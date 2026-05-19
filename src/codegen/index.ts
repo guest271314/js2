@@ -5987,6 +5987,34 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     ensureStructForType(ctx, propType);
     // Use resolveWasmType so nested structs get ref types, not externref
     let wasmType = resolveWasmType(ctx, propType);
+    // (#1468) `{ k: undefined }` makes TS infer the property's type as the
+    // literal `undefined`. `mapTsTypeToWasm` maps that to i32 because for
+    // function return types `undefined`/`void` indicate "no result". For a
+    // struct *field* the property is a value slot, so i32 silently loses the
+    // information that the slot holds `undefined`: codegen writes
+    // `i32.const 0` (which the host reads back as `false`) and destructuring
+    // defaults like `{ k = D }` never fire because the value isn't
+    // observably undefined. Widening the field to externref lets the
+    // existing `__get_undefined()` path in `compileExpression` preserve the
+    // identity of `undefined`, which then trips `__extern_is_undefined` in
+    // the destructuring default fast-path.
+    //
+    // Scope: only when the field's TS type is *exactly* the `undefined`
+    // (or `void`) primitive — for `T | undefined` unions the union branch
+    // in `mapTsTypeToWasm` already widens to externref / inner-T, so this
+    // never affects them.
+    if (
+      wasmType.kind === "i32" &&
+      (propType.flags & ts.TypeFlags.Undefined || propType.flags & ts.TypeFlags.Void) &&
+      !(propType.flags & ts.TypeFlags.Boolean) &&
+      !(propType.flags & ts.TypeFlags.BooleanLiteral) &&
+      !(propType.flags & ts.TypeFlags.Number) &&
+      !(propType.flags & ts.TypeFlags.NumberLiteral) &&
+      !(propType.flags & ts.TypeFlags.ESSymbol) &&
+      !(propType.flags & ts.TypeFlags.UniqueESSymbol)
+    ) {
+      wasmType = { kind: "externref" };
+    }
     const callSigs = propType.getCallSignatures();
     // For valueOf/toString callable properties, store as eqref instead of externref
     // so coercion can recover the closure and call it via call_ref
