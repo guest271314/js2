@@ -1,10 +1,10 @@
 ---
 id: 1434
-sprint: 51
+sprint: 52
 title: "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases"
-status: ready
+status: done
 created: 2026-05-11
-updated: 2026-05-11
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high

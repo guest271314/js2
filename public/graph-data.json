@@ -18330,7 +18330,7 @@
       "priority": "medium",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [
         "1326"
       ],
@@ -18786,9 +18786,9 @@
       "id": "1364",
       "title": "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)",
       "priority": "high",
-      "status": "ready",
-      "raw_status": "in-progress",
-      "sprint": "51",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "spec-completeness",
@@ -18908,7 +18908,7 @@
       "priority": "medium",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "ir-full-coverage",
@@ -18920,7 +18920,7 @@
       "priority": "medium",
       "status": "blocked",
       "raw_status": "blocked",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "ir-full-coverage",
@@ -18942,8 +18942,8 @@
       "id": "1375",
       "title": "IR: full optional-chain support (?. and ?.[]) without resolver fallback",
       "priority": "medium",
-      "status": "ready",
-      "raw_status": "in-progress",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "51",
       "depends_on": [],
       "files": [],
@@ -19014,8 +19014,8 @@
       "id": "1381",
       "title": "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)",
       "priority": "medium",
-      "status": "ready",
-      "raw_status": "in-progress",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "51",
       "depends_on": [],
       "files": [],
@@ -19028,7 +19028,7 @@
       "priority": "high",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "ir-full-coverage",
@@ -19089,7 +19089,7 @@
       "priority": "medium",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "spec-completeness",
@@ -19175,7 +19175,7 @@
       "priority": "high",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
       "depends_on": [
         "1388"
       ],
@@ -19187,8 +19187,8 @@
       "id": "1395",
       "title": "class static method descriptors: class identifier resolves to string_constant, not constructor object",
       "priority": "medium",
-      "status": "ready",
-      "raw_status": "ready",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "51",
       "depends_on": [],
       "files": [],
@@ -19197,11 +19197,153 @@
     },
     {
       "id": "1396",
-      "title": "for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads",
+      "title": "fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "51",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1397",
+      "title": "codegen: static method dispatch ignores runtime property reassignment on typed receivers",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1398",
+      "title": "report: edition filter on category table — per-category edition breakdown",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-52"
+    },
+    {
+      "id": "1399",
+      "title": "chore: fix 9 biome lint errors in src/runtime.ts",
+      "priority": "low",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "null",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-null"
+    },
+    {
+      "id": "1400",
+      "title": "npm: compile ESLint package entry to valid Wasm",
       "priority": "high",
       "status": "ready",
       "raw_status": "ready",
-      "sprint": "51",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "npm-library-support",
+      "cluster": "npm-library-support"
+    },
+    {
+      "id": "1431",
+      "title": "spec gap: assignment operators — destructuring completion, defaults, and compound side effects",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1432",
+      "title": "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1433",
+      "title": "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1434",
+      "title": "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1435",
+      "title": "spec gap: lexical grammar and syntax-directed early errors",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1436",
+      "title": "spec gap: global object descriptors and global function coercion/URI semantics",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1437",
+      "title": "spec gap: Math numeric edge cases beyond random source",
+      "priority": "low",
+      "status": "ready",
+      "raw_status": "in-progress",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1438",
+      "title": "spec gap: Map, WeakMap, and WeakSet residual collection semantics",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "spec-completeness",
@@ -21164,7 +21306,8 @@
         "1312",
         "1313",
         "1327",
-        "1334"
+        "1334",
+        "1400"
       ],
       "track": "supporting track"
     },
@@ -21528,7 +21671,16 @@
         "1390",
         "1394",
         "1395",
-        "1396"
+        "1396",
+        "1397",
+        "1431",
+        "1432",
+        "1433",
+        "1434",
+        "1435",
+        "1436",
+        "1437",
+        "1438"
       ]
     },
     {
@@ -25347,6 +25499,10 @@
       "issue": "1334"
     },
     {
+      "goal": "npm-library-support",
+      "issue": "1400"
+    },
+    {
       "goal": "observability",
       "issue": "880"
     },
@@ -26561,6 +26717,42 @@
     {
       "goal": "spec-completeness",
       "issue": "1396"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1397"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1431"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1432"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1433"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1434"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1435"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1436"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1437"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1438"
     },
     {
       "goal": "standalone-mode",
@@ -29653,6 +29845,10 @@
       "issue": "1334"
     },
     {
+      "goal": "core-semantics",
+      "issue": "1400"
+    },
+    {
       "goal": "platform",
       "issue": "111"
     },
@@ -29931,6 +30127,10 @@
     {
       "goal": "platform",
       "issue": "1334"
+    },
+    {
+      "goal": "platform",
+      "issue": "1400"
     },
     {
       "goal": "core-semantics",
@@ -31137,6 +31337,42 @@
       "issue": "1396"
     },
     {
+      "goal": "async-model",
+      "issue": "1397"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1431"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1432"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1433"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1434"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1435"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1436"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1437"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1438"
+    },
+    {
       "goal": "symbol-protocol",
       "issue": "10"
     },
@@ -31765,6 +32001,42 @@
       "issue": "1396"
     },
     {
+      "goal": "symbol-protocol",
+      "issue": "1397"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1431"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1432"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1433"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1434"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1435"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1436"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1437"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1438"
+    },
+    {
       "goal": "builtin-methods",
       "issue": "10"
     },
@@ -32393,6 +32665,42 @@
       "issue": "1396"
     },
     {
+      "goal": "builtin-methods",
+      "issue": "1397"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1431"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1432"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1433"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1434"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1435"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1436"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1437"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1438"
+    },
+    {
       "goal": "property-model",
       "issue": "10"
     },
@@ -33019,6 +33327,42 @@
     {
       "goal": "property-model",
       "issue": "1396"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1397"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1431"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1432"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1433"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1434"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1435"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1436"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1437"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1438"
     },
     {
       "goal": "iterator-protocol",

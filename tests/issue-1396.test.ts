@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "./src/index.js";
-import { buildImports } from "./src/runtime.js";
+import { compile } from "../src/index.js";
+import { buildImports } from "../src/runtime.js";
 
 describe("#1396 — for-of/dstr defaults fire on OOB extern-array reads (Task #50)", () => {
   async function runTest(src: string): Promise<{ pass: boolean; ret?: unknown; error?: string }> {
     const result = compile(src, { skipSemanticDiagnostics: true });
-    if (!result.success) return { pass: false, error: result.error };
+    if (!result.success) {
+      return { pass: false, error: result.errors.map((e) => e.message).join("; ") };
+    }
     const importObj = buildImports(result.imports, undefined, result.stringPool);
     const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
     if (typeof (importObj as any).setExports === "function") {
@@ -112,6 +114,60 @@ describe("#1396 — for-of/dstr defaults fire on OOB extern-array reads (Task #5
           aVal = a; bVal = b;
         }
         return aVal === 5 && bVal === 99 ? 1 : 0;
+      }
+    `;
+    const { pass, error } = await runTest(src);
+    expect(error).toBeUndefined();
+    expect(pass).toBe(true);
+  });
+
+  it("plain array destructuring: const [x = 23]: any[] = [] uses default", async () => {
+    // Issue #1396 direct repro — no for-of involved.
+    const src = `
+      export function test(): number {
+        const arr: any[] = [];
+        const [x = 23] = arr;
+        return x === 23 ? 1 : 0;
+      }
+    `;
+    const { pass, error } = await runTest(src);
+    expect(error).toBeUndefined();
+    expect(pass).toBe(true);
+  });
+
+  it("plain array destructuring: present value bypasses default", async () => {
+    const src = `
+      export function test(): number {
+        const arr: any[] = [42];
+        const [x = 23] = arr;
+        return x === 42 ? 1 : 0;
+      }
+    `;
+    const { pass, error } = await runTest(src);
+    expect(error).toBeUndefined();
+    expect(pass).toBe(true);
+  });
+
+  it("plain array destructuring: explicit null does NOT trigger default", async () => {
+    // Per spec §13.7.5.5 — defaults fire only for undefined, never for null.
+    const src = `
+      export function test(): number {
+        const arr: any[] = [null];
+        const [x = 23] = arr;
+        return x === null ? 1 : 0;
+      }
+    `;
+    const { pass, error } = await runTest(src);
+    expect(error).toBeUndefined();
+    expect(pass).toBe(true);
+  });
+
+  it("object destructuring on missing key still triggers default (regression)", async () => {
+    const src = `
+      export function test(): number {
+        const obj: { a?: number } = {};
+        const { a = 1 } = obj;
+        return a === 1 ? 1 : 0;
       }
     `;
     const { pass, error } = await runTest(src);

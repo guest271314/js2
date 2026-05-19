@@ -170,7 +170,17 @@
       ],
       "goal": "ir-full-coverage",
       "status": "blocked",
-      "sprint": "51"
+      "sprint": "52"
+    },
+    {
+      "id": "1364",
+      "title": "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "blocked",
+      "sprint": "52"
     },
     {
       "id": "1166",
@@ -245,24 +255,84 @@
   ],
   "ready": [
     {
-      "id": "1396",
-      "title": "for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads",
-      "priority": "high",
+      "id": "1438",
+      "title": "spec gap: Map, WeakMap, and WeakSet residual collection semantics",
+      "priority": "medium",
       "feasibility": "medium",
       "depends_on": [],
       "goal": "spec-completeness",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
-      "id": "1395",
-      "title": "class static method descriptors: class identifier resolves to string_constant, not constructor object",
+      "id": "1436",
+      "title": "spec gap: global object descriptors and global function coercion/URI semantics",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1435",
+      "title": "spec gap: lexical grammar and syntax-directed early errors",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1433",
+      "title": "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics",
       "priority": "medium",
       "feasibility": "hard",
       "depends_on": [],
       "goal": "spec-completeness",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
+    },
+    {
+      "id": "1432",
+      "title": "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1431",
+      "title": "spec gap: assignment operators — destructuring completion, defaults, and compound side effects",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1400",
+      "title": "npm: compile ESLint package entry to valid Wasm",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "npm-library-support",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1399",
+      "title": "chore: fix 9 biome lint errors in src/runtime.ts",
+      "priority": "low",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "",
+      "status": "ready",
+      "sprint": "null"
     },
     {
       "id": "1394",
@@ -274,7 +344,7 @@
       ],
       "goal": "spec-completeness",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1387",
@@ -284,7 +354,7 @@
       "depends_on": [],
       "goal": "spec-completeness",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1382",
@@ -294,7 +364,7 @@
       "depends_on": [],
       "goal": "ir-full-coverage",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1373",
@@ -304,7 +374,7 @@
       "depends_on": [],
       "goal": "ir-full-coverage",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1353",
@@ -536,7 +606,7 @@
       ],
       "goal": "standalone-mode",
       "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1326",
@@ -1834,39 +1904,19 @@
   ],
   "inprogress": [
     {
-      "id": "1381",
-      "title": "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)",
-      "priority": "medium",
-      "feasibility": "easy",
+      "id": "1437",
+      "title": "spec gap: Math numeric edge cases beyond random source",
+      "priority": "low",
+      "feasibility": "medium",
       "depends_on": [],
       "goal": "spec-completeness",
       "status": "in-progress",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1378",
       "title": "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)",
       "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "in-progress",
-      "sprint": "51"
-    },
-    {
-      "id": "1375",
-      "title": "IR: full optional-chain support (?. and ?.[]) without resolver fallback",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "ir-full-coverage",
-      "status": "in-progress",
-      "sprint": "51"
-    },
-    {
-      "id": "1364",
-      "title": "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)",
-      "priority": "high",
       "feasibility": "medium",
       "depends_on": [],
       "goal": "spec-completeness",
@@ -1967,6 +2017,56 @@
   "review": [],
   "done": [
     {
+      "id": "1434",
+      "title": "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "52"
+    },
+    {
+      "id": "1398",
+      "title": "report: edition filter on category table — per-category edition breakdown",
+      "priority": "low",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "",
+      "status": "done",
+      "sprint": "52"
+    },
+    {
+      "id": "1397",
+      "title": "codegen: static method dispatch ignores runtime property reassignment on typed receivers",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "52"
+    },
+    {
+      "id": "1396",
+      "title": "fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
+      "id": "1395",
+      "title": "class static method descriptors: class identifier resolves to string_constant, not constructor object",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
       "id": "1393",
       "title": "infra: content-hash CI cache + GitHub Merge Queue — eliminate baseline drift and redundant re-runs",
       "priority": "high",
@@ -2057,6 +2157,16 @@
       "sprint": "51"
     },
     {
+      "id": "1381",
+      "title": "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
       "id": "1380",
       "title": "spec gap: equality (==, !=, ===, !==) — Symbol/BigInt coercion + ReferenceError propagation (~55 fails)",
       "priority": "medium",
@@ -2091,6 +2201,16 @@
       "title": "IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold",
       "priority": "high",
       "feasibility": "easy",
+      "depends_on": [],
+      "goal": "ir-full-coverage",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
+      "id": "1375",
+      "title": "IR: full optional-chain support (?. and ?.[]) without resolver fallback",
+      "priority": "medium",
+      "feasibility": "hard",
       "depends_on": [],
       "goal": "ir-full-coverage",
       "status": "done",
