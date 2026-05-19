@@ -1,13 +1,13 @@
 ---
 id: 51
-status: active
+status: closed
 created: 2026-05-08
 started: 2026-05-08
 wrap_checklist:
-  status_closed: false
-  retro_written: false
-  diary_updated: false
-  end_tag_pushed: false
+  status_closed: true
+  retro_written: true
+  diary_updated: true
+  end_tag_pushed: true
   begin_tag_pushed: true
 ---
 
@@ -171,32 +171,11 @@ Two parallel tracks:
 
 _Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
-### Blocked
-
-| Issue | Title | Priority | Status |
-|---|---|---|---|
-| #1373b | IR async Phase C: CPS lowering for await + async-return + async-throw | medium | blocked |
-
-### Ready
-
-| Issue | Title | Priority | Status |
-|---|---|---|---|
-| #1326c | Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B) | medium | ready |
-| #1373 | IR: claim async functions (async/await through IR path) | medium | ready |
-| #1382 | structural: Wasm closures not JS-callable from host imports — bridge gap | high | ready |
-| #1387 | feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies | medium | ready |
-| #1394 | class method-closure caching: C.prototype.method returns stable singleton closure | high | ready |
-| #1395 | class static method descriptors: class identifier resolves to string_constant, not constructor object | medium | ready |
-| #1396 | for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads | high | ready |
-
 ### In Progress
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #1364 | spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails) | high | in-progress |
-| #1375 | IR: full optional-chain support (?. and ?.[]) without resolver fallback | medium | in-progress |
 | #1378 | spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails) | medium | in-progress |
-| #1381 | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | medium | in-progress |
 
 ### Done
 
@@ -218,10 +197,12 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1371 | IR: expand external-call whitelist to stop rejecting host imports and Math.* | high | done |
 | #1372 | IR: support destructuring params (removes param-shape-rejected bypass) | high | done |
 | #1374 | IR: string for-of and for-in through IR (removes legacy fallback for string iteration) | medium | done |
+| #1375 | IR: full optional-chain support (?. and ?.[]) without resolver fallback | medium | done |
 | #1376 | IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold | high | done |
 | #1377 | spec gap: Array.prototype.{push,pop,shift,unshift,fill,copyWithin,reverse} — mutation on array-like + length writes (~80 fails) | medium | done |
 | #1379 | spec gap: prefix/postfix ++/-- on null/undefined/string operands — ToNumeric coercion (~40 fails) | medium | done |
 | #1380 | spec gap: equality (==, !=, ===, !==) — Symbol/BigInt coercion + ReferenceError propagation (~55 fails) | medium | done |
+| #1381 | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | medium | done |
 | #1384 | CE: static async method with PrivateName — 'not enough arguments on the stack' (249 tests) | high | done |
 | #1385 | HANG: Temporal/Duration/from/argument-non-string.js — infinite runtime loop | medium | done |
 | #1386 | HANG: Promise/race/invoke-then.js — compilation or runtime infinite loop | medium | done |
@@ -231,5 +212,7 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1391 | infra: CI feed baseline staleness detection — warn when baseline_sha diverges from current main | high | done |
 | #1392 | IR: null-safe access primitives — ref.is_null IrUnop + value-producing if/else IR node | high | done |
 | #1393 | infra: content-hash CI cache + GitHub Merge Queue — eliminate baseline drift and redundant re-runs | high | done |
+| #1395 | class static method descriptors: class identifier resolves to string_constant, not constructor object | medium | done |
+| #1396 | fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel | high | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->

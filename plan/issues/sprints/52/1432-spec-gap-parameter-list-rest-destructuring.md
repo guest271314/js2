@@ -1,6 +1,6 @@
 ---
 id: 1432
-sprint: 51
+sprint: 52
 title: "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers"
 status: ready
 created: 2026-05-11

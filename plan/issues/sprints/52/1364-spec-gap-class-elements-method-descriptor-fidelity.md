@@ -1,8 +1,8 @@
 ---
 id: 1364
-sprint: 51
+sprint: 52
 title: "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)"
-status: in-progress
+status: blocked
 worktree: /workspace/.claude/worktrees/issue-1364-class-element-descriptors
 created: 2026-05-08
 priority: high

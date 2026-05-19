@@ -1,6 +1,6 @@
 ---
 id: 1438
-sprint: 51
+sprint: 52
 title: "spec gap: Map, WeakMap, and WeakSet residual collection semantics"
 status: ready
 created: 2026-05-11

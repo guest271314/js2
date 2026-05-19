@@ -1,6 +1,6 @@
 ---
 id: 1382
-sprint: 51
+sprint: 52
 title: "structural: Wasm closures not JS-callable from host imports — bridge gap"
 status: ready
 created: 2026-05-08

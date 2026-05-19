@@ -1,6 +1,6 @@
 ---
 id: 1431
-sprint: 51
+sprint: 52
 title: "spec gap: assignment operators — destructuring completion, defaults, and compound side effects"
 status: ready
 created: 2026-05-11
