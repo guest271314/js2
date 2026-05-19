@@ -8,6 +8,17 @@ isolation: worktree
 
 You are a Developer teammate on the js2wasm project — a TypeScript-to-WebAssembly compiler.
 
+## CRITICAL: CI wait protocol
+
+**Never send `idle_notification` messages** — ever, for any reason. They are discarded.
+
+When waiting for CI, launch one background monitor and immediately proceed to your next task:
+```bash
+# run_in_background: true
+until [ -f /workspace/.claude/ci-status/pr-<N>.json ]; do sleep 30; done
+```
+Set `run_in_background: true` on that Bash call. You will be notified automatically when the file appears. Do NOT poll, do NOT ping, do NOT idle between steps.
+
 ## Communication
 
 Message **specific agents only** — no broadcasts unless claiming a shared file. Only send what the recipient needs to act on.
@@ -20,7 +31,12 @@ Message **specific agents only** — no broadcasts unless claiming a shared file
 **Message another dev only for:**
 - Direct file/function conflict: `"Claiming compileCallExpression in expressions.ts for #512 — are you in that file?"`
 
-**Never message anyone for:** task completion, CI status, progress updates, "ready for merge". TaskList and CI feed handle those.
+**Never message anyone for:** task completion, CI status, progress updates, "ready for merge", idle state, CI-wait state. TaskList and CI feed handle those. **Never send `idle_notification` messages** — they are silently discarded.
+
+**Three exceptions — message tech lead only for:**
+1. **Claiming a task**: `"Claiming #N — <title>. Queue: X tasks still pending."` where X excludes the one you just claimed.
+2. **TaskList empty after merge**: `"#N merged. TaskList empty — need next task."` Then wait silently.
+3. **Cannot proceed**: blocked >30 min, CI failing with regressions you can't resolve, or any situation where you know you cannot move forward without a decision. Include what you tried and what's stopping you.
 
 ## Workflow
 
@@ -34,6 +50,11 @@ Message **specific agents only** — no broadcasts unless claiming a shared file
 2. Update issue frontmatter: `status: in-progress`
 3. Check `plan/method/file-locks.md` — if another dev owns your target file/function, message them directly
 4. Create worktree: `git worktree add /workspace/.claude/worktrees/issue-{N}-{slug} -b issue-{N}-{slug} origin/main`
+   Then write your active status for the tech lead's statusline:
+   ```bash
+   printf '{"name":"issue-{N}-{slug}","state":"active","issue":"#{N}","since":%s}\n' "$(date +%s)" \
+     > "/workspace/.claude/agent-status/issue-{N}-{slug}.json"
+   ```
 5. Implement fix in `src/`, write tests in `tests/issue-{N}.test.ts`
 6. Validate by compiling + running specific failing tests (see patterns below). **No `npm test`, no full test262.**
 
@@ -43,18 +64,43 @@ Message **specific agents only** — no broadcasts unless claiming a shared file
    - Compiler source conflicts (`src/**/*.ts`): create `[CONFLICT]` task in TaskList, assign to `senior-developer`. Do NOT resolve inline.
 2. Run scoped local checks again after the merge
 3. `git push origin <branch>`
-4. `gh pr create --base main --title "fix(#N): <description>" --body "..."`
-5. **Wait for CI**: use a **foreground blocking loop** — do NOT use background tasks or `run_in_background`. Run:
+4. **Re-merge main immediately before opening the PR** — more commits may have landed since step 1:
    ```bash
-   until [ -f .claude/ci-status/pr-<N>.json ] && \
-     [ "$(jq -r '.head_sha' .claude/ci-status/pr-<N>.json)" = "$(git rev-parse HEAD)" ]; \
+   git fetch origin && git merge origin/main --no-edit && git push origin <branch>
+   ```
+   Then open the PR:
+   `gh pr create --base main --title "fix(#N): <description>" --body "..."`
+5. **Wait for CI — IMMEDIATELY after `gh pr create` returns, before doing anything else:**
+   Update your status file to ci-wait so the tech lead's statusline shows you:
+   ```bash
+   _branch=$(git -C /workspace/.claude/worktrees/issue-{N}-{slug} branch --show-current 2>/dev/null | sed 's/^issue-//')
+   printf '{"name":"%s","state":"ci-wait","issue":"#{N}","pr":<PR>,"since":%s}\n' "${_branch:-dev}" "$(date +%s)" \
+     > "/workspace/.claude/agent-status/issue-{N}-{slug}.json"
+   ```
+   **Fast-path for test/docs-only PRs** (no `src/**` changes): Test262 Sharded does not run,
+   so the ci-status file never appears. Instead, poll for basic CI completion:
+   ```bash
+   src_changes=$(gh pr view <N> --json files --jq '[.files[].path | select(startswith("src/"))] | length')
+   ```
+   If `src_changes == 0`, submit this wait loop as a single `Bash` call with `run_in_background: true`:
+   ```bash
+   until gh pr checks <N> --json name,status,conclusion 2>/dev/null | \
+     jq -e '[.[] | select(.conclusion != null)] | length > 0 and ([.[] | select(.conclusion == "FAILURE")] | length == 0)' \
+     > /dev/null 2>&1; do sleep 60; done
+   ```
+   If `src_changes > 0`, submit the standard wait loop instead:
+   ```bash
+   until [ -f /workspace/.claude/ci-status/pr-<N>.json ] && \
+     [ "$(jq -r '.head_sha' /workspace/.claude/ci-status/pr-<N>.json)" = "<HEAD_SHA>" ]; \
      do sleep 60; done
    ```
-   This keeps the agent occupied (no idle_notification spam) until CI result lands.
+   Replace `<N>` with the PR number and `<HEAD_SHA>` with the full commit SHA from `gh pr view`.
+   Your turn ends the moment you submit this call. **Do NOT send any messages. Do NOT send idle_notifications. Do NOT do anything else.** The system notifies you when the loop exits; that is your signal to proceed to step 6.
 6. Run `/dev-self-merge <N>` — outputs MERGE or ESCALATE
 7. On MERGE: `gh pr merge <N> --merge --admin`
 8. On ESCALATE: message tech lead with which criterion failed + values
 9. After merge:
+   - `rm -f "/workspace/.claude/agent-status/issue-{N}-{slug}.json"` — clear your status
    - `git worktree remove /workspace/.claude/worktrees/<branch>` — clean up your own worktree
    - `TaskUpdate(status: completed)`
    - `TaskList` → claim next task, or shut down if queue is empty

@@ -5,7 +5,7 @@
  *
  * Extracted from codegen/index.ts (#1013).
  */
-import ts from "typescript";
+import { ts, forEachChild } from "../ts-api.js";
 import {
   isBigIntType,
   isBooleanType,
@@ -48,6 +48,7 @@ import {
   unwrapGeneratorYieldType,
 } from "./index.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
+import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
 import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import {
   addFuncType,
@@ -254,6 +255,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
     if (isNumberType(receiverType) && methodName === "toString") {
       state.primitiveNeeded.add("number_toString");
+      // #1321: toString(radix) needs a 2-arg host import so the radix is
+      // actually used. The 1-arg `number_toString` only handles default base 10.
+      if (node.arguments.length > 0) {
+        state.primitiveNeeded.add("number_toString_radix");
+      }
     }
     if (isNumberType(receiverType) && methodName === "toFixed") {
       state.primitiveNeeded.add("number_toFixed");
@@ -505,6 +511,15 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       state.callbackFound = true;
     }
   }
+  // (#1239) Object literals carrying get/set accessor declarations also
+  // route through `__make_getter_callback` via compileObjectLiteralWithAccessors.
+  if (
+    !state.getterCallbackFound &&
+    ts.isObjectLiteralExpression(node) &&
+    node.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))
+  ) {
+    state.getterCallbackFound = true;
+  }
   // ── getterCallbackFound: Object.defineProperty / Reflect.defineProperty with accessor descriptor (#929) ──
   // Also covers Object.defineProperties(obj, { p1: desc1, p2: desc2, ... }) (#1027)
   if (!state.getterCallbackFound && ts.isCallExpression(node)) {
@@ -754,11 +769,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // Track computed property name depth for string literal collection
   if (ts.isComputedPropertyName(node)) {
     state.insideComputedPropertyName++;
-    ts.forEachChild(node, (child) => unifiedVisitNode(ctx, state, child));
+    forEachChild(node, (child) => unifiedVisitNode(ctx, state, child));
     state.insideComputedPropertyName--;
     return; // already recursed
   }
-  ts.forEachChild(node, (child) => unifiedVisitNode(ctx, state, child));
+  forEachChild(node, (child) => unifiedVisitNode(ctx, state, child));
 }
 
 /** Run all post-walk finalization (register imports based on collected state) */
@@ -793,6 +808,13 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   if (state.primitiveNeeded.has("number_toString")) {
     const t = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString", { kind: "func", typeIdx: t });
+  }
+  // #1321: 2-arg `number_toString_radix(value, radix)` for `toString(radix)` calls.
+  // Without this, the codegen validates the radix range but then calls 1-arg
+  // `number_toString(value)`, silently producing decimal output for any radix.
+  if (state.primitiveNeeded.has("number_toString_radix")) {
+    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
   }
   if (state.primitiveNeeded.has("number_toFixed")) {
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
@@ -897,8 +919,17 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // ── collectMathImports finalize ──
   for (const method of state.mathNeeded) {
     if (method === "random") {
-      const typeIdx = addFuncType(ctx, [], [{ kind: "f64" }]);
-      addImport(ctx, "env", `Math_${method}`, { kind: "func", typeIdx });
+      // #1322: in WASI/standalone mode, emit a Wasm `Math_random` that calls
+      // WASI `random_get(ptr, 8)` for entropy. The `random_get` import was
+      // already registered EARLY by registerWasiImports (before any defined
+      // functions) so adding it here doesn't shift indices of helpers like
+      // `__str_copy_tree`.
+      if (ctx.wasi) {
+        ctx.pendingMathMethods.add(method);
+      } else {
+        const typeIdx = addFuncType(ctx, [], [{ kind: "f64" }]);
+        addImport(ctx, "env", `Math_${method}`, { kind: "func", typeIdx });
+      }
     } else {
       ctx.pendingMathMethods.add(method);
     }
@@ -954,11 +985,25 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // Instance methods (.then/.catch/.finally) are NOT pre-registered because
   // adding their func types here shifts struct type indices, breaking
   // non-Promise code in the same module (#855 regression fix).
+  //
+  // (#1326 Phase 1B) In standalone (WASI) mode, skip pre-registration of
+  // `Promise_resolve` / `Promise_reject` — these are unsatisfiable host
+  // imports there; the codegen call site emits Wasm-native `struct.new
+  // $Promise` instead. Other Promise methods (all/race/allSettled/any)
+  // are still host-routed in 1B; Phase 3 will add native combinators.
+  //
+  // (#1368) Aggregators (all/race/allSettled/any) take (thisArg, iterable) so
+  // the codegen can pass through `Promise.all.call(C, …)` thisArg semantics
+  // and the runtime can default to globalThis.Promise when wasm passes null.
+  // Resolve/reject keep their original 1-arg signature.
   for (const method of state.promiseNeeded) {
     if (method === "then" || method === "catch" || method === "finally") continue;
+    if (ctx.wasi && (method === "resolve" || method === "reject")) continue;
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+      const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
+      const params: ValType[] = isAggregator ? [{ kind: "externref" }, { kind: "externref" }] : [{ kind: "externref" }];
+      const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
     }
   }
@@ -1106,6 +1151,17 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   for (const [name, argCount] of state.unknownCtorNeeded) {
     const importName = `__new_${name}`;
     if (ctx.funcMap.has(importName)) continue;
+    // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
+    // emit Wasm-native `__new_<ErrorName>` functions that build a
+    // `$Error_struct` for the 8 built-in Error constructors instead of
+    // unsatisfiable `env.__new_<ErrorName>` host imports. Other unknown
+    // constructors still emit host imports (they may resolve via user-supplied
+    // imports at instantiation time, or fail loudly if missing). JS-host mode
+    // is unchanged.
+    if (ctx.wasi && isWasiErrorName(name)) {
+      emitWasiErrorConstructor(ctx, name, argCount);
+      continue;
+    }
     const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
     const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
     addImport(ctx, "env", importName, { kind: "func", typeIdx });
@@ -1141,10 +1197,10 @@ export function resolveGenericCallSiteTypes(
         found = { params, results };
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
-  ts.forEachChild(sourceFile, visit);
+  forEachChild(sourceFile, visit);
   return found;
 }
 
@@ -1189,10 +1245,10 @@ export function inferParamTypeFromCallSites(
         }
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
-  ts.forEachChild(sourceFile, visit);
+  forEachChild(sourceFile, visit);
   return conflict ? null : agreed;
 }
 
@@ -1298,9 +1354,9 @@ export function inferParamTypeFromBody(
       }
     }
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
-  ts.forEachChild(decl.body, visit);
+  forEachChild(decl.body, visit);
   return foundNumericUse ? { kind: "f64" } : null;
 }
 
@@ -1347,9 +1403,9 @@ export function inferNumericReturnTypes(ctx: CodegenContext, sourceFile: ts.Sour
         candidates.set(node.name.text, node);
       }
     }
-    ts.forEachChild(node, collectFns);
+    forEachChild(node, collectFns);
   }
-  ts.forEachChild(sourceFile, collectFns);
+  forEachChild(sourceFile, collectFns);
   if (candidates.size === 0) return new Map();
 
   // Inference set: starts with all candidates, and shrinks as we eliminate
@@ -1532,9 +1588,9 @@ export function inferNumericReturnTypes(ctx: CodegenContext, sourceFile: ts.Sour
             sawBareReturn = true;
           }
         }
-        ts.forEachChild(node, visit);
+        forEachChild(node, visit);
       };
-      ts.forEachChild(fnDecl.body, visit);
+      forEachChild(fnDecl.body, visit);
     }
     fnInfo.set(fnName, { paramNames, returns, sawBareReturn, paramsAllNumeric });
   }
@@ -1915,14 +1971,22 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   // First: collect enum declarations (so enum values are available)
   collectEnumDeclarations(ctx, sourceFile);
 
-  // Second: collect interfaces and type aliases (so struct types are available)
-  for (const stmt of sourceFile.statements) {
-    if (ts.isInterfaceDeclaration(stmt)) {
-      collectInterface(ctx, stmt);
-    } else if (ts.isTypeAliasDeclaration(stmt)) {
-      const aliasType = ctx.checker.getTypeAtLocation(stmt);
-      if (aliasType.flags & ts.TypeFlags.Object) {
-        collectObjectType(ctx, stmt.name.text, aliasType);
+  // Second: collect interfaces and type aliases (so struct types are available).
+  // Skip declarations from `.d.ts` files: those describe shapes of host
+  // values (DOM types, npm package public API). Lowering them to WasmGC
+  // structs registers types whose fields can recursively reference array
+  // types of other declaration-file interfaces, producing forward heap-type
+  // references that fail Wasm validation when the dead-elim pass compacts
+  // the type section. (#1287)
+  if (!sourceFile.isDeclarationFile) {
+    for (const stmt of sourceFile.statements) {
+      if (ts.isInterfaceDeclaration(stmt)) {
+        collectInterface(ctx, stmt);
+      } else if (ts.isTypeAliasDeclaration(stmt)) {
+        const aliasType = ctx.checker.getTypeAtLocation(stmt);
+        if (aliasType.flags & ts.TypeFlags.Object) {
+          collectObjectType(ctx, stmt.name.text, aliasType);
+        }
       }
     }
   }
@@ -1986,16 +2050,25 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     if (ts.isClassExpression(node)) {
       registerClassExpression(node);
     }
-    ts.forEachChild(node, collectAnonymousClassesInNewExpr);
+    forEachChild(node, collectAnonymousClassesInNewExpr);
   }
 
   function collectClassesFromStatements(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
     for (const stmt of stmts) {
-      if (ts.isClassDeclaration(stmt) && stmt.name && !hasDeclareModifier(stmt)) {
+      // `class X` in a `.d.ts` file is implicitly ambient — only the type
+      // declaration is real, there is no JS body to compile. Treating it as
+      // a user-defined class registers a WasmGC struct type whose field
+      // resolution can produce forward heap-type references (e.g.
+      // `children: X[]` → struct ref array ref struct loop) that fail Wasm
+      // validation. The extern collection pass (`collectExternClass` /
+      // `collectExternFromDeclareVar` in `index.ts`) owns the type-only
+      // registration for these shapes. (#1287)
+      const isAmbient = hasDeclareModifier(stmt) || stmt.getSourceFile().isDeclarationFile;
+      if (ts.isClassDeclaration(stmt) && stmt.name && !isAmbient) {
         collectClassDeclaration(ctx, stmt);
         // Register class declaration .name
         ctx.functionNameMap.set(stmt.name.text, stmt.name.text);
-      } else if (ts.isVariableStatement(stmt) && !hasDeclareModifier(stmt)) {
+      } else if (ts.isVariableStatement(stmt) && !isAmbient) {
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
             collectClassDeclaration(ctx, decl.initializer, decl.name.text);
@@ -2052,6 +2125,38 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
       // Also scan all statements for new (class { ... })() patterns
       collectAnonymousClassesInNewExpr(stmt);
+
+      // (#1394 dual-registration bridge) `var C = class { ... }` triggers TWO
+      // class registrations against the SAME ClassExpression node:
+      //   1. The var-statement branch above registers it under `decl.name.text`
+      //      (e.g. "C") via collectClassDeclaration.
+      //   2. collectAnonymousClassesInNewExpr (just above) recurses into the
+      //      stmt, finds the class expression, and via registerClassExpression
+      //      registers it AGAIN under a synthetic `__anonClass_N` name.
+      //
+      // The instance-type path (TS resolves `c: C` → symbol "__class" →
+      // classExprNameMap["__class"] → "__anonClass_N") and the call-site
+      // path both end up using the synthetic name. The proto-handler in
+      // property-access.ts, however, key-resolves off the user-visible
+      // identifier "C" and was returning `classExprNameMap.get("C") ?? "C"`
+      // which fell through to "C" because no map entry existed for the
+      // var-name.
+      //
+      // Result: `c.m` cached under `${synthetic}_m`, `C.prototype.m` cached
+      // under `C_m`, `c.m === C.prototype.m` failed (~556 class/elements
+      // verifyProperty regressions). Bridge by mapping the var-name to the
+      // synthetic name AFTER both registrations have run, so every access
+      // path collapses to the same cache key.
+      if (ts.isVariableStatement(stmt) && !isAmbient) {
+        for (const decl of stmt.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
+            const syntheticName = ctx.anonClassExprNames.get(decl.initializer);
+            if (syntheticName && !ctx.classExprNameMap.has(decl.name.text)) {
+              ctx.classExprNameMap.set(decl.name.text, syntheticName);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -2379,6 +2484,33 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     }
   }
 
+  // ESM named-export declaration: `export { foo, bar as baz };` (#1277).
+  // Without this, the rewriter and existing ESM walker only handle
+  // `export function foo() {}` and `export default <ident>`. Re-exports
+  // from another module (`export { x } from "spec"`) are intentionally
+  // skipped here — those need import resolution + re-export wiring that
+  // isn't part of this gap.
+  if (isEntryFile) {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isExportDeclaration(stmt)) continue;
+      if (!stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
+      if (stmt.moduleSpecifier) continue; // re-export — handled elsewhere
+      for (const spec of stmt.exportClause.elements) {
+        // `export { foo as bar }` → propertyName=foo, name=bar
+        // `export { foo }`        → propertyName=undefined, name=foo
+        const localName = spec.propertyName?.text ?? spec.name.text;
+        const exportedName = spec.name.text;
+        if (!ctx.funcMap.has(localName)) continue;
+        const funcIdx = ctx.funcMap.get(localName)!;
+        const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+        if (func && !func.exported) func.exported = true;
+        if (!ctx.mod.exports.some((e) => e.name === exportedName)) {
+          ctx.mod.exports.push({ name: exportedName, desc: { kind: "func", index: funcIdx } });
+        }
+      }
+    }
+  }
+
   // CJS exports: recognize `module.exports` / `exports.foo` patterns (#1075).
   // Phase 1 — register CJS function expressions and surface CJS assignments as Wasm exports.
   // This runs after the ESM export-default block so CJS and ESM don't conflict.
@@ -2454,6 +2586,36 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             if (name !== "default") {
               ctx.mod.exports.push({ name: "default", desc: { kind: "func", index: funcIdx } });
             }
+          }
+        }
+        continue;
+      }
+
+      // Pattern 1c: `module.exports = { a, b: c, d }` — multi-named export via
+      // object literal (#1277). Handles shorthand (`{ a }`) and named-with-
+      // identifier (`{ alias: foo }`) shapes. Skips computed keys, methods,
+      // spreads, and non-identifier RHS — those bail out without exporting
+      // (a future enhancement could route generic-expression values through
+      // a synthetic global).
+      if (isModuleExports(expr.left) && ts.isObjectLiteralExpression(expr.right)) {
+        hasModuleExportsDefault = true;
+        for (const prop of expr.right.properties) {
+          let key: string | undefined;
+          let valName: string | undefined;
+          if (ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+            key = prop.name.text;
+            valName = key;
+          } else if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && ts.isIdentifier(prop.initializer)) {
+            key = prop.name.text;
+            valName = prop.initializer.text;
+          }
+          if (!key || !valName) continue;
+          if (!ctx.funcMap.has(valName)) continue;
+          const funcIdx = ctx.funcMap.get(valName)!;
+          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          if (func && !func.exported) func.exported = true;
+          if (!ctx.mod.exports.some((e) => e.name === key)) {
+            ctx.mod.exports.push({ name: key, desc: { kind: "func", index: funcIdx } });
           }
         }
         continue;
@@ -2718,7 +2880,15 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           opKind === ts.SyntaxKind.CaretEqualsToken ||
           opKind === ts.SyntaxKind.LessThanLessThanEqualsToken ||
           opKind === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken ||
-          opKind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken;
+          opKind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken ||
+          // #1268 — logical-assignment operators (??=, ||=, &&=) are also
+          // assignment ops with side effects; without these, top-level
+          // statements like `d["x"] ??= 42` were silently dropped from
+          // `__module_init`, leaving the LHS uninitialised and reads
+          // returning NaN/undefined.
+          opKind === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+          opKind === ts.SyntaxKind.BarBarEqualsToken ||
+          opKind === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
         if (!isAssignOp) continue;
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {
@@ -2880,7 +3050,11 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     insideFunction = false,
   ): void {
     for (const stmt of stmts) {
-      if (ts.isClassDeclaration(stmt) && stmt.name && !hasDeclareModifier(stmt)) {
+      // Mirror the `.d.ts` ambient guard from `collectClassesFromStatements`:
+      // there is no body to compile for classes declared in declaration
+      // files. (#1287)
+      const isAmbient = hasDeclareModifier(stmt) || stmt.getSourceFile().isDeclarationFile;
+      if (ts.isClassDeclaration(stmt) && stmt.name && !isAmbient) {
         if (insideFunction) {
           // Defer body compilation — will be compiled in compileNestedClassDeclaration
           // when the enclosing function is compiled (so captured locals are available)
@@ -2893,7 +3067,7 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             reportError(ctx, stmt, `Internal error compiling class '${stmt.name.text}': ${msg}`);
           }
         }
-      } else if (ts.isVariableStatement(stmt) && !hasDeclareModifier(stmt)) {
+      } else if (ts.isVariableStatement(stmt) && !isAmbient) {
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
             if (insideFunction) {
@@ -3000,7 +3174,7 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     if (ts.isClassExpression(node)) {
       compileAnonClassIfNeeded(node);
     }
-    ts.forEachChild(node, compileAnonymousClassBodiesInNode);
+    forEachChild(node, compileAnonymousClassBodiesInNode);
   }
 
   compileClassesFromStatements(sourceFile.statements);
@@ -3060,11 +3234,29 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     };
     ctx.currentFunc = initFctx;
 
-    // Compile static property initializers
-    for (const { globalIdx, initializer } of ctx.staticInitExprs) {
-      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
-      compileExpression(ctx, initFctx, initializer, globalDef?.type);
-      initFctx.body.push({ op: "global.set", index: globalIdx });
+    // Compile static property initializers. (#1395) Each initializer is
+    // scoped to its owning class — set `enclosingClassName` +
+    // `isStaticContext` on initFctx for the duration of compilation so
+    // `this` inside `static f = () => this`-style initializers resolves to
+    // the `__class_<Name>` singleton via the static-context fallback in
+    // `compileExpression(ThisKeyword)`. We toggle these per-entry rather
+    // than spawning a fresh fctx because the body must accumulate into
+    // a single `__module_init` and globals/locals are shared.
+    for (const { globalIdx, initializer, className } of ctx.staticInitExprs) {
+      const savedEnclosing = initFctx.enclosingClassName;
+      const savedIsStatic = initFctx.isStaticContext;
+      if (className !== undefined) {
+        initFctx.enclosingClassName = className;
+        initFctx.isStaticContext = true;
+      }
+      try {
+        const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+        compileExpression(ctx, initFctx, initializer, globalDef?.type);
+        initFctx.body.push({ op: "global.set", index: globalIdx });
+      } finally {
+        initFctx.enclosingClassName = savedEnclosing;
+        initFctx.isStaticContext = savedIsStatic;
+      }
     }
 
     // Compile module-level variable init statements

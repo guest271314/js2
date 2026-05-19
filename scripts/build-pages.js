@@ -257,6 +257,9 @@ if (hasDashboardBundle) {
 // issues-graph.html + graph-data.json are in public/ → included via Vite build
 copyDirectoryIfExists(join(ROOT, "benchmarks", "suites"), join(PAGES_DIST, "benchmarks", "suites"));
 
+// spec-compliance audit data — fetched by benchmarks/spec-compliance.html at /spec-compliance/summary.json
+copyDirectoryIfExists(join(ROOT, "spec-compliance"), join(PAGES_DIST, "spec-compliance"));
+
 // Add the benchmark data files fetched by the public report pages. Public pages
 // should read from the already-curated public summaries, not from the full
 // internal benchmark results directory.
@@ -350,7 +353,10 @@ for (const file of ["site-nav.js", "t262-charts.js", "trend-chart.js", "perf-ben
 
 // Render ADR markdown → HTML pages so the landing page can link to
 // on-origin /js2wasm/docs/adr/*.html instead of broken raw .md URLs.
-await import("./build-adr-html.mjs");
+// `buildAdrPages` is gated behind isMainModule in build-adr-html.mjs, so
+// `await import(...)` alone is a no-op — call the export explicitly.
+const { buildAdrPages } = await import("./build-adr-html.mjs");
+buildAdrPages();
 
 // Copy sprint-stats.json to dashboard data when dashboard artifacts exist.
 if (hasDashboardBundle) {

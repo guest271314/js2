@@ -162,7 +162,14 @@ export interface IrClassShape {
 }
 
 export type IrType =
-  | { readonly kind: "val"; readonly val: ValType }
+  // The optional `signed` flag (#1126 Stage 1) is a *value-domain* fact, not
+  // a Wasm-storage fact: both `int32` and `uint32` lower to the same Wasm
+  // `i32` storage but are distinguished at op-selection time (`i32.shr_s`
+  // vs `i32.shr_u`, `f64.convert_i32_s` vs `_u`, signed vs unsigned cmp).
+  // Default (undefined) is "signed" for backward compat — every existing
+  // `val: { kind: "i32" }` callsite preserves its current semantics.
+  // Stage 1 only adds the field; producers / consumers come in Stages 2-3.
+  | { readonly kind: "val"; readonly val: ValType; readonly signed?: boolean }
   // Backend-agnostic string marker (#1169a). The actual Wasm representation
   // is decided at lowering time via `IrLowerResolver.resolveString`:
   //   - host-strings backend  → `externref`
@@ -214,6 +221,20 @@ export function irVal(v: ValType): IrType {
 }
 
 /**
+ * Wrap a ValType as an IrType with an explicit signedness fact (#1126 Stage 1).
+ * Use this only for `i32` ValTypes where the value-domain (signed `int32` vs
+ * unsigned `uint32`) is known. For non-i32 ValTypes the `signed` flag is
+ * meaningless; callers should use `irVal()` instead.
+ *
+ * The flag is read by Stage 3 emit decisions (signed vs unsigned shifts,
+ * comparisons, conversions back to f64). For Stage 1 it is purely additive —
+ * no existing emitter consults it yet.
+ */
+export function irValSigned(v: ValType, signed: boolean): IrType {
+  return { kind: "val", val: v, signed };
+}
+
+/**
  * Return the single underlying ValType for a `val`-kind IrType, else `null`.
  * Call sites that previously did `t.kind === "f64"` against an `IrType` now
  * do `asVal(t)?.kind === "f64"`.
@@ -231,7 +252,17 @@ export function asVal(t: IrType): ValType | null {
  */
 export function irTypeEquals(a: IrType, b: IrType): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === "val" && b.kind === "val") return valTypeEquals(a.val, b.val);
+  if (a.kind === "val" && b.kind === "val") {
+    if (!valTypeEquals(a.val, b.val)) return false;
+    // #1126 Stage 1 — `signed` is a domain fact, not a Wasm-storage fact.
+    // Two `val` types differ if they disagree on signedness (e.g. an
+    // i32 inferred as `int32` in one branch vs `uint32` in another would
+    // join to `f64` in the lattice; we never want them to compare equal
+    // here). `undefined` is treated as "signed" (the legacy default).
+    const aSigned = a.signed ?? true;
+    const bSigned = b.signed ?? true;
+    return aSigned === bSigned;
+  }
   if (a.kind === "string" && b.kind === "string") return true;
   if (a.kind === "boxed" && b.kind === "boxed") return valTypeEquals(a.inner, b.inner);
   if (a.kind === "union" && b.kind === "union") {
@@ -425,13 +456,70 @@ export type IrBinop =
   | "i32.ne"
   // i32 logical (for bool && / || — operands assumed 0|1)
   | "i32.and"
-  | "i32.or";
+  | "i32.or"
+  // #1126 Stage 3 — native i32 magnitude compares. Emitted by the
+  // AST→IR lowerer when both operands of `<`, `<=`, `>`, `>=` are
+  // i32-typed (a bool, a comparison result, or an i32-domain value
+  // out of `js.bit*`). Signed vs unsigned is picked from the operands'
+  // `IrType.val.signed` flag (signed if either is signed; unsigned only
+  // when BOTH are unsigned `u32`). Result is i32 (bool).
+  | "i32.lt_s"
+  | "i32.le_s"
+  | "i32.gt_s"
+  | "i32.ge_s"
+  | "i32.lt_u"
+  | "i32.le_u"
+  | "i32.gt_u"
+  | "i32.ge_u"
+  // Slice 11 (#1169n) — JS bitwise ops on f64 operands.
+  // Each lowers to: ToInt32(lhs); ToInt32(rhs); i32.<op>; convert back to f64.
+  // The `js.*` prefix marks them as composite (multi-Wasm-instr) ops; the
+  // lowerer's `case "binary"` arm dispatches on this prefix to emit the
+  // ToInt32 / convert dance using a per-function shared scratch local.
+  // Result type is f64 for all.
+  //
+  // #1126 Stage 3 — when BOTH operands' IrTypes are already i32-shaped,
+  // the lowerer emits the native `i32.*` op directly and skips the
+  // ToInt32 dance. The AST→IR lowerer also narrows the result type
+  // from f64 to i32 in that case so chains of bitwise ops (e.g. an
+  // FNV-1a hash mixer `(h ^ b) * P | 0`) stay in the i32 domain.
+  | "js.bitand"
+  | "js.bitor"
+  | "js.bitxor"
+  | "js.shl"
+  | "js.shr_s"
+  | "js.shr_u";
 
 /**
  * Typed unary primitive. `f64.neg` negates a number. `i32.eqz` implements
  * bool negation (`!x` where x is bool — 0↔1).
+ *
+ * Slice 12 (#1169o) adds `i32.trunc_sat_f64_s` — saturating f64 → i32
+ * truncation. Used to convert a JS-style f64 array index into the i32
+ * the backend `vec.get` instruction expects. Saturation handles
+ * NaN→0 and out-of-range values gracefully (no trap), matching what
+ * test262's array-indexing patterns expect.
  */
-export type IrUnop = "f64.neg" | "i32.eqz";
+export type IrUnop =
+  | "f64.neg"
+  | "i32.eqz"
+  | "i32.trunc_sat_f64_s"
+  // (#1371) Math.* unary ops that map 1:1 to a Wasm f64 instruction.
+  // The IR's `case "unary"` lowerer already passes the `op` tag through
+  // verbatim (lower.ts line 770), so we only need to extend the type
+  // and the from-ast lowering surface.
+  | "f64.abs"
+  | "f64.sqrt"
+  | "f64.floor"
+  | "f64.ceil"
+  | "f64.trunc"
+  // (#1392) `ref.is_null` — tests whether a Wasm reference is null. Result
+  // is i32 (1 if null, 0 otherwise). Used by the optional-chain lowering
+  // to short-circuit `recv?.prop` when `recv` is null. The Wasm op is
+  // valid for `ref` / `ref_null` / externref / funcref operands; the IR
+  // type carrier on `IrInstrUnary.rand` must be a `val`-kind IrType
+  // wrapping one of those.
+  | "ref.is_null";
 
 export interface IrInstrBinary extends IrInstrBase {
   readonly kind: "binary";
@@ -457,6 +545,92 @@ export interface IrInstrSelect extends IrInstrBase {
   readonly condition: IrValueId;
   readonly whenTrue: IrValueId;
   readonly whenFalse: IrValueId;
+}
+
+/**
+ * (#1392) Value-producing if/else expression. UNLIKE `select`, this
+ * SHORT-CIRCUITS — only one branch's instructions are executed. Used by
+ * the optional-chain lowering (`recv?.prop`) where the right-hand side
+ * (`recv.prop`) MUST NOT execute when `recv` is null.
+ *
+ * The two arm buffers (`then` / `else`) are self-contained instruction
+ * lists collected via `IrFunctionBuilder.collectBodyInstrs(...)`. They
+ * may reference SSA values defined OUTSIDE the if-instr (those are
+ * available through Wasm locals), but values defined INSIDE one arm are
+ * NOT visible to the other arm or to instructions following the if.
+ *
+ * The carrier values are `thenValue` / `elseValue` — IrValueIds defined
+ * inside the corresponding arm. The lowerer emits a Wasm
+ * `if (result T) ... else ... end` block where each arm leaves its
+ * carrier value on the stack; the post-block `local.set` binds the
+ * result to the if-instr's `result` SSA value.
+ *
+ * Both arms must produce values of `resultType`. The verifier rejects
+ * shape mismatches.
+ */
+export interface IrInstrIf extends IrInstrBase {
+  readonly kind: "if";
+  readonly cond: IrValueId;
+  readonly then: readonly IrInstr[];
+  readonly thenValue: IrValueId;
+  readonly else: readonly IrInstr[];
+  readonly elseValue: IrValueId;
+}
+
+/**
+ * (#1373 Phase B) `await <expr>` — suspend the current async function until
+ * `expr`'s Promise settles, then resume with the resolved value. The IR
+ * node carries the operand whose evaluation produces a Promise (or a
+ * non-Promise value that must be wrapped in `Promise.resolve` before
+ * suspension per spec §27.2.1.4).
+ *
+ * Phase B (this slice) defines the type only — no lowering. Phase C
+ * (CPS transform, follow-up #1373b) splits the function at each await
+ * point, lifts the post-await tail into a continuation closure, and
+ * emits microtask-queue calls (`__promise_then(promise, continuation)`)
+ * to schedule resumption.
+ *
+ * The result IrValueId carries the resolved value. Its IrType must
+ * match the surrounding expression context (typically the unwrapped
+ * `T` from `Promise<T>`).
+ */
+export interface IrInstrAwait extends IrInstrBase {
+  readonly kind: "await";
+  readonly operand: IrValueId;
+}
+
+/**
+ * (#1373 Phase B) `return <value>` from an async function body. UNLIKE
+ * `IrTerminatorReturn`, which produces the bare value, this wraps the
+ * value in `Promise.resolve(value)` per the async function spec
+ * §15.8.5.5. The IR node defines the wrap intent; lowering (Phase C)
+ * emits the wrap via the existing `Promise_resolve` host import in
+ * JS-host mode or via the standalone `$Promise` struct.new in WASI
+ * mode (the latter wired in #1326 Phase 1B).
+ *
+ * Used in tail position only — non-tail `return` inside an async
+ * function flows through the IR's normal block terminator, which the
+ * Phase C lowerer recognises and routes through the same wrap.
+ */
+export interface IrInstrAsyncReturn extends IrInstrBase {
+  readonly kind: "async.return";
+  readonly value: IrValueId;
+}
+
+/**
+ * (#1373 Phase B) Synchronous throw inside an async function body.
+ * UNLIKE `IrInstrThrow`, which propagates as a Wasm exception, this
+ * wraps the thrown value in `Promise.reject(reason)` so the async
+ * function's outer Promise settles in the rejected state. Lowering
+ * (Phase C) emits the wrap via `Promise_reject` (host) or `$Promise`
+ * struct.new with `state = REJECTED` (standalone, #1326 Phase 1B).
+ *
+ * Currently NOT emitted by from-ast — Phase C wires it from
+ * `ts.ThrowStatement` nodes inside async function bodies.
+ */
+export interface IrInstrAsyncThrow extends IrInstrBase {
+  readonly kind: "async.throw";
+  readonly reason: IrValueId;
 }
 
 /**
@@ -1386,6 +1560,95 @@ export interface IrInstrThrow extends IrInstrBase {
   readonly value: IrValueId;
 }
 
+// ---------------------------------------------------------------------------
+// Generic structured loops (#1280 — IR Phase 4 Slice 12)
+// ---------------------------------------------------------------------------
+//
+// Slice 12 extends the IR's loop coverage beyond the iterator-shaped
+// `forof.*` family. `while.loop` and `for.loop` are statement-level
+// declarative instructions that wrap a condition buffer, a body buffer,
+// and (for `for.loop`) an update buffer. The lowerer emits the
+// canonical `block { loop { <cond>; i32.eqz; br_if 1; <body>; <update?>;
+// br 0 } }` Wasm pattern.
+//
+// Cross-iteration mutable state lives in slots (same convention as the
+// `forof.*` family) — outer-scope `let` bindings that the source code
+// reassigns inside / through the loop are slot-bound during from-ast
+// lowering via the existing `mutatedLets` analysis. SSA values defined
+// inside the body register against the surrounding block via the
+// recursive walks in `lower.ts::registerInstrDefs` /
+// `allocLocalForInstr`; uses inside the body are recorded against a
+// synthetic block id (-1) so any outer-defined operand crosses the
+// loop boundary and pre-materializes into a Wasm local before the
+// loop op runs.
+
+/**
+ * Slice 12 (#1280) — `while (cond) body` loop.
+ *
+ * Lowering pattern:
+ *   block
+ *     loop
+ *       <cond instrs>          ;; computes condValue
+ *       <emit condValue>       ;; pushes the i32 boolean
+ *       i32.eqz
+ *       br_if 1                ;; exit on falsy
+ *       <body instrs>
+ *       br 0                   ;; continue
+ *     end
+ *   end
+ *
+ * `condValue` MUST be the SSA result of an instruction in `cond` (or
+ * an outer-scope value that's loaded into `cond`'s last instr). The
+ * resolver coerces non-i32 values to i32 via the standard truthy
+ * lowering path — for now the from-ast layer enforces an i32 result.
+ *
+ * Result: void (`result: null`).
+ */
+export interface IrInstrWhileLoop extends IrInstrBase {
+  readonly kind: "while.loop";
+  /** Instructions that compute the condition. Re-evaluated per iteration. */
+  readonly cond: readonly IrInstr[];
+  /** SSA value of the condition (an i32 boolean). */
+  readonly condValue: IrValueId;
+  /** Body instructions executed each iteration when the cond is truthy. */
+  readonly body: readonly IrInstr[];
+}
+
+/**
+ * Slice 12 (#1280) — `for (init; cond; update) body` loop.
+ *
+ * The init clause is emitted by the from-ast layer as ordinary IR
+ * statements BEFORE the `for.loop` instr (init is just a let-decl or
+ * an assignment expression statement, no special encoding needed).
+ * The instr carries cond, body, update.
+ *
+ * Lowering pattern:
+ *   block
+ *     loop
+ *       <cond instrs>
+ *       <emit condValue>
+ *       i32.eqz
+ *       br_if 1
+ *       <body instrs>
+ *       <update instrs>        ;; runs after body, before re-evaluating cond
+ *       br 0
+ *     end
+ *   end
+ *
+ * Result: void (`result: null`).
+ */
+export interface IrInstrForLoop extends IrInstrBase {
+  readonly kind: "for.loop";
+  /** Instructions that compute the condition. Re-evaluated per iteration. */
+  readonly cond: readonly IrInstr[];
+  /** SSA value of the condition (an i32 boolean). */
+  readonly condValue: IrValueId;
+  /** Body instructions executed each iteration when the cond is truthy. */
+  readonly body: readonly IrInstr[];
+  /** Update instructions executed after the body each iteration. */
+  readonly update: readonly IrInstr[];
+}
+
 /**
  * Slice 9 (#1169h) — try / catch / finally as a declarative statement-level
  * instr. Mirrors the slice-6 `forof.vec` shape: the body / catch handler /
@@ -1441,6 +1704,8 @@ export type IrInstr =
   | IrInstrBinary
   | IrInstrUnary
   | IrInstrSelect
+  // (#1392) Value-producing short-circuiting if/else — used by optional-chain.
+  | IrInstrIf
   | IrInstrRawWasm
   | IrInstrBox
   | IrInstrUnbox
@@ -1486,7 +1751,15 @@ export type IrInstr =
   | IrInstrExternCall
   | IrInstrExternProp
   | IrInstrExternPropSet
-  | IrInstrRegExpLiteral;
+  | IrInstrRegExpLiteral
+  // Slice 12 (#1280) — generic structured loops.
+  | IrInstrWhileLoop
+  | IrInstrForLoop
+  // (#1373 Phase B) Async / await IR nodes. Currently type-only —
+  // Phase C (CPS transform, follow-up #1373b) wires lowering.
+  | IrInstrAwait
+  | IrInstrAsyncReturn
+  | IrInstrAsyncThrow;
 
 // ---------------------------------------------------------------------------
 // Slot definitions (#1169e — IR Phase 4 Slice 6)

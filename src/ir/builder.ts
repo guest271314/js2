@@ -200,6 +200,58 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * (#1392) Emit `unary("ref.is_null", val)` — tests a Wasm reference for
+   * null. Result is `i32` (1 if null, 0 otherwise). The architect-spec
+   * name `emitRefIsNull` mirrors the existing `emitUnary` /
+   * `emitBinary` / `emitSelect` family and surfaces the underlying op
+   * at the call site so #1375's optional-chain lowering reads naturally
+   * (`cx.builder.emitRefIsNull(recv)`).
+   *
+   * `val`'s IrType MUST be a `val`-kind wrapping a Wasm reference type
+   * (`ref` / `ref_null` / `externref` / `funcref`); the verifier and the
+   * Wasm validator together reject other operand shapes.
+   */
+  emitRefIsNull(val: IrValueId): IrValueId {
+    return this.emitUnary("ref.is_null", val, irVal({ kind: "i32" }));
+  }
+
+  /**
+   * (#1392) Emit a value-producing short-circuiting if/else. Both `then`
+   * and `else` are pre-collected instruction buffers (typically built
+   * via `collectBodyInstrs(...)`); the lowerer emits a Wasm
+   * `if (result T) ... else ... end` so only the matching branch
+   * executes.
+   *
+   * `thenValue` / `elseValue` are SSA value IDs DEFINED INSIDE the
+   * corresponding arm — the lowerer emits each arm's instruction tree
+   * and leaves the carrier value on the Wasm stack at end-of-arm; the
+   * post-block `local.set` binds the if-instr's result to whichever
+   * carrier ran.
+   */
+  emitIfElse(args: {
+    cond: IrValueId;
+    then: readonly IrInstr[];
+    thenValue: IrValueId;
+    else: readonly IrInstr[];
+    elseValue: IrValueId;
+    resultType: IrType;
+  }): IrValueId {
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, args.resultType);
+    this.pushInstr({
+      kind: "if",
+      cond: args.cond,
+      then: args.then,
+      thenValue: args.thenValue,
+      else: args.else,
+      elseValue: args.elseValue,
+      result,
+      resultType: args.resultType,
+    });
+    return result;
+  }
+
   // --- string ops (#1169a) ------------------------------------------------
 
   emitStringConst(value: string): IrValueId {
@@ -837,15 +889,18 @@ export class IrFunctionBuilder {
    * Returns the captured body instrs.
    */
   collectBodyInstrs(emit: () => void): IrInstr[] {
-    if (this.bodyBuffer !== null) {
-      throw new Error(`IrFunctionBuilder: nested collectBodyInstrs not supported (func ${this.name})`);
-    }
+    // (#1392) Nesting support — required for nested optional chains
+    // (`a?.b?.c` lowers to nested `IrInstrIf`s, each with its own arm
+    // buffer). Save & restore the previous buffer so emissions inside
+    // the inner `emit()` route to its own buffer; instructions emitted
+    // AFTER the inner returns continue routing to the outer buffer.
+    const previous = this.bodyBuffer;
     const buffer: IrInstr[] = [];
     this.bodyBuffer = buffer;
     try {
       emit();
     } finally {
-      this.bodyBuffer = null;
+      this.bodyBuffer = previous;
     }
     return buffer;
   }
@@ -1020,6 +1075,50 @@ export class IrFunctionBuilder {
       body: args.body,
       ...(args.catchClause ? { catchClause: args.catchClause } : {}),
       ...(args.finallyBody ? { finallyBody: args.finallyBody } : {}),
+      result: null,
+      resultType: null,
+    });
+  }
+
+  // --- generic structured loops (slice 12 — #1280) ------------------------
+
+  /**
+   * Slice 12 (#1280): emit a `while (cond) body` declarative loop. The
+   * caller pre-collects the cond + body buffers via `collectBodyInstrs`
+   * and threads through the SSA value emitted by the cond's last
+   * instruction. The lowerer emits the canonical
+   * `block { loop { <cond>; i32.eqz; br_if 1; <body>; br 0 } }`
+   * Wasm pattern.
+   */
+  emitWhileLoop(args: { cond: readonly IrInstr[]; condValue: IrValueId; body: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "while.loop",
+      cond: args.cond,
+      condValue: args.condValue,
+      body: args.body,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * Slice 12 (#1280): emit a `for (init; cond; update) body` declarative
+   * loop. `init` is emitted as separate IR instructions BEFORE this
+   * instr (a `let i = 0` is just a `lowerVarDecl`, no special encoding
+   * needed). The instr carries cond, body, update.
+   */
+  emitForLoop(args: {
+    cond: readonly IrInstr[];
+    condValue: IrValueId;
+    body: readonly IrInstr[];
+    update: readonly IrInstr[];
+  }): void {
+    this.pushInstr({
+      kind: "for.loop",
+      cond: args.cond,
+      condValue: args.condValue,
+      body: args.body,
+      update: args.update,
       result: null,
       resultType: null,
     });

@@ -23,6 +23,37 @@ display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
 [ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 [ -n "$effort" ] && [ "$effort" != "none" ] && [ "$effort" != "disabled" ] && printf ' \033[00;33m%s\033[00m' "$effort"
+
+# Agent PR badge — only shown when inside a worktree, for that worktree's own agent
+status_dir="/workspace/.claude/agent-status"
+if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
+  current_agent=$(basename "$in_worktree")
+  f="$status_dir/${current_agent}.json"
+  if [ -f "$f" ]; then
+    now_sec=$(date +%s)
+    state=$(jq -r '.state // empty' "$f" 2>/dev/null)
+    if [ "$state" != "active" ]; then
+      since=$(jq -r '.since // empty' "$f" 2>/dev/null)
+      if [ -n "$since" ]; then
+        elapsed=$(( now_sec - since ))
+        [ "$elapsed" -lt 0 ] && elapsed=0
+        if [ "$elapsed" -lt 60 ]; then age="${elapsed}s"
+        elif [ "$elapsed" -lt 3600 ]; then age="$((elapsed / 60))m"
+        else age="$((elapsed / 3600))h$((elapsed % 3600 / 60))m"; fi
+        pr=$(jq -r '.pr // empty' "$f" 2>/dev/null)
+        issue=$(jq -r '.issue // empty' "$f" 2>/dev/null)
+        task=$(jq -r '.task // empty' "$f" 2>/dev/null)
+        [ -n "$pr" ] && ref="#${pr}" || ref="${issue:-${task}}"
+        [ -n "$ref" ] && label="${ref} ${age}" || label="${age}"
+        if [ "$elapsed" -ge 900 ]; then   color="48;5;196;37"
+        elif [ "$elapsed" -ge 300 ]; then color="43;30"
+        else                              color="100;37"; fi
+        printf ' \033[%sm %s \033[00m' "$color" "$label"
+      fi
+    fi
+  fi
+fi
+
 if [ -n "$used" ] || [ -n "$weekly" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
@@ -185,16 +216,16 @@ if [ -z "$in_worktree" ]; then
   fi
   if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
     sprint_pct=$((sprint_done * 100 / sprint_total))
-    awk -v p="$sprint_pct" -v n="$sprint_n" 'BEGIN {
-      if (p >= 55)      { fill=42;         fg=30 }
+    awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
+      if (p >= 67)      { fill=42;         fg=30 }
       else if (p >= 33) { fill=43;         fg=30 }
       else              { fill="48;5;196"; fg=37 }
-      width = 10
+      width = 12
       filled = int(p * width / 100)
-      label = sprintf(" %d%% s%d ", p, n)
+      label = sprintf(" s%d %d/%d", n, done, total)
       bar = ""
       for (i = 0; i < width; i++) bar = bar " "
-      bar = substr(label substr(bar, length(label) + 1), 1, width)
+      bar = label substr(bar, length(label) + 1)
       filled_part = substr(bar, 1, filled)
       empty_part  = substr(bar, filled + 1)
       printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part

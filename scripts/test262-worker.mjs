@@ -81,6 +81,74 @@ const _origObjectProtoKeys = new Set(Object.getOwnPropertyNames(Object.prototype
 const _origObjectProtoSymbols = new Set(Object.getOwnPropertySymbols(Object.prototype));
 const _origArrayProtoSymbols = new Set(Object.getOwnPropertySymbols(Array.prototype));
 
+// #1220 — extra-property cleanup for additional prototypes.
+//
+// test262 tests sometimes attach own properties to host prototypes via
+// `Object.defineProperty(SomeProto, name, { get(){...} })` WITHOUT
+// `configurable: true`. The descriptor defaults to non-configurable, which
+// means the FIRST run in a fork installs the accessor and EVERY subsequent
+// run that tries to defineProperty the same key fails with
+// `TypeError: Cannot redefine property: <name>`.
+//
+// Concrete failures observed in the baseline:
+//   - built-ins/Iterator/prototype/map/this-non-object.js installs
+//     Number.prototype.next (the iter-helper falls back to receiver's
+//     `next` via the prototype chain). Subsequent same-fork runs throw
+//     "Cannot redefine property: next".
+//   - built-ins/TypedArray/prototype/findLastIndex/get-length-ignores-length-prop.js
+//     installs accessors on %TypedArray%.prototype.length AND on every
+//     concrete TA.prototype.length (Int8Array..Float64Array). Same
+//     "Cannot redefine property: length" on second run.
+//
+// The existing Object.prototype / Array.prototype "delete extras" loops
+// (lines below) handle their respective protos. We replicate the same
+// approach for additional prototypes that tests realistically poison.
+//
+// When `delete` succeeds (descriptor was configurable) the slate is clean
+// for the next test. When `delete` fails because the descriptor is
+// non-configurable, we deliberately do NOT exit-for-respawn here even
+// though that's what the Array.prototype FATAL precedent does. Reason:
+// ~51 TypedArray.prototype + ~30 Number.prototype tests in test262 install
+// non-configurable accessors. Forcing fork respawn on each one cost +71
+// compile_timeouts in CI (in-flight tests in the same fork lost their
+// IPC response when the worker called process.exit(1) before libuv flushed
+// the previous test's result message). Net effect was -7 pass.
+//
+// Trade-off accepted: the 3 tests we'd "fix" with the FATAL approach
+// (Iterator/map/this-non-object.js, TypedArray/.../get-length-ignores-length-prop.js,
+// + 1 sibling) stay broken on second-run-in-same-fork. Bug A's Promise
+// snapshot still gives +26 cleanly. Recover the 3 tests later with a
+// safer mechanism (e.g. process.disconnect() before exit, or per-test
+// fork recycle for known-polluter test paths).
+const _typedArrayProto = Object.getPrototypeOf(Int8Array.prototype); // %TypedArray%.prototype
+const _iteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+const _PROTO_EXTRA_CLEANUP = [
+  ["Number.prototype", Number.prototype],
+  ["Boolean.prototype", Boolean.prototype],
+  ["%TypedArray%.prototype", _typedArrayProto],
+  ["Int8Array.prototype", Int8Array.prototype],
+  ["Uint8Array.prototype", Uint8Array.prototype],
+  ["Uint8ClampedArray.prototype", Uint8ClampedArray.prototype],
+  ["Int16Array.prototype", Int16Array.prototype],
+  ["Uint16Array.prototype", Uint16Array.prototype],
+  ["Int32Array.prototype", Int32Array.prototype],
+  ["Uint32Array.prototype", Uint32Array.prototype],
+  ["Float32Array.prototype", Float32Array.prototype],
+  ["Float64Array.prototype", Float64Array.prototype],
+  ["%IteratorPrototype%", _iteratorProto],
+  ["Map.prototype", Map.prototype],
+  ["Set.prototype", Set.prototype],
+  ["Date.prototype", Date.prototype],
+  ["Promise.prototype", Promise.prototype],
+  ["Error.prototype", Error.prototype],
+];
+const _protoExtraOrig = _PROTO_EXTRA_CLEANUP.map(([name, proto]) => ({
+  name,
+  proto,
+  names: new Set(Object.getOwnPropertyNames(proto)),
+  symbols: new Set(Object.getOwnPropertySymbols(proto)),
+}));
+
 // --- Category 2: specific methods the compiler + TypeScript use.
 // Captured by VALUE at startup. Restored by simple assignment.
 // When adding here: verify a test262 test that poisons the method actually
@@ -284,6 +352,17 @@ const _STATIC_SNAPSHOTS = [
     ],
   ],
   ["RegExp", RegExp, []],
+  // #1220 — Tests under built-ins/Promise/{all,any,race,allSettled}/invoke-resolve*.js
+  // intentionally replace `Promise.resolve` with custom callables (or non-callables
+  // like `null` / `"string"`) to verify spec invocation semantics. Without snapshot+
+  // restore, those mutations leak across tests in the same fork process and Node's
+  // own `Promise.all` (which calls `this.resolve(value)` internally) crashes with
+  // "TypeError: resolve is not a function" on every subsequent test that uses any
+  // Promise static method. The runtime-side host imports in src/runtime.ts:2955-2965
+  // close over the global `Promise` constructor, so the poisoned static methods are
+  // also reached directly by compiled `Promise.resolve(x)` / `Promise.all(arr)`.
+  // Symmetric with the existing Array/Object/String/etc. entries.
+  ["Promise", Promise, ["resolve", "reject", "all", "allSettled", "any", "race"]],
 ];
 
 // --- Category 4: accessor properties on RegExp.prototype (getters).
@@ -415,6 +494,32 @@ function restoreBuiltins() {
       );
       process.exit(1);
     }
+    // #1221: callability probe. The typeof check above only catches
+    // non-callable poison. A test that assigns a Wasm-throwing function
+    // (`Array.prototype[Symbol.iterator] = wasmInstance.exports.thrower`)
+    // and made the descriptor non-configurable bypasses the typeof check
+    // — but the very next `for...of` below (and every for-of in the TS
+    // compiler's internals) would invoke it and throw a
+    // WebAssembly.Exception. Without an exit here, that exception
+    // propagates out of restoreBuiltins → out of doCompile → caught at
+    // the outer try with status:"compile_error", error:"[object
+    // WebAssembly.Exception]" — and EVERY subsequent test in this fork
+    // hits the same trap (the blast radius can be ~100s of tests). Probe
+    // by calling it on an empty array; if it throws, the fork is
+    // unrecoverable — exit so the pool respawns.
+    try {
+      const probeIter = cur.call([]);
+      // Some valid iterators are objects without .next yet — calling
+      // .next() on the probe is the real correctness signal. Wrap so a
+      // throw from .next() also trips the FATAL branch.
+      if (probeIter && typeof probeIter.next === "function") probeIter.next();
+    } catch (probeErr) {
+      const kind = probeErr?.constructor?.name ?? typeof probeErr;
+      console.error(
+        `[unified-worker pid=${process.pid}] FATAL: Array.prototype[Symbol.iterator] throws when called (${kind}) — exiting for restart (#1221)`,
+      );
+      process.exit(1);
+    }
   }
 
   // Remove numeric-indexed accessor properties added to Array.prototype
@@ -464,10 +569,50 @@ function restoreBuiltins() {
     }
   }
 
+  // #1220 — Delete extra own keys/symbols added to additional prototypes
+  // (Number, %TypedArray%, %Iterator%, etc). See comment on _PROTO_EXTRA_CLEANUP.
+  //
+  // Tests routinely call Object.defineProperty(SomeProto, k, { get(){...} }).
+  // When `configurable: true` is set the next test starts clean. When the
+  // descriptor defaults to non-configurable, `delete` silently no-ops and
+  // the next test's defineProperty throws "Cannot redefine property: <k>".
+  // We accept that outcome (see the _PROTO_EXTRA_CLEANUP block comment for
+  // the rationale against process.exit(1) recovery here).
+  for (const { proto, names, symbols } of _protoExtraOrig) {
+    for (const k of Object.getOwnPropertyNames(proto)) {
+      if (!names.has(k)) {
+        try {
+          delete proto[k];
+        } catch {}
+      }
+    }
+    for (const s of Object.getOwnPropertySymbols(proto)) {
+      if (!symbols.has(s)) {
+        try {
+          delete proto[s];
+        } catch {}
+      }
+    }
+  }
+
   // Restore specific methods on prototypes (value-assignment, defineProperty fallback).
   for (const { obj, values } of _methodOrig) {
     for (const [key, orig, origDesc] of values) {
       _restoreMethodProp(obj, key, orig, origDesc);
+    }
+  }
+
+  // Validate restore — if any method is still not the original, the descriptor
+  // is non-configurable and the fork is poisoned. Restart so the next test
+  // gets a clean environment. (#1295)
+  for (const { obj, values } of _methodOrig) {
+    for (const [key, orig] of values) {
+      if (obj[key] !== orig) {
+        console.error(
+          `[unified-worker pid=${process.pid}] FATAL: prototype method ${String(key)} not restored (non-configurable poison) — exiting for restart (#1295)`,
+        );
+        process.exit(1);
+      }
     }
   }
 
@@ -585,8 +730,24 @@ function extractWasmExceptionMessage(err, instance) {
     let info = err.message ?? String(err);
     const stack = err.stack ?? "";
     if (/illegal cast|null|unreachable|out of bounds/.test(info)) {
-      const funcMatch = stack.match(/at (\w+) \(wasm:/);
-      if (funcMatch) info = `${info} [in ${funcMatch[1]}()]`;
+      // (#1316 / #1317) Extract every wasm frame in trap-first order so
+      // the error chain reaches more than the leaf function — for
+      // `illegal cast` and `dereferencing a null pointer` traps the
+      // leaf is often a tiny lifted helper whose name alone is
+      // uninformative without its caller.
+      const frameRe = /at\s+(\S+)\s+\(wasm:\/\//g;
+      const frames = [];
+      let m;
+      while ((m = frameRe.exec(stack)) !== null) frames.push(m[1]);
+      if (frames.length > 0) {
+        info = `${info} [in ${frames[0]}()`;
+        if (frames.length > 1) {
+          // Cap at 3 caller frames so the line stays readable inside the
+          // 300-char `error.substring(0, 300)` truncation downstream.
+          info += ` ← ${frames.slice(1, 4).join(" ← ")}`;
+        }
+        info += "]";
+      }
     }
     return info;
   }
@@ -728,6 +889,23 @@ process.on("message", async (msg) => {
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
     incrementalCompiler = null;
     createFreshCompiler();
+    if (err instanceof WebAssembly.Exception) {
+      // Poisoned String.prototype (or similar built-in) — Wasm throw escaped
+      // from the TS compiler internals. Send fail (not compile_error) and
+      // restart the fork so subsequent tests get a clean environment.
+      process.send({
+        id,
+        status: "fail",
+        error: "wasm exception during compile (poisoned built-in)",
+        isException: true,
+        compileMs: performance.now() - compileStart,
+      });
+      postCompileCleanup();
+      // Flush process.send before exiting so the pool's exit handler can
+      // respawn a clean fork for subsequent tests.
+      process.nextTick(() => process.exit(1));
+      return;
+    }
     process.send({
       id,
       status: "compile_error",
@@ -968,13 +1146,33 @@ process.on("message", async (msg) => {
       });
     }
   } catch (outerErr) {
-    process.send({
-      id,
-      status: "compile_error",
-      error: outerErr.message ?? String(outerErr),
-      compileMs,
-      execMs: performance.now() - execStart,
-    });
+    // #1221: A WebAssembly.Exception that escapes the inner try (e.g. thrown
+    // by `restoreBuiltins` walking a poisoned Symbol.iterator, or by a
+    // microtask resumed at an `await` boundary) is a runtime throw, not a
+    // compile failure. Route it through extractWasmExceptionMessage so the
+    // error text is meaningful instead of "[object WebAssembly.Exception]"
+    // and emit status:"fail" so the dashboard groups it with real runtime
+    // failures. The inner instantiate catch already handles the common case
+    // (#1155) — this closes the remaining outer-catch leak that produced up
+    // to ~1,176 misclassified rows in the test262 baseline.
+    if (outerErr instanceof WebAssembly.Exception) {
+      process.send({
+        id,
+        status: "fail",
+        error: extractWasmExceptionMessage(outerErr, instance ?? null),
+        isException: true,
+        compileMs,
+        execMs: performance.now() - execStart,
+      });
+    } else {
+      process.send({
+        id,
+        status: "compile_error",
+        error: outerErr.message ?? String(outerErr),
+        compileMs,
+        execMs: performance.now() - execStart,
+      });
+    }
   }
 
   // Drop Wasm references

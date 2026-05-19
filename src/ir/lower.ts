@@ -54,6 +54,7 @@ import {
   type IrTypeRef,
   type IrValueId,
 } from "./nodes.js";
+import { isSideEffecting } from "./passes/dead-code.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
 
 /**
@@ -350,6 +351,22 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         for (const sub of instr.finallyBody) registerInstrDefs(sub, blockId);
       }
     }
+    // Slice 12 (#1280): walk into while/for loop cond + body + update buffers.
+    if (instr.kind === "while.loop") {
+      for (const sub of instr.cond) registerInstrDefs(sub, blockId);
+      for (const sub of instr.body) registerInstrDefs(sub, blockId);
+    }
+    if (instr.kind === "for.loop") {
+      for (const sub of instr.cond) registerInstrDefs(sub, blockId);
+      for (const sub of instr.body) registerInstrDefs(sub, blockId);
+      for (const sub of instr.update) registerInstrDefs(sub, blockId);
+    }
+    // (#1392) walk into if's then/else buffers so SSA defs inside an arm
+    // register in the def maps.
+    if (instr.kind === "if") {
+      for (const sub of instr.then) registerInstrDefs(sub, blockId);
+      for (const sub of instr.else) registerInstrDefs(sub, blockId);
+    }
   };
   for (const block of func.blocks) {
     for (const instr of block.instrs) {
@@ -422,6 +439,38 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
           for (const u of collectForOfBodyUses(instr.finallyBody)) recordUse(u, -1);
         }
       }
+      // Slice 12 (#1280): while / for loop cond + body + update buffers.
+      // Same -1 block id convention as forof bodies — uses inside the
+      // loop are treated as cross-block w.r.t. outer-defined values.
+      if (instr.kind === "while.loop") {
+        for (const u of collectForOfBodyUses(instr.cond)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.body)) recordUse(u, -1);
+        // The cond's SSA result is consumed by the synthesized
+        // i32.eqz / br_if at the loop top. Record the use so the
+        // value is allocated a Wasm local if the cond isn't
+        // re-emitted in place (multi-use across iterations).
+        recordUse(instr.condValue, -1);
+      }
+      if (instr.kind === "for.loop") {
+        for (const u of collectForOfBodyUses(instr.cond)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.body)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.update)) recordUse(u, -1);
+        recordUse(instr.condValue, -1);
+      }
+      // (#1392) `if` arms — same `-1` block id convention as for-of
+      // bodies. Outer SSA values referenced inside an arm need to be
+      // pre-materialised into Wasm locals so the arm's inline code can
+      // `local.get` them (since the arm's structured Wasm if-block runs
+      // INSIDE the surrounding block but reads from outer locals).
+      // The thenValue / elseValue are the carrier values left on the
+      // stack at end-of-arm — recording them ensures their defs survive
+      // DCE and that they're accessible at the carrier-emission site.
+      if (instr.kind === "if") {
+        for (const u of collectForOfBodyUses(instr.then)) recordUse(u, -1);
+        for (const u of collectForOfBodyUses(instr.else)) recordUse(u, -1);
+        recordUse(instr.thenValue, -1);
+        recordUse(instr.elseValue, -1);
+      }
     }
     for (const u of collectTerminatorUses(block)) recordUse(u, blockId);
   }
@@ -476,6 +525,16 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         for (const sub of instr.finallyBody) allocLocalForInstr(sub);
       }
     }
+    // Slice 12 (#1280): walk into while / for loop buffers.
+    if (instr.kind === "while.loop") {
+      for (const sub of instr.cond) allocLocalForInstr(sub);
+      for (const sub of instr.body) allocLocalForInstr(sub);
+    }
+    if (instr.kind === "for.loop") {
+      for (const sub of instr.cond) allocLocalForInstr(sub);
+      for (const sub of instr.body) allocLocalForInstr(sub);
+      for (const sub of instr.update) allocLocalForInstr(sub);
+    }
   };
   for (const block of func.blocks) {
     for (const instr of block.instrs) {
@@ -493,9 +552,98 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
   }
   const slotWasmIdx = (slotIndex: number): number => slotBase + slotIndex;
 
+  // Slice 11 (#1169n) — JS bitwise ops need TWO scratch f64 locals:
+  //   - $js_bitwise_rhs: stash the right operand while we apply
+  //     ToInt32 to the left.
+  //   - $js_bitwise_tmp: scratch slot used INSIDE `emitJsToInt32` to
+  //     duplicate the truncated value for modulo reduction.
+  // Both are allocated lazily; one pair per function, reused across
+  // every bitwise op in the body.
+  //
+  // #1126 Stage 3 — when one operand of a bitwise op is already
+  // i32-typed in the IR, we need a SECOND rhs slot of i32 type for
+  // those calls. This keeps the f64-rhs slot reusable for legacy paths
+  // and avoids type-mismatched local stores. Both slots are allocated
+  // lazily on first use of their type.
+  let jsBitwiseRhsIdxF64: number | null = null;
+  let jsBitwiseRhsIdxI32: number | null = null;
+  let jsBitwiseTmpIdx: number | null = null;
+  const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
+    if (jsBitwiseTmpIdx === null) {
+      jsBitwiseTmpIdx = func.params.length + locals.length;
+      locals.push({ name: "$js_bitwise_tmp", type: { kind: "f64" } });
+    }
+    if (rhsIsI32) {
+      if (jsBitwiseRhsIdxI32 === null) {
+        jsBitwiseRhsIdxI32 = func.params.length + locals.length;
+        locals.push({ name: "$js_bitwise_rhs_i32", type: { kind: "i32" } });
+      }
+      return { rhs: jsBitwiseRhsIdxI32, tmp: jsBitwiseTmpIdx };
+    }
+    if (jsBitwiseRhsIdxF64 === null) {
+      jsBitwiseRhsIdxF64 = func.params.length + locals.length;
+      locals.push({ name: "$js_bitwise_rhs", type: { kind: "f64" } });
+    }
+    return { rhs: jsBitwiseRhsIdxF64, tmp: jsBitwiseTmpIdx };
+  };
+
+  // #1126 Stage 3 — best-effort `typeOf` that returns null instead of
+  // throwing. Used by the fast-path operand inspection in `case "binary"`
+  // to peek at IrTypes without breaking emit if some defensive contract
+  // (no resultType, etc.) isn't met. The slow path still emits correct
+  // code in that case.
+  const tryTypeOf = (v: IrValueId): IrType | null => {
+    try {
+      return typeOf(v);
+    } catch {
+      return null;
+    }
+  };
+
   // --- emission -----------------------------------------------------------
 
   const materialized = new Set<IrValueId>();
+
+  /**
+   * #1303 — Defensive coercion for bitwise op operands.
+   *
+   * Bitwise ops (`&`, `|`, `^`, `<<`, `>>`, `>>>`) require f64 on the
+   * stack — their lowering chain `emitJsToInt32` starts with `f64.trunc`
+   * which traps validation if the operand is not f64. The IR generator's
+   * `requireF64` guard in `from-ast.ts` is supposed to prevent any
+   * non-f64-val IR `binary` instruction from reaching the lowerer, but
+   * on lodash `partial.js`'s `mergeData` the lowered operand still
+   * arrives as externref. Suspected root cause (filed as #1305):
+   * module-level `var WRAP_BIND_FLAG = 1` in JS mode is treated as
+   * `any`; the IR generator types the use as f64-val based on the
+   * literal initializer, but the lowered `global.get` returns externref.
+   *
+   * Defense: after `emitValue(v)` for a bitwise operand, check the IR
+   * type. If it is NOT f64-val (the contract), emit `__unbox_number`
+   * to coerce externref → f64. For correctly-typed values the branch
+   * is never taken and codegen is byte-identical.
+   *
+   * Once #1305 lands the IR contract holds across the board and this
+   * helper can be removed.
+   */
+  const coerceToF64ForBitwise = (v: IrValueId, out: Instr[]): void => {
+    let t: IrType;
+    try {
+      t = typeOf(v);
+    } catch {
+      return; // value type unknown — leave as-is
+    }
+    if (t.kind === "val" && t.val.kind === "f64") return; // already f64
+    // Try to resolve __unbox_number; if absent, leave the value alone
+    // (the legacy validator will then surface the type mismatch and we
+    // haven't masked any other contract violation).
+    try {
+      const idx = resolver.resolveFunc({ kind: "func", name: "__unbox_number" });
+      out.push({ op: "call", funcIdx: idx });
+    } catch {
+      // resolver doesn't know __unbox_number — fall through unchanged
+    }
+  };
 
   const emitValue = (v: IrValueId, out: Instr[]): void => {
     const pi = paramIdx.get(v);
@@ -539,11 +687,104 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitValue(instr.value, out);
         out.push({ op: "global.set", index: resolver.resolveGlobal(instr.target) });
         return;
-      case "binary":
+      case "binary": {
+        const isJsBitwise =
+          instr.op === "js.bitand" ||
+          instr.op === "js.bitor" ||
+          instr.op === "js.bitxor" ||
+          instr.op === "js.shl" ||
+          instr.op === "js.shr_s" ||
+          instr.op === "js.shr_u";
+
+        // #1126 Stage 3 — peek at operand IrTypes BEFORE emitting them so
+        // we can pick the cheapest lowering shape. The four cases:
+        //   • both i32           → native i32.* op, skip the scratch dance
+        //   • lhs i32 / rhs f64  → ToInt32 only on rhs
+        //   • lhs f64 / rhs i32  → ToInt32 only on lhs
+        //   • both f64           → existing scratch dance (legacy path)
+        // Result type of `js.bit*` is f64 by IR contract; we tail with
+        // `f64.convert_i32_*` to honour it. When the IR result type was
+        // narrowed to i32 by Stage 3 from-ast (chained bitwise ops), we
+        // also skip the convert-back so the chain stays in i32.
+        //
+        // Any value already typed as i32 in IR has gone through one of:
+        //   - a JS bitwise op (which produces a ToInt32-equivalent result),
+        //   - a comparison / bool source (0 or 1, trivially in [-2^31,2^31)),
+        //   - or a const i32. All inhabit the JS-ToInt32 image already, so
+        //   skipping the redundant ToInt32 is semantically a no-op.
+        const lhsIrTy = isJsBitwise ? tryTypeOf(instr.lhs) : null;
+        const rhsIrTy = isJsBitwise ? tryTypeOf(instr.rhs) : null;
+        const lhsIsI32 = lhsIrTy ? asVal(lhsIrTy)?.kind === "i32" : false;
+        const rhsIsI32 = rhsIrTy ? asVal(rhsIrTy)?.kind === "i32" : false;
+        const resultIsI32 = isJsBitwise && instr.resultType ? asVal(instr.resultType)?.kind === "i32" : false;
+
+        if (isJsBitwise && lhsIsI32 && rhsIsI32) {
+          // FAST PATH — both operands already in JS-ToInt32-equivalent i32
+          // domain. No ToInt32 needed; emit native i32.* directly.
+          emitValue(instr.lhs, out);
+          emitValue(instr.rhs, out);
+          out.push({ op: jsBitwiseToI32(instr.op) } as unknown as Instr);
+          if (!resultIsI32) {
+            // Convert i32 → f64 to honour the legacy js.bit* result-type
+            // contract. `>>>` is unsigned, others signed.
+            if (instr.op === "js.shr_u") {
+              out.push({ op: "f64.convert_i32_u" } as unknown as Instr);
+            } else {
+              out.push({ op: "f64.convert_i32_s" });
+            }
+          }
+          return;
+        }
+
         emitValue(instr.lhs, out);
+        // #1303 — defensive coercion only for JS bitwise ops, where the
+        // lowering's first instruction (`f64.trunc` inside `emitJsToInt32`)
+        // requires f64 on stack. Other binary ops (`f64.add`, `i32.eq`)
+        // are not affected and must NOT be coerced (would break i32
+        // boolean ops). See `coerceToF64ForBitwise` doc + #1305.
+        // #1126 Stage 3 — skip the coercion when the operand is already
+        // i32-typed (we'll skip its emitJsToInt32 step below too).
+        if (isJsBitwise && !lhsIsI32) coerceToF64ForBitwise(instr.lhs, out);
         emitValue(instr.rhs, out);
+        if (isJsBitwise && !rhsIsI32) coerceToF64ForBitwise(instr.rhs, out);
+        // Slice 11 (#1169n) — JS bitwise composite ops. Each pops two
+        // f64 from the stack, applies JS ToInt32 to each, runs the i32
+        // op, and converts back to f64. We use a per-function scratch
+        // f64 local to stash the right operand while we ToInt32 the
+        // left (Wasm has no general "swap" op).
+        //
+        // #1126 Stage 3 — when one operand is already i32-typed, the
+        // scratch-rhs slot is widened to an i32 local; ToInt32 is also
+        // skipped on that operand. This keeps mixed i32/f64 lowering
+        // correct (the f64 side still gets its ToInt32; the i32 side
+        // passes through directly).
+        if (isJsBitwise) {
+          const { rhs: rhsSlot, tmp: tmpSlot } = ensureJsBitwiseScratch(rhsIsI32);
+          // Stack: [lhs, rhs]
+          out.push({ op: "local.set", index: rhsSlot });
+          // Stack: [lhs]; rhsSlot holds rhs.
+          if (!lhsIsI32) emitJsToInt32(out, tmpSlot);
+          // Stack: [lhs_i32]
+          out.push({ op: "local.get", index: rhsSlot });
+          // Stack: [lhs_i32, rhs]
+          if (!rhsIsI32) emitJsToInt32(out, tmpSlot);
+          // Stack: [lhs_i32, rhs_i32]
+          out.push({ op: jsBitwiseToI32(instr.op) } as unknown as Instr);
+          // `>>>` returns a Uint32; everything else is Int32. Convert
+          // back to f64 with the matching signedness — UNLESS the IR
+          // result type was already narrowed to i32 by Stage 3.
+          if (!resultIsI32) {
+            if (instr.op === "js.shr_u") {
+              out.push({ op: "f64.convert_i32_u" } as unknown as Instr);
+            } else {
+              out.push({ op: "f64.convert_i32_s" });
+            }
+          }
+          return;
+        }
         out.push({ op: instr.op } as unknown as Instr);
         return;
+      }
       case "unary":
         emitValue(instr.rand, out);
         out.push({ op: instr.op } as unknown as Instr);
@@ -557,6 +798,64 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitValue(instr.condition, out);
         out.push({ op: "select" });
         return;
+      case "if": {
+        // (#1392) Value-producing short-circuiting if/else. Lowers to:
+        //   <cond>
+        //   if (result T)
+        //     <then arm instrs (SSA materialisation rules)>
+        //     <emit thenValue tree-style — leaves value on stack>
+        //   else
+        //     <else arm instrs>
+        //     <emit elseValue tree-style>
+        //   end
+        // Each arm's last stack-top becomes the if-block's result; the
+        // outer SSA `result` is bound by the caller's `local.set`
+        // (handled by `emitBlockBody` since this instr has a result).
+        if (instr.resultType === null) {
+          throw new Error(`ir/lower: IrInstrIf without resultType (${func.name})`);
+        }
+        const armResultType = lowerIrTypeToValType(instr.resultType, resolver, func.name);
+        const blockType: BlockType = { kind: "val", type: armResultType };
+
+        // Helper: emit a body buffer using the same SSA-materialisation
+        // rules as `try` / `forof.*`. Cross-block uses get pre-emitted
+        // and `local.set`; void-result instrs emit in place; intra-arm
+        // multi-use values emit at their use site via the tee pattern.
+        const emitArmBody = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
+          for (const bodyInstr of bodyInstrs) {
+            if (bodyInstr.result === null) {
+              emitInstrTree(bodyInstr, target);
+            } else if (crossBlock.has(bodyInstr.result)) {
+              emitInstrTree(bodyInstr, target);
+              target.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+              materialized.add(bodyInstr.result);
+            }
+            // Intra-arm multi-use: handled at use site via tee pattern.
+          }
+        };
+
+        // 1. Emit cond.
+        emitValue(instr.cond, out);
+
+        // 2. THEN arm.
+        const thenBody: Instr[] = [];
+        emitArmBody(instr.then, thenBody);
+        emitValue(instr.thenValue, thenBody);
+
+        // 3. ELSE arm.
+        const elseBody: Instr[] = [];
+        emitArmBody(instr.else, elseBody);
+        emitValue(instr.elseValue, elseBody);
+
+        // 4. Wrap in `if (result T) ... else ... end`.
+        out.push({
+          op: "if",
+          blockType,
+          then: thenBody,
+          else: elseBody,
+        });
+        return;
+      }
       case "raw.wasm":
         for (const op of instr.ops) out.push(op);
         return;
@@ -1405,6 +1704,78 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         out.push({ op: "call", funcIdx: fn });
         return;
       }
+      // Slice 12 (#1280) — generic structured loops. Both kinds emit
+      //   block { loop { <cond>; <push condValue>; i32.eqz; br_if 1;
+      //                  <body>; <update?>; br 0 } }
+      // The body / cond / update buffers each follow the same
+      // SSA-materialisation rules as `forof.vec.body` (cross-block
+      // values get pre-materialised; void / intra-block-only values
+      // are emitted in place).
+      case "while.loop":
+      case "for.loop": {
+        const loopBody: Instr[] = [];
+
+        // Helper: emit a body buffer (cond / body / update) into a
+        // target ops array using the standard SSA materialisation
+        // rules (mirrors the `forof.*` body emission).
+        const emitBodyBuffer = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
+          for (const bodyInstr of bodyInstrs) {
+            if (bodyInstr.result === null) {
+              emitInstrTree(bodyInstr, target);
+            } else if (crossBlock.has(bodyInstr.result)) {
+              emitInstrTree(bodyInstr, target);
+              target.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+              materialized.add(bodyInstr.result);
+            }
+            // Intra-block multi-use: handled at use site via tee pattern.
+          }
+        };
+
+        // 1. Cond instructions (re-evaluated each iteration).
+        emitBodyBuffer(instr.cond, loopBody);
+
+        // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+        emitValue(instr.condValue, loopBody);
+        loopBody.push({ op: "i32.eqz" });
+        loopBody.push({ op: "br_if", depth: 1 });
+
+        // 3. Body instructions.
+        emitBodyBuffer(instr.body, loopBody);
+
+        // 4. Update instructions (for-loop only — empty array for while).
+        if (instr.kind === "for.loop") {
+          emitBodyBuffer(instr.update, loopBody);
+        }
+
+        // 5. Continue back to the loop header.
+        loopBody.push({ op: "br", depth: 0 });
+
+        // 6. Wrap in `block { loop { ... } }`.
+        out.push({
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: loopBody,
+            },
+          ],
+        });
+        return;
+      }
+      // (#1373 Phase B) Async / await IR nodes are type-only in this
+      // slice — Phase C (#1373b) wires the CPS lowering. Until then
+      // the selector rejects async functions (returns "async-function"
+      // bucket), so these IrInstrs never reach the lowerer in practice.
+      // Throwing here makes accidental construction surface clearly
+      // rather than silently emitting nothing.
+      case "await":
+      case "async.return":
+      case "async.throw":
+        throw new Error(
+          `ir/lower: ${instr.kind} not yet implemented (#1373 Phase C / #1373b — see issue plan/issues/sprints/51/1373-ir-async-function.md)`,
+        );
     }
   };
 
@@ -1420,9 +1791,26 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitInstrTree(instr, out);
         out.push({ op: "local.set", index: localIdx.get(instr.result)! });
         materialized.add(instr.result);
+        continue;
       }
-      // Intra-block-only: single-use inlines at use site, multi-use uses
-      // the lazy-tee pattern at first reference. Skip emission here.
+      // #1267 — side-effecting instr whose result is unused (e.g. a
+      // method call in expression-statement position: `c.bump();`).
+      // The lazy-emission pattern below only fires at a USE SITE; if the
+      // result has zero uses, the instruction (and its observable side
+      // effect) gets silently dropped. For side-effecting kinds —
+      // `class.call`, `extern.call`, `call`, `closure.call`, etc. (see
+      // dead-code.ts:isSideEffecting) — we eagerly emit the instruction
+      // and follow with a Wasm `drop` so the produced value is removed
+      // from the operand stack. The DCE pass already keeps these instrs
+      // live in the IR; this is the matching emission contract.
+      const useCount = totalUses.get(instr.result) ?? 0;
+      if (useCount === 0 && isSideEffecting(instr)) {
+        emitInstrTree(instr, out);
+        out.push({ op: "drop" });
+      }
+      // Intra-block-only with at least one use: single-use inlines at
+      // use site, multi-use uses the lazy-tee pattern at first
+      // reference. Skip emission here.
     }
 
     const t = block.terminator;
@@ -1514,6 +1902,12 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.rand];
     case "select":
       return [instr.condition, instr.whenTrue, instr.whenFalse];
+    case "if":
+      // (#1392) Surface only the cond at top level. Arm-buffer uses of
+      // OUTER SSA values are surfaced separately via collectForOfBodyUses
+      // so the cross-block / multi-use counters properly materialise
+      // them in Wasm locals before the if-instr emits.
+      return [instr.cond];
     case "raw.wasm":
       return [];
     case "box":
@@ -1622,6 +2016,21 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.receiver, instr.value];
     case "extern.regex":
       return [];
+    // Slice 12 (#1280) — generic structured loops. Body / cond / update
+    // buffer uses are surfaced separately via `collectForOfBodyUses`.
+    case "while.loop":
+    case "for.loop":
+      return [];
+    // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
+    // The lowering Phase C (#1373b) will inflate these into CPS-form
+    // microtask-queue calls; until then they're never emitted by
+    // from-ast and never reach the lowerer.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
   }
 }
 
@@ -1647,6 +2056,27 @@ export function collectForOfBodyUses(body: readonly IrInstr[]): IrValueId[] {
       if (instr.finallyBody) {
         for (const u of collectForOfBodyUses(instr.finallyBody)) uses.push(u);
       }
+    }
+    // Slice 12 (#1280) — recurse into while / for loop buffers.
+    if (instr.kind === "while.loop") {
+      for (const u of collectForOfBodyUses(instr.cond)) uses.push(u);
+      for (const u of collectForOfBodyUses(instr.body)) uses.push(u);
+      uses.push(instr.condValue);
+    }
+    if (instr.kind === "for.loop") {
+      for (const u of collectForOfBodyUses(instr.cond)) uses.push(u);
+      for (const u of collectForOfBodyUses(instr.body)) uses.push(u);
+      for (const u of collectForOfBodyUses(instr.update)) uses.push(u);
+      uses.push(instr.condValue);
+    }
+    // (#1392) Recurse into if's then/else arms so outer SSA values
+    // referenced inside an arm are correctly counted as cross-block
+    // uses (driving Wasm-local materialisation).
+    if (instr.kind === "if") {
+      for (const u of collectForOfBodyUses(instr.then)) uses.push(u);
+      for (const u of collectForOfBodyUses(instr.else)) uses.push(u);
+      uses.push(instr.thenValue);
+      uses.push(instr.elseValue);
     }
   }
   return uses;
@@ -1770,6 +2200,73 @@ function describeIrTypeShallow(t: IrType): string {
   if (t.kind === "extern") return `extern<${t.className}>`;
   if (t.kind === "union") return `union<${t.members.map((m) => m.kind).join(",")}>`;
   return `boxed<${t.inner.kind}>`;
+}
+
+/**
+ * Slice 11 (#1169n) — emit JS ToInt32 for the f64 currently on top of
+ * the value stack. After this runs, the stack holds an i32 whose bit
+ * pattern matches what `(value | 0)` would produce in JS — including
+ * NaN→0, Infinity→0, and modulo-2^32 wrap for out-of-range inputs.
+ *
+ * This mirrors the legacy `emitToInt32` helper in
+ * `src/codegen/binary-ops.ts:1973`. It needs a single f64 scratch
+ * local (passed in `tmpLocalIdx`) to duplicate the truncated value
+ * for the modulo-2^32 reduction step.
+ *
+ * Sequence:
+ *   - f64.trunc                  ; truncate fractional part toward zero
+ *   - local.tee tmp; local.get tmp
+ *                                ; duplicate the trunc'd value
+ *   - f64.const 2^32; f64.div; f64.floor; f64.const 2^32; f64.mul; f64.sub
+ *                                ; reduce modulo 2^32 → range [0, 2^32)
+ *   - i32.trunc_sat_f64_u        ; bit pattern of int32 result
+ *
+ * NaN handling: trunc(NaN)=NaN, NaN/x=NaN, floor(NaN)=NaN, NaN*x=NaN,
+ * x-NaN=NaN, trunc_sat_f64_u(NaN)=0. So NaN→0 falls out naturally
+ * without a branch.
+ */
+/**
+ * #1126 Stage 3 — map a JS-bitwise IrBinop tag to its native Wasm i32 op.
+ * Pure helper; used by both the fast path (both i32) and the legacy
+ * scratch-dance path (both f64) inside `case "binary"`. Centralising
+ * the mapping keeps the two paths in lock-step on `>>>` vs `>>` (signed
+ * vs unsigned) signedness.
+ */
+function jsBitwiseToI32(
+  op: "js.bitand" | "js.bitor" | "js.bitxor" | "js.shl" | "js.shr_s" | "js.shr_u",
+): "i32.and" | "i32.or" | "i32.xor" | "i32.shl" | "i32.shr_s" | "i32.shr_u" {
+  switch (op) {
+    case "js.bitand":
+      return "i32.and";
+    case "js.bitor":
+      return "i32.or";
+    case "js.bitxor":
+      return "i32.xor";
+    case "js.shl":
+      return "i32.shl";
+    case "js.shr_s":
+      return "i32.shr_s";
+    case "js.shr_u":
+      return "i32.shr_u";
+  }
+}
+
+function emitJsToInt32(out: Instr[], tmpLocalIdx: number): void {
+  // Stack: [f64]
+  out.push({ op: "f64.trunc" } as unknown as Instr);
+  // Stack: [f64_trunc]
+  out.push({ op: "local.tee", index: tmpLocalIdx });
+  out.push({ op: "local.get", index: tmpLocalIdx });
+  // Stack: [f64_trunc, f64_trunc]
+  out.push({ op: "f64.const", value: 4294967296 });
+  out.push({ op: "f64.div" });
+  out.push({ op: "f64.floor" } as unknown as Instr);
+  out.push({ op: "f64.const", value: 4294967296 });
+  out.push({ op: "f64.mul" });
+  out.push({ op: "f64.sub" });
+  // Stack: [f64_in_range]
+  out.push({ op: "i32.trunc_sat_f64_u" } as unknown as Instr);
+  // Stack: [i32]
 }
 
 function emitConst(instr: Extract<IrInstr, { kind: "const" }>, out: Instr[], funcName: string): void {

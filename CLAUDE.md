@@ -20,6 +20,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   - Read/Edit/Write tools use absolute paths and are unaffected.
   - The `pre-git-commit.sh` hook injects a "VERIFY BEFORE COMMITTING: pwd=/workspace branch=main" reminder; that's the hook reading the (reset) shell cwd, NOT the actual command's working dir. The reminder is informational — verify by reading the commit's branch in git output (`[issue-1183-string-forof-ir 0527c7c5]`-style line shows the real branch).
 - **Worktree creation**: `git worktree add /workspace/.claude/worktrees/issue-NNN-slug -b issue-NNN-slug origin/main`. Always branch from `origin/main` (post-fetch), never from local `main`.
+- **Push safety**: `.git/config` sets `push.default=current` — `git push` always pushes to the remote branch matching the local branch name, regardless of upstream tracking. This prevents the `git worktree add -b <branch> origin/main` trap where the inherited tracking ref routes pushes to origin/main.
 - **Worktree cleanup after merge**: after a dev self-merges their PR, they remove their own worktree (`git worktree remove /workspace/.claude/worktrees/<branch>`) before claiming the next task. Tech-lead only removes worktrees for suspended or abandoned branches.
 
 ## Architecture Principles
@@ -77,13 +78,45 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 
 ### Baseline files (which is authoritative?)
 
-| File | Lives in | Authoritative for | Refreshed by |
-|------|----------|-------------------|--------------|
-| `benchmarks/results/test262-current.jsonl` | main repo (committed, ~15MB) | `dev-self-merge` Step 4 bucket-by-path regression analysis | `refresh-committed-baseline.yml` (after every `Test262 Sharded` push to main) |
-| `benchmarks/results/test262-current.json` | main repo (committed, ~kB) | landing-page summary, pass/total badges | `test262-sharded.yml` `promote-baseline` job (every push to main) |
-| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run) | `test262-sharded.yml` `promote-baseline` job (every push to main) |
+| File | Lives in | Authoritative for | Refreshed by | Validated by |
+|------|----------|-------------------|--------------|--------------|
+| `benchmarks/results/test262-current.jsonl` | main repo (committed, ~15MB) | `dev-self-merge` Step 4 bucket-by-path regression analysis | `refresh-committed-baseline.yml` (after every `Test262 Sharded` push to main) | `test262-baseline-validate.yml` spot-checks 50 random `pass` entries on every PR (#1218); fails the PR if any sampled entry no longer passes on main HEAD |
+| `benchmarks/results/test262-current.json` | main repo (committed, ~kB) | landing-page summary, pass/total badges | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run) | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `benchmarks/results/playground-benchmark-sidebar.json` | main repo (committed, ~1KB) | landing-page sidebar wasm/js perf chart; `benchmark-refresh.yml` regression diff baseline | `benchmark-refresh.yml` auto-commit step on every push to main (#1216) | (none) |
 
 The committed JSONL must be kept in sync with the JSON; otherwise the dev-self-merge bucket analysis reads stale "pass" entries and silently miscounts regressions. `refresh-committed-baseline.yml` is the dedicated workflow for that sync — it downloads the merged JSONL artifact from the most-recent successful `Test262 Sharded` run on main and commits it back with `[skip ci]`.
+
+To validate the committed JSONL on demand, run `pnpm run test:262:validate-baseline` (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to `refresh-committed-baseline.yml`.
+
+## IR Fallback Budget (#1376)
+
+The IR retirement gate `pnpm run check:ir-fallbacks` walks every `.ts` file
+under `playground/examples/` with `trackFallbacks: true` and aggregates
+rejection reasons against `scripts/ir-fallback-baseline.json`. CI fails when
+any **unintended** bucket grows.
+
+| Reason                       | Category   | Reduces with                         |
+|------------------------------|------------|--------------------------------------|
+| `body-shape-rejected`        | unintended | #1370 (class methods), #1373 (async) |
+| `external-call`              | unintended | #1371 (whitelist Math.* / parseInt)  |
+| `call-graph-closure`         | unintended | #1370, #1373                         |
+| `param-shape-rejected`       | unintended | #1372 (destructuring params)         |
+| `param-type-not-resolvable`  | unintended | better TypeMap propagation           |
+| `return-type-not-resolvable` | unintended | better TypeMap propagation           |
+| `type-resolution-failure`    | unintended | better TypeMap propagation           |
+| `async-generator`            | deferred   | (out of scope long-term)             |
+| `deferred-feature`           | deferred   | (eval / Proxy / with — wont-fix)     |
+| `type-parameters`            | deferred   | (generics specialisation, future)    |
+| `non-export-modifier`        | deferred   | (`async` / declare-only — narrow)    |
+| `unnamed`                    | deferred   | (anonymous default exports)          |
+
+Refresh the baseline on PRs that intentionally retire a bypass:
+
+```bash
+pnpm run check:ir-fallbacks -- --update
+git add scripts/ir-fallback-baseline.json
+```
 
 ## CLI Flags
 - `--target wasi` — emit WASI imports (fd_write, proc_exit) instead of JS host

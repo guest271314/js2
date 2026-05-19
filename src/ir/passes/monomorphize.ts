@@ -623,6 +623,20 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.rand];
     case "select":
       return [instr.condition, instr.whenTrue, instr.whenFalse];
+    case "if": {
+      // (#1392) Surface cond + carrier values plus uses inside the arms.
+      // Arm-buffer instrs may reference outer SSA values; the
+      // monomorphize pass needs to see them for use-counting.
+      const out: IrValueId[] = [instr.cond, instr.thenValue, instr.elseValue];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectUses(sub)) out.push(u);
+        }
+      };
+      walk(instr.then);
+      walk(instr.else);
+      return out;
+    }
     case "box":
     case "unbox":
     case "tag.test":
@@ -758,5 +772,18 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.receiver, instr.value];
     case "extern.regex":
       return [];
+    // Slice 12 (#1280): while.loop / for.loop. The cond / body /
+    // update buffers are walked separately by the dead-code analysis
+    // walker; the instr itself only directly references condValue.
+    case "while.loop":
+    case "for.loop":
+      return [instr.condValue];
+    // (#1373 Phase B) Async / await IR nodes — single operand.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
   }
 }
