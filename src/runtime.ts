@@ -354,6 +354,68 @@ function _materializeIterable(
   return iter;
 }
 
+/**
+ * (#1438) Recursively convert a wasm vec / tuple struct to a real JS array
+ * suitable for the native `new Map(iterable)`, `new WeakMap(iterable)` etc.
+ * constructors. Inner tuples (heterogeneous `[k, v]` structs) are converted
+ * to real `[k, v]` arrays. Inner vecs become nested arrays. JS-iterables and
+ * primitives pass through unchanged.
+ *
+ * This is intentionally similar to `__make_iterable`'s `convertToJS` but
+ * exported as a top-level helper so the `extern_class` constructor path can
+ * use it directly (without going through the host import).
+ */
+function _convertIterableForHost(obj: any, exports: Record<string, Function> | undefined): any {
+  if (obj == null || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) {
+    // Pre-existing JS array — still walk for nested wasm structs so e.g.
+    // `[[wasmStructKey, value]]` passed from JS works.
+    return obj.map((v) => _convertIterableForHost(v, exports));
+  }
+  // Only convert if this is a wasm-opaque struct. Plain JS objects with
+  // Symbol.iterator (Maps, Sets, generators, ...) pass through.
+  if (!_isWasmStruct(obj)) {
+    if (Symbol.iterator in obj) return obj;
+    return obj;
+  }
+  if (!exports) return obj;
+  // Tuple struct (heterogeneous `[k, v]`) — fields are `_0`, `_1`, ...
+  const fieldNames = exports.__struct_field_names as Function | undefined;
+  if (typeof fieldNames === "function") {
+    const names = fieldNames(obj) as string | null;
+    if (typeof names === "string" && names.length > 0) {
+      const parts = names.split(",");
+      const isNumeric = parts.every((p: string) => /^_\d+$/.test(p));
+      if (isNumeric) {
+        const arr: any[] = new Array(parts.length);
+        for (let i = 0; i < parts.length; i++) {
+          const getter = exports[`__sget_${parts[i]}`] as Function | undefined;
+          arr[i] = getter ? _convertIterableForHost(getter(obj), exports) : undefined;
+        }
+        return arr;
+      }
+    }
+  }
+  // Vec struct (homogeneous arrays)
+  const vecLen = exports.__vec_len as Function | undefined;
+  const vecGet = exports.__vec_get as Function | undefined;
+  if (typeof vecLen === "function" && typeof vecGet === "function") {
+    try {
+      const len = vecLen(obj) as number;
+      if (typeof len === "number" && len >= 0) {
+        const arr: any[] = new Array(len);
+        for (let i = 0; i < len; i++) {
+          arr[i] = _convertIterableForHost(vecGet(obj, i), exports);
+        }
+        return arr;
+      }
+    } catch {
+      // not a vec — fall through
+    }
+  }
+  return obj;
+}
+
 function _getSidecar(obj: object): Record<string | symbol, any> {
   if (!_canBeWeakKey(obj)) return Object.create(null) as Record<string | symbol, any>;
   let sc = _wasmStructProps.get(obj);
@@ -1889,11 +1951,29 @@ function resolveImport(
         // not "" (which new String() with no args produces).
         const isWrapperCtor =
           intent.className === "String" || intent.className === "Number" || intent.className === "Boolean";
+        // (#1438) Keyed-collection constructors take an iterable — Map and
+        // WeakMap take `[key, value]` pairs, Set/WeakSet take values. When the
+        // wasm caller passes a vec struct (or tuple struct), native V8 doesn't
+        // know how to iterate it. Materialize the first arg via
+        // _materializeIterable so the engine sees a real JS array. Inner
+        // wasm tuple structs are converted recursively below.
+        const isIterableCtor =
+          intent.className === "Map" ||
+          intent.className === "Set" ||
+          intent.className === "WeakMap" ||
+          intent.className === "WeakSet";
         return (...args: any[]) => {
           if (!isWrapperCtor) {
             let len = args.length;
             while (len > 0 && args[len - 1] == null) len--;
             args = args.slice(0, len);
+          }
+          if (isIterableCtor && args.length > 0 && args[0] != null) {
+            const exports = callbackState?.getExports();
+            // Convert outer wasm vec (or tuple struct) into a JS array of
+            // converted entries. For Map/WeakMap each entry must itself be
+            // an iterable (tuple → [k, v] array).
+            args[0] = _convertIterableForHost(args[0], exports);
           }
           return new Ctor(...args);
         };
@@ -1933,6 +2013,27 @@ function resolveImport(
           const wrappedArgs = args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
           const fn = self[m] ?? _sidecarGet(self, m);
           if (typeof fn === "function") return fn.call(self, ...wrappedArgs);
+          return undefined;
+        };
+      }
+      // (#1438) Map.prototype.forEach / Set.prototype.forEach take a
+      // callback and an optional thisArg. The callback can be a wasm
+      // closure struct (no `[[Call]]`); wrap it as a JS Function so the
+      // native engine invokes it as `cb(value, key, map)` (3 args for
+      // Map, `cb(value, value, set)` for Set). Without this, native V8
+      // throws "object is not a function".
+      if ((intent.className === "Map" || intent.className === "Set") && m === "forEach") {
+        return (self: any, ...args: any[]) => {
+          if (self == null) return undefined;
+          const exports = callbackState?.getExports();
+          let cb = args[0];
+          if (cb != null && _isWasmStruct(cb)) {
+            const wrapped = _wrapWasmClosure(cb, 3, callbackState);
+            if (wrapped) cb = wrapped;
+          }
+          const thisArg = args.length > 1 ? args[1] : undefined;
+          const fn = self[m] ?? _sidecarGet(self, m);
+          if (typeof fn === "function") return fn.call(self, cb, thisArg);
           return undefined;
         };
       }
@@ -3352,21 +3453,26 @@ assert._isSameValue = isSameValue;
               (method === "getOrInsert" || method === "getOrInsertComputed") &&
               (wrappedObj instanceof Map || wrappedObj instanceof WeakMap)
             ) {
+              // (#1438) Wrap a wasm closure callback so `typeof` checks pass
+              // and `Call(callback, undefined, [key])` dispatches into Wasm.
+              let callback = wrappedArgs[1];
               if (method === "getOrInsertComputed") {
-                const callback = wrappedArgs[1];
+                if (callback != null && typeof callback !== "function" && _isWasmStruct(callback)) {
+                  const wrapped = _wrapWasmClosure(callback, 1, callbackState);
+                  if (wrapped) callback = wrapped;
+                }
                 if (typeof callback !== "function") {
                   throw new TypeError("Map.prototype.getOrInsertComputed: callbackfn is not callable");
                 }
               }
               const key = wrappedArgs[0];
-              // For WeakMap, the spec requires throwing TypeError when the
-              // key is not an Object/Symbol (CanBeHeldWeakly). Native
-              // `WeakMap.prototype.has` already throws for primitives in
-              // Node's earlier behavior, but newer node only throws on
-              // `set` — be explicit.
+              // (#1438) Symbol keys are valid WeakMap keys per ES2023
+              // (CanBeHeldWeakly accepts symbols that are not registered).
               if (
                 wrappedObj instanceof WeakMap &&
-                (key === null || key === undefined || (typeof key !== "object" && typeof key !== "function"))
+                (key === null ||
+                  key === undefined ||
+                  (typeof key !== "object" && typeof key !== "function" && typeof key !== "symbol"))
               ) {
                 throw new TypeError("Invalid value used as weak map key");
               }
@@ -3375,7 +3481,7 @@ assert._isSameValue = isSameValue;
               }
               const value =
                 method === "getOrInsertComputed"
-                  ? (wrappedArgs[1] as (k: unknown) => unknown).call(undefined, key)
+                  ? (callback as (k: unknown) => unknown).call(undefined, key)
                   : wrappedArgs[1];
               wrappedObj.set(key, value);
               return _unwrapForHost(value);
@@ -4284,7 +4390,14 @@ assert._isSameValue = isSameValue;
         // Needed because Map/Set expect [key, value] tuples that are also iterable.
         const convertToJS = (obj: any): any => {
           if (obj == null || typeof obj !== "object") return obj;
-          if (obj[Symbol.iterator]) return obj;
+          // (#1438) `obj[Symbol.iterator]` throws "WebAssembly objects are
+          // opaque" on wasmGC structs. Check `_isWasmStruct` FIRST so we
+          // only walk the struct path for wasm structs and pass through
+          // plain JS objects (including non-iterable ones used as WeakMap
+          // keys) unchanged.
+          if (!_isWasmStruct(obj)) {
+            return obj;
+          }
           const exports = callbackState?.getExports();
           if (!exports) return obj;
           // Try tuple struct FIRST (e.g. [string, number] for Map entries).
