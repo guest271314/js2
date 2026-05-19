@@ -59,7 +59,6 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1431 | spec gap: assignment operators — destructuring completion, defaults, and compound side effects | medium | ready |
 | #1432 | spec gap: parameter lists — rest/destructuring iterator semantics and default initializers | medium | ready |
 | #1433 | spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics | medium | ready |
-| #1434 | spec gap: ToNumber/ToNumeric coercion and unary operator edge cases | medium | ready |
 | #1435 | spec gap: lexical grammar and syntax-directed early errors | medium | ready |
 | #1436 | spec gap: global object descriptors and global function coercion/URI semantics | medium | ready |
 | #1438 | spec gap: Map, WeakMap, and WeakSet residual collection semantics | medium | ready |
@@ -76,5 +75,6 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 |---|---|---|---|
 | #1397 | codegen: static method dispatch ignores runtime property reassignment on typed receivers | medium | done |
 | #1398 | report: edition filter on category table — per-category edition breakdown | low | done |
+| #1434 | spec gap: ToNumber/ToNumeric coercion and unary operator edge cases | medium | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->
