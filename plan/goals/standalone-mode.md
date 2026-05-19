@@ -70,7 +70,7 @@ and any environment without a JS runtime. This follows the pattern of
 | **1324** | JSON.stringify and JSON.parse: implement in pure Wasm, eliminate JS host dependency | 50 | done | medium |
 | **1325** | instanceof against built-in types: compile-time type-tag registry eliminates JS host for common cases | 50 | in-progress | medium |
 | **1326** | Async standalone: implement microtask queue + CPS scheduler in Wasm for Promise/async without JS host | 50 | ready | low |
-| **1326c** | Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B) | 51 | ready | medium |
+| **1326c** | Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B) | 52 | ready | medium |
 | **1335** | Number.prototype formatting in pure Wasm: integer toString(radix), then Ryu for floats (standalone) | 50 | ready | medium |
 | **1353** | JSON.stringify (objects/arrays) + JSON.parse: architect spec for Wasm shape-walking and recursive-descent parser | 50 | ready | medium |
 

@@ -161,6 +161,28 @@
   ],
   "blocked": [
     {
+      "id": "1373b",
+      "title": "IR async Phase C: CPS lowering for await + async-return + async-throw",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [
+        "1326c"
+      ],
+      "goal": "ir-full-coverage",
+      "status": "blocked",
+      "sprint": "52"
+    },
+    {
+      "id": "1364",
+      "title": "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "blocked",
+      "sprint": "52"
+    },
+    {
       "id": "1166",
       "title": "Closed-world integer specialization from literal call sites",
       "priority": "high",
@@ -233,6 +255,86 @@
   ],
   "ready": [
     {
+      "id": "1438",
+      "title": "spec gap: Map, WeakMap, and WeakSet residual collection semantics",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1436",
+      "title": "spec gap: global object descriptors and global function coercion/URI semantics",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1435",
+      "title": "spec gap: lexical grammar and syntax-directed early errors",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1434",
+      "title": "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1433",
+      "title": "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1432",
+      "title": "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1431",
+      "title": "spec gap: assignment operators — destructuring completion, defaults, and compound side effects",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1400",
+      "title": "npm: compile ESLint package entry to valid Wasm",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "npm-library-support",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
       "id": "1399",
       "title": "chore: fix 9 biome lint errors in src/runtime.ts",
       "priority": "low",
@@ -243,12 +345,44 @@
       "sprint": "null"
     },
     {
+      "id": "1394",
+      "title": "class method-closure caching: C.prototype.method returns stable singleton closure",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [
+        "1388"
+      ],
+      "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
       "id": "1387",
       "title": "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies",
       "priority": "medium",
       "feasibility": "hard",
       "depends_on": [],
       "goal": "spec-completeness",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1382",
+      "title": "structural: Wasm closures not JS-callable from host imports — bridge gap",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "ir-full-coverage",
+      "status": "ready",
+      "sprint": "52"
+    },
+    {
+      "id": "1373",
+      "title": "IR: claim async functions (async/await through IR path)",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "ir-full-coverage",
       "status": "ready",
       "sprint": "52"
     },
@@ -471,6 +605,18 @@
       "goal": "npm-library-support",
       "status": "ready",
       "sprint": "50"
+    },
+    {
+      "id": "1326c",
+      "title": "Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B)",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [
+        "1326"
+      ],
+      "goal": "standalone-mode",
+      "status": "ready",
+      "sprint": "52"
     },
     {
       "id": "1326",
@@ -1767,6 +1913,16 @@
     }
   ],
   "inprogress": [
+    {
+      "id": "1437",
+      "title": "spec gap: Math numeric edge cases beyond random source",
+      "priority": "low",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "in-progress",
+      "sprint": "52"
+    },
     {
       "id": "1378",
       "title": "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)",
