@@ -85,6 +85,7 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1471 | host-independence: eliminate JS host boxing/unboxing for standalone Wasm | high | ready |
 | #1472 | host-independence: eliminate JS host object/property ops for standalone Wasm | high | ready |
 | #1473 | host-independence: eliminate JS host error/exception ops for standalone Wasm | high | ready |
+| #1474 | host-independence: eliminate JS host RegExp for standalone Wasm | high | ready |
 | #1480 | wasi: console.error and console.warn should write to stderr (fd=2) | high | ready |
 | #1481 | wasi: support reading stdin via fd_read | high | ready |
 | #1482 | wasi: wire process.env to environ_get / environ_sizes_get | high | ready |
@@ -97,6 +98,9 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1494 | nodejs: __dirname / __filename / import.meta.url for compiled modules | medium | ready |
 | #1500 | browser: fetch() host import with Response bridge | medium | ready |
 | #1501 | browser: setTimeout/setInterval/clearTimeout/clearInterval host imports | medium | ready |
+| #1502 | browser: localStorage / sessionStorage host imports with standalone fallback | medium | ready |
+| #1503 | browser: crypto.getRandomValues / crypto.randomUUID host imports | medium | ready |
+| #1504 | browser: marshal compiled export return values (structs/arrays) to plain JS | medium | ready |
 
 ### In Progress
 
