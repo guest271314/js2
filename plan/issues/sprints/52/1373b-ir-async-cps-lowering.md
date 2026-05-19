@@ -1,6 +1,6 @@
 ---
 id: 1373b
-sprint: 51
+sprint: 52
 title: "IR async Phase C: CPS lowering for await + async-return + async-throw"
 status: blocked
 created: 2026-05-09

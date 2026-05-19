@@ -161,18 +161,6 @@
   ],
   "blocked": [
     {
-      "id": "1373b",
-      "title": "IR async Phase C: CPS lowering for await + async-return + async-throw",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [
-        "1326c"
-      ],
-      "goal": "ir-full-coverage",
-      "status": "blocked",
-      "sprint": "51"
-    },
-    {
       "id": "1166",
       "title": "Closed-world integer specialization from literal call sites",
       "priority": "high",
@@ -245,36 +233,14 @@
   ],
   "ready": [
     {
-      "id": "1396",
-      "title": "for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads",
-      "priority": "high",
-      "feasibility": "medium",
+      "id": "1399",
+      "title": "chore: fix 9 biome lint errors in src/runtime.ts",
+      "priority": "low",
+      "feasibility": "easy",
       "depends_on": [],
-      "goal": "spec-completeness",
+      "goal": "",
       "status": "ready",
-      "sprint": "51"
-    },
-    {
-      "id": "1395",
-      "title": "class static method descriptors: class identifier resolves to string_constant, not constructor object",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "51"
-    },
-    {
-      "id": "1394",
-      "title": "class method-closure caching: C.prototype.method returns stable singleton closure",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [
-        "1388"
-      ],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "51"
+      "sprint": "null"
     },
     {
       "id": "1387",
@@ -284,27 +250,7 @@
       "depends_on": [],
       "goal": "spec-completeness",
       "status": "ready",
-      "sprint": "51"
-    },
-    {
-      "id": "1382",
-      "title": "structural: Wasm closures not JS-callable from host imports — bridge gap",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "ir-full-coverage",
-      "status": "ready",
-      "sprint": "51"
-    },
-    {
-      "id": "1373",
-      "title": "IR: claim async functions (async/await through IR path)",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "ir-full-coverage",
-      "status": "ready",
-      "sprint": "51"
+      "sprint": "52"
     },
     {
       "id": "1353",
@@ -525,18 +471,6 @@
       "goal": "npm-library-support",
       "status": "ready",
       "sprint": "50"
-    },
-    {
-      "id": "1326c",
-      "title": "Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B)",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [
-        "1326"
-      ],
-      "goal": "standalone-mode",
-      "status": "ready",
-      "sprint": "51"
     },
     {
       "id": "1326",
@@ -1834,39 +1768,9 @@
   ],
   "inprogress": [
     {
-      "id": "1381",
-      "title": "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)",
-      "priority": "medium",
-      "feasibility": "easy",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "in-progress",
-      "sprint": "51"
-    },
-    {
       "id": "1378",
       "title": "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)",
       "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "in-progress",
-      "sprint": "51"
-    },
-    {
-      "id": "1375",
-      "title": "IR: full optional-chain support (?. and ?.[]) without resolver fallback",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "ir-full-coverage",
-      "status": "in-progress",
-      "sprint": "51"
-    },
-    {
-      "id": "1364",
-      "title": "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)",
-      "priority": "high",
       "feasibility": "medium",
       "depends_on": [],
       "goal": "spec-completeness",
@@ -1967,6 +1871,46 @@
   "review": [],
   "done": [
     {
+      "id": "1398",
+      "title": "report: edition filter on category table — per-category edition breakdown",
+      "priority": "low",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "",
+      "status": "done",
+      "sprint": "52"
+    },
+    {
+      "id": "1397",
+      "title": "codegen: static method dispatch ignores runtime property reassignment on typed receivers",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "52"
+    },
+    {
+      "id": "1396",
+      "title": "fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
+      "id": "1395",
+      "title": "class static method descriptors: class identifier resolves to string_constant, not constructor object",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
       "id": "1393",
       "title": "infra: content-hash CI cache + GitHub Merge Queue — eliminate baseline drift and redundant re-runs",
       "priority": "high",
@@ -2057,6 +2001,16 @@
       "sprint": "51"
     },
     {
+      "id": "1381",
+      "title": "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
       "id": "1380",
       "title": "spec gap: equality (==, !=, ===, !==) — Symbol/BigInt coercion + ReferenceError propagation (~55 fails)",
       "priority": "medium",
@@ -2091,6 +2045,16 @@
       "title": "IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold",
       "priority": "high",
       "feasibility": "easy",
+      "depends_on": [],
+      "goal": "ir-full-coverage",
+      "status": "done",
+      "sprint": "51"
+    },
+    {
+      "id": "1375",
+      "title": "IR: full optional-chain support (?. and ?.[]) without resolver fallback",
+      "priority": "medium",
+      "feasibility": "hard",
       "depends_on": [],
       "goal": "ir-full-coverage",
       "status": "done",

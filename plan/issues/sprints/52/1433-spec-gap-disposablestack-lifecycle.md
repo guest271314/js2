@@ -1,6 +1,6 @@
 ---
 id: 1433
-sprint: 51
+sprint: 52
 title: "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics"
 status: ready
 created: 2026-05-11

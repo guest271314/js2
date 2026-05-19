@@ -1,6 +1,6 @@
 ---
 id: 1435
-sprint: 51
+sprint: 52
 title: "spec gap: lexical grammar and syntax-directed early errors"
 status: ready
 created: 2026-05-11

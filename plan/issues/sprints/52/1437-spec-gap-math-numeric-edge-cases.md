@@ -1,6 +1,6 @@
 ---
 id: 1437
-sprint: 51
+sprint: 52
 title: "spec gap: Math numeric edge cases beyond random source"
 status: ready
 created: 2026-05-11

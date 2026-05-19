@@ -2,7 +2,7 @@
 id: 1395
 sprint: 51
 title: "class static method descriptors: class identifier resolves to string_constant, not constructor object"
-status: ready
+status: done
 created: 2026-05-09
 priority: medium
 feasibility: hard
