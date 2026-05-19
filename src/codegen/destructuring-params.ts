@@ -27,28 +27,33 @@ import {
 import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
 
 /**
- * #1158 — Detect array binding patterns whose every element is itself an
- * "empty-only" pattern (no `IteratorStep` would be required by §13.3.3.6).
- * Used to short-circuit `__array_from_iter` materialization for patterns like
- * `[]`, `[, ,]` (elision-only), or `[[], []]` (nested empties without
- * defaults).
+ * Detect array binding patterns that, per ECMA-262 §13.3.3.6, perform no
+ * iterator observation at all. Per spec:
  *
- * Conservative — returns `false` for any element that needs to actually
- * read iterator state: rest elements, defaults, identifier bindings, and
- * non-array nested patterns. The caller still routes those through the
- * existing materializing paths.
+ *   ArrayBindingPattern : [ ]
+ *     1. Return NormalCompletion(empty).        ← NO IteratorStep
+ *
+ *   ArrayBindingPattern : [ Elision ]            ← each `,` calls IteratorStep
+ *   ArrayBindingPattern : [ BindingElementList ] ← each element calls IteratorStep
+ *
+ * So the ONLY pattern that skips iterator observation entirely is the
+ * truly-empty pattern `[]`. Elisions (`[,]`, `[, ,]`) and nested empties
+ * (`[[]]`, `[[], []]`) each still consume one IteratorStep per top-level
+ * element — they must NOT short-circuit, otherwise:
+ *
+ *   - `function f([,] = throwingIter) {}; f()` fails to propagate the
+ *     iterator's `.next()` throw (#1432 — `dflt-ary-ptrn-elision-step-err`).
+ *   - `function f([[]] = iter) {}; f()` fails to advance the iterator,
+ *     observably wrong for any iterator with side-effects.
+ *
+ * #1158 had broadened this short-circuit to cover patterns whose elements
+ * were all themselves "empty-only" (`[, ,]`, `[[]]`, `[[], []]`). That was
+ * a spec violation: those patterns DO observe the iterator. The narrower
+ * definition below restores spec compliance — the truly-empty `[]` is the
+ * only pattern that bypasses iteration. (#1432)
  */
 function isPatternEmptyOnly(pattern: ts.ArrayBindingPattern): boolean {
-  if (pattern.elements.length === 0) return true;
-  for (const el of pattern.elements) {
-    if (ts.isOmittedExpression(el)) continue;
-    if (!ts.isBindingElement(el)) return false;
-    if (el.dotDotDotToken) return false; // rest must consume
-    if (el.initializer) return false; // default may need a real slot
-    if (ts.isArrayBindingPattern(el.name) && isPatternEmptyOnly(el.name)) continue;
-    return false;
-  }
-  return true;
+  return pattern.elements.length === 0;
 }
 
 /**
