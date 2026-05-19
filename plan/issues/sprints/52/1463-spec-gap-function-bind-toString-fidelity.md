@@ -2,7 +2,7 @@
 id: 1463
 sprint: 52
 title: "spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity"
-status: ready
+status: review
 created: 2026-05-20
 priority: medium
 feasibility: hard
@@ -166,3 +166,74 @@ Concretely:
   (e.g. that `toString` of a generator includes `function*`).
 - #1382 covered the inverse problem (Wasm closure → JS-callable);
   bound functions need a similar but more elaborate bridge.
+
+## Status — partial slice landed
+
+This issue is a deliberate umbrella spec gap covering ~309 test262
+failures across `bind`, `toString`, `call/apply`, and
+`Symbol.hasInstance`. The full acceptance-criteria set (notably criterion
+**#7 ≥180 / 309 failures resolved**) is **not** achievable in a single
+PR — each criterion sits behind structural compiler changes (bound-
+function exotic objects, `[[BoundTargetFunction]]` storage, the
+`@@hasInstance` lookup that the GC-tag-based instanceof has no hook for,
+the `apply` array-like CreateListFromArrayLike refactor, plus class /
+arrow / generator source-text capture).
+
+The slice landed in this PR is the only safely-scoped piece that does
+not depend on the deferred work:
+
+### What this slice implements
+
+1. **Top-level function `.toString()` source-text capture.**
+   `collectDeclarations` now stores `stmt.getText(sourceFile)` per
+   function name in `ctx.funcSourceText` (new context field). The
+   `.toString()` handler in `expressions/calls.ts` early-intercepts when
+   the receiver is an `Identifier` resolving to a captured entry and
+   emits a string global with the exact source instead of the legacy
+   `function () { [native code] }` placeholder. The fallback path is
+   untouched, so any receiver we cannot resolve statically (arrow
+   functions, method references, externref values, anonymous
+   expressions) keeps existing behaviour.
+
+2. **Regression net** — `tests/issue-1463.test.ts` locks in:
+   * the new source-text capture (3 passing cases),
+   * existing `bind` behaviours that already work (4 passing cases —
+     immediate bind+call, zero-arg bind, identity bind survival, side
+     effects of bind args),
+   * existing `.call` baseline + default `instanceof` (2 passing cases),
+   * 9 `it.skip` cases documenting each unmet acceptance-criterion
+     scenario so they remain visible in the test ledger and can be
+     flipped to `it(...)` as follow-up PRs land.
+
+### Deferred to follow-up issues
+
+Each of these requires its own focused PR; tracking them all under
+#1463 leads to scope creep that blocks any progress. They should be
+broken into sibling issues so each can be sized and delivered
+independently:
+
+| Sub-area | Depends on | Estimated size |
+| --- | --- | --- |
+| Real bound-function exotic with `[[Call]]` / `[[Construct]]` / `.name` / `.length` / no own `prototype` | **#1382** (JS-callable closure bridge) | hard |
+| `.toString()` source-text for arrow functions, class methods, generators, async forms | — | medium |
+| `Function.prototype.apply` `CreateListFromArrayLike` path | — | small |
+| `Function.prototype.call.call(…)` / `apply.call(…)` receiver-forwarding chain | — | small |
+| `obj instanceof C` consulting `Get(C, @@hasInstance)` before the GC-tag walk | — | medium |
+| `async-method-class-expression-static.js` Wasm-compile crash (`call[0] expected type externref`) | — | medium |
+
+## Test Results (local)
+
+`npm test -- tests/issue-1463.test.ts`
+
+```
+Test Files  1 passed (1)
+     Tests  10 passed | 9 skipped (19)
+```
+
+Smoke-tested for non-regression:
+* `tests/issue-1300.test.ts` — 4/4 pass
+* `tests/issue-1006.test.ts` — 7/7 pass
+* `tests/equivalence/function-name-length.test.ts` — 12/12 pass
+* `tests/equivalence/inline-small-functions.test.ts` — 5/5 pass
+* `tests/equivalence/tostring-valueof.test.ts` + `date-basic.test.ts` +
+  `issue-799-prototype-chain.test.ts` — 24/24 pass

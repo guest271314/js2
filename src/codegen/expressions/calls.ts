@@ -4922,6 +4922,21 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     // Fallback .toString() for any type not already handled above
     // Handles: function.toString(), object.toString(), array.toString(), class instance.toString()
     if (propAccess.name.text === "toString" && expr.arguments.length === 0) {
+      // #1463 — `someFn.toString()` where `someFn` is a top-level function
+      // declaration → return the captured source text directly. Must happen
+      // BEFORE the externref-routes-to-JS fallback below: top-level functions
+      // resolve to externref at the type system level, so the default path
+      // would call `__extern_toString` on a Wasm closure (which JS doesn't
+      // know how to stringify) and the spec text would be lost.
+      if (ts.isIdentifier(propAccess.expression)) {
+        const captured = ctx.funcSourceText.get(propAccess.expression.text);
+        if (captured) {
+          addStringConstantGlobal(ctx, captured);
+          const idx = ctx.stringGlobalMap.get(captured)!;
+          fctx.body.push({ op: "global.get", index: idx });
+          return { kind: "externref" };
+        }
+      }
       const tsType = ctx.checker.getTypeAtLocation(propAccess.expression);
       const wasm = resolveWasmType(ctx, tsType);
 
@@ -4960,8 +4975,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const isFunc = callSigs && callSigs.length > 0 && !tsType.getProperties?.()?.length;
 
       if (isFunc) {
-        addStringConstantGlobal(ctx, "function () { [native code] }");
-        const idx = ctx.stringGlobalMap.get("function () { [native code] }")!;
+        // #1463 — return captured source text when the receiver is an
+        // identifier resolving to a known top-level function declaration.
+        // Falls back to the legacy placeholder for arrow functions, method
+        // references, or any receiver we can't resolve statically.
+        let toStrStr = "function () { [native code] }";
+        if (ts.isIdentifier(propAccess.expression)) {
+          const captured = ctx.funcSourceText.get(propAccess.expression.text);
+          if (captured) toStrStr = captured;
+        }
+        addStringConstantGlobal(ctx, toStrStr);
+        const idx = ctx.stringGlobalMap.get(toStrStr)!;
         fctx.body.push({ op: "global.get", index: idx });
       } else {
         const str = isArray ? "[object Array]" : "[object Object]";
