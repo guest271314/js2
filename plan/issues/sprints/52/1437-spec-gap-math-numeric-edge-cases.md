@@ -2,7 +2,7 @@
 id: 1437
 sprint: 52
 title: "spec gap: Math numeric edge cases beyond random source"
-status: in-progress
+status: done
 created: 2026-05-11
 updated: 2026-05-20
 priority: low
