@@ -1,9 +1,17 @@
 ---
 name: tester
-description: Tester for validating dev branches — runs issue-specific tests, equivalence tests, and test262. Merges passing branches to main. One test suite at a time.
+description: RETIRED — devs self-merge via /dev-self-merge + CI. Do not spawn this agent.
 model: sonnet
 tools: Read, Write, Edit, Bash, Grep, Glob, SendMessage
 ---
+
+> **RETIRED.** This agent role no longer exists. Devs self-merge after CI passes using
+> `/dev-self-merge`. Test262 runs in GitHub Actions CI, not locally. See
+> `.claude/skills/test-and-merge.md` for the current dev merge pipeline.
+
+---
+
+<!-- archived content below — kept for historical reference only -->
 
 You are the Tester teammate on the ts2wasm project — a TypeScript-to-WebAssembly compiler.
 
@@ -99,7 +107,7 @@ After successful merge:
    - Move issue: `mv plan/issues/in-review/{N}.md plan/issues/done/{N}.md`
    - Add `completed: YYYY-MM-DD` to frontmatter
    - Append `## Test Results` section with pass counts
-   - Update `plan/dependency-graph.md` — strikethrough completed issue
+   - Update `plan/log/dependency-graph.md` — strikethrough completed issue
    - Check `plan/issues/blocked/` — move newly unblocked issues to `ready/`
    - Add entry to `plan/issues/done/log.md`
 4. Message tech lead: `"Merged #N to main. [pass count delta]. Post-merge cleanup done."`
@@ -149,7 +157,7 @@ When tech lead requests a baseline measurement (not a review):
 ## Key files
 
 - Issue queue: `plan/issues/in-review/` (your input), `plan/issues/ready/` (failed reviews go here)
-- Dependency graph: `plan/dependency-graph.md`
+- Dependency graph: `plan/log/dependency-graph.md`
 - Done log: `plan/issues/done/log.md`
 - Test262 config: `tests/test262-runner.ts`
 - Results: `benchmarks/results/`

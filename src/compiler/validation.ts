@@ -1,4 +1,5 @@
-import ts from "typescript";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { ts, forEachChild } from "../ts-api.js";
 import type { CompileError, CompileOptions } from "../index.js";
 
 // Default blocked members on extern classes in safe mode
@@ -146,7 +147,7 @@ function validateSafeMode(sourceFile: ts.SourceFile, checker: ts.TypeChecker, op
       }
     }
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(sourceFile);
@@ -182,7 +183,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     function visit(current: ts.Node): void {
       if (position < current.getFullStart() || position >= current.getEnd()) return;
       best = current;
-      ts.forEachChild(current, visit);
+      forEachChild(current, visit);
     }
     visit(node);
     return best;
@@ -209,7 +210,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
             break; // Directives must be at the top
           }
         }
-        // Don't assume module = strict. We add `export {}` synthetically for TS,
+        // Don't assume module = strict. We add export {} synthetically for TS,
         // but the source may be a sloppy-mode script (test262 noStrict tests).
         return false;
       }
@@ -429,6 +430,16 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       if (isCallExpressionTarget(node.operand) && isStrictMode(node)) {
         addError(node, "Invalid left-hand side in postfix operation");
       }
+      // ES spec: no LineTerminator between LeftHandSideExpression and ++/--.
+      // U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) between
+      // operand and operator are SyntaxErrors. Regular \n and \r are handled
+      // by the TS parser's ASI, but these Unicode separators are not.
+      const operandEnd = node.operand.end;
+      const opStart = node.operand.end; // operator immediately follows operand in AST
+      const textBetween = sourceFile.text.substring(operandEnd, node.end - 2);
+      if (/[\u2028\u2029]/.test(textBetween)) {
+        addError(node, "No line terminator allowed before postfix operator");
+      }
     }
 
     // Check assignment to arguments/eval in strict mode
@@ -530,6 +541,22 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       checkDuplicateParams(node.parameters, node);
     }
 
+    // ── YieldExpression in generator default parameters ──────────────
+    // ES spec: It is a SyntaxError if FormalParameters of a generator
+    // function Contains YieldExpression. Default parameter values are
+    // evaluated before the generator body, so yield is not valid there.
+    // Same applies to async generators (AwaitExpression in params).
+    if (ts.isYieldExpression(node)) {
+      if (isInsideGeneratorParams(node)) {
+        addError(node, "Yield expression is not allowed in generator function parameters");
+      }
+    }
+    if (ts.isAwaitExpression(node)) {
+      if (isInsideAsyncParams(node)) {
+        addError(node, "Await expression is not allowed in async function parameters");
+      }
+    }
+
     // Check yield used as identifier in generator functions/methods
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "yield") {
       // Check if inside a generator function/method
@@ -611,10 +638,10 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       }
     }
 
-    // Check var redeclaration conflicts with lexical declarations in block scope
+    // Check var redeclaration conflicts with lexical declarations in block/module scope
     // ES spec: It is a Syntax Error if any element of VarDeclaredNames also occurs
     // in LexicallyDeclaredNames of the StatementList.
-    if (ts.isBlock(node)) {
+    if (ts.isBlock(node) || ts.isSourceFile(node)) {
       checkVarLexicalConflicts(node);
     }
 
@@ -1173,6 +1200,14 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
             addError(member, "Class constructor may not be a setter");
           }
         }
+        // TS parses `async constructor()` as a ConstructorDeclaration with
+        // AsyncKeyword modifier (not as a MethodDeclaration named "constructor").
+        // Catch this case separately.
+        if (ts.isConstructorDeclaration(member)) {
+          if (member.modifiers?.some((m: any) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
+            addError(member, "Class constructor may not be an async method");
+          }
+        }
       }
     }
 
@@ -1192,6 +1227,36 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     ) {
       if (!isInsideMethod(node)) {
         addError(node, "'super' keyword unexpected here");
+      }
+      // ES spec: SuperProperty only allows IdentifierName and [Expression],
+      // NOT PrivateName. super.#x is always a SyntaxError.
+      if (ts.isPropertyAccessExpression(node) && ts.isPrivateIdentifier(node.name)) {
+        addError(node, "Private fields cannot be accessed via super");
+      }
+    }
+
+    // ── Strict mode reserved words as assignment targets ─────────────
+    // ES spec: It is a SyntaxError if the LeftHandSideExpression of a simple
+    // assignment is a strict mode reserved word (public, private, protected, etc.)
+    // and the code is in strict mode.
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && isStrictMode(node)) {
+      let lhs: ts.Node = node.left;
+      while (ts.isParenthesizedExpression(lhs)) lhs = lhs.expression;
+      if (ts.isIdentifier(lhs)) {
+        const strictReservedAssign = new Set([
+          "implements",
+          "interface",
+          "let",
+          "package",
+          "private",
+          "protected",
+          "public",
+          "static",
+          "yield",
+        ]);
+        if (strictReservedAssign.has(lhs.text)) {
+          addError(lhs, `Assignment to reserved word '${lhs.text}' in strict mode`);
+        }
       }
     }
 
@@ -1350,6 +1415,24 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       }
     }
 
+    // ── import.defer(...) / import.source(...) — Stage 3 proposals ──
+    // Reported as SyntaxError so negative parse/early test262 tests covering
+    // the import-defer / source-phase-imports proposals correctly count as
+    // detecting the unsupported syntax. This walk runs over the whole AST
+    // (including unreferenced async arrow bodies) so we catch the constructs
+    // even in dead code where the codegen pipeline never visits them. (#1315)
+    if (
+      ts.isCallExpression(node) &&
+      ts.isMetaProperty(node.expression) &&
+      node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (node.expression.name.text === "defer" || node.expression.name.text === "source")
+    ) {
+      addError(
+        node,
+        `SyntaxError: import.${node.expression.name.text}(...) is not supported (Stage 3 proposal — import-defer / source-phase-imports)`,
+      );
+    }
+
     // ── new import() — always a SyntaxError ────────────────────────
     // ES spec: ImportCall is a CallExpression, not a NewExpression target.
     // Also applies to import.source() and import.defer() proposals.
@@ -1395,6 +1478,15 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       }
     }
 
+    // ── `arguments` in class static blocks ──────────────────────────
+    // ES spec: ClassStaticBlockBody — It is a Syntax Error if
+    // ContainsArguments of ClassStaticBlockStatementList is true.
+    if (ts.isClassStaticBlockDeclaration(node)) {
+      if (containsArguments(node.body)) {
+        addError(node, "'arguments' is not allowed in class static initialization blocks");
+      }
+    }
+
     // ── await with empty operand in async functions ───────────────
     // When TS parses `void await`, `await:`, or just `await` (as identifier ref)
     // inside an async function, it creates AwaitExpression with empty Identifier
@@ -1414,6 +1506,13 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
         if (afterText.startsWith(":")) {
           addError(node, "'await' is not allowed as a label identifier in this context");
         }
+      }
+      // ES spec: ClassStaticBlockBody: "It is a Syntax Error if ContainsAwait
+      // of ClassStaticBlockStatementList is true." This means a real AwaitExpression
+      // (not just the identifier 'await') inside a static block is always invalid,
+      // even if the static block is nested inside an async function.
+      if (isInsideClassStaticBlock(node)) {
+        addError(node, "'await' is not allowed in class static initialization blocks");
       }
       // ES spec: AwaitExpression is only valid in async functions or module top-level.
       // In module context, TypeScript may produce AwaitExpression for `await 1` inside
@@ -1437,6 +1536,18 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       const operand = node.expression;
       if (operand && ts.isIdentifier(operand) && operand.text === "") {
         addError(node, "'yield' is not allowed as an identifier in a generator function");
+      }
+    }
+
+    // ── yield * with newline before * ──────────────────────────────
+    // ES spec: YieldExpression : yield [no LineTerminator here] * AssignmentExpression
+    // A newline before the `*` makes it a distinct statement — SyntaxError.
+    if (ts.isYieldExpression(node) && node.asteriskToken && isInsideGeneratorFunction(node)) {
+      const yieldEnd = node.getStart(sourceFile) + 5; // length of "yield"
+      const starStart = node.asteriskToken.getStart(sourceFile);
+      const textBetween = sourceFile.text.substring(yieldEnd, starStart);
+      if (/[\r\n\u2028\u2029]/.test(textBetween)) {
+        addError(node, "A newline may not precede the '*' token in a yield expression");
       }
     }
 
@@ -1491,6 +1602,31 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           }
         }
       }
+    }
+
+    // ── Escaped reserved/contextual keywords in export/import ──────
+    // ES spec: It is a SyntaxError if the source text of an IdentifierName
+    // in keyword position contains a UnicodeEscapeSequence.
+    // Covers: `export { x \u0061s y }`, `export { x as \u0064efault }`,
+    //         `export {} \u0066rom "./x"`, etc.
+    if (ts.isExportDeclaration(node) || ts.isImportDeclaration(node)) {
+      const nodeStart = node.getStart(sourceFile);
+      const nodeText = sourceFile.text.substring(nodeStart, node.end);
+      if (nodeText.includes("\\u")) {
+        addError(node, "Keyword must not contain escaped characters");
+      }
+    }
+    if (ts.isExportSpecifier(node)) {
+      // Check the exported name and the local name for escaped keywords
+      const checkEscape = (n: ts.Identifier | ts.StringLiteral) => {
+        const s = n.getStart(sourceFile);
+        const raw = sourceFile.text.substring(s, s + n.text.length + 10);
+        if (raw.includes("\\u")) {
+          addError(n, "Keyword must not contain escaped characters");
+        }
+      };
+      checkEscape(node.name);
+      if (node.propertyName) checkEscape(node.propertyName);
     }
 
     // ── import/export in invalid positions ──────────────────────────
@@ -1551,9 +1687,15 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
     // ── return outside function ──────────────────────────────────
     // ES spec: A ReturnStatement can only appear in a FunctionBody.
+    // ES spec: ClassStaticBlockStatementList uses [~Return], meaning
+    // 'return' is not valid directly inside a static block even if the
+    // block is nested inside a function. Only returns inside functions
+    // WITHIN the static block are valid.
     if (ts.isReturnStatement(node)) {
       if (!isInsideFunction(node)) {
         addError(node, "A 'return' statement can only be used within a function body");
+      } else if (isInsideClassStaticBlock(node)) {
+        addError(node, "A 'return' statement is not allowed in a class static initialization block");
       }
     }
 
@@ -1601,10 +1743,14 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     // any duplicate entries.
     // This is checked at the source file level.
 
-    // ── import() with spread argument ──────────────────────────────
-    // ES spec: ImportCall takes exactly one AssignmentExpression, not ArgumentList.
-    // import(...['x']) is a SyntaxError.
+    // ── import() argument validation ──────────────────────────────
+    // ES spec: ImportCall takes exactly one AssignmentExpression (plus an
+    // optional second options argument per the import-attributes proposal).
+    // import() with 0 args, spread args, or 3+ args is a SyntaxError.
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      if (node.arguments.length === 0) {
+        addError(node, "import() requires at least one argument");
+      }
       for (const arg of node.arguments) {
         if (ts.isSpreadElement(arg)) {
           addError(arg, "import() does not allow spread arguments");
@@ -1801,15 +1947,15 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     }
 
     // ── Fields named "constructor" in class ──────────────────────────
-    // ES spec: It is a Syntax Error if PropName of a ClassElement is "constructor"
-    // and the element is a field definition (not a method).
+    // ES spec: ClassElement: FieldDefinition ;
+    //   It is a Syntax Error if PropName of FieldDefinition is "constructor".
+    // ES spec: ClassElement: static FieldDefinition ;
+    //   It is a Syntax Error if PropName of FieldDefinition is "prototype" or "constructor".
+    // So "constructor" is always forbidden as a field name (static or not).
     if (ts.isPropertyDeclaration(node)) {
       const name = ts.isIdentifier(node.name) ? node.name.text : ts.isStringLiteral(node.name) ? node.name.text : null;
       if (name === "constructor") {
-        const isStatic = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
-        if (!isStatic) {
-          addError(node, "Classes may not have a non-static field named 'constructor'");
-        }
+        addError(node, "Classes may not have a field named 'constructor'");
       }
     }
 
@@ -1823,7 +1969,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     // We're always in module mode. Check for --> at the start of a line.
     // Note: TS parser doesn't flag this.
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   /** Check if a node is inside a class static initializer block. */
@@ -1955,7 +2101,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     }
     // Arrow functions don't bind arguments — keep searching
     let found = false;
-    ts.forEachChild(node, (child) => {
+    forEachChild(node, (child) => {
       if (!found && containsArguments(child)) {
         found = true;
       }
@@ -2176,9 +2322,9 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
         }
         return;
       }
-      ts.forEachChild(node, walkForLabels);
+      forEachChild(node, walkForLabels);
     }
-    ts.forEachChild(block, walkForLabels);
+    forEachChild(block, walkForLabels);
   }
 
   /** Check duplicate lexical declarations across switch case clauses. */
@@ -2246,10 +2392,13 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
   /** Check for duplicate private names in a class body. */
   function checkDuplicatePrivateNames(classNode: ts.ClassDeclaration | ts.ClassExpression): void {
-    const privateNames = new Map<string, { kinds: Set<string> }>();
+    const privateNames = new Map<string, { kinds: Set<string>; isStatic: boolean }>();
     for (const member of classNode.members) {
       if (member.name && ts.isPrivateIdentifier(member.name)) {
         const name = member.name.text;
+        const memberIsStatic = ts.canHaveModifiers(member)
+          ? (ts.getModifiers(member as ts.HasModifiers)?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false)
+          : false;
         let kind: string;
         if (ts.isGetAccessorDeclaration(member)) {
           kind = "get";
@@ -2265,12 +2414,17 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
         const existing = privateNames.get(name);
         if (!existing) {
-          privateNames.set(name, { kinds: new Set([kind]) });
+          privateNames.set(name, { kinds: new Set([kind]), isStatic: memberIsStatic });
         } else {
-          // get+set pair is allowed; anything else is a duplicate
+          // get+set pair is allowed ONLY if both have the same staticness
           const combined = new Set([...existing.kinds, kind]);
-          if (combined.size === 2 && combined.has("get") && combined.has("set")) {
-            // This is fine — getter+setter pair
+          if (
+            combined.size === 2 &&
+            combined.has("get") &&
+            combined.has("set") &&
+            existing.isStatic === memberIsStatic
+          ) {
+            // This is fine — getter+setter pair with same staticness
             existing.kinds.add(kind);
           } else {
             addError(member.name, `Duplicate private name '${name}'`);
@@ -2278,6 +2432,72 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
         }
       }
     }
+  }
+
+  /**
+   * Check if a node is inside the formal parameters of a generator function.
+   * ES spec: FormalParameters of generators use [+Yield] but YieldExpression
+   * is forbidden — "It is a Syntax Error if FormalParameters Contains YieldExpression".
+   */
+  function isInsideGeneratorParams(node: ts.Node): boolean {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (ts.isParameter(current)) {
+        const func = current.parent;
+        if ((ts.isFunctionDeclaration(func) || ts.isFunctionExpression(func)) && func.asteriskToken) {
+          return true;
+        }
+        if (ts.isMethodDeclaration(func) && func.asteriskToken) {
+          return true;
+        }
+        return false;
+      }
+      // Stop at function boundaries
+      if (
+        ts.isFunctionDeclaration(current) ||
+        ts.isFunctionExpression(current) ||
+        ts.isArrowFunction(current) ||
+        ts.isMethodDeclaration(current)
+      ) {
+        return false;
+      }
+      current = current.parent;
+    }
+    return false;
+  }
+
+  /**
+   * Check if a node is inside the formal parameters of an async function.
+   * ES spec: "It is a Syntax Error if FormalParameters Contains AwaitExpression".
+   */
+  function isInsideAsyncParams(node: ts.Node): boolean {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (ts.isParameter(current)) {
+        const func = current.parent;
+        if (
+          (ts.isFunctionDeclaration(func) ||
+            ts.isFunctionExpression(func) ||
+            ts.isArrowFunction(func) ||
+            ts.isMethodDeclaration(func)) &&
+          func.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+        ) {
+          return true;
+        }
+        return false;
+      }
+      // Stop at function boundaries
+      if (
+        ts.isFunctionDeclaration(current) ||
+        ts.isFunctionExpression(current) ||
+        ts.isArrowFunction(current) ||
+        ts.isMethodDeclaration(current)
+      ) {
+        return false;
+      }
+      current = current.parent;
+    }
+    return false;
   }
 
   /** Check if a node is inside an async function (including async generators). */
@@ -2364,8 +2584,8 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     return false;
   }
 
-  /** Check for var/lexical declaration conflicts in a block. */
-  function checkVarLexicalConflicts(block: ts.Block): void {
+  /** Check for var/lexical declaration conflicts in a block or source file. */
+  function checkVarLexicalConflicts(block: ts.Block | ts.SourceFile): void {
     // Collect lexically-declared names (let, const, function, class)
     const lexicalNames = new Set<string>();
     for (const stmt of block.statements) {
@@ -2379,7 +2599,12 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           }
         }
       } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-        lexicalNames.add(stmt.name.text);
+        // At SourceFile scope, function declarations are var-scoped — no conflict with var
+        // (LexicallyDeclaredNames does not include VarDeclaredNames per ES §13.1.1).
+        // Only inside a Block are function declarations lexically scoped (ES §B.3.2).
+        if (ts.isBlock(block)) {
+          lexicalNames.add(stmt.name.text);
+        }
       } else if (ts.isClassDeclaration(stmt) && stmt.name) {
         lexicalNames.add(stmt.name.text);
       }
@@ -2419,7 +2644,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     ) {
       return;
     }
-    ts.forEachChild(node, (child) => collectVarDeclaredNamesInBlock(child, lexicalNames));
+    forEachChild(node, (child) => collectVarDeclaredNamesInBlock(child, lexicalNames));
   }
 
   /**
@@ -2524,7 +2749,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     ) {
       return;
     }
-    ts.forEachChild(node, (child: ts.Node) => checkForTDZRef(child, name));
+    forEachChild(node, (child: ts.Node) => checkForTDZRef(child, name));
   }
 
   /**
@@ -2710,6 +2935,57 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
   visit(sourceFile);
 
+  // ── export default const/var/let — always SyntaxError ────────────
+  // ES spec: ExportDeclaration : export default HoistableDeclaration |
+  //          export default ClassDeclaration | export default [LAE] AssignmentExpression ;
+  // VariableStatement and LexicalDeclaration are not valid after export default.
+  for (const stmt of sourceFile.statements) {
+    if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
+      // TS models `export default expr` as ExportAssignment.
+      // But `export default const x = 1` is parsed differently — TS may parse it
+      // as ExportAssignment with the expression being an error node.
+      // Check the raw source for the pattern.
+      const start = stmt.getStart(sourceFile);
+      const rawText = sourceFile.text.substring(start, start + 30);
+      if (/^export\s+default\s+(?:const|let|var)\b/.test(rawText)) {
+        addError(stmt, "A default export may not be a variable/lexical declaration");
+      }
+    }
+  }
+
+  // ── Duplicate labels — always SyntaxError ──────────────────────────
+  // ES spec: ContainsDuplicateLabels of StatementList must be false.
+  // A label is duplicated if the same label name is nested (not sibling).
+  function checkDuplicateLabels(node: ts.Node, activeLabels: Set<string>): void {
+    // Don't cross function/class boundaries
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      return;
+    }
+    if (ts.isLabeledStatement(node)) {
+      const label = node.label.text;
+      if (activeLabels.has(label)) {
+        addError(node.label, `Duplicate label '${label}'`);
+      } else {
+        activeLabels.add(label);
+        checkDuplicateLabels(node.statement, activeLabels);
+        activeLabels.delete(label);
+      }
+      return;
+    }
+    forEachChild(node, (child) => checkDuplicateLabels(child, activeLabels));
+  }
+  checkDuplicateLabels(sourceFile, new Set());
+
   // ── Duplicate export names (source-file level check) ──────────────
   // ES spec: It is a Syntax Error if ExportedNames contains any duplicate entries.
   const exportedNames = new Map<string, ts.Node>();
@@ -2825,7 +3101,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           return;
         }
       }
-      ts.forEachChild(node, checkModuleItemPosition);
+      forEachChild(node, checkModuleItemPosition);
     };
     checkModuleItemPosition(sourceFile);
   }
@@ -2888,23 +3164,40 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
             addError(node, "'yield' is a reserved word and may not be used as an identifier in strict mode");
           }
         } else if (name === "await") {
-          // Reserved in module code and inside any enclosing async function.
-          let reserved = sourceFileIsModule;
-          if (!reserved) {
-            let c: ts.Node | undefined = node.parent;
-            while (c) {
-              if (
-                (ts.isFunctionDeclaration(c) ||
-                  ts.isFunctionExpression(c) ||
-                  ts.isArrowFunction(c) ||
-                  ts.isMethodDeclaration(c)) &&
-                c.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
-              ) {
+          // ES spec §13.2.5.1: `await` is reserved at module top level
+          // ([+Await] goal) and inside async function bodies. A non-async
+          // function body uses [~Await], so `await` is a valid identifier
+          // there even within a module. Walk up to the nearest function
+          // boundary to determine the context.
+          let reserved = false;
+          let c: ts.Node | undefined = node.parent;
+          while (c) {
+            if (ts.isArrowFunction(c)) {
+              // Arrow functions inherit [+Await] from their enclosing context —
+              // they do NOT reset it. If async, mark reserved and stop.
+              // If non-async, keep walking outward.
+              if (c.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
                 reserved = true;
                 break;
               }
-              c = c.parent;
+              // non-async arrow: continue to enclosing scope
+            } else if (ts.isFunctionDeclaration(c) || ts.isFunctionExpression(c) || ts.isMethodDeclaration(c)) {
+              // Non-arrow function boundary resets [Await] context.
+              // Exception: if 'await' is the BindingIdentifier (name) of THIS
+              // function, it's evaluated in the ENCLOSING scope's [Await] context,
+              // not the function's own body. Keep walking up. (#1068)
+              if ((c as any).name === node) {
+                c = c.parent;
+                continue;
+              }
+              reserved = !!c.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
+              break;
             }
+            c = c.parent;
+          }
+          // No enclosing function — module top level is [+Await]
+          if (!c && sourceFileIsModule) {
+            reserved = true;
           }
           if (reserved) {
             addError(
@@ -2914,7 +3207,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           }
         }
       }
-      ts.forEachChild(node, checkReservedIdentifiers);
+      forEachChild(node, checkReservedIdentifiers);
     };
     checkReservedIdentifiers(sourceFile);
   }
@@ -2956,7 +3249,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
       checkDuplicateConstructors(node);
     }
-    ts.forEachChild(node, checkClassesForDuplicateCtors);
+    forEachChild(node, checkClassesForDuplicateCtors);
   }
   checkClassesForDuplicateCtors(sourceFile);
 
@@ -3021,7 +3314,7 @@ function validateHardenedMode(
         });
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(sourceFile);
@@ -3070,11 +3363,11 @@ function rewriteEvalSuperCall(source: string): string {
 
 export {
   DEFAULT_BLOCKED_MEMBERS,
-  getApproxSourceLocation,
-  pushSourceAnchoredDiagnostic,
-  hasExportModifier,
-  validateSafeMode,
   detectEarlyErrors,
-  validateHardenedMode,
+  getApproxSourceLocation,
+  hasExportModifier,
+  pushSourceAnchoredDiagnostic,
   rewriteEvalSuperCall,
+  validateHardenedMode,
+  validateSafeMode,
 };

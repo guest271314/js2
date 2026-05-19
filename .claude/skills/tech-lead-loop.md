@@ -20,14 +20,13 @@ read the results and decide.
 
 - **Devs are authoritative for their own PRs.** Tech lead only intervenes when a
   dev is truly stuck, when claims conflict, or when the merge queue stalls.
-- **SendMessage is the canonical dispatch channel.** TaskList is unreliable
-  (see `.claude/memory/feedback_tasklist_sync_unreliable.md`); always include
-  full task context in the SendMessage body.
+- **TaskList is the canonical dispatch mechanism.** Populate it at sprint start and whenever new issues are added mid-sprint. Devs self-serve — they claim tasks, self-merge, and claim the next task without waiting for tech lead direction.
+- **SendMessage only for escalations and exceptions.** Devs contact tech lead only if TaskList is empty, they are blocked >30 min, or CI criteria force an escalation. Tech lead contacts devs only when they are stuck/silent or there is a file conflict to resolve.
 - **Every protocol correction issued to one dev should be generalized.** If you
-  correct one dev's push-ping omission, broadcast the canonical protocol to all
-  devs within the next cycle — individual corrections rot.
+  correct one dev, broadcast the canonical protocol to all devs within the next
+  cycle — individual corrections rot.
 - **Keep tool calls parallel when independent.** One message with five Bash
-  calls or SendMessages is dramatically faster than five sequential ones.
+  calls is dramatically faster than five sequential ones.
 - **Measure the merge queue, not the task queue.** The right metric is
   "how many PRs are ready to merge but unmerged" — stalls there compound.
 
@@ -39,14 +38,14 @@ read the results and decide.
 
 **Checklist**:
 
-1. Read the current sprint doc: `plan/sprints/sprint-<N>.md`
+1. Read the current sprint doc: `plan/issues/sprints/<N>/sprint.md`
 2. Read the tech lead handoff: `plan/agent-context/tech-lead.md`
-3. Read this skill (refresher).
-4. `git status && git branch --show-current && git log --oneline origin/main -10`
-5. `gh pr list --state open --limit 20` — snapshot of inherited open PRs
-6. `ls .claude/worktrees/` — inherited worktrees (may contain WIP)
-7. Read `plan/file-locks.md` if it exists — active dev claims
-8. Read `.claude/memory/MEMORY.md` top section — critical rules + feedback index
+3. `git status && git branch --show-current && git log --oneline origin/main -10`
+4. `gh pr list --state open --limit 20` — snapshot of inherited open PRs
+5. `ls .claude/worktrees/` — inherited worktrees (may contain WIP)
+6. Read `plan/method/file-locks.md` if it exists — active dev claims
+7. Read `.claude/memory/MEMORY.md` top section — critical rules + feedback index
+8. **`TaskList` — if empty, create tasks from `plan/issues/sprints/{N}/` (current sprint dir, filter by `status: ready`) before touching any dev.**
 
 **Output**: before touching any dev, write a 3–5 sentence situation summary to
 yourself (not to the user) covering baseline, open PRs, active dev claims,
@@ -59,45 +58,18 @@ Start doing Phase 1 work.
 
 ## Phase 1 — Dispatch
 
-**Trigger**: idle devs, unclaimed tasks in the queue, unstarted sprint items.
+**Trigger**: idle devs, TaskList is empty or has unclaimed tasks, unstarted sprint items.
 
-**Goal**: every dev has a concrete, unambiguous task with owner, file scope,
-worktree path, and protocol expectations.
+**Goal**: TaskList is populated and every ready dev can self-serve.
 
 **Checklist**:
 
-1. Count active devs vs available tasks. Target: 4–5 devs, each on a distinct
-   issue, no two devs in the same file.
-2. For each idle dev, check inbox activity. Idle notification ≠ stuck — see
-   Phase 3 for the stuck criteria.
-3. For each new task:
-   - Pick from the priority queue in `plan/sprints/sprint-<N>.md` or the
-     harvester top picks (see `plan/agent-context/tech-lead.md` for the list)
-   - Verify the issue file exists. If not, invoke `/create-issue` first.
-   - If feasibility is `hard`, invoke `/architect-spec` before dispatch.
-   - Check file-lock overlap with other active devs before assigning.
-4. Dispatch via SendMessage. Include: issue number, file path, target source
-   file(s), expected scope (lines), worktree path, protocol reminders.
-5. Track the dispatch in your working model (mental state, not a file).
+1. **Populate TaskList first.** For each issue in `plan/issues/sprints/{N}/` with `status: ready` that doesn't have a task yet: `TaskCreate`. If feasibility is `hard` and no impl spec exists, run `/architect-spec` first.
+2. Count active devs vs unclaimed tasks. Target: up to 8 devs, each on a distinct issue, no two devs in the same function.
+3. Idle notifications are normal — devs are between tasks and will self-claim. Do not ping unless they've been silent for >20 min with no commits (see Phase 3).
+4. **Conflict resolution** — if two devs claim the same file/function: first specific-scope claim wins; message the later dev directly with a different task.
 
-**Pattern — dispatch message**:
-
-```
-Task: #<N> — <title>
-File: plan/issues/ready/<N>.md (+ any arch spec link)
-Primary source: src/<path>
-Worktree: .claude/worktrees/issue-<N>-<slug>
-Scope: <one-line estimate>
-Reminder: push=ping, pushed=done-claim-next, /dev-self-merge when CI clean.
-Confirm when you've claimed file locks.
-```
-
-**Conflict resolution** — if two devs claim the same file/function:
-1. First specific-scope claim wins.
-2. Immediately send a `TRAFFIC COP` broadcast naming the sole owner.
-3. Redirect the other dev with a direct SendMessage to a different task.
-4. Expect subsequent confirmations; if one dev doesn't honor the standdown,
-   remind them of protocol point 3 (standdown = stop in place).
+**Only use SendMessage dispatch as fallback** when a dev reports TaskList is empty and you can't immediately add a task (e.g., issue needs an arch spec first).
 
 ---
 
@@ -222,11 +194,11 @@ Nothing important is trapped in conversation context only.
 
 **Checklist**:
 
-1. Update `plan/sprints/sprint-<N>.md` "interim results" with the latest
+1. Update `plan/issues/sprints/<N>/sprint.md` "interim results" with the latest
    baseline and merge count.
-2. Move completed issues from `plan/issues/ready/` to `plan/issues/done/` —
-   update frontmatter `status: done`.
-3. Update `plan/dependency-graph.md` — strike through completed issues.
+2. Update completed issues in `plan/issues/` —
+   set frontmatter `status: done`.
+3. Update `plan/log/dependency-graph.md` — strike through completed issues.
 4. Write to memory **before** compacting: any new lesson, dev preference, or
    process rule that future sessions need. See
    `.claude/memory/feedback_diary_and_sprints_before_compact.md`.
@@ -258,22 +230,62 @@ Phase 0: context load  (once per session start)
 │     ↓
 │    Phase 4: protocol enforcement (after ≥2 corrections)
 │     ↓
-└─── Phase 5: sprint hygiene (every ~30 min)
+│    Phase 5: sprint hygiene (every ~30 min)
+│     ↓
+│    [all devs shut down + no tasks?] ──→ Sprint-end wrap-up ──→ STOP
+│     ↓ (no)
+└─── (continue loop)
 ```
 
 You don't always run every phase — you trigger on events. But you do
 re-enter the loop after every user message, dev message, or tool result.
+The sprint-end detection runs every iteration — when it triggers, the
+wrap-up is mandatory before the loop can stop.
 
-## When to break the loop
+## Sprint-end detection (MUST run before loop exit)
+
+**Trigger**: all devs shut down AND no unclaimed/unblocked tasks remain.
+
+When this condition is met, the sprint is over. You MUST complete the
+wrap-up before stopping the loop. Do NOT just stop — incomplete wrap-ups
+lose learnings, leave issues in the wrong state, and force the next
+session to reconstruct context from scratch.
+
+**Sprint-end checklist** (all mandatory, in order):
+
+1. **Tag**: `git tag sprint/<N>`
+2. **Sprint doc**: update `plan/issues/sprints/<N>/sprint.md` with:
+   - Status: `done` in frontmatter
+   - Ending baseline numbers
+   - Results table (PRs merged, issues completed, issues deferred)
+   - Acceptance criteria review (checked/unchecked)
+   - Retrospective (what went well, what didn't, lessons learned)
+3. **Diary**: append session entry to `plan/diary.md`
+4. **Handoff**: update `plan/agent-context/tech-lead.md` for next session
+5. **Issues**: move completed issues from `ready/` to `done/`
+6. **Commit + push**: stage all wrap-up files, commit, push, push tags
+7. **Landing page**: verify Pages deploy triggered (baseline refresh uses
+   `[skip ci]` which also skips deploy — trigger manually if needed)
+8. **Shutdown PO**: if a PO agent is still alive, send shutdown request
+9. **TeamDelete**: clean up team directories and worktrees
+10. **THEN stop the loop** — omit ScheduleWakeup only after step 9
+
+If you are about to omit ScheduleWakeup (stop the loop) and have NOT
+completed steps 1-9, you are violating this protocol. Go back and do them.
+
+## When to pause or break the loop (non-sprint-end)
 
 - **User directly asks for something**: handle the user request first, loop after.
 - **Token budget approaching 40%**: Phase 5 hygiene + /compact.
-- **Sprint end**: `/sprint-wrap-up` + retrospective + tag `sprint/<N>`.
 - **Fresh team restart needed**: write `plan/agent-context/tech-lead.md`,
   TeamDelete, TeamCreate, resume from Phase 0.
 
 ## Anti-patterns (do NOT do these)
 
+- **Stopping the loop without sprint wrap-up**. "All devs shut down" is NOT
+  the exit condition. "All devs shut down + wrap-up complete + tag pushed"
+  is the exit condition. This is the #1 protocol violation — it happened in
+  Sprint 41 and required the user to catch it.
 - **Polling devs every minute for status**. Idle notifications are normal.
 - **Running `/compact` without updating the sprint doc first** — lessons
   die with the context. See `feedback_diary_and_sprints_before_compact.md`.
@@ -283,8 +295,7 @@ re-enter the loop after every user message, dev message, or tool result.
 - **Taking a dev's work away without a direct SendMessage first**. Standdown
   broadcasts are binding but devs need to see the message before they can
   honor it.
-- **Assuming TaskList reflects shared truth**. It doesn't. SendMessage is
-  authoritative.
+- **Letting TaskList run empty.** Devs have no way to self-serve when the queue is empty. Populate it before touching agents.
 - **Reading files you already read this session** to "double-check". Your
   context is your source of truth; re-reading burns tokens and cache.
 - **Reporting merge progress to the user in full table form** unless they ask
@@ -295,7 +306,7 @@ re-enter the loop after every user message, dev message, or tool result.
 ## Cross-references
 
 - `CLAUDE.md` — team config, merge protocol, memory budget
-- `plan/team-setup.md` — roster, capacity limits
+- `plan/method/team-setup.md` — roster, capacity limits
 - `.claude/skills/dev-self-merge.md` — what devs do after push
 - `.claude/skills/merge-wave.md` — batched merges
 - `.claude/skills/handle-regression.md` — when a merge breaks something

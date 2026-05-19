@@ -1,31 +1,24 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * String operations extracted from expressions.ts.
  * Handles string literals, templates, tagged templates, string binary ops,
  * and native string method calls.
  */
-import ts from "typescript";
-import { reportError } from "./context/errors.js";
-import { pushBody } from "./context/bodies.js";
-import { allocLocal } from "./context/locals.js";
-import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
-import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
-import { resolveWasmType, addUnionImports, nativeStringType, flatStringType, addStringImports } from "./index.js";
+import { ts } from "../ts-api.js";
 import { isBooleanType, isStringType, isVoidType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import {
-  compileExpression,
-  VOID_RESULT,
-  getLine,
-  getCol,
-  ensureLateImport,
-  flushLateImportShifts,
-  registerCompileStringLiteral,
-} from "./shared.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
+import { pushBody } from "./context/bodies.js";
+import { reportError } from "./context/errors.js";
+import { allocLocal } from "./context/locals.js";
+import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { getFuncParamTypes } from "./expressions/helpers.js";
-import { emitNullCheckThrow } from "./property-access.js";
-import { pushDefaultValue, pushParamSentinel, emitGuardedRefCast, coerceType } from "./type-coercion.js";
+import { addStringImports, addUnionImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
+import { ensureNativeStringExternBridge } from "./native-strings.js";
+import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
+import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
+import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
+import { coerceType, emitGuardedRefCast, pushDefaultValue, pushParamSentinel } from "./type-coercion.js";
 
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): void {
@@ -116,7 +109,7 @@ export function compileTemplateExpression(
   // Ensure string imports (concat, etc.) are available — template literals need concat
   addStringImports(ctx);
 
-  const concatIdx = ctx.funcMap.get("concat");
+  const concatIdx = ctx.jsStringImports.get("concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
   if (concatIdx === undefined) return null;
 
@@ -176,6 +169,8 @@ export function compileNativeTemplateExpression(
 ): ValType | null {
   const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
+  ensureNativeStringExternBridge(ctx);
+  flushLateImportShifts(ctx, fctx);
   const fromExternIdx = ctx.nativeStrHelpers.get("__str_from_extern");
   if (concatIdx === undefined) return null;
 
@@ -392,7 +387,7 @@ export function compileTaggedTemplateExpression(
     // Case 2: tag is a known function
     const funcIdx = ctx.funcMap.get(tagName);
     if (funcIdx !== undefined) {
-      // Prepend captured values for nested functions with captures
+      // Prepend captured values for nested functions with captures.
       const nestedCaptures = ctx.nestedFuncCaptures.get(tagName);
       if (nestedCaptures) {
         for (const cap of nestedCaptures) {
@@ -692,6 +687,112 @@ function collectConcatOperands(ctx: CodegenContext, expr: ts.Expression): ts.Exp
 }
 
 /**
+ * Fold runs of adjacent compile-time-constant operands in a concat chain
+ * into single synthetic string literals. E.g. [var, "a", "b", "c", var2]
+ * becomes [var, "abc", var2] — reducing 4 concat ops to 2.
+ */
+function foldAdjacentConstantOperands(ctx: CodegenContext, operands: ts.Expression[]): ts.Expression[] {
+  if (operands.length <= 1) return operands;
+  const result: ts.Expression[] = [];
+  let pendingConst = "";
+  let hasPending = false;
+  let lastConstNode: ts.Expression | undefined;
+
+  for (const op of operands) {
+    const val = resolveStrictConstant(ctx, op);
+    if (typeof val === "string") {
+      pendingConst += val;
+      hasPending = true;
+      lastConstNode = op;
+    } else if (typeof val === "number") {
+      pendingConst += String(val);
+      hasPending = true;
+      lastConstNode = op;
+    } else {
+      if (hasPending) {
+        // Synthesize a string literal node for the folded constant
+        result.push(createSyntheticStringLiteral(pendingConst, lastConstNode!));
+        pendingConst = "";
+        hasPending = false;
+      }
+      result.push(op);
+    }
+  }
+
+  if (hasPending) {
+    result.push(createSyntheticStringLiteral(pendingConst, lastConstNode!));
+  }
+
+  return result;
+}
+
+/**
+ * Resolve a compile-time constant, but only for truly immutable values.
+ * Unlike resolveConstantExpression, this does NOT resolve let/var declarations —
+ * only string/numeric literals, const variables, and expressions composed of those.
+ * This prevents incorrect folding of mutable variables in loops.
+ */
+function resolveStrictConstant(ctx: CodegenContext, expr: ts.Expression): string | number | undefined {
+  if (ts.isStringLiteral(expr)) return expr.text;
+  if (ts.isNumericLiteral(expr)) return Number(expr.text);
+  if (ts.isParenthesizedExpression(expr)) return resolveStrictConstant(ctx, expr.expression);
+
+  // Only resolve const variable references
+  if (ts.isIdentifier(expr)) {
+    const sym = ctx.checker.getSymbolAtLocation(expr);
+    if (sym) {
+      const decl = sym.valueDeclaration;
+      if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+        const declList = decl.parent;
+        if (ts.isVariableDeclarationList(declList) && (declList.flags & ts.NodeFlags.Const) !== 0) {
+          return resolveStrictConstant(ctx, decl.initializer);
+        }
+      }
+    }
+    return undefined;
+  }
+
+  // Binary expressions (recurse strictly)
+  if (ts.isBinaryExpression(expr)) {
+    const left = resolveStrictConstant(ctx, expr.left);
+    const right = resolveStrictConstant(ctx, expr.right);
+    if (left === undefined || right === undefined) return undefined;
+    if (typeof left === "string" || typeof right === "string") {
+      if (expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        return String(left) + String(right);
+      }
+      return undefined;
+    }
+    if (expr.operatorToken.kind === ts.SyntaxKind.PlusToken) return left + right;
+    return undefined;
+  }
+
+  // Template literals
+  if (ts.isTemplateExpression(expr)) {
+    let result = expr.head.text;
+    for (const span of expr.templateSpans) {
+      const val = resolveStrictConstant(ctx, span.expression);
+      if (val === undefined) return undefined;
+      result += String(val) + span.literal.text;
+    }
+    return result;
+  }
+  if (ts.isNoSubstitutionTemplateLiteral(expr)) return expr.text;
+
+  return undefined;
+}
+
+/** Create a synthetic TS string literal node for use in codegen. */
+function createSyntheticStringLiteral(value: string, positionSource: ts.Node): ts.StringLiteral {
+  const node = ts.factory.createStringLiteral(value);
+  // Copy position info so error reporting works
+  (node as any).pos = positionSource.pos;
+  (node as any).end = positionSource.end;
+  (node as any).parent = positionSource.parent;
+  return node;
+}
+
+/**
  * Compile a single operand and coerce it to externref (string) for concat.
  * Handles: void → "undefined", number → number_toString, boolean → "true"/"false",
  * null/undefined externref → string constant, struct ref → extern.convert_any.
@@ -752,7 +853,7 @@ function compileBatchedConcat(ctx: CodegenContext, fctx: FunctionContext, operan
     fctx.body.push({ op: "call", funcIdx });
   } else {
     // Fallback: pairwise concat (shouldn't happen in js-string mode)
-    const concatIdx = ctx.funcMap.get("concat");
+    const concatIdx = ctx.jsStringImports.get("concat");
     if (concatIdx !== undefined) {
       for (let i = 1; i < arity; i++) {
         fctx.body.push({ op: "call", funcIdx: concatIdx });
@@ -775,6 +876,11 @@ export function compileStringBinaryOp(
 
     switch (op) {
       case ts.SyntaxKind.PlusToken: {
+        // Constant-fold if both sides are compile-time constants (#1004)
+        const constVal = resolveStrictConstant(ctx, expr);
+        if (typeof constVal === "string") {
+          return compileStringLiteral(ctx, fctx, constVal, expr);
+        }
         // concat accepts ref $AnyString — no flatten needed
         compileExpression(ctx, fctx, expr.left);
         compileExpression(ctx, fctx, expr.right);
@@ -901,11 +1007,30 @@ export function compileStringBinaryOp(
   // Ensure string imports are registered (may not be if no string literals in source)
   addStringImports(ctx);
 
+  // Constant-fold entire concat expression if all operands are compile-time constants (#1004)
+  if (op === ts.SyntaxKind.PlusToken) {
+    const constVal = resolveStrictConstant(ctx, expr);
+    if (typeof constVal === "string") {
+      return compileStringLiteral(ctx, fctx, constVal, expr);
+    }
+  }
+
   // Batch N-operand string concat chains into a single multi-arg host call (#958)
   if (op === ts.SyntaxKind.PlusToken) {
     const operands = collectConcatOperands(ctx, expr);
-    if (operands.length >= 3) {
-      return compileBatchedConcat(ctx, fctx, operands);
+    // Fold adjacent constant operands to reduce concat count (#1004)
+    const folded = foldAdjacentConstantOperands(ctx, operands);
+    if (folded.length >= 3) {
+      return compileBatchedConcat(ctx, fctx, folded);
+    }
+    if (folded.length === 1 && folded.length < operands.length) {
+      // Everything folded into one constant string
+      return compileStringLiteral(ctx, fctx, (folded[0] as ts.StringLiteral).text, expr);
+    }
+    if (folded.length === 2 && folded.length < operands.length) {
+      // Folding reduced a multi-op chain to 2 operands — emit as pair concat
+      // using the folded operands (not the original expression tree)
+      return compileBatchedConcat(ctx, fctx, folded);
     }
   }
 
@@ -1071,7 +1196,7 @@ export function compileStringBinaryOp(
   switch (op) {
     case ts.SyntaxKind.PlusToken: {
       // String concatenation
-      const funcIdx = ctx.funcMap.get("concat");
+      const funcIdx = ctx.jsStringImports.get("concat");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         return { kind: "externref" };
@@ -1080,7 +1205,7 @@ export function compileStringBinaryOp(
     }
     case ts.SyntaxKind.EqualsEqualsEqualsToken:
     case ts.SyntaxKind.EqualsEqualsToken: {
-      const funcIdx = ctx.funcMap.get("equals");
+      const funcIdx = ctx.jsStringImports.get("equals");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         return { kind: "i32" };
@@ -1089,7 +1214,7 @@ export function compileStringBinaryOp(
     }
     case ts.SyntaxKind.ExclamationEqualsEqualsToken:
     case ts.SyntaxKind.ExclamationEqualsToken: {
-      const funcIdx = ctx.funcMap.get("equals");
+      const funcIdx = ctx.jsStringImports.get("equals");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         fctx.body.push({ op: "i32.eqz" }); // negate
@@ -1703,6 +1828,8 @@ export function compileNativeStringMethodCall(
   const importName = `string_${method}`;
   const funcIdx = ctx.funcMap.get(importName);
   if (funcIdx !== undefined) {
+    ensureNativeStringExternBridge(ctx);
+    flushLateImportShifts(ctx, fctx);
     // Marshal receiver: flatten + native string -> externref
     compileExpression(ctx, fctx, propAccess.expression);
     emitFlatten();

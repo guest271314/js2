@@ -1,10 +1,11 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Shared codegen error reporting helpers.
  *
  * This module owns backend diagnostics plumbing that only depends on the
  * stable context layer.
  */
-import ts from "typescript";
+import { ts } from "../../ts-api.js";
 import type { CodegenContext } from "./types.js";
 
 /** Extract {line, column} from a node, returning {0,0} if not available. */

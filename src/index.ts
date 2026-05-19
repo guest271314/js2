@@ -1,8 +1,15 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 export type ImportIntent =
   | { type: "string_literal"; value: string }
   | { type: "math"; method: string }
   | { type: "console_log"; variant: string }
-  | { type: "extern_class"; className: string; action: "new" | "method" | "get" | "set"; member?: string }
+  | {
+      type: "extern_class";
+      className: string;
+      action: "new" | "method" | "get" | "set";
+      member?: string;
+      namespacePath?: string[];
+    }
   | { type: "string_method"; method: string }
   | { type: "builtin"; name: string }
   | { type: "callback_maker" }
@@ -18,8 +25,12 @@ export type ImportIntent =
   | { type: "date_method"; method: string }
   | { type: "date_now" }
   | { type: "declared_global"; name: string }
+  | { type: "host_eq" }
+  | { type: "host_loose_eq" }
+  | { type: "same_value_zero" }
   | { type: "dynamic_import" }
-  | { type: "proxy_create" };
+  | { type: "proxy_create" }
+  | { type: "node_builtin"; moduleName: string };
 
 export interface ImportDescriptor {
   module: "env" | "wasm:js-string" | "string_constants";
@@ -91,6 +102,11 @@ export interface CompileOptions {
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /** Test-only: emit `__test_str_from_externref` and `__test_str_to_externref`
+   *  exports so test code can pass JS strings to/from native-string params (#1187).
+   *  Has no effect unless `nativeStrings` is also true. Production builds should
+   *  leave this unset — when off, the helpers are absent from the module entirely. */
+  testRuntime?: boolean;
   /** Enable SIMD-accelerated string/array helpers (requires engine SIMD support) */
   simd?: boolean;
   /** Enable safe mode — reject unsafe TypeScript patterns at compile time */
@@ -129,13 +145,23 @@ export interface CompileOptions {
    *  Requires either the 'binaryen' npm package or wasm-opt on PATH.
    *  Set to true for -O3 defaults, or pass a number (1-4) for a specific level. */
   optimize?: boolean | 1 | 2 | 3 | 4;
+  /**
+   * Experimental: route a narrow set of functions through the middle-end IR
+   * (see `src/ir/`). Defaults to off. Ship as off until the IR reaches
+   * parity with the legacy direct-emission path.
+   */
+  experimentalIR?: boolean;
+  /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
+   *  before TypeScript parsing. Example: `{ "process.env.NODE_ENV": '"production"' }`.
+   *  Values must be valid JS expression literals (strings need inner quotes).
+   *  Also supports shorthand: `"production"` mode sets process.env.NODE_ENV and typeof guards. */
+  define?: Record<string, string>;
 }
 
 import * as path from "path";
-import { compileSource, compileMultiSource, compileFilesSource, compileToObjectSource } from "./compiler.js";
 import { IncrementalLanguageService } from "./checker/index.js";
+import { compileFilesSource, compileMultiSource, compileSource, compileToObjectSource } from "./compiler.js";
 import { ModuleResolver, resolveAllImports } from "./resolve.js";
-import { treeshake, getEntryExportNames } from "./treeshake.js";
 
 /**
  * Compile TypeScript source to Wasm GC binary.
@@ -217,8 +243,12 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   const resolvedEntry = path.resolve(entryFile);
   const rootDir = path.dirname(resolvedEntry);
 
+  // Auto-enable allowJs when entry file is .js/.mjs (#1107)
+  const isJs = /\.[cm]?js$/.test(resolvedEntry);
+  const effectiveOptions = isJs && !options?.allowJs ? { ...options, allowJs: true } : options;
+
   // Create resolver
-  const resolver = new ModuleResolver(rootDir, options);
+  const resolver = new ModuleResolver(rootDir, effectiveOptions);
 
   // Resolve all imports recursively
   const allFiles = resolveAllImports(resolvedEntry, resolver);
@@ -236,7 +266,7 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   // Entry file key
   const entryKey = `./${path.relative(rootDir, resolvedEntry)}`;
 
-  return compileMultiSource(files, entryKey, options);
+  return compileMultiSource(files, entryKey, effectiveOptions);
 }
 
 /**
@@ -270,17 +300,18 @@ export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
   };
 }
 
+export { getBarePackageName, ModuleResolver, resolveAllImports } from "./resolve.js";
+export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";
-export { ModuleResolver, resolveAllImports, getBarePackageName } from "./resolve.js";
-export { treeshake, getEntryExportNames } from "./treeshake.js";
 
 export {
-  jsString,
   buildImports,
   buildStringConstants,
+  buildWasiPolyfill,
   checkPolicy,
   compileAndInstantiate,
   instantiateWasm,
   instantiateWasmStreaming,
+  jsString,
 } from "./runtime.js";

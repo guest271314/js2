@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Shape inference pre-pass: scan source files for variables used as array-like objects.
  *
@@ -10,7 +11,7 @@
  * These variables are inferred to have array-like shape and can be compiled
  * as WasmGC vec structs instead of externref/AnyValue.
  */
-import ts from "typescript";
+import { ts, forEachChild } from "./ts-api.js";
 
 export interface InferredShape {
   /** Named fields set on the variable (e.g. "length") with inferred types */
@@ -31,6 +32,20 @@ export interface InferredShape {
  */
 export function collectShapes(checker: ts.TypeChecker, sourceFile: ts.SourceFile): Map<string, InferredShape> {
   const shapes = new Map<string, InferredShape>();
+  // Variables initialized via `new X()` are constructor instances, not array-likes.
+  // Shape inference must not reclassify them as vec structs.
+  const constructorInitialized = new Set<string>();
+
+  // Collect variables with new-expression initializers at the top level.
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isVariableStatement(stmt)) continue;
+    for (const decl of stmt.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name)) continue;
+      if (decl.initializer && ts.isNewExpression(decl.initializer)) {
+        constructorInitialized.add(decl.name.text);
+      }
+    }
+  }
 
   function getOrCreate(name: string): InferredShape {
     let shape = shapes.get(name);
@@ -113,15 +128,17 @@ export function collectShapes(checker: ts.TypeChecker, sourceFile: ts.SourceFile
       }
     }
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(sourceFile);
 
   // Filter: only keep variables that look like array-likes
   // (have both numeric indexing and a length field, or are used in call/apply)
+  // Exclude constructor-initialized variables — they are object instances, not arrays.
   const result = new Map<string, InferredShape>();
   for (const [name, shape] of shapes) {
+    if (constructorInitialized.has(name)) continue;
     const isArrayLike = shape.hasNumericIndexing && shape.fields.has("length");
     if (isArrayLike || (shape.usedInCallApply && shape.hasNumericIndexing)) {
       result.set(name, shape);

@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script defer src="../frame-nav-sync.js"></script>
     <title>Project JS2</title>
     <style>
       :root {
@@ -41,19 +42,27 @@
       }
 
       body {
+        --page-pad-x: clamp(24px, 4vw, 48px);
+        --page-pad-top: 82px;
+        --page-pad-bottom: 18px;
         font-family: var(--font);
         background: var(--bg);
         color: var(--text);
-        line-height: 1.6;
-        padding: 88px 48px 48px;
+        line-height: 1.45;
+        padding: var(--page-pad-top) var(--page-pad-x) var(--page-pad-bottom);
         min-height: 100vh;
+        height: 100vh;
         margin: 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
 
       header {
         display: flex;
         align-items: center;
         justify-content: space-between;
+        flex: 0 0 auto;
 
         border-bottom: 1px solid var(--border);
       }
@@ -142,7 +151,7 @@
         background: none;
         border: none;
 
-        padding: 20px 0;
+        padding: 14px 0;
         overflow: visible;
       }
 
@@ -162,10 +171,11 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 12px;
+        margin-bottom: 8px;
         padding-bottom: 8px;
         border-bottom: 1px solid var(--border);
         flex-wrap: wrap;
+        flex: 0 0 auto;
       }
 
       .panel-head h2 {
@@ -220,15 +230,87 @@
         width: 84px;
       }
 
+      .sprint-nav-btn {
+        background: none;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        cursor: pointer;
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        font-size: 14px;
+        padding: 0;
+        line-height: 1;
+      }
+
+      .sprint-nav-btn:hover {
+        color: var(--text);
+        border-color: rgba(255, 255, 255, 0.28);
+      }
+
+      #issue-search {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 10px;
+        font-family: var(--font);
+        font-size: 12px;
+        width: 160px;
+        outline: none;
+      }
+
+      #issue-search::placeholder {
+        color: var(--text-muted);
+      }
+
+      #issue-search:focus {
+        border-color: rgba(255, 255, 255, 0.28);
+      }
+
+      #refresh-btn {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        padding: 0 4px;
+        font-size: 22px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        opacity: 0.55;
+      }
+
+      #refresh-btn:hover {
+        opacity: 1;
+      }
+
       /* Kanban board */
       .kanban {
-        margin-bottom: 24px;
+        margin-bottom: 0;
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
       }
 
       .kanban-board {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
         gap: 12px;
+        border-bottom: 0;
+        padding-bottom: 0;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      #overview,
+      #kanban {
+        scroll-margin-top: 72px;
       }
 
       @media (max-width: 900px) {
@@ -236,28 +318,42 @@
           grid-template-columns: repeat(2, 1fr);
         }
       }
-      @media (max-width: 600px) {
-        .kanban-board {
-          grid-template-columns: 1fr;
-        }
-      }
-
       .kanban-col {
         background: var(--bg);
         border-radius: var(--radius);
         padding: 10px;
-        min-height: 200px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .kanban-col-body {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+        padding-top: 8px;
+        padding-right: 4px;
+        mask-image: linear-gradient(to bottom, black 0%, black calc(100% - 18px), transparent 100%);
+        -webkit-mask-image: linear-gradient(to bottom, black 0%, black calc(100% - 18px), transparent 100%);
       }
 
       .kanban-col-header {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        font: inherit;
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 1px;
         color: var(--text-muted);
-        margin-bottom: 8px;
+        margin-bottom: 0;
+        padding: 0 0 8px;
+        border-bottom: 1px solid var(--border);
         display: flex;
         justify-content: space-between;
         align-items: center;
+        cursor: default;
       }
 
       .kanban-col-header .count {
@@ -268,8 +364,42 @@
         color: var(--text-muted);
       }
 
+      .kanban-col-header .lane-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .lane-tools {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
+      .fold-indicator {
+        display: none;
+        width: 14px;
+        justify-content: center;
+        color: rgba(255, 255, 255, 0.62);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .fold-indicator::before {
+        content: "-";
+      }
+
+      .kanban-col.is-collapsed .fold-indicator::before {
+        content: "+";
+      }
+
+      .kanban-col-header:disabled {
+        color: var(--text-muted);
+      }
+
       .kanban-card {
-        padding: 18px 18px 20px;
+        padding: 12px;
         border: 1px solid rgba(255, 255, 255, 0.12);
         background: rgba(255, 255, 255, 0.025);
         margin-bottom: 8px;
@@ -286,17 +416,18 @@
 
       .kanban-card .title {
         display: block;
-        font-size: 16px;
+        font-size: 13px;
+        line-height: 1.35;
         font-weight: 600;
         color: #ffffff;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
       }
 
       .kanban-card .card-footer {
         display: flex;
         align-items: center;
         gap: 8px;
-        margin-top: 10px;
+        margin-top: 6px;
       }
 
       .kanban-card .issue-num {
@@ -329,12 +460,9 @@
         background: rgba(107, 138, 255, 0.15);
         color: var(--accent);
       }
-
-      /* Chart canvas */
-      trend-chart {
-        display: block;
-        width: 100%;
-        max-width: 600px;
+      .tag.wont-fix {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-muted);
       }
 
       /* Sprint table */
@@ -367,64 +495,6 @@
         background: var(--surface-2);
       }
 
-      /* Process health badges */
-      .health-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-
-      .health-item {
-        background: var(--bg);
-        border-radius: 6px;
-        padding: 12px;
-        text-align: center;
-      }
-
-      .health-item .h-val {
-        font-size: 22px;
-        font-weight: 700;
-      }
-
-      .health-item .h-label {
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        color: var(--text-muted);
-        margin-top: 2px;
-      }
-
-      /* Velocity sparkline */
-      .velocity-bar {
-        display: flex;
-        align-items: flex-end;
-        gap: 3px;
-        height: 60px;
-        margin-top: 8px;
-      }
-
-      .velocity-bar .bar {
-        flex: 1;
-        background: var(--accent);
-        border-radius: 2px 2px 0 0;
-        min-width: 4px;
-        position: relative;
-      }
-
-      .velocity-bar .bar:hover::after {
-        content: attr(data-tip);
-        position: absolute;
-        bottom: calc(100% + 4px);
-        left: 50%;
-        transform: translateX(-50%);
-        background: var(--surface-2);
-        color: var(--text);
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 10px;
-        white-space: nowrap;
-      }
-
       /* Loading state */
       .loading {
         color: var(--text-muted);
@@ -452,9 +522,6 @@
         }
       }
 
-      .kanban-col-body {
-      }
-
       .kanban-col-body::-webkit-scrollbar {
         width: 4px;
       }
@@ -462,34 +529,176 @@
         background: var(--border);
         border-radius: 2px;
       }
-      #sprint-history::-webkit-scrollbar {
-        height: 4px;
-      }
-      #sprint-history {
+      #sprint-timeline {
+        margin-left: calc(var(--page-pad-x) * -1) !important;
+        margin-right: calc(var(--page-pad-x) * -1) !important;
+        width: calc(100% + var(--page-pad-x) * 2) !important;
         scrollbar-width: none;
       }
-      #sprint-history:hover {
+      #sprint-timeline:hover {
         scrollbar-width: thin;
         scrollbar-color: var(--border) transparent;
       }
-      #sprint-history::-webkit-scrollbar {
+      #sprint-timeline::-webkit-scrollbar {
         height: 0;
       }
-      #sprint-history:hover::-webkit-scrollbar {
+      #sprint-timeline:hover::-webkit-scrollbar {
         height: 4px;
       }
-      #sprint-history::-webkit-scrollbar-track {
+      #sprint-timeline::-webkit-scrollbar-track {
         background: transparent;
       }
-      #sprint-history::-webkit-scrollbar-thumb {
+      #sprint-timeline::-webkit-scrollbar-thumb {
         background: var(--border);
         border-radius: 2px;
+      }
+
+      @media (max-width: 600px) {
+        body {
+          --page-pad-x: 12px;
+          --page-pad-top: 72px;
+          --page-pad-bottom: 24px;
+          display: block;
+          height: auto;
+          min-height: 100vh;
+          overflow: auto;
+          padding: var(--page-pad-top) var(--page-pad-x) var(--page-pad-bottom);
+        }
+
+        #build-meta {
+          display: none !important;
+        }
+
+        header#overview {
+          display: block !important;
+        }
+
+        .metrics-row {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px 8px;
+        }
+
+        .metric-card {
+          min-width: 0;
+        }
+
+        .metric-card .value {
+          font-size: 20px;
+          margin-bottom: 4px;
+        }
+
+        .metric-card .label {
+          font-size: 9px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 100%;
+        }
+
+        #sprint-timeline {
+          display: none;
+        }
+
+        .panel-head {
+          align-items: stretch;
+        }
+
+        .panel-head > div:first-child {
+          width: 100%;
+        }
+
+        #issue-search {
+          flex: 1 1 120px;
+          min-width: 0;
+        }
+
+        .kanban {
+          display: block;
+          padding-top: 16px;
+        }
+
+        .kanban-board {
+          display: block;
+          height: auto !important;
+          overflow: visible;
+        }
+
+        .kanban-col {
+          margin-bottom: 10px;
+          overflow: visible;
+          padding: 0;
+          border-bottom: 1px solid var(--border);
+        }
+
+        .kanban-col-body {
+          display: block;
+          max-height: none;
+          min-height: 0;
+          overflow: visible;
+          padding: 10px 0 16px;
+          mask-image: none;
+          -webkit-mask-image: none;
+        }
+
+        .kanban-col.is-collapsed .kanban-col-body {
+          display: none;
+        }
+
+        .kanban-col-header {
+          position: sticky;
+          top: 64px;
+          z-index: 20;
+          margin-bottom: 0;
+          padding: 12px;
+          border: 1px solid var(--border);
+          border-left: 0;
+          border-right: 0;
+          background: rgba(6, 10, 20, 0.92);
+          backdrop-filter: blur(18px);
+          -webkit-backdrop-filter: blur(18px);
+          cursor: pointer;
+        }
+
+        .fold-indicator {
+          display: inline-flex;
+        }
+
+        .kanban-card {
+          padding: 14px 12px;
+        }
+
+        .kanban-card .title {
+          font-size: 14px;
+        }
       }
     </style>
   </head>
   <body>
-    <site-nav base="../"></site-nav>
+    <site-nav
+      base="../"
+      links='[{"label":"Overview","href":"#overview"},{"label":"Sprint","href":"#kanban"}]'
+    ></site-nav>
+    <div
+      id="build-meta"
+      style="
+        position: fixed;
+        top: 68px;
+        right: 56px;
+        z-index: 99;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+        font-family: var(--font-mono, &quot;JetBrains Mono&quot;, monospace);
+        color: rgba(255, 255, 255, 0.28);
+        pointer-events: none;
+      "
+    >
+      <span id="build-hash"></span>
+      <span id="build-date"></span>
+    </div>
     <header
+      id="overview"
       style="display: flex; align-items: baseline; gap: 8px; border-bottom: none; padding-bottom: 0; flex-wrap: wrap"
     >
       <div class="metrics-row" id="metrics-row">
@@ -513,126 +722,79 @@
           <span class="value" id="m-ready">—</span>
           <span class="label">ready</span>
         </div>
+        <div class="metric-card" id="baseline-age-card" style="display: none">
+          <span class="value" id="m-baseline-age">—</span>
+          <span class="label">baseline age</span>
+        </div>
       </div>
       <div
-        id="sprint-history"
+        id="sprint-timeline"
         style="overflow-x: auto; margin-left: -48px; margin-right: -48px; width: calc(100% + 96px)"
       ></div>
     </header>
 
     <!-- Kanban -->
-    <div class="panel kanban" style="border-top: none">
+    <div id="kanban" class="panel kanban" style="border-top: none">
       <div class="panel-head">
-        <h2>Issue Board</h2>
+        <div style="display: flex; align-items: center; gap: 12px">
+          <h2>Issue Board</h2>
+          <input type="search" id="issue-search" placeholder="Filter issues…" autocomplete="off" />
+        </div>
         <div class="panel-actions">
           <div class="sprint-controls">
-            <label for="sprint-input">Sprint</label>
-            <input id="sprint-input" type="number" min="1" step="1" placeholder="32" />
+            <label for="sprint-select">Sprint</label>
+            <button class="sprint-nav-btn" id="sprint-prev" type="button" title="Previous sprint">−</button>
             <select id="sprint-select"></select>
+            <button class="sprint-nav-btn" id="sprint-next" type="button" title="Next sprint">+</button>
           </div>
-          <a href="../issues-graph.html">dependency graph</a>
+          <button id="refresh-btn" type="button" onclick="refreshData()" title="Refresh">↺</button>
         </div>
       </div>
       <div class="kanban-board" id="kanban-board">
         <div class="kanban-col">
-          <div class="kanban-col-header">
-            Ready
-            <span class="count" id="col-ready-count">0</span>
-          </div>
+          <button class="kanban-col-header" type="button" aria-expanded="true" aria-controls="col-ready">
+            <span class="lane-title">Ready</span>
+            <span class="lane-tools">
+              <span class="count" id="col-ready-count">0</span>
+              <span class="fold-indicator" aria-hidden="true"></span>
+            </span>
+          </button>
           <div class="kanban-col-body" id="col-ready"></div>
         </div>
         <div class="kanban-col">
-          <div class="kanban-col-header">
-            In Progress
-            <span class="count" id="col-inprogress-count">0</span>
-          </div>
+          <button class="kanban-col-header" type="button" aria-expanded="true" aria-controls="col-inprogress">
+            <span class="lane-title">In Progress</span>
+            <span class="lane-tools">
+              <span class="count" id="col-inprogress-count">0</span>
+              <span class="fold-indicator" aria-hidden="true"></span>
+            </span>
+          </button>
           <div class="kanban-col-body" id="col-inprogress"></div>
         </div>
         <div class="kanban-col">
-          <div class="kanban-col-header">
-            In Review
-            <span class="count" id="col-review-count">0</span>
-          </div>
+          <button class="kanban-col-header" type="button" aria-expanded="true" aria-controls="col-review">
+            <span class="lane-title">In Review</span>
+            <span class="lane-tools">
+              <span class="count" id="col-review-count">0</span>
+              <span class="fold-indicator" aria-hidden="true"></span>
+            </span>
+          </button>
           <div class="kanban-col-body" id="col-review"></div>
         </div>
         <div class="kanban-col">
-          <div class="kanban-col-header">
-            Done
-            <span class="count" id="col-done-count">0</span>
-          </div>
+          <button class="kanban-col-header" type="button" aria-expanded="true" aria-controls="col-done">
+            <span class="lane-title">Done</span>
+            <span class="lane-tools">
+              <span class="count" id="col-done-count">0</span>
+              <span class="fold-indicator" aria-hidden="true"></span>
+            </span>
+          </button>
           <div class="kanban-col-body" id="col-done"></div>
         </div>
       </div>
     </div>
 
-    <!-- Charts row -->
-    <div class="grid-2">
-      <div class="panel">
-        <h2>Official Test262 Pass Rate Trend</h2>
-        <trend-chart id="chart-passrate" mode="line" height="280"></trend-chart>
-      </div>
-      <div class="panel">
-        <h2>Test262 Breakdown Trend</h2>
-        <trend-chart id="chart-breakdown" mode="stacked" height="280"></trend-chart>
-      </div>
-    </div>
-
-    <!-- Issues dependency graph -->
-    <h2
-      style="
-        font-family: var(--mono);
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: rgba(255, 255, 255, 0.46);
-        margin: 24px 0 12px;
-      "
-    >
-      Issue Dependency Graph
-    </h2>
-    <iframe
-      id="graph-iframe"
-      src="../issues-graph.html"
-      style="width: 100%; height: 600px; border: 1px solid var(--border); background: #060a14; pointer-events: none"
-      onclick="this.style.pointerEvents = 'auto'"
-    ></iframe>
-    <script>
-      const gf = document.getElementById("graph-iframe");
-      gf.addEventListener("click", () => (gf.style.pointerEvents = "auto"));
-      document.addEventListener("click", (e) => {
-        if (!gf.contains(e.target)) gf.style.pointerEvents = "none";
-      });
-    </script>
-
-    <!-- Process health -->
-    <div class="grid-2">
-      <div class="panel">
-        <h2>Process Health</h2>
-        <div class="health-grid" id="health-grid">
-          <div class="health-item">
-            <div class="h-val green" id="h-total-done">—</div>
-            <div class="h-label">Issues Completed</div>
-          </div>
-          <div class="health-item">
-            <div class="h-val accent" id="h-total-runs">—</div>
-            <div class="h-label">Test262 Runs</div>
-          </div>
-          <div class="health-item">
-            <div class="h-val green" id="h-pass-delta">—</div>
-            <div class="h-label">Pass Δ (All Time)</div>
-          </div>
-          <div class="health-item">
-            <div class="h-val yellow" id="h-ready-ratio">—</div>
-            <div class="h-label">Ready / Total</div>
-          </div>
-        </div>
-        <h2 style="margin-top: 16px">Velocity (issues per hour)</h2>
-        <div class="velocity-bar" id="velocity-bar"></div>
-      </div>
-    </div>
-
     <script type="module" src="../components/site-nav.js"></script>
-    <script src="../components/trend-chart.js"></script>
     <script src="data.js" onerror=""></script>
     <script>
       // ── Data loading ──────────────────────────────────────────────
@@ -716,6 +878,7 @@
           hard: "Requires deep analysis or architectural changes",
         };
         let meta = "";
+        if (fm.status === "wont-fix") meta += `<span class="tag wont-fix">wont-fix</span>`;
         if (priority !== "medium")
           meta += `<span class="tag ${priority}" title="${prioTips[priority] || ""}">${priority}</span>`;
         if (feasibility && feasibility !== "medium")
@@ -740,6 +903,23 @@
         );
       }
 
+      function getLatestActiveSprint(sprints) {
+        return (
+          [...sprints]
+            .filter((s) => Number.isFinite(s.sprintNumber))
+            .filter((s) => !s.isClosed && !s.isPlanning)
+            .sort((a, b) => a.sprintNumber - b.sprintNumber)
+            .at(-1) || null
+        );
+      }
+
+      const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+      function prioritySort(a, b) {
+        const pa = PRIORITY_ORDER[a.priority] ?? 99;
+        const pb = PRIORITY_ORDER[b.priority] ?? 99;
+        return pa !== pb ? pa - pb : String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
+      }
+
       function buildSprintOptions(sprints) {
         const byNumber = new Map();
         for (const sprint of sprints) {
@@ -760,6 +940,12 @@
         return [...byNumber.values()].sort((a, b) => a.sprintNumber - b.sprintNumber);
       }
 
+      function sprintHasUnfinishedIssueIds(sprint) {
+        if (!sprint || !Array.isArray(sprint.issueIds) || sprint.issueIds.length === 0) return false;
+        const completed = new Set((sprint.completedIssueIds || []).map(String));
+        return sprint.issueIds.some((id) => !completed.has(String(id)));
+      }
+
       function filterIssuesForSprint(issues, sprint) {
         if (!sprint) return issues;
         if (sprint.isClosed) {
@@ -768,6 +954,7 @@
             blocked: [],
             ready: [],
             inprogress: [],
+            review: [],
             done: (issues.done || []).filter((iss) => completed.has(String(iss.id))),
           };
         }
@@ -777,11 +964,44 @@
           blocked: (issues.blocked || []).filter((iss) => allowed.has(String(iss.id))),
           ready: (issues.ready || []).filter((iss) => allowed.has(String(iss.id))),
           inprogress: (issues.inprogress || []).filter((iss) => allowed.has(String(iss.id))),
+          review: (issues.review || []).filter((iss) => allowed.has(String(iss.id))),
           done: (issues.done || []).filter((iss) => allowed.has(String(iss.id))),
         };
       }
 
+      function sprintHasUndoneWork(issues, sprint) {
+        if (!sprint) return false;
+        if (sprintHasUnfinishedIssueIds(sprint)) return true;
+        const scopedIssues = filterIssuesForSprint(issues, sprint);
+        return (
+          (scopedIssues.blocked || []).length > 0 ||
+          (scopedIssues.ready || []).length > 0 ||
+          (scopedIssues.inprogress || []).length > 0 ||
+          (scopedIssues.review || []).length > 0
+        );
+      }
+
+      function getCurrentUnfinishedSprintStart(issues, sprintOptions) {
+        const numeric = sprintOptions
+          .filter((s) => Number.isFinite(s.sprintNumber))
+          .sort((a, b) => a.sprintNumber - b.sprintNumber);
+        if (numeric.length === 0) return null;
+        let idx = numeric.length - 1;
+        while (idx >= 0 && !sprintHasUndoneWork(issues, numeric[idx])) idx--;
+        if (idx < 0) return null;
+        while (idx > 0 && sprintHasUndoneWork(issues, numeric[idx - 1])) idx--;
+        return numeric[idx];
+      }
+
+      let searchQuery = "";
+      let currentIssues = { ready: [], inprogress: [], review: [], done: [] };
+      let currentSprintOptions = [];
+      let currentSelectedSprint = null;
+      let selectedSprintNumber = null;
+      let sprintControlsReady = false;
+
       function renderIssueBoard(issues) {
+        const q = searchQuery.toLowerCase().trim();
         const cols = {
           ready: { el: document.getElementById("col-ready"), count: document.getElementById("col-ready-count") },
           inprogress: {
@@ -793,16 +1013,63 @@
         };
 
         for (const [status, col] of Object.entries(cols)) {
-          const list = issues[status] || [];
-          col.count.textContent = list.length;
-          const display = status === "done" ? list.slice(-20).reverse() : list.slice(0, 30);
-          col.el.innerHTML = display.map((iss) => makeCard(iss.id, iss.title || `Issue #${iss.id}`, iss)).join("");
-          if (list.length > display.length) {
-            col.el.innerHTML += `<div style="text-align:center;color:var(--text-muted);font-size:11px;padding:8px">
-            +${list.length - display.length} more
-          </div>`;
+          let list = issues[status] || [];
+          if (q) {
+            list = list.filter((iss) => String(iss.id).includes(q) || (iss.title || "").toLowerCase().includes(q));
           }
+          col.count.textContent = list.length;
+          const display = status === "done" ? [...list].reverse() : [...list].sort(prioritySort);
+          col.el.innerHTML = display.map((iss) => makeCard(iss.id, iss.title || `Issue #${iss.id}`, iss)).join("");
         }
+      }
+
+      function syncSprintControls() {
+        const sprintSelect = document.getElementById("sprint-select");
+        if (sprintSelect) sprintSelect.value = currentSelectedSprint ? String(currentSelectedSprint.sprintNumber) : "";
+      }
+
+      function renderSprintBoard() {
+        const sprintLabel = document.getElementById("sprint-label");
+        const scopedIssues = filterIssuesForSprint(currentIssues, currentSelectedSprint);
+        renderIssueBoard(scopedIssues);
+        if (sprintLabel)
+          sprintLabel.textContent = currentSelectedSprint
+            ? `Board: Sprint ${currentSelectedSprint.sprintNumber}`
+            : "Board: All issues";
+        syncSprintControls();
+        resizeKanban();
+      }
+
+      function setSprintByNumber(numberValue) {
+        const sprintNumber = Number(numberValue);
+        const found = currentSprintOptions.find((s) => s.sprintNumber === sprintNumber) || null;
+        if (!found) return;
+        selectedSprintNumber = found.sprintNumber;
+        currentSelectedSprint = found;
+        renderSprintBoard();
+      }
+
+      function selectSprintOffset(offset) {
+        const sortedSprintNums = currentSprintOptions
+          .filter((s) => Number.isFinite(s.sprintNumber))
+          .map((s) => s.sprintNumber)
+          .sort((a, b) => a - b);
+        const cur = currentSelectedSprint?.sprintNumber ?? NaN;
+        const idx = sortedSprintNums.indexOf(cur);
+        const next = sortedSprintNums[idx + offset];
+        if (idx >= 0 && Number.isFinite(next)) setSprintByNumber(next);
+      }
+
+      function setupSprintControls() {
+        if (sprintControlsReady) return;
+        sprintControlsReady = true;
+        document.getElementById("sprint-select")?.addEventListener("change", (e) => setSprintByNumber(e.target.value));
+        document.getElementById("sprint-prev")?.addEventListener("click", () => selectSprintOffset(-1));
+        document.getElementById("sprint-next")?.addEventListener("click", () => selectSprintOffset(1));
+        document.getElementById("issue-search")?.addEventListener("input", (e) => {
+          searchQuery = e.target.value;
+          renderSprintBoard();
+        });
       }
 
       // ── Main ─────────────────────────────────────────────────────
@@ -819,24 +1086,19 @@
         // For now, we parse from what we can fetch or use embedded data
         let issues = { ready: [], inprogress: [], review: [], done: [] };
 
-        if (EMBEDDED_DATA && EMBEDDED_DATA.issues) {
+        // Prefer generated JSON over embedded data so the board reflects the latest sprint files.
+        const issueIndex = await loadJSON("./data/issues.json");
+        if (issueIndex) {
+          issues = issueIndex;
+        } else if (EMBEDDED_DATA && EMBEDDED_DATA.issues) {
           issues = EMBEDDED_DATA.issues;
-        } else {
-          // Try loading issue index if available
-          const issueIndex = await loadJSON("./data/issues.json");
-          if (issueIndex) {
-            issues = issueIndex;
-          }
         }
 
         // Load sprint data
         let sprints = [];
-        if (EMBEDDED_DATA && EMBEDDED_DATA.sprints) {
-          sprints = EMBEDDED_DATA.sprints;
-        } else {
-          const sprintIndex = await loadJSON("./data/sprints.json");
-          if (sprintIndex) sprints = sprintIndex;
-        }
+        const sprintIndex = await loadJSON("./data/sprints.json");
+        if (sprintIndex) sprints = sprintIndex;
+        else if (EMBEDDED_DATA && EMBEDDED_DATA.sprints) sprints = EMBEDDED_DATA.sprints;
         sprints = sprints
           .map((s) => ({ ...s, sprintNumber: Number(s.sprintNumber ?? String(s.name).match(/(\d+)/)?.[1] ?? NaN) }))
           .sort((a, b) => (a.sprintNumber || 0) - (b.sprintNumber || 0));
@@ -846,14 +1108,47 @@
         if (updEl) updEl.textContent = "Updated: " + new Date().toLocaleString();
 
         // ── Metrics ──
-        if (runs.length > 0) {
-          const latest = runs[runs.length - 1];
-          // Use strict-mode pass rate (ES module compatible) when available, fall back to all tests
-          const strictPass = latest.strict_pass ?? latest.pass;
-          const strictTotal = latest.strict_total ?? latest.total;
-          const passRate = ((strictPass / strictTotal) * 100).toFixed(1);
-          document.getElementById("m-passrate").textContent = passRate + "%";
+        // Use test262-report.json as the authoritative pass rate (same source as landing page).
+        // runs/index.json may contain PR runs that differ from the merged baseline.
+        try {
+          const reportData = await loadJSON("../benchmarks/results/test262-report.json");
+          if (reportData?.summary?.pass && reportData?.summary?.total) {
+            const passRate = ((reportData.summary.pass / reportData.summary.total) * 100).toFixed(1);
+            document.getElementById("m-passrate").textContent = passRate + "%";
+          } else if (runs.length > 0) {
+            const latest = runs[runs.length - 1];
+            document.getElementById("m-passrate").textContent = ((latest.pass / latest.total) * 100).toFixed(1) + "%";
+          }
+          // ── Build meta (top-right commit hash + date) ──
+          updateBuildMeta(reportData);
+        } catch {
+          if (runs.length > 0) {
+            const latest = runs[runs.length - 1];
+            document.getElementById("m-passrate").textContent = ((latest.pass / latest.total) * 100).toFixed(1) + "%";
+          }
         }
+
+        // ── Baseline age badge ──
+        try {
+          const reportData = await loadJSON("../benchmarks/results/test262-current.json");
+          if (reportData && reportData.baseline_generated_at) {
+            const genTime = new Date(reportData.baseline_generated_at).getTime();
+            const ageMs = Date.now() - genTime;
+            const ageHours = ageMs / (1000 * 60 * 60);
+            const card = document.getElementById("baseline-age-card");
+            const ageEl = document.getElementById("m-baseline-age");
+            if (card && ageEl) {
+              let ageText;
+              if (ageHours < 1) ageText = Math.round(ageHours * 60) + "m";
+              else if (ageHours < 48) ageText = ageHours.toFixed(1) + "h";
+              else ageText = (ageHours / 24).toFixed(1) + "d";
+              ageEl.textContent = ageText;
+              if (ageHours > 24) ageEl.style.color = "var(--red)";
+              else if (ageHours > 6) ageEl.style.color = "var(--orange)";
+              card.style.display = "";
+            }
+          }
+        } catch {}
 
         // Current sprint number (latest tag)
         try {
@@ -882,128 +1177,37 @@
         } catch {}
 
         // ── Kanban board ──
-        const sprintLabel = document.getElementById("sprint-label");
-        const sprintInput = document.getElementById("sprint-input");
         const sprintSelect = document.getElementById("sprint-select");
         const sprintOptions = buildSprintOptions(sprints);
         const latestSprint = getLatestSprint(sprintOptions);
-        // Default to first incomplete sprint (has ready issues)
-        const firstIncomplete = sprintOptions
-          .filter((s) => Number.isFinite(s.sprintNumber) && s.issueIds && s.issueIds.length > 0)
-          .sort((a, b) => a.sprintNumber - b.sprintNumber)
-          .find((s) => {
-            const scopedIssues = filterIssuesForSprint(issues, s);
-            return scopedIssues.ready.length > 0 || scopedIssues.inprogress.length > 0;
-          });
-        let selectedSprint = latestSprint || firstIncomplete;
-
-        // Clamp input to available sprints
-        const validNums = sprintOptions.filter((s) => Number.isFinite(s.sprintNumber)).map((s) => s.sprintNumber);
-        if (validNums.length > 0) {
-          sprintInput.min = Math.min(...validNums);
-          sprintInput.max = Math.max(...validNums);
-        }
+        const latestActiveSprint = getLatestActiveSprint(sprintOptions);
+        // Prefer the latest active sprint. Fall back to the current unfinished block, then latest closed sprint.
+        const firstCurrentIncomplete = getCurrentUnfinishedSprintStart(issues, sprintOptions);
+        const fallbackSprint = latestActiveSprint || firstCurrentIncomplete || latestSprint;
+        const persistedSprint =
+          selectedSprintNumber == null
+            ? null
+            : sprintOptions.find((s) => s.sprintNumber === Number(selectedSprintNumber)) || null;
+        currentIssues = issues;
+        currentSprintOptions = sprintOptions;
+        currentSelectedSprint = persistedSprint || fallbackSprint || null;
+        selectedSprintNumber = currentSelectedSprint?.sprintNumber ?? null;
 
         sprintSelect.innerHTML = sprintOptions
           .filter((s) => Number.isFinite(s.sprintNumber))
-          .map((s) => `<option value="${s.sprintNumber}">Sprint ${s.sprintNumber}</option>`)
+          .map((s) => `<option value="${s.sprintNumber}">${s.sprintNumber}</option>`)
           .join("");
 
-        function syncSprintControls(numberValue) {
-          sprintInput.value = numberValue ? String(numberValue) : "";
-          sprintSelect.value = numberValue ? String(numberValue) : "";
-        }
-
-        function renderSprintBoard() {
-          const scopedIssues = filterIssuesForSprint(issues, selectedSprint);
-          renderIssueBoard(scopedIssues);
-          if (sprintLabel)
-            sprintLabel.textContent = selectedSprint
-              ? `Board: Sprint ${selectedSprint.sprintNumber}`
-              : "Board: All issues";
-          syncSprintControls(selectedSprint?.sprintNumber ?? "");
-        }
-
-        function setSprintByNumber(numberValue) {
-          const sprintNumber = Number(numberValue);
-          const found = sprintOptions.find((s) => s.sprintNumber === sprintNumber) || null;
-          if (!found) return;
-          selectedSprint = found;
-          renderSprintBoard();
-        }
-
-        if (latestSprint) {
+        if (currentSelectedSprint) {
           renderSprintBoard();
         } else {
           renderIssueBoard(issues);
+          const sprintLabel = document.getElementById("sprint-label");
           if (sprintLabel) sprintLabel.textContent = "Board: All issues";
+          syncSprintControls();
         }
 
-        sprintInput.addEventListener("change", () => setSprintByNumber(sprintInput.value));
-        sprintSelect.addEventListener("change", () => setSprintByNumber(sprintSelect.value));
-
-        // ── Test262 Charts ──
-        if (runs.length > 0) {
-          // Subsample for readability if too many points
-          let chartRuns = runs;
-          if (runs.length > 60) {
-            const step = Math.ceil(runs.length / 60);
-            chartRuns = runs.filter((_, i) => i % step === 0 || i === runs.length - 1);
-          }
-
-          const labels = chartRuns.map((r) => {
-            const d = new Date(r.timestamp);
-            return `${d.getMonth() + 1}/${d.getDate()}`;
-          });
-
-          // Prepare data with labels for the trend-chart component
-          const trendData = chartRuns.map((r) => {
-            const d = new Date(r.timestamp);
-            return {
-              label: `${d.getMonth() + 1}/${d.getDate()}`,
-              passRate: (r.pass / r.total) * 100,
-              pass: r.pass,
-              fail: r.fail,
-              ce: r.ce || 0,
-              skip: r.total - r.pass - r.fail - (r.ce || 0),
-            };
-          });
-
-          // Pass rate chart
-          const prChart = document.getElementById("chart-passrate");
-          prChart.setAttribute("labels-key", "label");
-          prChart.setAttribute(
-            "series",
-            JSON.stringify([{ key: "passRate", color: "#fff", fill: true, lineOpacity: 1 }]),
-          );
-          prChart.data = trendData;
-
-          // Breakdown chart (stacked)
-          const bdChart = document.getElementById("chart-breakdown");
-          bdChart.setAttribute("labels-key", "label");
-          bdChart.setAttribute(
-            "series",
-            JSON.stringify([
-              { key: "pass", color: "#ffffff", areaOpacity: 0.15 },
-              { key: "fail", color: "rgba(255,255,255,0.5)", areaOpacity: 0.06 },
-              { key: "ce", color: "rgba(255,255,255,0.35)", areaOpacity: 0.04 },
-              { key: "skip", color: "rgba(255,255,255,0.2)", areaOpacity: 0.03 },
-            ]),
-          );
-          bdChart.data = trendData;
-        }
-
-        // ── Process health ──
-        const totalIssues =
-          (issues.done || []).length +
-          (issues.ready || []).length +
-          (issues.blocked || []).length +
-          (issues.inprogress || []).length;
-        document.getElementById("h-total-done").textContent = issues.done.length;
-        document.getElementById("h-total-runs").textContent = runs.length;
-        document.getElementById("h-ready-ratio").textContent = issues.ready.length + " / " + totalIssues;
-
-        // ── Sprint history (vertical timeline) ──
+        // ── Sprint timeline in header ──
         if (sprints.length > 0) {
           let sprintStats = null;
           try {
@@ -1011,150 +1215,197 @@
             if (resp.ok) sprintStats = await resp.json();
           } catch {}
 
-          if (sprintStats && (sprintStats.sprints || sprintStats).length > 1) {
+          const timelineEl = document.getElementById("sprint-timeline");
+          if (timelineEl && sprintStats && (sprintStats.sprints || sprintStats).length > 1) {
             const rawStats = sprintStats.sprints || sprintStats;
             const ss = rawStats.filter((s) => s.sprint > 0 && s.epoch);
-            const minEpoch = sprintStats.repoStart || ss[0].epoch;
-            const maxEpoch = sprintStats.repoEnd || ss[ss.length - 1].epoch;
-            const range = maxEpoch - minEpoch || 1;
-            const ONE_WEEK = 7 * 24 * 3600;
-            const VIEWPORT_W = 1000; // 1 week = this many SVG units = 100vw
-            const pxPerSec = VIEWPORT_W / ONE_WEEK;
-            const H = 100;
-            const PAD = { top: 40, bottom: 30, left: 30, right: 30 };
-            const plotW = range * pxPerSec;
-            const W = plotW + PAD.left + PAD.right;
-            const lineY = PAD.top;
+            const minEpoch = sprintStats.repoStart || ss[0]?.epoch;
+            const maxEpoch = sprintStats.repoEnd || ss[ss.length - 1]?.epoch;
 
-            const xPos = (epoch) => PAD.left + (epoch - minEpoch) * pxPerSec;
+            if (ss.length > 1 && minEpoch && maxEpoch) {
+              const range = maxEpoch - minEpoch || 1;
+              const ONE_WEEK = 7 * 24 * 3600;
+              const VIEWPORT_W = 1000;
+              const pxPerSec = VIEWPORT_W / ONE_WEEK;
+              const H = 100;
+              const PAD = { top: 40, bottom: 30, left: 30, right: 30 };
+              const plotW = range * pxPerSec;
+              const W = plotW + PAD.left + PAD.right;
+              const lineY = PAD.top;
 
-            let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="display:block;overflow:visible">`;
+              const xPos = (epoch) => PAD.left + (epoch - minEpoch) * pxPerSec;
 
-            // Horizontal timeline line
-            svg += `<line x1="${PAD.left}" y1="${lineY}" x2="${PAD.left + plotW}" y2="${lineY}" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>`;
+              let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="display:block;overflow:visible">`;
+              svg += `<line x1="${PAD.left}" y1="${lineY}" x2="${PAD.left + plotW}" y2="${lineY}" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>`;
 
-            // Commit dots
-            const commitEpochs = sprintStats.commitEpochs || [];
-            for (const ce of commitEpochs) {
-              if (ce < minEpoch || ce > maxEpoch) continue;
-              const cx = xPos(ce);
-              svg += `<circle cx="${cx}" cy="${lineY}" r="2.5" fill="rgba(248,113,113,0.35)"/>`;
-            }
-
-            // Date ticks — one per calendar day
-            const startDay = new Date(minEpoch * 1000);
-            startDay.setHours(0, 0, 0, 0);
-            const endDay = new Date(maxEpoch * 1000);
-            endDay.setHours(23, 59, 59, 999);
-            for (let d = new Date(startDay); d <= endDay; d.setDate(d.getDate() + 1)) {
-              const dayEpoch = d.getTime() / 1000;
-              if (dayEpoch < minEpoch || dayEpoch > maxEpoch) continue;
-              const dx = xPos(dayEpoch);
-              svg += `<line x1="${dx}" y1="${lineY - 10}" x2="${dx}" y2="${lineY + 10}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>`;
-              const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-              const label = d.getDate() === 1 ? months[d.getMonth()] : String(d.getDate());
-              const size = d.getDate() === 1 ? 14 : 12;
-              const opacity = d.getDate() === 1 ? 0.5 : 0.3;
-              svg += `<text x="${dx}" y="${lineY + 28}" text-anchor="middle" fill="rgba(255,255,255,${opacity})" font-size="${size}" font-family="monospace">${label}</text>`;
-            }
-
-            // Playhead (hidden initially)
-            svg += `<line id="tl-playhead" x1="0" y1="${lineY - 16}" x2="0" y2="${lineY + 16}" stroke="#fbbf24" stroke-width="2" opacity="0"/>`;
-
-            // Sprint dots — clickable, hide labels that are too close
-            const MIN_LABEL_GAP = 25;
-            let lastLabelX = -Infinity;
-            for (let i = ss.length - 1; i >= 0; i--) {
-              const s = ss[i];
-              const cx = xPos(s.epoch);
-              svg += `<rect x="${cx - 14}" y="${lineY - 22}" width="28" height="55" fill="transparent" data-sprint="${s.sprint}" style="cursor:pointer"/>`;
-              svg += `<circle cx="${cx}" cy="${lineY}" r="5" fill="#fff" data-sprint="${s.sprint}" style="cursor:pointer"/>`;
-              if (lastLabelX - cx >= MIN_LABEL_GAP || lastLabelX === -Infinity) {
-                svg += `<text x="${cx}" y="${lineY - 14}" text-anchor="middle" fill="#fff" font-size="13" font-weight="600" data-sprint="${s.sprint}" style="cursor:pointer">${s.sprint}</text>`;
-                lastLabelX = cx;
+              const commitEpochs = sprintStats.commitEpochs || [];
+              for (const ce of commitEpochs) {
+                if (ce < minEpoch || ce > maxEpoch) continue;
+                const cx = xPos(ce);
+                svg += `<circle cx="${cx}" cy="${lineY}" r="2.5" fill="rgba(248,113,113,0.35)"/>`;
               }
-            }
 
-            svg += `</svg>`;
-            const el = document.getElementById("sprint-history");
-            el.style.overflowX = "auto";
-            el.innerHTML = svg;
-            el.scrollLeft = el.scrollWidth;
-
-            // Sprint positions for playhead
-            const sprintPos = {};
-            for (const s of ss) sprintPos[s.sprint] = xPos(s.epoch);
-
-            // Click -> move playhead + select sprint on kanban
-            el.addEventListener("click", (e) => {
-              const t = e.target.closest("[data-sprint]");
-              if (!t) return;
-              const n = t.dataset.sprint;
-              const ph = el.querySelector("#tl-playhead");
-              if (ph && sprintPos[n] != null) {
-                ph.setAttribute("x1", sprintPos[n]);
-                ph.setAttribute("x2", sprintPos[n]);
-                ph.setAttribute("opacity", "1");
+              const startDay = new Date(minEpoch * 1000);
+              startDay.setHours(0, 0, 0, 0);
+              const endDay = new Date(maxEpoch * 1000);
+              endDay.setHours(23, 59, 59, 999);
+              for (let d = new Date(startDay); d <= endDay; d.setDate(d.getDate() + 1)) {
+                const dayEpoch = d.getTime() / 1000;
+                if (dayEpoch < minEpoch || dayEpoch > maxEpoch) continue;
+                const dx = xPos(dayEpoch);
+                svg += `<line x1="${dx}" y1="${lineY - 10}" x2="${dx}" y2="${lineY + 10}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>`;
+                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                const label = d.getDate() === 1 ? months[d.getMonth()] : String(d.getDate());
+                const size = d.getDate() === 1 ? 14 : 12;
+                const opacity = d.getDate() === 1 ? 0.5 : 0.3;
+                svg += `<text x="${dx}" y="${lineY + 28}" text-anchor="middle" fill="rgba(255,255,255,${opacity})" font-size="${size}" font-family="monospace">${label}</text>`;
               }
-              el.querySelectorAll("circle[data-sprint]").forEach((c) =>
-                c.setAttribute("fill", c.dataset.sprint === n ? "#fbbf24" : "#fff"),
-              );
-              if (typeof setSprintByNumber === "function") setSprintByNumber(n);
-            });
-          } else {
-            document.getElementById("sprint-history").innerHTML =
-              '<div style="color:var(--text-muted);font-size:12px;padding:16px">No sprint tags found.</div>';
-          }
 
-          // ── Velocity bar chart (issues per hour from sprint-stats) ──
-          const velStats = sprintStats ? sprintStats.sprints || sprintStats : [];
-          if (velStats.length > 0) {
-            function parseDuration(d) {
-              if (!d) return 0;
-              let hours = 0;
-              const dm = d.match(/(\d+)d/);
-              if (dm) hours += parseInt(dm[1]) * 24;
-              const hm = d.match(/(\d+)h/);
-              if (hm) hours += parseInt(hm[1]);
-              const mm = d.match(/(\d+)m/);
-              if (mm) hours += parseInt(mm[1]) / 60;
-              return hours || 1;
+              svg += `<line id="tl-playhead" x1="0" y1="${lineY - 16}" x2="0" y2="${lineY + 16}" stroke="#fbbf24" stroke-width="2" opacity="0"/>`;
+
+              const MIN_LABEL_GAP = 25;
+              let lastLabelX = -Infinity;
+              for (let i = ss.length - 1; i >= 0; i--) {
+                const s = ss[i];
+                const cx = xPos(s.epoch);
+                svg += `<rect x="${cx - 14}" y="${lineY - 22}" width="28" height="55" fill="transparent" data-sprint="${s.sprint}" style="cursor:pointer"/>`;
+                svg += `<circle cx="${cx}" cy="${lineY}" r="5" fill="#fff" data-sprint="${s.sprint}" style="cursor:pointer"/>`;
+                if (lastLabelX - cx >= MIN_LABEL_GAP || lastLabelX === -Infinity) {
+                  svg += `<text x="${cx}" y="${lineY - 14}" text-anchor="middle" fill="#fff" font-size="13" font-weight="600" data-sprint="${s.sprint}" style="cursor:pointer">${s.sprint}</text>`;
+                  lastLabelX = cx;
+                }
+              }
+
+              svg += `</svg>`;
+              timelineEl.innerHTML = svg;
+              timelineEl.scrollLeft = timelineEl.scrollWidth;
+
+              const sprintPos = {};
+              for (const s of ss) sprintPos[s.sprint] = xPos(s.epoch);
+
+              timelineEl.onclick = (e) => {
+                const t = e.target.closest("[data-sprint]");
+                if (!t) return;
+                const n = t.dataset.sprint;
+                const ph = timelineEl.querySelector("#tl-playhead");
+                if (ph && sprintPos[n] != null) {
+                  ph.setAttribute("x1", sprintPos[n]);
+                  ph.setAttribute("x2", sprintPos[n]);
+                  ph.setAttribute("opacity", "1");
+                }
+                timelineEl
+                  .querySelectorAll("circle[data-sprint]")
+                  .forEach((c) => c.setAttribute("fill", c.dataset.sprint === n ? "#fbbf24" : "#fff"));
+                if (typeof setSprintByNumber === "function") setSprintByNumber(n);
+              };
             }
-            const velocities = velStats
-              .filter((s) => s.sprint > 0 && s.issues > 0)
-              .map((s) => ({
-                sprint: s.sprint,
-                rate: s.issues / parseDuration(s.duration),
-                issues: s.issues,
-                duration: s.duration,
-              }));
-            const maxRate = Math.max(...velocities.map((v) => v.rate), 0.1);
-            document.getElementById("velocity-bar").innerHTML = velocities
-              .map((v) => {
-                const h = (v.rate / maxRate) * 100;
-                return `<div class="bar" style="height:${Math.max(h, 2)}%" data-tip="Sprint ${v.sprint}: ${v.rate.toFixed(1)} issues/h (${v.issues} in ${v.duration})"></div>`;
-              })
-              .join("");
-          } else if (sprints.length > 0) {
-            const maxIssues = Math.max(...sprints.map((s) => s.issueCount || 0), 1);
-            document.getElementById("velocity-bar").innerHTML = sprints
-              .map((s) => {
-                const h = ((s.issueCount || 0) / maxIssues) * 100;
-                return `<div class="bar" style="height:${Math.max(h, 2)}%" data-tip="${s.name}: ${s.issueCount || 0} issues"></div>`;
-              })
-              .join("");
           }
         }
       }
 
-      // ── Run on load ──
-      main().catch((err) => console.error("Dashboard error:", err));
+      // ── Local vs baseline detection ──
+      // Set to true when the Vite dev-server WebSocket connects, meaning
+      // we're viewing locally-generated data rather than a committed baseline.
+      let isLocal = false;
 
-      // ── Resize handler for charts ──
+      function fmtDate(d) {
+        return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      }
+
+      function updateBuildMeta(reportData) {
+        const hashEl = document.getElementById("build-hash");
+        const dateEl = document.getElementById("build-date");
+        if (isLocal) {
+          if (hashEl) hashEl.textContent = "";
+          if (dateEl) dateEl.textContent = "local · " + fmtDate(new Date());
+        } else {
+          if (hashEl && reportData?.baseline_sha) hashEl.textContent = reportData.baseline_sha.slice(0, 8);
+          if (dateEl && reportData?.timestamp) {
+            const d = new Date(reportData.timestamp);
+            if (dateEl) dateEl.textContent = isNaN(d) ? reportData.timestamp : fmtDate(d);
+          }
+        }
+      }
+
+      // ── Refresh ──
+      function refreshData() {
+        main().catch((err) => console.error("Dashboard error:", err));
+      }
+
+      const laneMobileQuery = window.matchMedia("(max-width: 600px)");
+
+      function setLaneCollapsed(col, collapsed) {
+        const header = col.querySelector(".kanban-col-header");
+        col.classList.toggle("is-collapsed", collapsed);
+        if (header) header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      }
+
+      function syncLaneFoldingMode() {
+        document.querySelectorAll(".kanban-col").forEach((col) => {
+          const header = col.querySelector(".kanban-col-header");
+          if (header) header.disabled = !laneMobileQuery.matches;
+          if (!laneMobileQuery.matches) setLaneCollapsed(col, false);
+        });
+      }
+
+      function setupLaneFolding() {
+        document.querySelectorAll(".kanban-col").forEach((col) => {
+          const header = col.querySelector(".kanban-col-header");
+          if (!header) return;
+          header.addEventListener("click", () => {
+            if (!laneMobileQuery.matches) return;
+            setLaneCollapsed(col, !col.classList.contains("is-collapsed"));
+          });
+        });
+        syncLaneFoldingMode();
+        if (laneMobileQuery.addEventListener) laneMobileQuery.addEventListener("change", syncLaneFoldingMode);
+        else laneMobileQuery.addListener(syncLaneFoldingMode);
+      }
+
+      function resizeKanban() {
+        const board = document.getElementById("kanban-board");
+        if (!board) return;
+        if (laneMobileQuery.matches) {
+          board.style.height = "";
+          return;
+        }
+        const top = board.getBoundingClientRect().top;
+        board.style.height = Math.max(260, window.innerHeight - top - 12) + "px";
+      }
+
+      // Push updates via SSE — no polling needed, no WebSocket upgrade dance
+      if (location.protocol !== "file:") {
+        const es = new EventSource("/dashboard-sse");
+        es.onopen = () => {
+          isLocal = true;
+          updateBuildMeta(null);
+        };
+        es.onmessage = (e) => {
+          try {
+            const { type } = JSON.parse(e.data);
+            if (type === "refresh") {
+              main().then(resizeKanban).catch(console.error);
+              const dateEl = document.getElementById("build-date");
+              if (dateEl) dateEl.textContent = "local · " + fmtDate(new Date());
+            }
+          } catch {}
+        };
+      }
+
+      // ── Run on load ──
+      setupLaneFolding();
+      setupSprintControls();
+      main()
+        .then(resizeKanban)
+        .catch((err) => console.error("Dashboard error:", err));
+
+      // ── Resize handler for charts + kanban ──
       let resizeTimer;
       window.addEventListener("resize", () => {
         clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => main(), 200);
+        resizeTimer = setTimeout(() => {
+          resizeKanban();
+        }, 200);
       });
     </script>
   </body>
