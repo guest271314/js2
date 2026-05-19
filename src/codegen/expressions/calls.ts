@@ -4860,8 +4860,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               } else {
                 fctx.body.push({ op: "ref.null.extern" });
               }
-            } else if (pt.kind === "f64") fctx.body.push({ op: "f64.const", value: 0 });
-            else if (pt.kind === "i32") fctx.body.push({ op: "i32.const", value: 0 });
+            } else if (pt.kind === "f64") {
+              // #1441 — `split` uses NaN as the "limit was not provided"
+              // sentinel. ToUint32(NaN) === 0 would produce `[]` if the runtime
+              // passed it through verbatim, so the `string_method` host shim
+              // strips a trailing NaN limit before invoking the JS method.
+              if (method === "split") {
+                fctx.body.push({ op: "f64.const", value: Number.NaN });
+              } else {
+                fctx.body.push({ op: "f64.const", value: 0 });
+              }
+            } else if (pt.kind === "i32") fctx.body.push({ op: "i32.const", value: 0 });
           }
         }
         fctx.body.push({ op: "call", funcIdx });
