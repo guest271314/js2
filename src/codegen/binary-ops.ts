@@ -583,6 +583,38 @@ export function compileBinaryExpression(
     if (staticKey !== null) {
       const hasInStruct = structFieldNames !== null && structFieldNames.includes(staticKey);
       const has = hasInStruct || tsTypeHasProperty;
+      // (#1444) When RHS is externref/anyref AND static analysis came up empty
+      // (no struct field, no TS-typed prop), the answer is NOT reliably false
+      // — the host object may carry dynamic keys (e.g. regex `result.groups`).
+      // Route through `__extern_has` for the real `in` check instead of
+      // emitting an unconditional `false`.
+      if (!has && (rightWasm.kind === "externref" || rightWasm.kind === "anyref")) {
+        const hasIdx = ensureLateImport(
+          ctx,
+          "__extern_has",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "i32" }],
+        );
+        if (hasIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult && rightResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+          if (leftResult && leftResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (leftResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: hasIdx });
+          return { kind: "i32" };
+        }
+      }
       // Evaluate both operands for side effects (needed for comma expressions like
       // (NUMBER = Number, "MAX_VALUE") in NUMBER). Drop the produced values.
       const leftResult = compileExpression(ctx, fctx, expr.left);
@@ -632,6 +664,41 @@ export function compileBinaryExpression(
     // Compile both sides for side effects, then use TS type system if the key
     // can be resolved from its type (e.g., a string variable with a known literal type).
     {
+      // (#1444) When RHS is externref-backed (host object — e.g. regex
+      // `result.groups`, untyped JS values), route through `__extern_has` so
+      // `'key' in hostObj` reflects the actual JS `in` semantics instead of
+      // the unconditional `false` fallback. The static path above still
+      // covers WasmGC structs / vec types / TS-typed properties where the
+      // compile-time answer is reliable.
+      if (rightWasm.kind === "externref" || rightWasm.kind === "anyref") {
+        const hasIdx = ensureLateImport(
+          ctx,
+          "__extern_has",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "i32" }],
+        );
+        if (hasIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          // Push obj (RHS) then key (LHS) — runtime signature is (obj, key).
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult && rightResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+          if (leftResult && leftResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (leftResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: hasIdx });
+          return { kind: "i32" };
+        }
+      }
+
       const leftResult = compileExpression(ctx, fctx, expr.left);
       if (leftResult) {
         fctx.body.push({ op: "drop" });
