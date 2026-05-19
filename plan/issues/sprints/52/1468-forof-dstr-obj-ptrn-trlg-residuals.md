@@ -1,5 +1,5 @@
 ---
-id: 1397
+id: 1468
 sprint: 52
 title: "for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close"
 status: ready
