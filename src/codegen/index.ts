@@ -7468,7 +7468,35 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     if (fctx.localMap.has(name)) return;
     if (ctx.moduleGlobals.has(name)) return;
     const varType = ctx.checker.getTypeAtLocation(decl);
-    const wasmType = resolveWasmType(ctx, varType);
+    // (#1239 / #1433) Object literals carrying get/set accessor declarations,
+    // or `[Symbol.dispose]` / `[Symbol.asyncDispose]` computed methods, are
+    // routed through the JS-host plain-object (externref) path. The local
+    // must be allocated as externref so subsequent property reads/writes
+    // bind to the host object, not a struct slot. Tag the var here so
+    // resolveStructNameForExpr sees the override at every later access.
+    let initForcesExternref = false;
+    if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      for (const p of decl.initializer.properties) {
+        if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
+          initForcesExternref = true;
+          break;
+        }
+        if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
+          const inner = p.name.expression;
+          if (
+            ts.isPropertyAccessExpression(inner) &&
+            ts.isIdentifier(inner.expression) &&
+            inner.expression.text === "Symbol" &&
+            (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
+          ) {
+            initForcesExternref = true;
+            break;
+          }
+        }
+      }
+    }
+    const wasmType: ValType = initForcesExternref ? { kind: "externref" as const } : resolveWasmType(ctx, varType);
+    if (initForcesExternref) ctx.externrefAccessorVars.add(name);
     const localIdx = allocLocal(fctx, name, wasmType);
     // In JS, hoisted `var` variables are `undefined` before their declaration,
     // not `null`. For externref locals, emit __get_undefined() + local.set (#737).
