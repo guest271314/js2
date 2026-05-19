@@ -1,6 +1,6 @@
 ---
 id: 1394
-sprint: 51
+sprint: 52
 title: "class method-closure caching: C.prototype.method returns stable singleton closure"
 status: ready
 created: 2026-05-09

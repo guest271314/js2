@@ -1,6 +1,6 @@
 ---
 id: 1400
-sprint: 51
+sprint: 52
 title: "npm: compile ESLint package entry to valid Wasm"
 status: ready
 created: 2026-05-11

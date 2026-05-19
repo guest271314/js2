@@ -1,6 +1,6 @@
 ---
 id: 1396
-sprint: 51
+sprint: 52
 title: "for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads"
 status: ready
 created: 2026-05-09
