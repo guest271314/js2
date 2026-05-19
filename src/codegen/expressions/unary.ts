@@ -460,20 +460,21 @@ function compilePrefixUnary(
       }
       const operandType = compileExpression(ctx, fctx, expr.operand);
       if (operandType?.kind === "externref") {
-        // String → number: use __unbox_number (Number() semantics, not parseFloat)
-        // Number("") = 0, Number("123") = 123, Number("abc") = NaN
-        // parseFloat("") = NaN which is wrong for unary +
-        const unboxIdx = ctx.funcMap.get("__unbox_number");
-        if (unboxIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxIdx });
-          return { kind: "f64" };
-        }
-        // Fallback to parseFloat if __unbox_number not available
-        const pfIdx = ctx.funcMap.get("parseFloat");
-        if (pfIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: pfIdx });
-          return { kind: "f64" };
-        }
+        // ToNumber (ECMA-262 §7.1.4): route through `__unbox_number` (#1434).
+        // This is the centralized ToNumber funnel — it implements
+        // ToPrimitive → Number for objects (including WasmGC struct
+        // valueOf/toString/@@toPrimitive via _toPrimitive #1319) and
+        // delegates to `Number(v)` for primitives. Critically, `Number()`
+        // throws TypeError on Symbol and BigInt operands per spec, and
+        // since #1434 the runtime no longer swallows that exception.
+        //
+        // The previous fallback to `parseFloat` was incorrect:
+        //   parseFloat("")  = NaN  (spec: Number("")  = 0)
+        //   parseFloat(Symbol()) ≠ throw (spec: TypeError)
+        // Use coerceType which auto-registers the import via
+        // addUnionImports if it wasn't already loaded.
+        coerceType(ctx, fctx, operandType, { kind: "f64" });
+        return { kind: "f64" };
       }
       // Struct ref → f64: coerce via valueOf (JS ToNumber semantics)
       if (operandType && (operandType.kind === "ref" || operandType.kind === "ref_null")) {

@@ -932,13 +932,15 @@ class T262EditionTimeline extends HTMLElement {
           top: 0;
         }
         .marker.above .line {
-          top: 23px;
+          top: 20px;
+          clip-path: inset(0 0 5px 0);
         }
         .marker.below {
           top: 0;
         }
         .marker.below .line {
-          top: 43px;
+          top: 38px;
+          clip-path: inset(5px 0 0 0);
         }
         .label {
           position: relative;

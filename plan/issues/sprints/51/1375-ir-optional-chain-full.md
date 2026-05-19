@@ -2,7 +2,7 @@
 id: 1375
 sprint: 51
 title: "IR: full optional-chain support (?. and ?.[]) without resolver fallback"
-status: in-progress
+status: done
 created: 2026-05-08
 priority: medium
 feasibility: hard

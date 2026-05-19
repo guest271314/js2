@@ -1,13 +1,13 @@
 ---
 id: 51
-status: active
+status: closed
 created: 2026-05-08
 started: 2026-05-08
 wrap_checklist:
-  status_closed: false
-  retro_written: false
-  diary_updated: false
-  end_tag_pushed: false
+  status_closed: true
+  retro_written: true
+  diary_updated: true
+  end_tag_pushed: true
   begin_tag_pushed: true
 ---
 
@@ -101,6 +101,8 @@ Two parallel tracks:
   `test262-differential.yml`; merge queue via GitHub Ruleset #16153215 attempted then
   ROLLED BACK — personal repos cannot bypass `github-actions[bot]` pushes. See issue file.
   `dev-self-merge.md` reverted to `--admin --merge`.
+- **#1134**: Loose equality cross-tag coercion (null==undefined, bool==number). Done PR #322 GATE_BYPASS (+35 net_per_test, 9/44=20% ratio but 9 absolute is small, correctness fix).
+- **dev-self-merge skill fix (2026-05-09)**: CI feed writes pr-N.json to origin/main, not local. Added `git fetch origin && git show origin/main:.claude/ci-status/pr-N.json` polling pattern to skill. Devs no longer need tech-lead to `git merge origin/main` before they can see CI results.
 
 ## Session results (2026-05-08)
 
@@ -151,43 +153,29 @@ Two parallel tracks:
 
 ## Remaining work
 
-**In progress (implementing):**
-- #1375 IR optional chain — Slice A merged (PR #311); dev-1389 on Slice B (task #19)
-- #1382 Wasm closures — senior-dev-1370 implementing (task #29)
+**In progress (2026-05-09):**
+- #1373 IR async functions — senior-dev (task #20), unblocked by #1326 Phase 1B
 - #1154 Array.prototype poisoning CE — dev-idx (task #30)
-- #1252+#1253 SameValue NaN + OrdinaryToPrimitive — dev-1389-2 (task #31)
-- #1104 Wasm-native Error — dev-1390-2 (task #33)
-
-**Pending (no active dev):**
-- #1373 IR async functions — BLOCKED on #1326 Phase 1 (microtask queue)
-- #1326 Async microtask queue Phase 1 — to be assigned to senior-dev-1384
+- #1382 Phase 2 (wire __make_js_callable) — senior-dev-1370 (task #38)
+- #1104 Phase 2 (Error .message/.name) — dev-1390-2 (task #39), PR #326 in CI
+- #1383 typeof-gated strict equality — dev-1388 (task #40)
+- class/dstr element null/undefined — dev-1389-2 (task #41)
+- class/elements _yield in static gen methods — dev-1389 (task #42)
 
 **Blocked:**
 - #1377 Slices C+ → externref identity bug
+- #1373 Phase B/C — blocked on #1326 Phase 1C (microtask queue, not yet assigned)
 
 <!-- GENERATED_ISSUE_TABLES_START -->
 ## Issue Tables
 
 _Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
-### Ready
-
-| Issue | Title | Priority | Status |
-|---|---|---|---|
-| #1366 | spec gap: class subclass + subclass-builtins prototype chain (~154 fails) | medium | ready |
-| #1373 | IR: claim async functions (async/await through IR path) | medium | ready |
-| #1375 | IR: full optional-chain support (?. and ?.[]) without resolver fallback | medium | ready |
-| #1382 | structural: Wasm closures not JS-callable from host imports — bridge gap | high | ready |
-| #1387 | feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies | medium | ready |
-| #1392 | IR: null-safe access primitives — ref.is_null IrUnop + value-producing if/else IR node | high | ready |
-
 ### In Progress
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #1364 | spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails) | high | in-progress |
 | #1378 | spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails) | medium | in-progress |
-| #1381 | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | medium | in-progress |
 
 ### Done
 
@@ -200,6 +188,7 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1362 | spec gap: Object.defineProperties — apply full descriptor map (332 fails) | high | done |
 | #1363 | spec gap: class dstr — 'Cannot destructure null/undefined' in method default-binding (~700 runtime_errors) | high | done |
 | #1365 | spec gap: class private fields, methods, accessors and brand checks (~97 fails in elements/private-*) | medium | done |
+| #1366 | spec gap: class subclass + subclass-builtins prototype chain (~154 fails) | medium | done |
 | #1366a | spec gap: class extends Error/TypeError/RangeError — builtin subclassing via existing host imports (+40-60 passes) | high | done |
 | #1367 | spec gap: Iterator.prototype helpers — get-next-once, non-constructible, return-on-throw (~244 fails) | high | done |
 | #1368 | spec gap: Promise.{all,allSettled,any,race} — resolver-element semantics, ctor type-check (~109 fails) | medium | done |
@@ -208,10 +197,12 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1371 | IR: expand external-call whitelist to stop rejecting host imports and Math.* | high | done |
 | #1372 | IR: support destructuring params (removes param-shape-rejected bypass) | high | done |
 | #1374 | IR: string for-of and for-in through IR (removes legacy fallback for string iteration) | medium | done |
+| #1375 | IR: full optional-chain support (?. and ?.[]) without resolver fallback | medium | done |
 | #1376 | IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold | high | done |
 | #1377 | spec gap: Array.prototype.{push,pop,shift,unshift,fill,copyWithin,reverse} — mutation on array-like + length writes (~80 fails) | medium | done |
 | #1379 | spec gap: prefix/postfix ++/-- on null/undefined/string operands — ToNumeric coercion (~40 fails) | medium | done |
 | #1380 | spec gap: equality (==, !=, ===, !==) — Symbol/BigInt coercion + ReferenceError propagation (~55 fails) | medium | done |
+| #1381 | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | medium | done |
 | #1384 | CE: static async method with PrivateName — 'not enough arguments on the stack' (249 tests) | high | done |
 | #1385 | HANG: Temporal/Duration/from/argument-non-string.js — infinite runtime loop | medium | done |
 | #1386 | HANG: Promise/race/invoke-then.js — compilation or runtime infinite loop | medium | done |
@@ -219,6 +210,9 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1389 | fix: false CE — var + function-declaration same name at top-level scope | medium | done |
 | #1390 | fix: import-defer proposal tests fail as CE (no test export) when TEST262_INCLUDE_PROPOSALS=1 | low | done |
 | #1391 | infra: CI feed baseline staleness detection — warn when baseline_sha diverges from current main | high | done |
+| #1392 | IR: null-safe access primitives — ref.is_null IrUnop + value-producing if/else IR node | high | done |
 | #1393 | infra: content-hash CI cache + GitHub Merge Queue — eliminate baseline drift and redundant re-runs | high | done |
+| #1395 | class static method descriptors: class identifier resolves to string_constant, not constructor object | medium | done |
+| #1396 | fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel | high | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->

@@ -143,7 +143,7 @@ pass rate goes from "good" to "excellent."
 | **1349** | spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime) | 50 | ready | medium |
 | **1350** | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | 50 | ready | medium |
 | **1351** | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | 50 | ready | medium |
-| **1352** | spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails) | 50 | ready | medium |
+| **1352** | spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails) | 50 | in-progress | medium |
 | **1354** | spec backlog: SharedArrayBuffer + Atomics (full implementation, requires multi-thread Wasm) | backlog | backlog | low |
 | **1355** | spec backlog: Proxy implementation beyond JS-host fallback (235 test262 fails) | backlog | backlog | low |
 | **1356** | spec backlog: ShadowRealm implementation (61 test262 fails, requires per-realm parser) | backlog | backlog | low |
@@ -154,9 +154,9 @@ pass rate goes from "good" to "excellent."
 | **1361** | spec gap: Array.prototype.sort — comparator validation, stability, ToString fallback (~46 fails) | 51 | done | medium |
 | **1362** | spec gap: Object.defineProperties — apply full descriptor map (332 fails) | 51 | done | high |
 | **1363** | spec gap: class dstr — 'Cannot destructure null/undefined' in method default-binding (~700 runtime_errors) | 51 | done | high |
-| **1364** | spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails) | 51 | in-progress | high |
+| **1364** | spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails) | 52 | blocked | high |
 | **1365** | spec gap: class private fields, methods, accessors and brand checks (~97 fails in elements/private-*) | 51 | done | medium |
-| **1366** | spec gap: class subclass + subclass-builtins prototype chain (~154 fails) | 51 | ready | medium |
+| **1366** | spec gap: class subclass + subclass-builtins prototype chain (~154 fails) | 51 | done | medium |
 | **1366a** | spec gap: class extends Error/TypeError/RangeError — builtin subclassing via existing host imports (+40-60 passes) | 51 | done | high |
 | **1367** | spec gap: Iterator.prototype helpers — get-next-once, non-constructible, return-on-throw (~244 fails) | 51 | done | high |
 | **1368** | spec gap: Promise.{all,allSettled,any,race} — resolver-element semantics, ctor type-check (~109 fails) | 51 | done | medium |
@@ -165,15 +165,50 @@ pass rate goes from "good" to "excellent."
 | **1378** | spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails) | 51 | in-progress | medium |
 | **1379** | spec gap: prefix/postfix ++/-- on null/undefined/string operands — ToNumeric coercion (~40 fails) | 51 | done | medium |
 | **1380** | spec gap: equality (==, !=, ===, !==) — Symbol/BigInt coercion + ReferenceError propagation (~55 fails) | 51 | done | medium |
-| **1381** | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | 51 | in-progress | medium |
+| **1381** | spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails) | 51 | done | medium |
 | **1383** | narrower typeof-gated strict-equality fix (follow-up to closed PR #272 / #1380) | Backlog | backlog | medium |
 | **1384** | CE: static async method with PrivateName — 'not enough arguments on the stack' (249 tests) | 51 | done | high |
 | **1385** | HANG: Temporal/Duration/from/argument-non-string.js — infinite runtime loop | 51 | done | medium |
 | **1386** | HANG: Promise/race/invoke-then.js — compilation or runtime infinite loop | 51 | done | medium |
-| **1387** | feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies | 51 | ready | medium |
+| **1387** | feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies | 52 | ready | medium |
 | **1388** | runtime: null.next — yield* / async-generator iterator construction returns null in class methods (316 fails) | 51 | done | high |
 | **1389** | fix: false CE — var + function-declaration same name at top-level scope | 51 | done | medium |
 | **1390** | fix: import-defer proposal tests fail as CE (no test export) when TEST262_INCLUDE_PROPOSALS=1 | 51 | done | low |
+| **1394** | class method-closure caching: C.prototype.method returns stable singleton closure | 52 | ready | high |
+| **1395** | class static method descriptors: class identifier resolves to string_constant, not constructor object | 51 | done | medium |
+| **1396** | fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel | 51 | done | high |
+| **1397** | codegen: static method dispatch ignores runtime property reassignment on typed receivers | 52 | done | medium |
+| **1431** | spec gap: assignment operators — destructuring completion, defaults, and compound side effects | 52 | in-progress | medium |
+| **1432** | spec gap: parameter lists — rest/destructuring iterator semantics and default initializers | 52 | done | medium |
+| **1433** | spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics | 52 | in-progress | medium |
+| **1434** | spec gap: ToNumber/ToNumeric coercion and unary operator edge cases | 52 | done | medium |
+| **1435** | spec gap: lexical grammar and syntax-directed early errors | 52 | ready | medium |
+| **1436** | spec gap: global object descriptors and global function coercion/URI semantics | 52 | ready | medium |
+| **1437** | spec gap: Math numeric edge cases beyond random source | 52 | done | low |
+| **1438** | spec gap: Map, WeakMap, and WeakSet residual collection semantics | 52 | in-progress | medium |
+| **1439** | spec gap: RegExp.prototype Symbol.* protocol methods (replace/match/split/matchAll/search) | 52 | ready | high |
+| **1440** | spec gap: Date setters ToNumber coercion + Invalid Date (NaN) propagation | 52 | ready | high |
+| **1441** | spec gap: String.prototype.split — Array result shape + String wrapper receivers | 52 | ready | high |
+| **1442** | spec gap: String.prototype methods — RequireObjectCoercible + ToString on this value | 52 | ready | medium |
+| **1443** | spec gap: String.prototype.replace/replaceAll/match/search delegate to argument's Symbol.* method | 52 | ready | medium |
+| **1444** | spec gap: RegExp named groups (unmatched + duplicate) and lookbehind edge cases | 52 | ready | medium |
+| **1445** | spec gap: String.raw + String.prototype.* argument coercion (ToInteger / ToPrimitive) | 52 | ready | medium |
+| **1450** | spec gap: NamedEvaluation — anonymous fn/class names from binding identifiers in destructuring defaults | 52 | ready | high |
+| **1451** | spec gap: class/object-literal method parameter destructuring with non-trivial defaults | 52 | ready | high |
+| **1452** | spec gap: for-loop init binding patterns — declared names not visible in loop body | 52 | ready | high |
+| **1453** | spec gap: per-iteration fresh let/const binding in for-statements | 52 | ready | medium |
+| **1454** | spec gap: iterator protocol — error propagation and IteratorClose during destructuring | 52 | ready | medium |
+| **1455** | spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …) | 52 | ready | medium |
+| **1456** | spec gap: private-reference assignment to readonly accessor / method throws TypeError | 52 | ready | medium |
+| **1460** | spec gap: Object.defineProperty / defineProperties descriptor fidelity | 52 | ready | high |
+| **1461** | spec gap: Array.prototype.* called on array-like / exotic receivers | 52 | ready | high |
+| **1462** | spec gap: Object.getOwnPropertyDescriptor + Object.create descriptor surface | 52 | ready | high |
+| **1463** | spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity | 52 | ready | medium |
+| **1464** | spec gap: Iterator.prototype helpers + Iterator.zip / Iterator.concat (ES2025) | 52 | ready | medium |
+| **1465** | spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity | 52 | ready | medium |
+| **1466** | spec gap: Proxy + Reflect trap / operation fidelity | 52 | ready | medium |
+| **1467** | spec gap: Error / AggregateError / Symbol prototype protocol | 52 | ready | medium |
+| **1468** | for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close | 52 | ready | medium |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 
