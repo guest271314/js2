@@ -31,7 +31,7 @@ import {
   VOID_RESULT,
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
-import { emitLocalTdzInit } from "./tdz.js";
+import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
 
 export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, pattern: ts.BindingPattern): void {
   for (const element of pattern.elements) {
@@ -67,6 +67,15 @@ export function syncDestructuredLocalsToGlobals(
     if (ts.isBindingElement(element)) {
       if (ts.isIdentifier(element.name)) {
         const name = element.name.text;
+        // #1452 — every binding-pattern element that successfully ran
+        // through destructuring needs its TDZ flag flipped to
+        // "initialized". The struct-path object form already calls
+        // `emitLocalTdzInit` inline (destructuring.ts:677), but the
+        // externref array fallback, vec/tuple-struct array forms, and
+        // rest-element branches do not. Doing it here piggybacks on
+        // the central "destructure complete" callsite — and is a
+        // no-op for non-let/const bindings, which have no TDZ flag.
+        emitLocalTdzInit(fctx, name);
         const moduleGlobalIdx = ctx.moduleGlobals.get(name);
         const localIdx = fctx.localMap.get(name);
         if (moduleGlobalIdx !== undefined && localIdx !== undefined) {

@@ -45,6 +45,7 @@ import {
   syncDestructuredLocalsToGlobals,
 } from "./destructuring.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
+import { collectPatternBindingNames } from "./tdz.js";
 
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
@@ -303,25 +304,33 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
     ts.isVariableDeclarationList(stmt.initializer) &&
     stmt.initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)
   ) {
+    // #1452 — walk every name introduced by the declaration. The legacy
+    // path only covered `ts.isIdentifier(decl.name)`, leaving array /
+    // object / nested / rest binding-pattern bindings out of the
+    // shadow-tracking. The result was that `for (let [x] = [...]) ...`
+    // leaked `x` into the outer scope after the loop terminated.
+    const introducedNames: string[] = [];
     for (const decl of stmt.initializer.declarations) {
-      if (ts.isIdentifier(decl.name)) {
-        const name = decl.name.text;
-        if (!savedForConstBindings) savedForConstBindings = new Map();
-        savedForConstBindings.set(name, fctx.constBindings?.has(name) ?? false);
-        fctx.constBindings?.delete(name);
+      for (const n of collectPatternBindingNames(decl.name)) {
+        introducedNames.push(n);
+      }
+    }
+    for (const name of introducedNames) {
+      if (!savedForConstBindings) savedForConstBindings = new Map();
+      savedForConstBindings.set(name, fctx.constBindings?.has(name) ?? false);
+      fctx.constBindings?.delete(name);
 
-        const existing = fctx.localMap.get(name);
-        if (existing !== undefined) {
-          if (!savedForScope) savedForScope = new Map();
-          savedForScope.set(name, existing);
-          fctx.localMap.delete(name);
-        }
-        const existingTdz = fctx.tdzFlagLocals?.get(name);
-        if (existingTdz !== undefined) {
-          if (!savedForTdz) savedForTdz = new Map();
-          savedForTdz.set(name, existingTdz);
-          fctx.tdzFlagLocals?.delete(name);
-        }
+      const existing = fctx.localMap.get(name);
+      if (existing !== undefined) {
+        if (!savedForScope) savedForScope = new Map();
+        savedForScope.set(name, existing);
+        fctx.localMap.delete(name);
+      }
+      const existingTdz = fctx.tdzFlagLocals?.get(name);
+      if (existingTdz !== undefined) {
+        if (!savedForTdz) savedForTdz = new Map();
+        savedForTdz.set(name, existingTdz);
+        fctx.tdzFlagLocals?.delete(name);
       }
     }
   }
