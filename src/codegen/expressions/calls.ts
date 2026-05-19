@@ -1555,14 +1555,40 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 compileStringLiteral(ctx, fctx, methodName);
               }
 
-              // Compile receiver (first argument to .call)
+              // Compile receiver (first argument to .call).
+              // (#1442) When the receiver's static TS type is `boolean`, the
+              // i32 → externref auto-coercion uses `__box_number` and arrives
+              // host-side as `Number(0)` / `Number(1)`. That makes
+              // `String.prototype.trim.call(true)` return `"1"` instead of
+              // `"true"`. Box booleans through `__box_boolean` so the host
+              // gets a real `Boolean` wrapper, then String() / ToString
+              // produces the spec-correct `"true"` / `"false"`.
               const receiverArg = expr.arguments[0]!;
-              const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
-              if (recvType && recvType.kind !== "externref") {
-                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
-              }
-              if (recvType === null) {
-                fctx.body.push({ op: "ref.null.extern" });
+              const receiverTsType = ctx.checker.getTypeAtLocation(receiverArg);
+              if (isBooleanType(receiverTsType)) {
+                const recvWasm = compileExpression(ctx, fctx, receiverArg);
+                if (recvWasm && recvWasm.kind === "i32") {
+                  addUnionImports(ctx);
+                  flushLateImportShifts(ctx, fctx);
+                  const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+                  if (boxBoolIdx !== undefined) {
+                    fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+                  } else {
+                    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                  }
+                } else if (recvWasm && recvWasm.kind !== "externref") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                } else if (recvWasm === null) {
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else {
+                const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
+                if (recvType && recvType.kind !== "externref") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                }
+                if (recvType === null) {
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
               }
 
               // Build args array from remaining arguments
