@@ -19258,7 +19258,7 @@
       "title": "spec gap: assignment operators — destructuring completion, defaults, and compound side effects",
       "priority": "medium",
       "status": "ready",
-      "raw_status": "ready",
+      "raw_status": "in-progress",
       "sprint": "52",
       "depends_on": [],
       "files": [],
@@ -19269,8 +19269,8 @@
       "id": "1432",
       "title": "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers",
       "priority": "medium",
-      "status": "ready",
-      "raw_status": "ready",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "52",
       "depends_on": [],
       "files": [],
@@ -19282,7 +19282,7 @@
       "title": "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics",
       "priority": "medium",
       "status": "ready",
-      "raw_status": "ready",
+      "raw_status": "in-progress",
       "sprint": "52",
       "depends_on": [],
       "files": [],
@@ -19329,8 +19329,8 @@
       "id": "1437",
       "title": "spec gap: Math numeric edge cases beyond random source",
       "priority": "low",
-      "status": "ready",
-      "raw_status": "in-progress",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "52",
       "depends_on": [],
       "files": [],
@@ -19342,12 +19342,480 @@
       "title": "spec gap: Map, WeakMap, and WeakSet residual collection semantics",
       "priority": "medium",
       "status": "ready",
+      "raw_status": "in-progress",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1439",
+      "title": "spec gap: RegExp.prototype Symbol.* protocol methods (replace/match/split/matchAll/search)",
+      "priority": "high",
+      "status": "ready",
       "raw_status": "ready",
       "sprint": "52",
       "depends_on": [],
       "files": [],
       "goal": "spec-completeness",
       "cluster": "spec-completeness"
+    },
+    {
+      "id": "1440",
+      "title": "spec gap: Date setters ToNumber coercion + Invalid Date (NaN) propagation",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1441",
+      "title": "spec gap: String.prototype.split — Array result shape + String wrapper receivers",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1442",
+      "title": "spec gap: String.prototype methods — RequireObjectCoercible + ToString on this value",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1443",
+      "title": "spec gap: String.prototype.replace/replaceAll/match/search delegate to argument's Symbol.* method",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1444",
+      "title": "spec gap: RegExp named groups (unmatched + duplicate) and lookbehind edge cases",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1445",
+      "title": "spec gap: String.raw + String.prototype.* argument coercion (ToInteger / ToPrimitive)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1450",
+      "title": "spec gap: NamedEvaluation — anonymous fn/class names from binding identifiers in destructuring defaults",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1451",
+      "title": "spec gap: class/object-literal method parameter destructuring with non-trivial defaults",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1452",
+      "title": "spec gap: for-loop init binding patterns — declared names not visible in loop body",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1453",
+      "title": "spec gap: per-iteration fresh let/const binding in for-statements",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1454",
+      "title": "spec gap: iterator protocol — error propagation and IteratorClose during destructuring",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1455",
+      "title": "spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1456",
+      "title": "spec gap: private-reference assignment to readonly accessor / method throws TypeError",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1460",
+      "title": "spec gap: Object.defineProperty / defineProperties descriptor fidelity",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1461",
+      "title": "spec gap: Array.prototype.* called on array-like / exotic receivers",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1462",
+      "title": "spec gap: Object.getOwnPropertyDescriptor + Object.create descriptor surface",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1463",
+      "title": "spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1464",
+      "title": "spec gap: Iterator.prototype helpers + Iterator.zip / Iterator.concat (ES2025)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1465",
+      "title": "spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1466",
+      "title": "spec gap: Proxy + Reflect trap / operation fidelity",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1467",
+      "title": "spec gap: Error / AggregateError / Symbol prototype protocol",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1468",
+      "title": "for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1470",
+      "title": "host-independence: eliminate JS host string ops for standalone Wasm",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "host-independence",
+      "cluster": "host-independence"
+    },
+    {
+      "id": "1471",
+      "title": "host-independence: eliminate JS host boxing/unboxing for standalone Wasm",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "host-independence",
+      "cluster": "host-independence"
+    },
+    {
+      "id": "1472",
+      "title": "host-independence: eliminate JS host object/property ops for standalone Wasm",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "host-independence",
+      "cluster": "host-independence"
+    },
+    {
+      "id": "1473",
+      "title": "host-independence: eliminate JS host error/exception ops for standalone Wasm",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "host-independence",
+      "cluster": "host-independence"
+    },
+    {
+      "id": "1480",
+      "title": "wasi: console.error and console.warn should write to stderr (fd=2)",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1481",
+      "title": "wasi: support reading stdin via fd_read",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1482",
+      "title": "wasi: wire process.env to environ_get / environ_sizes_get",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1483",
+      "title": "wasi: route Date.now and performance.now to clock_time_get",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1484",
+      "title": "wasi: provide standalone setTimeout/setInterval via poll_oneoff (or fail loud)",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1490",
+      "title": "nodejs: runtime access to process.argv and process.env",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "nodejs-support",
+      "cluster": "nodejs-support"
+    },
+    {
+      "id": "1491",
+      "title": "nodejs: fs.readFileSync/writeFileSync as JS-host imports (non-WASI)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "nodejs-support",
+      "cluster": "nodejs-support"
+    },
+    {
+      "id": "1492",
+      "title": "nodejs: crypto.randomBytes / randomUUID host imports",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "nodejs-support",
+      "cluster": "nodejs-support"
+    },
+    {
+      "id": "1493",
+      "title": "nodejs: console.error / console.warn → stderr (fd=2) in WASI mode",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "nodejs-support",
+      "cluster": "nodejs-support"
+    },
+    {
+      "id": "1494",
+      "title": "nodejs: __dirname / __filename / import.meta.url for compiled modules",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "nodejs-support",
+      "cluster": "nodejs-support"
+    },
+    {
+      "id": "1500",
+      "title": "browser: fetch() host import with Response bridge",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "browser-support",
+      "cluster": "browser-support"
+    },
+    {
+      "id": "1501",
+      "title": "browser: setTimeout/setInterval/clearTimeout/clearInterval host imports",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "52",
+      "depends_on": [],
+      "files": [],
+      "goal": "browser-support",
+      "cluster": "browser-support"
     }
   ],
   "links": [
@@ -21680,7 +22148,30 @@
         "1435",
         "1436",
         "1437",
-        "1438"
+        "1438",
+        "1439",
+        "1440",
+        "1441",
+        "1442",
+        "1443",
+        "1444",
+        "1445",
+        "1450",
+        "1451",
+        "1452",
+        "1453",
+        "1454",
+        "1455",
+        "1456",
+        "1460",
+        "1461",
+        "1462",
+        "1463",
+        "1464",
+        "1465",
+        "1466",
+        "1467",
+        "1468"
       ]
     },
     {
@@ -26755,6 +27246,98 @@
       "issue": "1438"
     },
     {
+      "goal": "spec-completeness",
+      "issue": "1439"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1440"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1441"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1442"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1443"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1444"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1445"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1450"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1451"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1452"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1453"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1454"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1455"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1456"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1460"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1461"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1462"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1463"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1464"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1465"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1466"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1467"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1468"
+    },
+    {
       "goal": "standalone-mode",
       "issue": "34"
     },
@@ -31373,6 +31956,98 @@
       "issue": "1438"
     },
     {
+      "goal": "async-model",
+      "issue": "1439"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1440"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1441"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1442"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1443"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1444"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1445"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1450"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1451"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1452"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1453"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1454"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1455"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1456"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1460"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1461"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1462"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1463"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1464"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1465"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1466"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1467"
+    },
+    {
+      "goal": "async-model",
+      "issue": "1468"
+    },
+    {
       "goal": "symbol-protocol",
       "issue": "10"
     },
@@ -32037,6 +32712,98 @@
       "issue": "1438"
     },
     {
+      "goal": "symbol-protocol",
+      "issue": "1439"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1440"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1441"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1442"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1443"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1444"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1445"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1450"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1451"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1452"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1453"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1454"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1455"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1456"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1460"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1461"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1462"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1463"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1464"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1465"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1466"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1467"
+    },
+    {
+      "goal": "symbol-protocol",
+      "issue": "1468"
+    },
+    {
       "goal": "builtin-methods",
       "issue": "10"
     },
@@ -32701,6 +33468,98 @@
       "issue": "1438"
     },
     {
+      "goal": "builtin-methods",
+      "issue": "1439"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1440"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1441"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1442"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1443"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1444"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1445"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1450"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1451"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1452"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1453"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1454"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1455"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1456"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1460"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1461"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1462"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1463"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1464"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1465"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1466"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1467"
+    },
+    {
+      "goal": "builtin-methods",
+      "issue": "1468"
+    },
+    {
       "goal": "property-model",
       "issue": "10"
     },
@@ -33363,6 +34222,98 @@
     {
       "goal": "property-model",
       "issue": "1438"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1439"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1440"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1441"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1442"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1443"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1444"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1445"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1450"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1451"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1452"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1453"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1454"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1455"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1456"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1460"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1461"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1462"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1463"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1464"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1465"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1466"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1467"
+    },
+    {
+      "goal": "property-model",
+      "issue": "1468"
     },
     {
       "goal": "iterator-protocol",
