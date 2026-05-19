@@ -13,7 +13,7 @@ Run this when all sprint tasks are done or the sprint is being closed.
 # Check TaskList for any in_progress or pending tasks
 ```
 
-For each unmerged task: either merge it (use /test-and-merge) or document why it's deferred.
+For each unmerged task: either have the dev self-merge via /test-and-merge, or document why it's deferred.
 
 ## Step 2: Clean up worktrees
 
@@ -114,7 +114,7 @@ Update `/home/node/.claude/projects/-workspace/memory/project_next_session.md` w
 
 ```bash
 git add plan/issues/sprints/{N}/sprint.md plan/diary.md plan/log/retrospectives/sprint-{N}.md
-git commit -m "chore(sprint-{N}): close sprint — retro, diary entry, status closed [CHECKLIST-FOXTROT]"
+git commit -m "chore(sprint-{N}): close sprint — retro, diary entry, status closed. Checklist completed."
 ```
 
 ## Step 12: Push

@@ -177,6 +177,13 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.rand];
     case "select":
       return [instr.condition, instr.whenTrue, instr.whenFalse];
+    case "if":
+      // (#1392) The arm buffers are emission-internal — their SSA defs
+      // and uses live within their own scope (analogous to forof.vec /
+      // try). Surface only the `cond` for the straight-line walk;
+      // `thenValue` / `elseValue` are arm-internal too. The lowerer
+      // walks the arms separately when emitting Wasm if/else.
+      return [instr.cond];
     case "raw.wasm":
       return [];
     case "box":
@@ -266,6 +273,39 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     // Slice 6 part 4 (#1183) — string for-of.
     case "forof.string":
       return [instr.str];
+    // Slice 9 (#1169h) — exception handling. Body / catch / finally uses
+    // are loop-internal (analogous to forof.vec) and are not surfaced
+    // in the straight-line use-before-def walk.
+    case "throw":
+      return [instr.value];
+    case "try":
+      return [];
+    // Slice 10 (#1169i) — extern class ops.
+    case "extern.new":
+      return instr.args;
+    case "extern.call":
+      return [instr.receiver, ...instr.args];
+    case "extern.prop":
+      return [instr.receiver];
+    case "extern.propSet":
+      return [instr.receiver, instr.value];
+    case "extern.regex":
+      return [];
+    // Slice 12 (#1280): while.loop / for.loop. Buffer-internal uses
+    // are not surfaced here (mirrors forof.* convention) — the verify
+    // pass walks them via its own buffer recursion if any.
+    case "while.loop":
+    case "for.loop":
+      return [instr.condValue];
+    // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
+    // The verifier sees their operands as plain SSA uses; lowering
+    // (Phase C, #1373b) will define the per-arm SSA scope.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
   }
 }
 

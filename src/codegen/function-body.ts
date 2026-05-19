@@ -4,7 +4,7 @@
  *
  * Extracted from codegen/index.ts (#1013).
  */
-import ts from "typescript";
+import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { popBody, pushBody } from "./context/bodies.js";
@@ -38,6 +38,9 @@ import {
 } from "./shared.js";
 import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
+import { detectStringBuilders } from "./string-builder.js";
+import { collectI32SpecializedArrays } from "./array-element-typing.js";
+import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
@@ -166,9 +169,9 @@ export function collectI32CoercedLocals(decl: ts.FunctionLikeDeclaration): Set<s
         }
       }
     }
-    ts.forEachChild(node, collectDecls);
+    forEachChild(node, collectDecls);
   }
-  ts.forEachChild(decl.body, collectDecls);
+  forEachChild(decl.body, collectDecls);
 
   // Drop shadowed names — they are not safe to promote because the
   // hoist/codegen split would see two scopes with the same name.
@@ -246,15 +249,15 @@ export function collectI32CoercedLocals(decl: ts.FunctionLikeDeclaration): Set<s
         ts.isConstructorDeclaration(node))
     ) {
       // Descend, but mark all identifier references inside as "captured".
-      ts.forEachChild(node, (child) => collectCaptures(child, true));
+      forEachChild(node, (child) => collectCaptures(child, true));
       return;
     }
     if (insideNested && ts.isIdentifier(node) && candidates.has(node.text)) {
       disqualified.add(node.text);
     }
-    ts.forEachChild(node, (child) => collectCaptures(child, insideNested));
+    forEachChild(node, (child) => collectCaptures(child, insideNested));
   }
-  ts.forEachChild(decl.body, (child) => collectCaptures(child, false));
+  forEachChild(decl.body, (child) => collectCaptures(child, false));
 
   // Pass 2: collect every mutation of each candidate
   function collectMutations(node: ts.Node): void {
@@ -319,9 +322,9 @@ export function collectI32CoercedLocals(decl: ts.FunctionLikeDeclaration): Set<s
     ) {
       recordCandidate(node.operand.text, { kind: "incdec" });
     }
-    ts.forEachChild(node, collectMutations);
+    forEachChild(node, collectMutations);
   }
-  ts.forEachChild(decl.body, collectMutations);
+  forEachChild(decl.body, collectMutations);
 
   // Drop disqualified candidates so they cannot be promoted.
   for (const name of disqualified) {
@@ -410,9 +413,22 @@ export function collectI32CoercedLocals(decl: ts.FunctionLikeDeclaration): Set<s
       ) {
         return true;
       }
-      // Add/sub/mul: safe if both operands are i32-safe
+      // #1236 — `+`, `-`, `*` of i32-safe operands are NOT safe to promote
+      // to i32 here. The arithmetic itself produces f64 in codegen (JS spec:
+      // `number + number` is f64), and the trailing `i32.trunc_sat_f64_s`
+      // saturates rather than wrapping when the result exceeds 2^31-1.
+      // Pre-#1236 logic accepted these as safe ("overflow wrap is OK") but
+      // saturation is silent corruption: a long-running accumulator
+      // (`let s = 0; for (let i = 0; i < 1e6; i++) s = s + i;`) returns
+      // 2147483647 instead of the spec-correct 499999500000. Demote the
+      // candidate to f64 instead — the f64 arithmetic now flows through
+      // an f64 local with no trunc-sat in sight.
+      //
+      // Loop counters (`for (let i = 0; ...; i++)`) are unaffected: they go
+      // through the separate `detectI32LoopVar` path which proves the
+      // counter is bounded by the loop condition.
       if (o === ts.SyntaxKind.PlusToken || o === ts.SyntaxKind.MinusToken || o === ts.SyntaxKind.AsteriskToken) {
-        return isI32SafeExpr(expr.left, depth + 1) && isI32SafeExpr(expr.right, depth + 1);
+        return false;
       }
       return false;
     }
@@ -432,13 +448,16 @@ export function collectI32CoercedLocals(decl: ts.FunctionLikeDeclaration): Set<s
     ) {
       return true;
     }
-    // Arithmetic compound: needs i32-safe RHS
+    // #1236 — `+=`, `-=`, `*=` desugar to `lhs = lhs + rhs` etc., which
+    // routes through f64 arithmetic and a trailing `i32.trunc_sat_f64_s`.
+    // Saturation on overflow silently corrupts long-running accumulators
+    // (see #1236 / Option A). Demote to f64 instead.
     if (
       op === ts.SyntaxKind.PlusEqualsToken ||
       op === ts.SyntaxKind.MinusEqualsToken ||
       op === ts.SyntaxKind.AsteriskEqualsToken
     ) {
-      return isI32SafeExpr(rhs);
+      return false;
     }
     return false;
   }
@@ -598,6 +617,11 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // value flowing through them is constrained to int32 by `| 0` coercion.
   const i32CoercedLocals = collectI32CoercedLocals(decl);
 
+  // #1197: detect `number[]` locals whose element storage can lower to i32.
+  // Depends on the i32 scalar set so that `arr[i] = sum` (where `sum` is i32)
+  // counts as an i32-safe write.
+  const i32SpecializedArrays = collectI32SpecializedArrays(decl, i32CoercedLocals);
+
   const fctx: FunctionContext = {
     name: func.name,
     params,
@@ -612,6 +636,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     savedBodies: [],
     isGenerator,
     i32CoercedLocals: i32CoercedLocals.size > 0 ? i32CoercedLocals : undefined,
+    i32SpecializedArrays: i32SpecializedArrays.size > 0 ? i32SpecializedArrays : undefined,
   };
 
   // Register params as locals
@@ -893,16 +918,35 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   } else {
     // Compile body statements
     if (decl.body) {
+      // #1210: pre-scan for `let s = ""; for (...) s += <expr>` builder patterns.
+      // Must run BEFORE hoistLetConstWithTdz so the hoist pass can skip
+      // pre-allocating the binding's local — the binding is replaced by a
+      // synthetic buffer/len/cap/mat triple set up at declaration time.
+      // Only runs in nativeStrings mode (JS-host concat avoids GC pressure).
+      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        const builders = detectStringBuilders(ctx, decl.body);
+        if (builders.size > 0) fctx.pendingStringBuilders = builders;
+      }
+      // #1195: array-reduce-fusion — detect the fill+reduce shape and
+      // rewrite the AST to eliminate the temporary array. Runs BEFORE
+      // hoisting so the fused statement list is what gets hoisted /
+      // compiled. The detector is conservative; if any precondition
+      // fails, the original statements are returned unchanged.
+      const fusionMatches = detectArrayReduceFusion(ctx, decl.body);
+      const bodyStatements: ts.Statement[] =
+        fusionMatches.length > 0
+          ? applyArrayReduceFusion(decl.body.statements, fusionMatches)
+          : (decl.body.statements as unknown as ts.Statement[]);
       // Hoist `var` declarations: pre-allocate locals so variables are accessible
       // even before their declaration site (JS var hoisting semantics).
-      hoistVarDeclarations(ctx, fctx, decl.body.statements);
+      hoistVarDeclarations(ctx, fctx, bodyStatements);
       // Hoist `let`/`const` declarations with TDZ flags so nested functions can
       // capture them. The TDZ flag ensures ReferenceError if accessed before init.
-      hoistLetConstWithTdz(ctx, fctx, decl.body.statements);
+      hoistLetConstWithTdz(ctx, fctx, bodyStatements);
       // Hoist function declarations: JS semantics require function declarations
       // to be available before their textual position in the enclosing scope.
-      hoistFunctionDeclarations(ctx, fctx, decl.body.statements);
-      for (const stmt of decl.body.statements) {
+      hoistFunctionDeclarations(ctx, fctx, bodyStatements);
+      for (const stmt of bodyStatements) {
         compileStatement(ctx, fctx, stmt);
       }
     }

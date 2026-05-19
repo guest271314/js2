@@ -1,7 +1,7 @@
 node_modules/
 dist/
-playground-dist/
-pages-dist/
+dist/playground/
+dist/pages/
 output/
 *.tsbuildinfo
 .vite/
@@ -13,6 +13,7 @@ benchmarks/results/*.json
 !benchmarks/results/wat-analysis-report.json
 !benchmarks/results/latest.json
 !benchmarks/results/history.json
+!benchmarks/results/diff-test-baseline.json
 benchmarks/results/*.md
 benchmarks/results/*.txt
 .pnpm-store/
@@ -20,7 +21,7 @@ benchmarks/results/*.txt
 .claude/worktrees/
 .claude/agents/
 .test262-cache/
-test262-out/
+output/
 scripts/compiler-bundle.mjs
 scripts/runtime-bundle.mjs
 scripts/main-compiler-bundle.mjs
@@ -71,3 +72,12 @@ benchmarks/results/runs/
 .playwright-cli/
 vendor/
 docs/publications/
+
+# Claude Code scheduled tasks lock
+.claude/scheduled_tasks.lock
+
+# CI status snapshots and diff reports (generated, not committed)
+.claude/ci-status/*.bak
+test262-diff-branch-merged/
+test262-diff-main-merged/
+test262-diff-regressions-report/

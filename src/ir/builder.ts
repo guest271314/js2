@@ -200,6 +200,58 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * (#1392) Emit `unary("ref.is_null", val)` — tests a Wasm reference for
+   * null. Result is `i32` (1 if null, 0 otherwise). The architect-spec
+   * name `emitRefIsNull` mirrors the existing `emitUnary` /
+   * `emitBinary` / `emitSelect` family and surfaces the underlying op
+   * at the call site so #1375's optional-chain lowering reads naturally
+   * (`cx.builder.emitRefIsNull(recv)`).
+   *
+   * `val`'s IrType MUST be a `val`-kind wrapping a Wasm reference type
+   * (`ref` / `ref_null` / `externref` / `funcref`); the verifier and the
+   * Wasm validator together reject other operand shapes.
+   */
+  emitRefIsNull(val: IrValueId): IrValueId {
+    return this.emitUnary("ref.is_null", val, irVal({ kind: "i32" }));
+  }
+
+  /**
+   * (#1392) Emit a value-producing short-circuiting if/else. Both `then`
+   * and `else` are pre-collected instruction buffers (typically built
+   * via `collectBodyInstrs(...)`); the lowerer emits a Wasm
+   * `if (result T) ... else ... end` so only the matching branch
+   * executes.
+   *
+   * `thenValue` / `elseValue` are SSA value IDs DEFINED INSIDE the
+   * corresponding arm — the lowerer emits each arm's instruction tree
+   * and leaves the carrier value on the Wasm stack at end-of-arm; the
+   * post-block `local.set` binds the if-instr's result to whichever
+   * carrier ran.
+   */
+  emitIfElse(args: {
+    cond: IrValueId;
+    then: readonly IrInstr[];
+    thenValue: IrValueId;
+    else: readonly IrInstr[];
+    elseValue: IrValueId;
+    resultType: IrType;
+  }): IrValueId {
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, args.resultType);
+    this.pushInstr({
+      kind: "if",
+      cond: args.cond,
+      then: args.then,
+      thenValue: args.thenValue,
+      else: args.else,
+      elseValue: args.elseValue,
+      result,
+      resultType: args.resultType,
+    });
+    return result;
+  }
+
   // --- string ops (#1169a) ------------------------------------------------
 
   emitStringConst(value: string): IrValueId {
@@ -507,6 +559,109 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  // --- extern class ops (#1169i — slice 10) -------------------------------
+
+  /**
+   * Slice 10 (#1169i) — emit `extern.new` for `new ExternClass(args)`.
+   * Result type is `{ kind: "extern", className }` — opaque externref
+   * carrying the class identity statically.
+   */
+  emitExternNew(className: string, args: readonly IrValueId[]): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "extern", className };
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({
+      kind: "extern.new",
+      className,
+      args: [...args],
+      result,
+      resultType,
+    });
+    return result;
+  }
+
+  /**
+   * Slice 10 (#1169i) — emit `extern.call` for `<recv>.<method>(args)` on
+   * an extern-class receiver. `resultType` is the method's registered
+   * result IrType (or `null` for void). Returns `null` for void methods.
+   */
+  emitExternCall(
+    className: string,
+    method: string,
+    receiver: IrValueId,
+    args: readonly IrValueId[],
+    resultType: IrType | null,
+  ): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
+    this.pushInstr({
+      kind: "extern.call",
+      className,
+      method,
+      receiver,
+      args: [...args],
+      result,
+      resultType,
+    });
+    return result;
+  }
+
+  /**
+   * Slice 10 (#1169i) — emit `extern.prop` for a property read on an
+   * extern-class receiver.
+   */
+  emitExternProp(className: string, property: string, receiver: IrValueId, resultType: IrType): IrValueId {
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({
+      kind: "extern.prop",
+      className,
+      property,
+      receiver,
+      result,
+      resultType,
+    });
+    return result;
+  }
+
+  /**
+   * Slice 10 (#1169i) — emit `extern.propSet` for a property write on an
+   * extern-class receiver. Void result.
+   */
+  emitExternPropSet(className: string, property: string, receiver: IrValueId, value: IrValueId): void {
+    this.pushInstr({
+      kind: "extern.propSet",
+      className,
+      property,
+      receiver,
+      value,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * Slice 10 (#1169i) — emit `extern.regex` for a `/pattern/flags`
+   * RegExp literal. Result is `{ kind: "extern", className: "RegExp" }`
+   * (opaque externref handle to the RegExp instance).
+   */
+  emitRegExpLiteral(pattern: string, flags: string): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "extern", className: "RegExp" };
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({
+      kind: "extern.regex",
+      pattern,
+      flags,
+      result,
+      resultType,
+    });
+    return result;
+  }
+
   // --- finalize -----------------------------------------------------------
 
   typeOf(value: IrValueId): IrType {
@@ -734,15 +889,18 @@ export class IrFunctionBuilder {
    * Returns the captured body instrs.
    */
   collectBodyInstrs(emit: () => void): IrInstr[] {
-    if (this.bodyBuffer !== null) {
-      throw new Error(`IrFunctionBuilder: nested collectBodyInstrs not supported (func ${this.name})`);
-    }
+    // (#1392) Nesting support — required for nested optional chains
+    // (`a?.b?.c` lowers to nested `IrInstrIf`s, each with its own arm
+    // buffer). Save & restore the previous buffer so emissions inside
+    // the inner `emit()` route to its own buffer; instructions emitted
+    // AFTER the inner returns continue routing to the outer buffer.
+    const previous = this.bodyBuffer;
     const buffer: IrInstr[] = [];
     this.bodyBuffer = buffer;
     try {
       emit();
     } finally {
-      this.bodyBuffer = null;
+      this.bodyBuffer = previous;
     }
     return buffer;
   }
@@ -879,6 +1037,88 @@ export class IrFunctionBuilder {
       strSlot: args.strSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  // --- exception handling (slice 9 — #1169h) ------------------------------
+
+  /**
+   * Slice 9 (#1169h): emit a `throw` instruction. The `value` MUST be an
+   * SSA value of `(externref)` ValType — callers coerce upstream via
+   * `emitCoerceToExternref` for ref / object / class / closure values,
+   * and via the legacy box helper for f64 / i32 (boxed by the host).
+   *
+   * The instruction produces no SSA value; control doesn't fall through.
+   * The current block must still be terminated by the caller (typically
+   * with `unreachable` for top-level throws, or implicitly by the surrounding
+   * try-body buffer mechanism).
+   */
+  emitThrow(value: IrValueId): void {
+    this.pushInstr({ kind: "throw", value, result: null, resultType: null });
+  }
+
+  /**
+   * Slice 9 (#1169h): emit a `try` instruction with a body, optional catch
+   * handler, and optional finally body. Mirrors the for-of declarative
+   * shape — the caller pre-collects each buffer via `collectBodyInstrs`.
+   * Result is void.
+   */
+  emitTry(args: {
+    body: readonly IrInstr[];
+    catchClause?: { payloadSlot: number; body: readonly IrInstr[] };
+    finallyBody?: readonly IrInstr[];
+  }): void {
+    this.pushInstr({
+      kind: "try",
+      body: args.body,
+      ...(args.catchClause ? { catchClause: args.catchClause } : {}),
+      ...(args.finallyBody ? { finallyBody: args.finallyBody } : {}),
+      result: null,
+      resultType: null,
+    });
+  }
+
+  // --- generic structured loops (slice 12 — #1280) ------------------------
+
+  /**
+   * Slice 12 (#1280): emit a `while (cond) body` declarative loop. The
+   * caller pre-collects the cond + body buffers via `collectBodyInstrs`
+   * and threads through the SSA value emitted by the cond's last
+   * instruction. The lowerer emits the canonical
+   * `block { loop { <cond>; i32.eqz; br_if 1; <body>; br 0 } }`
+   * Wasm pattern.
+   */
+  emitWhileLoop(args: { cond: readonly IrInstr[]; condValue: IrValueId; body: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "while.loop",
+      cond: args.cond,
+      condValue: args.condValue,
+      body: args.body,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * Slice 12 (#1280): emit a `for (init; cond; update) body` declarative
+   * loop. `init` is emitted as separate IR instructions BEFORE this
+   * instr (a `let i = 0` is just a `lowerVarDecl`, no special encoding
+   * needed). The instr carries cond, body, update.
+   */
+  emitForLoop(args: {
+    cond: readonly IrInstr[];
+    condValue: IrValueId;
+    body: readonly IrInstr[];
+    update: readonly IrInstr[];
+  }): void {
+    this.pushInstr({
+      kind: "for.loop",
+      cond: args.cond,
+      condValue: args.condValue,
+      body: args.body,
+      update: args.update,
       result: null,
       resultType: null,
     });

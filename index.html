@@ -443,8 +443,8 @@
       .host-bench-copy {
         max-width: 860px;
         margin-top: 18px;
-        font-size: 14px;
-        line-height: 1.7;
+        font-size: 16px;
+        line-height: 1.75;
         color: var(--fg-faint);
       }
 
@@ -457,27 +457,31 @@
       }
 
       .host-bench-title {
-        font-family: var(--mono);
-        font-size: 11px;
-        font-weight: 500;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--fg-faint);
-        margin: 0 0 16px;
+        font-size: 22px;
+        line-height: 1.18;
+        font-weight: 650;
+        color: var(--fg);
+        margin: 0 0 14px;
       }
 
       .host-bench-subcopy {
         max-width: 780px;
-        margin: 0 0 28px;
-        font-size: 14px;
-        line-height: 1.7;
+        margin: 0 0 34px;
+        font-size: 17px;
+        line-height: 1.72;
         color: var(--fg-faint);
+      }
+      .host-bench-subcopy a {
+        color: var(--fg-soft);
+        text-decoration: underline;
+        text-decoration-color: rgba(255, 255, 255, 0.28);
+        text-underline-offset: 3px;
       }
 
       /* Donut and edition bar styles are now in <t262-donut> / <t262-edition-bars> shadow DOM */
       /* Benchmark performance chart is now in <perf-benchmark-chart> shadow DOM */
 
-      /* Size/coldstart charts reuse <perf-benchmark-chart> with mode="size"|"coldstart" */
+      /* Size/coldstart charts reuse <perf-benchmark-chart> with mode="module-size"|"coldstart" */
 
       .edition-chart {
         grid-column: span 1;
@@ -592,6 +596,116 @@
         text-align: left;
         margin-top: 6px;
         opacity: 0.5;
+      }
+
+      .approach-faq {
+        max-width: 960px;
+        margin-top: 56px;
+      }
+      .approach-faq-list {
+        border-top: 1px solid var(--line);
+      }
+      .approach-faq details {
+        border-bottom: 1px solid var(--line);
+      }
+      .approach-faq details.is-animating {
+        overflow: hidden;
+      }
+      .approach-faq summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 18px;
+        gap: 18px;
+        align-items: center;
+        padding: 24px 0;
+        color: var(--fg-soft);
+        cursor: pointer;
+        list-style: none;
+        transition: color 0.15s ease;
+      }
+      .approach-faq summary::-webkit-details-marker {
+        display: none;
+      }
+      .approach-faq summary::after {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-right: 2px solid var(--fg-faint);
+        border-bottom: 2px solid var(--fg-faint);
+        justify-self: end;
+        transform: rotate(45deg);
+        transition:
+          border-color 0.15s ease,
+          transform 0.2s ease;
+      }
+      .approach-faq summary:hover,
+      .approach-faq details[open] summary {
+        color: var(--fg);
+      }
+      .approach-faq summary:hover::after,
+      .approach-faq details[open] summary::after {
+        border-color: var(--fg-soft);
+      }
+      .approach-faq details[open] summary::after {
+        transform: rotate(-135deg);
+      }
+      .approach-faq-question {
+        min-width: 0;
+        font-size: 21px;
+        line-height: 1.36;
+        font-weight: 600;
+      }
+      .approach-faq-answer {
+        max-width: 820px;
+        padding: 0 42px 28px 0;
+        opacity: 0;
+        transform: translateY(-4px);
+        transition:
+          opacity 0.18s ease,
+          transform 0.18s ease;
+      }
+      .approach-faq details[open] .approach-faq-answer {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .approach-faq details.is-collapsing .approach-faq-answer {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+      .approach-faq-answer p {
+        margin: 0 0 16px;
+        color: var(--fg-faint);
+        font-size: 17px;
+        line-height: 1.74;
+      }
+      .approach-faq-answer p:last-child {
+        margin-bottom: 0;
+      }
+      .approach-faq-answer a:not(.btn-solid):not(.btn-outline) {
+        color: var(--fg);
+        text-decoration: underline;
+        text-decoration-color: rgba(255, 255, 255, 0.42);
+        text-underline-offset: 3px;
+      }
+      .approach-faq-answer a:not(.btn-solid):not(.btn-outline):hover {
+        text-decoration-color: rgba(255, 255, 255, 0.64);
+      }
+      .approach-faq-answer strong {
+        color: var(--fg);
+        font-weight: 700;
+      }
+      .approach-faq-answer ul {
+        display: grid;
+        gap: 10px;
+        margin: 0 0 16px;
+        padding: 0;
+        list-style: none;
+      }
+      .approach-faq-answer li {
+        padding-left: 16px;
+        border-left: 2px solid var(--line-strong);
+        color: var(--fg-faint);
+        font-size: 17px;
+        line-height: 1.7;
       }
 
       .code-section {
@@ -979,6 +1093,42 @@
         transition: background 0.14s ease;
       }
 
+      /* #1201 — live test262 pass-count badge alongside the feature name. */
+      .feat-row-counts {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--fg-faint);
+        margin-left: 8px;
+        font-weight: normal;
+        white-space: nowrap;
+      }
+      .feat-row-counts[data-tone="pass"] {
+        color: var(--ok, #4ade80);
+      }
+      .feat-row-counts[data-tone="partial"] {
+        color: var(--warn, #facc15);
+      }
+      .feat-row-counts[data-tone="fail"] {
+        color: var(--err, #f87171);
+      }
+
+      /* #1327 — "View test results →" link inside expanded feat-row body. */
+      .feat-report-link {
+        margin: 12px 0 4px;
+        font-size: 12px;
+      }
+      .feat-report-link a {
+        color: var(--accent, #60a5fa);
+        text-decoration: none;
+        font-family: var(--mono);
+        opacity: 0.85;
+        transition: opacity 0.14s ease;
+      }
+      .feat-report-link a:hover {
+        opacity: 1;
+        text-decoration: underline;
+      }
+
       .feat-row:last-child {
         border-bottom: none;
       }
@@ -1135,6 +1285,9 @@
         .feat-panel {
           columns: 1;
         }
+        .approach-faq-answer {
+          padding-right: 0;
+        }
         .feat-row details pre,
         .how-code {
           white-space: pre-wrap;
@@ -1164,8 +1317,8 @@
           <p class="hero-sub">
             JS
             <sup>2</sup>
-            is an open source compiler focused on compiling JavaScript to WebAssembly ahead of time, based on research
-            at Loopdive.
+            is a research preview of an open source compiler focused on compiling JavaScript to WebAssembly ahead of
+            time, developed at Loopdive.
           </p>
           <div class="hero-actions">
             <a class="btn-solid" href="./playground/">Playground</a>
@@ -1187,7 +1340,7 @@
           <p>
             The project is motivated by the idea that JavaScript, despite being a dynamic language, can be compiled
             efficiently ahead of time without limiting it to an incompatible subset or shipping a full JS runtime like
-            V8 or SpiderMonkey.
+            V8, SpiderMonkey or JavaScriptCore.
           </p>
           <p>The project is guided by the following goals:</p>
         </div>
@@ -1299,7 +1452,7 @@
 
         <div class="feat-filter">
           <label class="feat-toggle">
-            <input type="checkbox" id="strict-only-toggle" checked />
+            <input type="checkbox" id="strict-only-toggle" />
             <span>Strict mode</span>
           </label>
           <label class="feat-toggle">
@@ -1444,7 +1597,7 @@ outer: for (let i = 0; i &lt; 3; i++) {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/statements">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">for-in</span>
                 <span class="feat-desc">Iterate over object property names</span>
@@ -1464,7 +1617,7 @@ local.set $keys
                   >
                 </details>
               </div>
-              <div class="feat-row" data-sloppy>
+              <div class="feat-row" data-t262-paths="language/arguments-object" data-sloppy>
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">arguments object (full)</span>
                 <span class="feat-desc">Legacy arguments — partial, rest params preferred</span>
@@ -1483,7 +1636,7 @@ function legacy() {
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/eval-code,built-ins/eval">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">eval()</span>
@@ -1510,7 +1663,7 @@ function legacy() {
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES5</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/block-scope">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Variables (var, let, const)</span>
                 <span class="feat-desc">Block-scoped and function-scoped variable declarations</span>
@@ -1535,7 +1688,7 @@ var legacy = true;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/function-code">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Functions &amp; closures</span>
                 <span class="feat-desc">Named functions, expressions, and lexical closures</span>
@@ -1629,7 +1782,7 @@ try {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Object">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Objects</span>
                 <span class="feat-desc">Literals, property access, methods, and shorthand syntax</span>
@@ -1656,7 +1809,7 @@ const obj = {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/String">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Strings</span>
                 <span class="feat-desc">String methods, concatenation, and manipulation</span>
@@ -1679,7 +1832,7 @@ const obj = {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Number">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Numbers</span>
                 <span class="feat-desc">Math operations, parseInt, Number methods</span>
@@ -1703,7 +1856,7 @@ parseInt("42");
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/JSON">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">JSON</span>
@@ -1722,7 +1875,7 @@ const str = JSON.stringify({ a: 1 });</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Error,built-ins/NativeErrors">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Error types</span>
                 <span class="feat-desc">Error, TypeError, RangeError, SyntaxError and more</span>
@@ -1741,7 +1894,7 @@ throw new RangeError("out of bounds");</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Arrays</span>
@@ -1768,7 +1921,7 @@ const found = arr.find(x =&gt; x &gt; 5);</pre
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/RegExp">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Regular expressions</span>
@@ -1877,7 +2030,7 @@ const greet = () =&gt; "hello";</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/destructuring">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Destructuring</span>
                 <span class="feat-desc">Extract values from arrays and objects</span>
@@ -1978,7 +2131,7 @@ const obj = { [key]: 42 };</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/GeneratorFunction,built-ins/GeneratorPrototype">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Generators (function*, yield)</span>
                 <span class="feat-desc">Pausable functions that produce sequences</span>
@@ -2045,7 +2198,10 @@ class Dog extends Animal { }</pre
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/Map,built-ins/Set,built-ins/MapIteratorPrototype,built-ins/SetIteratorPrototype"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Map / Set</span>
@@ -2071,7 +2227,7 @@ s.has(2); // true</pre
                   <div class="feat-explain">Core operations work. Some iteration edge cases incomplete.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Symbol">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Symbol</span>
@@ -2096,7 +2252,10 @@ obj[id] = 42;</pre
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/TypedArray,built-ins/TypedArrayConstructors,built-ins/ArrayBuffer,built-ins/DataView,built-ins/Uint8Array"
+              >
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">TypedArray / ArrayBuffer</span>
@@ -2122,7 +2281,7 @@ view[0] = 42;</pre
                   <div class="feat-explain">Int8 through Float64 arrays work. BigInt64Array not yet.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/import,language/export,language/module-code">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Modules (import / export)</span>
                 <span class="feat-desc">ES module system for code organization</span>
@@ -2141,7 +2300,7 @@ export function bar() { return 1; }</pre
                   <div class="feat-explain">Static imports work. Dynamic import() not yet.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Proxy,built-ins/Reflect">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Proxy / Reflect</span>
                 <span class="feat-desc">Object behavior interception and reflection</span>
@@ -2151,7 +2310,7 @@ export function bar() { return 1; }</pre
                   <div class="feat-explain">Requires runtime trap dispatch. Not AOT-compilable.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Promise">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Promise .then / .catch / .finally</span>
@@ -2167,7 +2326,10 @@ export function bar() { return 1; }</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2017</div>
-              <div class="feat-row">
+              <div
+                class="feat-row"
+                data-t262-paths="built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/AsyncFromSyncIteratorPrototype"
+              >
                 <span class="feat-badge full">✓</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">async / await</span>
@@ -2206,7 +2368,7 @@ Object.values({ x: 10 });
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/SharedArrayBuffer,built-ins/Atomics">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">SharedArrayBuffer / Atomics</span>
@@ -2220,7 +2382,7 @@ Object.values({ x: 10 });
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2018</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Object">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Object spread / rest</span>
                 <span class="feat-desc">Object spread in literals and rest in destructuring</span>
@@ -2318,7 +2480,7 @@ const { a, ...rest } = obj;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/BigInt">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">BigInt</span>
@@ -2355,7 +2517,7 @@ const sum = big + 1n;</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2021</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/WeakRef,built-ins/FinalizationRegistry">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">WeakRef / FinalizationRegistry</span>
@@ -2648,7 +2810,7 @@ buf.resize(16);</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2025</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Set">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Set methods (union, intersection, difference)</span>
@@ -2664,7 +2826,7 @@ a.union(b); // {1,2,3,4}</pre
                   <div class="feat-explain">ES2025 Set methods. Requires host import for Set operations.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Iterator">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Iterator helpers (map, filter, take)</span>
@@ -2827,7 +2989,7 @@ RegExp.$1; // "123" — deprecated</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">Proposals</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Temporal">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Temporal</span>
                 <span class="feat-desc">Modern date and time API</span>
@@ -2884,7 +3046,7 @@ match (value) {
 
       <section class="section-pad" id="wasm-hosts">
         <div class="intro">
-          <h2>Lean modules that load and run fast.</h2>
+          <h2>Tiny modules that load and run fast.</h2>
           <p>
             When running outside of a JS engine like found in browsers or Node.js, compatibility today typically means
             embedding a JS interpreter inside the WebAssembly module. This increases module size and slows execution.
@@ -2892,25 +3054,83 @@ match (value) {
         </div>
 
         <div class="host-bench-group">
-          <h3 class="host-bench-title">Browser &amp; Node.js</h3>
+          <h3 class="host-bench-title">JavaScript host (V8, JIT enabled)</h3>
           <p class="host-bench-subcopy">
-            Runtime execution speed and module load time relative to plain JavaScript, measured in browser and Node.js
-            environments.
+            A benchmark comparing JavaScript in its native environment to the exact same source code compiled with JS²
+            as a WebAssembly module. Both were run inside Google's V8 engine in Node.js. Press the button to run the
+            benchmark in your browser including additional DOM benchmarks.
           </p>
           <div class="conformance-diagrams">
             <div class="diagram-panel">
               <perf-benchmark-chart
                 src="./benchmarks/results/playground-benchmark-sidebar.json"
-                title="Runtime Speed"
-                legend="Wasm runtime speed relative to JS (larger is better, whisker = ±1σ)"
+                mode="runtime"
+                rerun-src="./benchmarks/results/loadtime-benchmarks.json"
+                rerun-label="Run Browser Benchmark"
+                title="Runtime"
+                baseline-label="JS in V8"
+                show-delta
+                delta-kind="runtime"
+                legend="Median Wasm runtime per benchmark. JS lines show the same benchmark in JavaScript."
               ></perf-benchmark-chart>
             </div>
-            <div class="diagram-panel">
+          </div>
+        </div>
+
+        <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
+          <h3 class="host-bench-title">WebAssembly host (Wasmtime, JIT disabled)</h3>
+          <p class="host-bench-subcopy">
+            This test case approximates a multi-tenant Wasm native serverless environment. 5 small
+            <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
+            are run as WebAssembly in three different setups: 1. compiled ahead of time with JS², 2. interpreted by a
+            separate dynamically linked interpreter module, 3. interpreted by a bundled JS engine (preinitialized +
+            partial AOT evaluation). As a baseline we show the same code running in its native environment inside a V8
+            engine in Node.js with JIT enabled, spawning a fresh runtime process.
+          </p>
+          <div class="conformance-diagrams">
+            <div
+              class="diagram-panel"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+              style="display: none"
+            >
               <perf-benchmark-chart
-                src="./benchmarks/results/loadtime-benchmarks.json"
-                mode="loadtime"
-                title="Loading Speed"
-                legend="Wasm loading speed relative to JS (larger is better, whisker = ±1σ)"
+                src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+                mode="absolute-lower-better"
+                title="Runtime"
+                baseline-label="JS in V8"
+                show-delta
+                delta-kind="runtime"
+                legend="Geometric mean of repeated calls inside one fresh process after module load."
+              ></perf-benchmark-chart>
+            </div>
+            <div
+              class="diagram-panel"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size.json"
+              style="display: none"
+            >
+              <perf-benchmark-chart
+                src="./benchmarks/results/wasm-host-wasmtime-module-size.json"
+                mode="absolute-lower-better"
+                title="Module Size"
+                baseline-label="JS source (minified)"
+                show-delta
+                delta-kind="size"
+                legend="Geometric mean of raw deployable module size; JS source counts only the minified benchmark .js files. Parenthetical interpreter payload is not included in the bar or delta."
+              ></perf-benchmark-chart>
+            </div>
+            <div
+              class="diagram-panel"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-coldstart.json"
+              style="display: none"
+            >
+              <perf-benchmark-chart
+                src="./benchmarks/results/wasm-host-wasmtime-coldstart.json"
+                mode="absolute-lower-better"
+                title="Cold Start"
+                baseline-label="JS in V8"
+                show-delta
+                delta-kind="runtime"
+                legend="Geometric mean of a fresh JS source process or fresh precompiled WebAssembly artifact process through first invocation."
               ></perf-benchmark-chart>
             </div>
           </div>
@@ -2919,7 +3139,7 @@ match (value) {
 
       <hr class="divider" />
 
-      <section class="section-pad" id="how-it-works">
+      <section class="section-pad" id="approach">
         <div class="intro">
           <h2>Compiled ahead of time, no interpreter.</h2>
           <p>
@@ -2927,6 +3147,10 @@ match (value) {
             support &mdash; browser, server, edge. No interpreter embedded; garbage collection is handled by the host
             via WasmGC. When deployed with explicit imports, the module boundary can reduce ambient access and limit
             supply-chain attack surface.
+          </p>
+          <p>
+            The goal is 100% compatibility with the JavaScript and npm ecosystem while adding a module security and
+            module composition layer around compiled units.
           </p>
         </div>
 
@@ -2961,25 +3185,25 @@ export function run() {
               <span class="how-step-size" id="how-fib-wasm-size">(0.2 KB gzipped)</span>
             </h3>
             <pre class="how-code wat">
-;; simplified — actual output includes
-;; box/unbox for externref returns
-(func $fibonacci (param f64) (result externref)
+;; Actual compiler output — number → f64 throughout.
+;; No boxing, no anyref, no dispatch overhead.
+(func $fibonacci (param f64) (result f64)
   local.get 0
   f64.const 1
   f64.le
-  if
-    local.get 0
-    call $__box_number
-    return
-  end
-  local.get 0  f64.const 1  f64.sub
-  call $fibonacci  call $__unbox_number
-  local.get 0  f64.const 2  f64.sub
-  call $fibonacci  call $__unbox_number
-  f64.add
-  call $__box_number)
+  (if
+    (then
+      local.get 0
+      return)
+    (else
+      local.get 0  f64.const 1  f64.sub
+      call $fibonacci
+      local.get 0  f64.const 2  f64.sub
+      call $fibonacci
+      f64.add
+      return)))
 
-(func $run (export "run") (result externref)
+(func $run (export "run") (result f64)
   f64.const 10
   call $fibonacci)</pre
             >
@@ -3084,6 +3308,197 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
       <hr class="divider" />
 
+      <section class="section-pad" id="faq">
+        <div class="intro">
+          <h2 id="faq-title">Frequently asked questions.</h2>
+          <p>
+            How JS
+            <sup>2</sup>
+            treats compatibility, runtime boundaries, architecture decisions, and the difference between compilation and
+            bundling a JavaScript runtime.
+          </p>
+        </div>
+
+        <div class="approach-faq" aria-labelledby="faq-title">
+          <div class="approach-faq-list">
+            <details>
+              <summary>
+                <span class="approach-faq-question">Why not just use a JavaScript engine or interpreter?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  Good question! JavaScript engines like V8 are highly optimized multi-tier streaming JIT compilers that
+                  often run code two magnitudes faster than interpreters - within reach of native performance - and have
+                  a mature battle tested sandbox. WebAssembly has an edge in some scenarios, but overall it is not
+                  always faster or even on par. Interpreters like QuickJS on the other hand trade simplicity for
+                  performance.
+                </p>
+                <h3>Runtime overhead</h3>
+                <p>
+                  However, in
+                  <strong>constrained environments</strong>
+                  like multi-tenant function as a service - aka. "
+                  <strong>serverless</strong>
+                  " - or
+                  <strong>embedded</strong>
+                  environments a JS host might simply be too heavy-weight and costly. It may result in a slow
+                  interpreter path and having to ship a JS interpreter or engine with JIT disabled (which typically
+                  results in a 10x slowdown) alongside the binary in the Megabyte range. On desktop this might even mean
+                  shipping a full browser or server runtime with 100 MB or more in the case of Electron.
+                </p>
+                <ul>
+                  <li>
+                    <strong>Bundled interpreters</strong>
+                    package a JavaScript interpreter into the Wasm module and run the user's program inside it. That can
+                    provide broad compatibility, but each deployed module pays the interpreter/runtime cost.
+                  </li>
+                  <li>
+                    <strong>Bundled engines</strong>
+                    inherit mature JavaScript engine semantics, but also inherit the size, startup, integration,
+                    sandboxing, and runtime code-generation tradeoffs of shipping an engine.
+                  </li>
+                </ul>
+                <h3>Dependency management</h3>
+                <p>
+                  NPM dependencies are fragile and hard to manage. If you upgrade one module globally in a project, this
+                  often forces a cascade of updates across the project which may take weeks, break things loudly,
+                  introduce silent bugs, and you may sometimes end up in situations where one dependency already needs a
+                  newer version while another still depends on an older version, hindering upgrades. In contrast,
+                  WebAssembly modules declare their imports, and you can satisfy them on a module by module basis that
+                  do not force to keep the version of a module in lock step across modules.
+                </p>
+                <h3>Supply Chain Attacks</h3>
+                <p>
+                  Running untrusted code in JavaScript exposes the process to the risk of supply chain attacks: 95% of
+                  JavaScript code is a third party dependency. A single malicious or buggy module can take over the
+                  whole JavaScript process and extract sensitive information or in Node.js even access the file system
+                  or start programs with user rights. While isolation techniques exists they are rarely used in practice
+                  due their overhead, complexity, or ecosystem fragmentation. Supply chain attacks have become a real
+                  threat including high profile incidents in cornerstone dependencies such as
+                  <a href="https://github.com/axios/axios/issues/10636">axios</a>
+                  or
+                  <a
+                    href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
+                  >
+                    chalk
+                  </a>
+                  .
+                </p>
+                <p>
+                  JavaScript engines are highly complex and expose a large attack surface. Despite decades of hardening
+                  hackers and engine developers are in an arms race finding and fixing zero day vulnerabilities, and AI
+                  agents find vulnerabilities in high volumes (e.g. Anthropic's glasswing found
+                  <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
+                    271 vulnerabilities in Firefox
+                  </a>
+                  ) . If your code ships with a full browser and Node depdendency like in the case of Electron, you need
+                  to maintain manual patches for security vulnerabilities.
+                </p>
+                <p>
+                  WebAssembly has a simpler execution and deny by default security model in which access is granted
+                  explicitly, limiting the blast radius of incidents significantly.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">Why target ECMAScript, not a language subset or superset?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <ul>
+                  <li>
+                    <strong>Following the ECMAScript standard</strong>
+                    as the north star maintains full compatibility with the JS and NPM ecosystem. TypeScript annotations
+                    are only treated as optimization hints where types can be proven, not as ground truth and do not
+                    affect JavaScript runtime behavior.
+                  </li>
+                  <li>
+                    <strong>Subsets, supersets, and new languages</strong>
+                    make compilation easier by subtly breaking the language contract: unsupported dynamic JavaScript is
+                    excluded, custom APIs are introduced, or the language is designed around Wasm from the start.
+                  </li>
+                </ul>
+                <p>
+                  JavaScript is the most widely used programming language. It is easy to use, familiar to millions, and
+                  with NPM has the largest ecosystem in the world. It runs everywhere from browsers (e.g. Chrome,
+                  Firefox, Safari) to servers (e.g. Node, Deno, Bun) and even on desktop (Electron), mobile, or embedded
+                  devices.
+                </p>
+                <p>
+                  While it is not a perfect language due to its legacy and its dynamic nature makes it hard to optimize,
+                  it simply is what everyone uses and changing the language - even slightly - would break compatibility
+                  with existing codebases and fragment the ecosystem. We think chosing the right tool for the job should
+                  not require switching languages or porting code.
+                </p>
+              </div>
+            </details>
+
+            <details>
+              <summary>
+                <span class="approach-faq-question">Do you plan to support all dynamic parts of the language?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  We are intending to push the boundaries of what is possible here. The assumption is most code today is
+                  actually using very little of the dynamic features, so the goal is to isolate the cost of dynamic
+                  language features to the code paths that actually need them. We aim for a seamless experience so the
+                  user does not have to think about if code falls within a supported subset. Dynamic features may
+                  require guards, boxed representations, host fallbacks, or separately compiled units. You can track our
+                  progress in the ECMAScript compatibility reports.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">How do you support host APIs like the DOM?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  We see these as platform APIs that are imported using safe adapters from the host if in a browser or
+                  Node.js environment or polyfilled (e.g. using WASI). In browsers we auto generate adapters for Web
+                  APIs and JS builtins from their TypeScript definitions. Providing alternative implementations e.g. in
+                  standalone mode is possible by swapping out the import (e.g.
+                  <a href="https://edgejs.org/">Edge.js</a>
+                  emulates Node.js APIs WASIX).
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">Why do you depend on Wasm GC?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  In supported WebAssembly 3.0 runtime a portable garbarge collector (GC) is provided by the host, so
+                  runtimes no longer need to implement their own GC in linear memory. They can now build on top of a
+                  built-in implementation, making modules leaner and interop with the host environment and across
+                  components more seamless. WasmGC gives the compiler host-managed structs, arrays, references, and
+                  function references that can represent many JavaScript object shapes more directly.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">What are your guiding principles?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  Architecture Decision Records document the non-obvious choices behind JS
+                  <sup>2</sup>
+                  &mdash; why WasmGC over linear memory, why ahead-of-time compilation over a JIT, how closures and
+                  objects are laid out, and how the compiler keeps JavaScript semantics auditable as it grows.
+                </p>
+                <p>
+                  <a class="btn-solid" href="./docs/adr/">Architecture Decisions</a>
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <hr class="divider" />
+
       <section class="section-pad cta" id="roadmap">
         <h2>Project roadmap.</h2>
         <p>
@@ -3117,8 +3532,10 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             <h4>Inspect</h4>
             <ul>
               <li><a href="./wasm-treemap.html">Wasm Treemap</a></li>
+              <li><a href="./benchmarks/spec-compliance.html">ECMAScript Spec Compliance</a></li>
               <li><a href="https://github.com/loopdive/js2wasm">GitHub</a></li>
               <li><a href="#approach">Approach</a></li>
+              <li><a href="#faq">FAQ</a></li>
             </ul>
           </div>
         </div>
@@ -3160,6 +3577,67 @@ console.log(instance.exports.run()); // &rarr; 55</pre
     <script src="./components/trend-chart.js"></script>
 
     <script>
+      (function hydrateFaqAccordions() {
+        const items = document.querySelectorAll(".approach-faq details");
+        if (!items.length) return;
+
+        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+        const timing = { duration: 240, easing: "cubic-bezier(0.2, 0, 0, 1)" };
+
+        const clearAnimationState = (details) => {
+          details.classList.remove("is-animating", "is-collapsing");
+          details.style.height = "";
+          delete details.dataset.animating;
+        };
+
+        const animateOpen = (details) => {
+          const startHeight = `${details.offsetHeight}px`;
+          details.open = true;
+          const endHeight = `${details.offsetHeight}px`;
+
+          details.dataset.animating = "true";
+          details.classList.add("is-animating");
+          details.style.height = startHeight;
+
+          const animation = details.animate({ height: [startHeight, endHeight] }, timing);
+          animation.onfinish = () => clearAnimationState(details);
+          animation.oncancel = () => clearAnimationState(details);
+        };
+
+        const animateClose = (details, summary) => {
+          const startHeight = `${details.offsetHeight}px`;
+          const endHeight = `${summary.offsetHeight}px`;
+
+          details.dataset.animating = "true";
+          details.classList.add("is-animating", "is-collapsing");
+          details.style.height = startHeight;
+
+          const animation = details.animate({ height: [startHeight, endHeight] }, timing);
+          animation.onfinish = () => {
+            details.open = false;
+            clearAnimationState(details);
+          };
+          animation.oncancel = () => clearAnimationState(details);
+        };
+
+        items.forEach((details) => {
+          const summary = details.querySelector("summary");
+          if (!(summary instanceof HTMLElement)) return;
+
+          summary.addEventListener("click", (event) => {
+            if (prefersReducedMotion.matches) return;
+            event.preventDefault();
+            if (details.dataset.animating) return;
+
+            if (details.open) {
+              animateClose(details, summary);
+            } else {
+              animateOpen(details);
+            }
+          });
+        });
+      })();
+
       (function mountPuzzleBackground() {
         const canvas = document.querySelector(".puzzle-bg");
         if (!(canvas instanceof HTMLCanvasElement)) {
@@ -3581,7 +4059,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       // Hero wave is WebGL-rendered and only animates while visible.
 
       // Minimal syntax highlighter for feature code examples
-      // Syntax highlight feature examples and how-it-works code blocks with shiki
+      // Syntax highlight feature examples and approach code blocks with shiki
       (async function highlightWithShiki() {
         try {
           const { codeToHtml } = await import("https://esm.sh/shiki@4.0.2/bundle/web");
@@ -3608,7 +4086,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const hostToggle = document.getElementById("host-support-toggle");
         const tables = document.querySelector(".feat-tables");
         if (tables) {
-          tables.classList.add("strict-only");
           const hostRows = Array.from(document.querySelectorAll(".feat-row")).filter((row) =>
             row.querySelector(".feat-host"),
           );
@@ -3640,6 +4117,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             });
             if (typeof window.updateEditionPassBars === "function") {
               window.updateEditionPassBars();
+            }
+            if (typeof window.updateConformanceDonut === "function") {
+              window.updateConformanceDonut();
             }
           };
           sync();
@@ -3894,10 +4374,12 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       (async function hydrateConformanceEditionFilter() {
         const donutSlot = document.getElementById("conformance-donut-slot");
         const editionTimeline = document.getElementById("conformance-edition-timeline");
+        const strictToggle = document.getElementById("strict-only-toggle");
+        const hostToggle = document.getElementById("host-support-toggle");
         if (!donutSlot || !(editionTimeline instanceof HTMLElement)) return;
 
         const donutStyle = "--t262-bg: var(--bg, #060a14)";
-        const renderDonut = (summary, captionMain = "ECMAScript") => {
+        const renderDonut = (summary, captionMain = "ECMAScript", captionSub = "conformance") => {
           const pass = Number(summary?.pass ?? 0);
           const fail = Number(summary?.fail ?? 0);
           const ce = Number(summary?.ce ?? 0);
@@ -3914,8 +4396,62 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           donut.setAttribute("skip", String(skip));
           donut.setAttribute("total", String(total));
           donut.setAttribute("caption-main", captionMain);
-          donut.setAttribute("caption-sub", "conformance");
+          donut.setAttribute("caption-sub", captionSub);
           donut.setAttribute("style", donutStyle);
+        };
+        const normalizeSummary = (summary, fallback = {}) => {
+          const pass = Number(summary?.pass ?? fallback.pass ?? 0);
+          const fail = Number(summary?.fail ?? fallback.fail ?? 0);
+          const ce =
+            Number(summary?.ce ?? 0) ||
+            Number(summary?.compile_error ?? 0) + Number(summary?.compile_timeout ?? 0) ||
+            Number(fallback.ce ?? 0);
+          const skip = Number(summary?.skip ?? fallback.skip ?? 0);
+          const total = Number(summary?.total ?? fallback.total ?? pass + fail + ce + skip);
+          return { pass, fail, ce, skip, total };
+        };
+        const statusRatio = (filtered, base, key) => {
+          const baseValue = Number(base?.[key] ?? 0);
+          if (baseValue <= 0) return 1;
+          return Math.max(0, Math.min(1, Number(filtered?.[key] ?? 0) / baseValue));
+        };
+        const applySummaryRatios = (summary, ratios) => {
+          const pass = Math.round(summary.pass * ratios.pass);
+          const fail = Math.round(summary.fail * ratios.fail);
+          const ce = Math.round(summary.ce * ratios.ce);
+          const skip = Math.round(summary.skip * ratios.skip);
+          return { pass, fail, ce, skip, total: pass + fail + ce + skip };
+        };
+        const featureRowScore = (row, hostEnabled) => {
+          const badge = row.querySelector(".feat-badge");
+          if (!badge) return 0;
+          if (!hostEnabled && row.querySelector(".feat-host")) return 0;
+          const savedClasses = badge.dataset.origClass || Array.from(badge.classList).join(" ");
+          const classNames = new Set(savedClasses.split(/\s+/).filter(Boolean));
+          if (classNames.has("full")) return 1;
+          if (classNames.has("partial")) return 0.5;
+          return 0;
+        };
+        const hostOffPassScale = () => {
+          const strictOnly = strictToggle ? strictToggle.checked : false;
+          const rows = Array.from(document.querySelectorAll(".feat-row")).filter(
+            (row) => !(strictOnly && row.hasAttribute("data-sloppy")),
+          );
+          const hostOnScore = rows.reduce((sum, row) => sum + featureRowScore(row, true), 0);
+          if (hostOnScore <= 0) return 1;
+          const hostOffScore = rows.reduce((sum, row) => sum + featureRowScore(row, false), 0);
+          return Math.max(0, Math.min(1, hostOffScore / hostOnScore));
+        };
+        const applyHostMode = (summary) => {
+          const hostEnabled = hostToggle ? hostToggle.checked : true;
+          if (hostEnabled) return summary;
+          const nextPass = Math.round(summary.pass * hostOffPassScale());
+          const movedToFail = Math.max(0, summary.pass - nextPass);
+          return {
+            ...summary,
+            pass: nextPass,
+            fail: summary.fail + movedToFail,
+          };
         };
 
         try {
@@ -3926,21 +4462,18 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           const overallSummary = report?.summary;
           if (!overallSummary) throw new Error("overall summary unavailable");
 
-          const overall = {
-            pass: Number(overallSummary.pass ?? 0),
-            fail: Number(overallSummary.fail ?? 0),
-            ce: Number(overallSummary.compile_error ?? 0) + Number(overallSummary.compile_timeout ?? 0),
-            skip: Number(overallSummary.skip ?? 0),
-            total: Number(overallSummary.total ?? 0),
-          };
+          const overall = normalizeSummary(overallSummary);
           const fullSummary = report?.full_summary ?? overallSummary;
-          const withProposal = {
-            pass: Number(fullSummary.pass ?? overall.pass ?? 0),
-            fail: Number(fullSummary.fail ?? overall.fail ?? 0),
-            ce: Number(fullSummary.compile_error ?? 0) + Number(fullSummary.compile_timeout ?? 0),
-            skip: Number(fullSummary.skip ?? overall.skip ?? 0),
-            total: Number(fullSummary.total ?? overall.total ?? 0),
-          };
+          const withProposal = normalizeSummary(fullSummary, overall);
+          const strictSummary = report?.strict_summary ? normalizeSummary(report.strict_summary, overall) : null;
+          const strictRatios = strictSummary
+            ? {
+                pass: statusRatio(strictSummary, overall, "pass"),
+                fail: statusRatio(strictSummary, overall, "fail"),
+                ce: statusRatio(strictSummary, overall, "ce"),
+                skip: statusRatio(strictSummary, overall, "skip"),
+              }
+            : null;
           const proposalDiffers =
             withProposal.pass !== overall.pass ||
             withProposal.fail !== overall.fail ||
@@ -3948,8 +4481,38 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             withProposal.skip !== overall.skip ||
             withProposal.total !== overall.total;
 
+          let lastDetail = null;
+          const conformanceOptions = () => {
+            const strictOnly = strictToggle ? strictToggle.checked : false;
+            const hostEnabled = hostToggle ? hostToggle.checked : true;
+            return {
+              strictOnly,
+              hostEnabled,
+              captionSub:
+                strictOnly && !hostEnabled
+                  ? "strict standalone estimate"
+                  : strictOnly
+                    ? "strict conformance"
+                    : hostEnabled
+                      ? "conformance"
+                      : "standalone estimate",
+            };
+          };
+          const applyConformanceOptions = (summary, { exactStrictSummary = null } = {}) => {
+            const options = conformanceOptions();
+            let next = normalizeSummary(summary);
+            if (options.strictOnly) {
+              next = exactStrictSummary
+                ? normalizeSummary(exactStrictSummary)
+                : strictRatios
+                  ? applySummaryRatios(next, strictRatios)
+                  : next;
+            }
+            return { summary: applyHostMode(next), options };
+          };
           const applyScopeFromDetail = (detail) => {
             if (!detail) return;
+            lastDetail = detail;
             if (Number.isFinite(detail.publishedLimitRank)) {
               window.__conformancePublishedLimitRank = detail.publishedLimitRank;
             }
@@ -3957,21 +4520,29 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             const currentScope = detail.scope || "overall";
             window.__conformanceEditionScope = currentScope;
             if (currentScope === "overall") {
-              renderDonut(overall);
+              const { summary, options } = applyConformanceOptions(overall, { exactStrictSummary: strictSummary });
+              renderDonut(summary, "ECMAScript", options.captionSub);
               applyFeatureEditionScope("overall");
               return;
             }
             if (currentScope === "overall+proposal") {
-              renderDonut(withProposal, "ECMAScript + proposals");
+              const { summary, options } = applyConformanceOptions(withProposal);
+              renderDonut(summary, "ECMAScript + proposals", options.captionSub);
               applyFeatureEditionScope("overall+proposal");
               return;
             }
 
             const scope = detail.scopeMap instanceof Map ? detail.scopeMap.get(currentScope) : null;
             if (!scope) return;
-            renderDonut(scope.summary, scope.captionMain);
+            const { summary, options } = applyConformanceOptions(scope.summary);
+            renderDonut(summary, scope.captionMain, options.captionSub);
             applyFeatureEditionScope(currentScope);
           };
+          window.updateConformanceDonut = () => {
+            if (lastDetail) applyScopeFromDetail(lastDetail);
+          };
+          strictToggle?.addEventListener("change", window.updateConformanceDonut);
+          hostToggle?.addEventListener("change", window.updateConformanceDonut);
 
           editionTimeline.addEventListener("edition-change", (event) => {
             applyScopeFromDetail(event.detail);
@@ -4139,7 +4710,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         };
 
         const renderHeuristicEditionPassBars = () => {
-          const strictOnly = strictToggle ? strictToggle.checked : true;
+          const strictOnly = strictToggle ? strictToggle.checked : false;
           const hostEnabled = hostToggle ? hostToggle.checked : true;
 
           document.querySelectorAll(".feat-section").forEach((section) => {
@@ -4257,6 +4828,84 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           labelEl.textContent = `JavaScript feature areas implemented (${implemented}/${total} with >50% tests passing)`;
         } catch {
           // Keep the build-time fallback when the report file is unavailable.
+        }
+      })();
+
+      // #1201 — hydrate feature rows with live test262 pass counts.
+      // #1327 — also append "View test results →" link to the expanded
+      // feature body, deep-linking into the feature-report page.
+      //
+      // Each `.feat-row[data-t262-paths]` declares one or more depth-2
+      // test262 path prefixes (e.g. `built-ins/Array,built-ins/Map`).
+      // We sum pass/total across the listed paths and append a small
+      // `<span class="feat-row-counts">N/T</span>` next to the feature
+      // name. Falls back gracefully (no count shown) if the fetch fails
+      // or a path isn't present in the categories data — a wrong
+      // mapping is then visible as a missing count rather than a
+      // misleading number.
+      (async function hydrateFeatureRowCounts() {
+        try {
+          const resp = await fetch("./benchmarks/results/test262-categories.json");
+          if (!resp.ok) return;
+          const payload = await resp.json();
+          const categories = payload?.categories;
+          if (!Array.isArray(categories) || categories.length === 0) return;
+          const byPath = new Map();
+          for (const cat of categories) {
+            const key = cat?.path ?? cat?.name;
+            if (typeof key === "string") byPath.set(key, cat);
+          }
+          const rows = document.querySelectorAll(".feat-row[data-t262-paths]");
+          for (const row of rows) {
+            const paths = (row.getAttribute("data-t262-paths") || "")
+              .split(",")
+              .map((p) => p.trim())
+              .filter(Boolean);
+            let pass = 0;
+            let total = 0;
+            for (const p of paths) {
+              const cat = byPath.get(p);
+              if (!cat) continue;
+              pass += Number(cat.pass ?? 0);
+              const skip = Number(cat.skip ?? 0);
+              total += Number(cat.total ?? 0) - skip;
+            }
+            if (total <= 0) continue;
+            // Only render the count if at least one of the listed
+            // paths was found — otherwise leave the static badge alone
+            // so a stale mapping is visible rather than misleading.
+            const span = document.createElement("span");
+            span.className = "feat-row-counts feature-test-count";
+            span.textContent = `${pass} / ${total}`;
+            const ratio = pass / total;
+            if (ratio >= 0.9) span.dataset.tone = "pass";
+            else if (ratio >= 0.5) span.dataset.tone = "partial";
+            else span.dataset.tone = "fail";
+            // Append inside `.feat-name` to stay within its grid cell —
+            // the row uses a 3-col template (`30px 1fr 24px`) so any
+            // sibling span would land in column 3 (the badge column)
+            // and break alignment.
+            const nameEl = row.querySelector(".feat-name");
+            if (nameEl) nameEl.appendChild(span);
+
+            // #1327 — Inject a "View test results →" link into the
+            // expanded body. Use the first path as the `?feature=`
+            // value (the report page resolves it against
+            // testCategories in feature-examples.json).
+            const details = row.querySelector("details");
+            if (details && paths.length > 0 && !details.querySelector(".feat-report-link")) {
+              const linkWrap = document.createElement("div");
+              linkWrap.className = "feat-report-link";
+              const a = document.createElement("a");
+              a.href = `./benchmarks/feature-report.html?feature=${encodeURIComponent(paths[0])}`;
+              a.textContent = `View test results (${pass}/${total}) →`;
+              a.rel = "noopener";
+              linkWrap.appendChild(a);
+              details.appendChild(linkWrap);
+            }
+          }
+        } catch {
+          // Static badges remain — graceful fallback.
         }
       })();
 

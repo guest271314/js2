@@ -5,24 +5,105 @@ description: Algorithmic gate for self-merging a PR. Reads CI JSON, applies 4 ha
 
 # /dev-self-merge \<N\>
 
-Run this after `.claude/ci-status/pr-<N>.json` exists with a SHA matching your branch HEAD.
+## Waiting for CI — how to poll
+
+The CI feed commits `pr-<N>.json` to **origin/main** (not your branch). Your
+worktree never sees it until you fetch. While waiting for CI, poll with:
+
+```bash
+git fetch origin
+git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null
+```
+
+Run this every few minutes. When output appears and the `head_sha` matches
+`git rev-parse HEAD`, CI is done — proceed to Step 0 below.
+
+Do NOT `git merge origin/main` just to check — `git show` reads the remote ref
+without touching your working tree.
+
+## Step 0 — fast-path for non-test262 PRs
+
+If `git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null` returns nothing, check whether Test262 was
+required for this PR:
+
+```bash
+gh pr view <N> --json files --jq '[.files[].path | select(startswith("src/"))] | length'
+```
+
+If the result is **0** (no `src/**` changes), Test262 Sharded was not required.
+Check basic CI instead:
+
+```bash
+gh pr view <N> --json statusCheckRollup \
+  --jq '[.statusCheckRollup[] | select(.conclusion != null)] |
+        { total: length,
+          failed: [.[] | select(.conclusion == "FAILURE" or .conclusion == "failure")] | length }'
+```
+
+- If `failed == 0` and `total > 0`: output **MERGE** and skip to Step 5.
+- If `failed > 0`: output **ESCALATE — basic CI failed. Check which checks failed before merging.**
+- If `total == 0` (no checks at all): output **MERGE** — workflow-only, no CI gates apply.
+
+If `src/**` changes exist but no status file: CI is still in-flight. Wait.
 
 ## Step 1 — read the feed
 
 ```bash
-cat .claude/ci-status/pr-<N>.json
+git fetch origin
+git show origin/main:.claude/ci-status/pr-<N>.json
 ```
 
+If `test262_skipped: true` in the JSON, this was a test-only / docs-only PR
+(no `src/**` changes). Skip Steps 3–4 entirely:
+- `conclusion == "success"` → **MERGE** (go to Step 5)
+- `conclusion != "success"` → **ESCALATE — basic CI failed on a non-src PR.**
+
 Extract: `head_sha`, `net_per_test`, `regressions`, `regressions_real`,
-`compile_timeouts`, `improvements`, `run_url`.
+`regressions_wasm_change`, `wasm_identical_noise`, `compile_timeouts`,
+`improvements`, `run_url`, `baseline_stale`, `baseline_staleness_commits`.
+
+### Step 1a — baseline staleness short-circuit (#1391)
+
+If `baseline_stale: true` is set on the feed, the regression count is
+contaminated by drift on main (tests that flipped between when the baseline
+was last refreshed and the PR's CI run). Continuing through the criteria
+below would falsely block PRs whose actual same-run-main diff is clean.
+
+```bash
+stale=$(jq -r '.baseline_stale // false' .claude/ci-status/pr-<N>.json)
+if [ "$stale" = "true" ]; then
+  drift=$(jq -r '.baseline_staleness_commits // 0' .claude/ci-status/pr-<N>.json)
+  echo "ESCALATE — baseline is stale ($drift commits behind main HEAD)."
+  exit 1
+fi
+```
+
+Output (when triggered):
+
+> **ESCALATE — baseline is stale (N commits behind main HEAD). The CI feed's regression counts are inflated by drift, not by this PR. Tech lead should sanity-check by diffing branch-merged vs main-merged artifacts from the same CI run before merging.**
+
+Skip the rest of the algorithm. Do not merge. The tech lead may override after
+confirming via artifact comparison; the staleness threshold (50 commits) is
+conservative and most PRs will not be flagged.
+
+`regressions_wasm_change` (added by #1222) = regressions where the
+compiled Wasm binary differs between base and PR (excluding
+`compile_timeout`). Pass→fail flips on a byte-identical binary are
+physically impossible compiler regressions — they're CI runner variance
+(scheduling, memory pressure, GC timing). This is the preferred field
+for the ratio check in criterion 2.
 
 `regressions_real` (added by #1192) = `compile_error + fail` regressions
 only — excludes `compile_timeout` transitions which are runner-load
 timing noise (tests right at the 30s compile-timeout boundary flap
-based on CI system load). Use this for the ratio check in criterion 2.
+based on CI system load). Used as a fallback when `regressions_wasm_change`
+is null (older CI feed).
 
-If the feed predates #1192 (no `regressions_real` field), fall back to
-the headline `regressions` count.
+**`compile_timeout` transitions are NOT counted — runner timing noise.**
+**Wasm-identical pass→fail flips are NOT counted — runner variance noise.**
+
+Field priority (use the first non-null):
+`regressions_wasm_change` → `regressions_real` → `regressions`
 
 ## Step 2 — SHA check
 
@@ -41,14 +122,21 @@ Stop.
 | # | Criterion | Failure output |
 |---|-----------|----------------|
 | 1 | `net_per_test > 0` | **ESCALATE — net_per_test is not positive (value: N). PR caused more regressions than improvements.** |
-| 2 | `R == 0 OR R / improvements < 0.10`, where `R = regressions_real ?? regressions` | **ESCALATE — regression ratio is N% (R/improvements), exceeds 10% threshold.** |
+| 2 | `R == 0 OR R / improvements < 0.10`, where `R = regressions_wasm_change ?? regressions_real ?? regressions` | **ESCALATE — regression ratio is N% (R/improvements), exceeds 10% threshold.** |
 | 3 | No bucket > 50 regressions (see Step 4) | **ESCALATE — bucket "\<path\>" has N regressions, exceeds 50-test limit.** |
 | 4 | All above pass | **MERGE** |
 
-`R` (criterion 2) is `regressions_real` if the feed has it (post-#1192
-CI), else falls back to `regressions`. Excluding `compile_timeout`
-prevents runner-load timing noise from tipping otherwise-clean PRs
-above the 10% threshold.
+`R` (criterion 2) prefers `regressions_wasm_change` if the feed has it
+(post-#1222 CI). This filters out byte-identical-binary pass→fail flips,
+which are CI runner variance, not real regressions. Falls back to
+`regressions_real` (post-#1192, excludes compile_timeout), then to the
+headline `regressions` count. Excluding wasm-identical noise and
+`compile_timeout` prevents CI variance from tipping otherwise-clean PRs
+above the 10% threshold. Compute it in shell with:
+
+```bash
+R=$(jq -r '.regressions_wasm_change // .regressions_real // .regressions' .claude/ci-status/pr-<N>.json)
+```
 
 If `regressions` is `null` in the feed (older CI format without per-test tracking): treat criterion 2 as **pass** and skip criterion 3 (no data to bucket). Proceed to MERGE if criterion 1 holds.
 
@@ -58,8 +146,8 @@ Download the merged report artifact:
 
 ```bash
 run_id=$(jq -r '.run_url' .claude/ci-status/pr-<N>.json | grep -oE 'runs/[0-9]+' | cut -d/ -f2)
-mkdir -p /tmp/sm-<N>
-gh run download "$run_id" -n test262-merged-report -D /tmp/sm-<N>
+mkdir -p output/sm-<N>
+gh run download "$run_id" -n test262-merged-report -D output/sm-<N>
 ```
 
 Bucket by path prefix:
@@ -117,4 +205,7 @@ Do not merge. Do not move to the next task. Own the issue until it resolves.
 ## What these fields mean
 
 - **`net_per_test`** = `improvements - regressions` — per-test transitions from `diff-test262.ts`. The merge gate.
+- **`regressions_wasm_change`** (#1222) — regressions where the Wasm binary changed (excluding `compile_timeout`). Preferred for criterion 2.
+- **`wasm_identical_noise`** (#1222) — pass→other transitions where the Wasm binary is byte-identical on base & PR. These are CI runner variance, **not** real regressions, and are excluded from `regressions_wasm_change`.
+- **`regressions_real`** (#1192) — `compile_error + fail` regressions, excludes `compile_timeout`. Fallback for criterion 2.
 - **`snapshot_delta`** = bulk pass-count difference vs committed baseline. NOT a merge criterion — contaminated by baseline drift. Ignore it.

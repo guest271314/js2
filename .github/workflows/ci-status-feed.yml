@@ -1,18 +1,19 @@
 name: CI Status Feed
 
 # Writes a per-PR CI status file to .claude/ci-status/pr-{N}.json on main
-# whenever the Test262 Sharded workflow completes for a PR. Devs running in
-# worktrees watch this directory via a FileChanged hook and receive the
+# whenever the Test262 Differential workflow completes for a PR. Devs running
+# in worktrees watch this directory via a FileChanged hook and receive the
 # completion signal without needing SendMessage comms to stay alive.
 #
-# Why this exists: if the team-lead ↔ dev SendMessage channel breaks (OOM,
-# session restart, etc.), devs still receive authoritative "your PR passed/
-# failed CI" signals directly from the repo. This decouples CI notifications
-# from the comms layer.
+# Why Differential (not Sharded): the Differential workflow compares branch
+# vs. fresh main using a src-tree-hash cache — no baseline staleness drift.
+# The Sharded workflow compares against a committed JSONL baseline which goes
+# stale between merges, causing spurious regressions_wasm_change counts on
+# every PR during heavy merge periods.
 
 on:
   workflow_run:
-    workflows: ["Test262 Sharded"]
+    workflows: ["Test262 Differential"]
     types: [completed]
 
 permissions:
@@ -31,19 +32,19 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download merged report artifact from triggering run
+      - name: Download merged branch report artifact from triggering run
         uses: actions/download-artifact@v7
         with:
-          name: test262-merged-report
+          name: test262-diff-branch-merged
           path: /tmp/merged-report
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Download regressions report artifact from triggering run
+      - name: Download differential regressions report artifact from triggering run
         uses: actions/download-artifact@v7
         with:
-          name: test262-regressions-report
+          name: test262-diff-regressions-report
           path: /tmp/merged-report
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -99,12 +100,56 @@ jobs:
           net_per_test=null
           regressions=null
           regressions_real=null
+          regressions_wasm_change=null
+          wasm_identical_noise=null
           compile_timeouts=null
           improvements=null
+          baseline_sha=null
+          baseline_staleness_commits=null
+          baseline_stale=false
           if [ -f /tmp/merged-report/test262-report-merged.json ]; then
             pass=$(jq '.summary.pass' /tmp/merged-report/test262-report-merged.json)
             fail=$(jq '.summary.fail' /tmp/merged-report/test262-report-merged.json)
             ce=$(jq '.summary.compile_error' /tmp/merged-report/test262-report-merged.json)
+            # (#1391) Surface the baseline SHA the diff was computed against
+            # so the merge gate can detect when it lags current main.
+            baseline_sha=$(jq -r '.baseline_sha // ""' /tmp/merged-report/test262-report-merged.json)
+          fi
+
+          # (#1391) Baseline staleness detection.
+          #
+          # When `baseline_sha` lags `origin/main` HEAD by more than 50 commits,
+          # the regression count is contaminated by drift — tests that flipped
+          # on main since the baseline was last refreshed appear as PR
+          # regressions even when the PR didn't cause them. This is exactly
+          # what tripped PR #294: feed reported `regressions_real = 495` while
+          # branch-vs-same-run-main artifact comparison showed only 7.
+          #
+          # When stale, we emit `baseline_stale: true`. The dev-self-merge
+          # gate sees that and escalates to tech lead instead of hard-blocking
+          # on the inflated regression number.
+          STALE_THRESHOLD=50
+          if [ -n "${baseline_sha:-}" ] && [ "$baseline_sha" != "null" ] && [ "$baseline_sha" != "" ] && [ "$baseline_sha" != "unknown" ]; then
+            # Fetch the baseline commit so the merge-base count is computable
+            # even when the workflow checkout is shallow.
+            git fetch --depth=200 origin "$baseline_sha" 2>/dev/null || true
+            # Count commits in main reachable from main HEAD that aren't
+            # reachable from baseline_sha. If the baseline commit isn't
+            # reachable at all (deleted branch, force-push), we report
+            # `baseline_staleness_commits = null` and skip the flag.
+            if git cat-file -e "${baseline_sha}^{commit}" 2>/dev/null; then
+              baseline_staleness_commits=$(git rev-list --count "${baseline_sha}..HEAD" 2>/dev/null || echo 0)
+              # Coerce to integer for the comparison
+              if [ "$baseline_staleness_commits" -gt "$STALE_THRESHOLD" ] 2>/dev/null; then
+                baseline_stale=true
+                echo "::warning::Baseline drift detected — baseline_sha=${baseline_sha:0:8} is ${baseline_staleness_commits} commits behind main HEAD (threshold ${STALE_THRESHOLD}). Regression count may be inflated; gate will escalate to tech lead."
+              else
+                echo "Baseline freshness OK: ${baseline_staleness_commits} commits behind main HEAD."
+              fi
+            else
+              echo "::warning::Baseline commit ${baseline_sha:0:8} is not reachable from this checkout — staleness undetermined."
+              baseline_staleness_commits=null
+            fi
           fi
 
           # snapshot_delta: absolute pass count vs the committed baseline on main.
@@ -115,6 +160,11 @@ jobs:
             baseline=$(jq '.summary.pass' benchmarks/results/test262-current.json)
             snapshot_delta=$((pass - baseline))
           fi
+
+          # Differential workflow uploads regressions.txt under a diff-out/ subdir;
+          # flatten the path so the parse logic below works regardless of source.
+          [ -f /tmp/merged-report/diff-out/test262-regressions.txt ] && \
+            cp /tmp/merged-report/diff-out/test262-regressions.txt /tmp/merged-report/test262-regressions.txt
 
           # Regression / improvement counts from the regressions txt if present
           if [ -f /tmp/merged-report/test262-regressions.txt ]; then
@@ -129,16 +179,32 @@ jobs:
             # unchanged for backwards-compat with the dashboard.
             compile_timeouts=$(grep -oE 'Compile timeouts \(pass → compile_timeout\): [0-9]+' /tmp/merged-report/test262-regressions.txt | grep -oE '[0-9]+$' || echo 0)
             regressions_real=$(grep -oE 'Regressions excluding compile_timeout: [0-9]+' /tmp/merged-report/test262-regressions.txt | grep -oE '[0-9]+$' || echo 0)
+            # #1222: regressions where the compiled Wasm binary differs between
+            # base and branch. Pass→fail flips on a byte-identical binary are
+            # physically impossible compiler regressions — they're CI runner
+            # variance (scheduling, memory pressure, GC timing). The merge gate
+            # uses `regressions_wasm_change` in preference to `regressions_real`
+            # so symmetric-flip noise patterns no longer trigger gate failure.
+            regressions_wasm_change=$(grep -oE 'Regressions with wasm-hash change: [0-9]+' /tmp/merged-report/test262-regressions.txt | grep -oE '[0-9]+$' || echo 0)
+            wasm_identical_noise=$(grep -oE 'Wasm-identical noise \(pass → other, same wasm_sha\): [0-9]+' /tmp/merged-report/test262-regressions.txt | grep -oE '[0-9]+$' || echo 0)
           fi
 
           # net_per_test: improvements − regressions (per-test, from diff-test262.ts).
           # This IS the merge gate — it measures what the PR actually did to the
           # baseline it was tested against, not an absolute snapshot difference.
           # See #1082 for why the distinction matters.
-          if [ "$improvements" != "null" ] && [ "$regressions" != "null" ]; then
-            net_per_test=$((improvements - regressions))
+          # #1287: use regressions_wasm_change (not regressions) so compile_timeout
+          # flaps from noisy CI runners don't drag net_per_test below zero.
+          if [ "$improvements" != "null" ] && [ "$regressions_wasm_change" != "null" ]; then
+            net_per_test=$((improvements - regressions_wasm_change))
           fi
 
+          # Coerce the staleness value to a JSON-friendly form.
+          if [ -z "${baseline_staleness_commits:-}" ] || [ "$baseline_staleness_commits" = "null" ]; then
+            baseline_staleness_arg=null
+          else
+            baseline_staleness_arg="$baseline_staleness_commits"
+          fi
           # Write JSON using jq so nothing is broken by shell quoting
           jq -n \
             --arg pr "$PR" \
@@ -147,6 +213,7 @@ jobs:
             --arg head_sha "$HEAD_SHA" \
             --arg run_url "$RUN_URL" \
             --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg baseline_sha "${baseline_sha:-}" \
             --argjson pass "${pass:-null}" \
             --argjson fail "${fail:-null}" \
             --argjson ce "${ce:-null}" \
@@ -154,8 +221,12 @@ jobs:
             --argjson net_per_test "${net_per_test:-null}" \
             --argjson regressions "${regressions:-null}" \
             --argjson regressions_real "${regressions_real:-null}" \
+            --argjson regressions_wasm_change "${regressions_wasm_change:-null}" \
+            --argjson wasm_identical_noise "${wasm_identical_noise:-null}" \
             --argjson compile_timeouts "${compile_timeouts:-null}" \
             --argjson improvements "${improvements:-null}" \
+            --argjson baseline_staleness_commits "${baseline_staleness_arg}" \
+            --argjson baseline_stale "${baseline_stale}" \
             '{
               pr: ($pr|tonumber),
               conclusion: $conclusion,
@@ -170,10 +241,34 @@ jobs:
               net_per_test: $net_per_test,
               regressions: $regressions,
               regressions_real: $regressions_real,
+              regressions_wasm_change: $regressions_wasm_change,
+              wasm_identical_noise: $wasm_identical_noise,
               compile_timeouts: $compile_timeouts,
-              improvements: $improvements
+              improvements: $improvements,
+              baseline_sha: (if ($baseline_sha == "") then null else $baseline_sha end),
+              baseline_staleness_commits: $baseline_staleness_commits,
+              baseline_stale: $baseline_stale
             }' > "$out"
           cat "$out"
+
+          # Surface a GitHub Actions job summary so reviewers see the warning
+          # without digging into the raw feed file.
+          {
+            echo "## CI status feed: PR #$PR"
+            echo ""
+            echo "- conclusion: \`$CONCLUSION\`"
+            echo "- head_sha: \`${HEAD_SHA:0:8}\`"
+            if [ -n "${baseline_sha:-}" ] && [ "$baseline_sha" != "null" ] && [ "$baseline_sha" != "" ]; then
+              echo "- baseline_sha: \`${baseline_sha:0:8}\`"
+            fi
+            if [ -n "${baseline_staleness_commits:-}" ] && [ "$baseline_staleness_commits" != "null" ]; then
+              echo "- baseline_staleness_commits: $baseline_staleness_commits"
+            fi
+            if [ "${baseline_stale:-false}" = "true" ]; then
+              echo ""
+              echo "> ⚠️  **Baseline drift detected** — \`regressions_real\` may be inflated by tests that flipped on main since the baseline was last refreshed. The dev-self-merge gate will escalate to tech lead instead of hard-blocking on the raw count. See #1391."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: Commit and push
         if: ${{ steps.pr.outputs.pr != '' }}

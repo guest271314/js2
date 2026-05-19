@@ -164,7 +164,7 @@ function computeLiveValues(fn: IrFunction, reachable: ReadonlySet<number>): Set<
  *    is a later pass.
  * - `global.set` — writes observable state.
  */
-function isSideEffecting(i: IrInstr): boolean {
+export function isSideEffecting(i: IrInstr): boolean {
   return (
     i.kind === "raw.wasm" ||
     i.kind === "call" ||
@@ -225,7 +225,33 @@ function isSideEffecting(i: IrInstr): boolean {
     // Slice 6 part 4 (#1183): forof.string is statement-level (result:
     // null) so the generic null-result rule already keeps it; explicit
     // listing for clarity.
-    i.kind === "forof.string"
+    i.kind === "forof.string" ||
+    // Slice 9 (#1169h): throw / try are statement-level side effects
+    // (control flow). DCE must always preserve them.
+    i.kind === "throw" ||
+    i.kind === "try" ||
+    // Slice 10 (#1169i): extern class ops invoke host imports with
+    // arbitrary side effects. Conservatively keep all five live so DCE
+    // never strips a `RegExp_new` or `Uint8Array_set` whose result is
+    // unused but whose execution is observable.
+    i.kind === "extern.new" ||
+    i.kind === "extern.call" ||
+    i.kind === "extern.propSet" ||
+    // extern.prop is a getter call — most are pure but some (Date.now,
+    // Map.size after concurrent mutation) reflect external state. Keep
+    // conservatively until a purity analysis distinguishes them.
+    i.kind === "extern.prop" ||
+    // extern.regex calls RegExp_new which is morally pure (allocates
+    // a fresh value), but it may throw on bad pattern syntax — keep
+    // the side-effect of the throw observable to user code.
+    i.kind === "extern.regex" ||
+    // (#1373 Phase B) Async / await IR nodes are control-flow with
+    // observable suspension / Promise side effects. DCE must always
+    // preserve them. Phase C lowering (CPS transform) does not change
+    // this — even unused-result awaits need to suspend.
+    i.kind === "await" ||
+    i.kind === "async.return" ||
+    i.kind === "async.throw"
   );
 }
 
@@ -255,6 +281,29 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.rand];
     case "select":
       return [instr.condition, instr.whenTrue, instr.whenFalse];
+    case "if": {
+      // (#1392) Walk both arm buffers so DCE pins any outer SSA value
+      // referenced inside. Mirrors the `try` / `forof.*` handling.
+      const result: IrValueId[] = [instr.cond, instr.thenValue, instr.elseValue];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectInstrUses(sub)) result.push(u);
+          if (sub.kind === "forof.vec" || sub.kind === "forof.iter" || sub.kind === "forof.string") walk(sub.body);
+          if (sub.kind === "try") {
+            walk(sub.body);
+            if (sub.catchClause) walk(sub.catchClause.body);
+            if (sub.finallyBody) walk(sub.finallyBody);
+          }
+          if (sub.kind === "if") {
+            walk(sub.then);
+            walk(sub.else);
+          }
+        }
+      };
+      walk(instr.then);
+      walk(instr.else);
+      return result;
+    }
     case "raw.wasm":
       return [];
     case "box":
@@ -313,6 +362,12 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
         for (const sub of instrs) {
           for (const u of collectInstrUses(sub)) result.push(u);
           if (sub.kind === "forof.vec" || sub.kind === "forof.iter" || sub.kind === "forof.string") walk(sub.body);
+          // (#1392) `if` arms may contain references to outer SSA values
+          // — recurse so DCE pins them. Same rationale as `try` recursion.
+          if (sub.kind === "if") {
+            walk(sub.then);
+            walk(sub.else);
+          }
         }
       };
       walk(instr.body);
@@ -337,6 +392,12 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
         for (const sub of instrs) {
           for (const u of collectInstrUses(sub)) result.push(u);
           if (sub.kind === "forof.vec" || sub.kind === "forof.iter" || sub.kind === "forof.string") walk(sub.body);
+          // (#1392) `if` arms may contain references to outer SSA values
+          // — recurse so DCE pins them. Same rationale as `try` recursion.
+          if (sub.kind === "if") {
+            walk(sub.then);
+            walk(sub.else);
+          }
         }
       };
       walk(instr.body);
@@ -349,6 +410,12 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
         for (const sub of instrs) {
           for (const u of collectInstrUses(sub)) result.push(u);
           if (sub.kind === "forof.vec" || sub.kind === "forof.iter" || sub.kind === "forof.string") walk(sub.body);
+          // (#1392) `if` arms may contain references to outer SSA values
+          // — recurse so DCE pins them. Same rationale as `try` recursion.
+          if (sub.kind === "if") {
+            walk(sub.then);
+            walk(sub.else);
+          }
         }
       };
       walk(instr.body);
@@ -362,6 +429,62 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 7b (#1169f): yield* delegation.
     case "gen.yieldStar":
       return [instr.inner];
+    // Slice 9 (#1169h): exception handling.
+    case "throw":
+      return [instr.value];
+    case "try": {
+      // Recurse through body / catch / finally buffers so DCE pins any
+      // SSA value referenced inside.
+      const result: IrValueId[] = [];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectInstrUses(sub)) result.push(u);
+          if (sub.kind === "forof.vec" || sub.kind === "forof.iter" || sub.kind === "forof.string") walk(sub.body);
+          if (sub.kind === "try") {
+            walk(sub.body);
+            if (sub.catchClause) walk(sub.catchClause.body);
+            if (sub.finallyBody) walk(sub.finallyBody);
+          }
+          // (#1392) recurse into nested if arms for the same reason.
+          if (sub.kind === "if") {
+            walk(sub.then);
+            walk(sub.else);
+          }
+        }
+      };
+      walk(instr.body);
+      if (instr.catchClause) walk(instr.catchClause.body);
+      if (instr.finallyBody) walk(instr.finallyBody);
+      return result;
+    }
+    // Slice 10 (#1169i): extern class ops.
+    case "extern.new":
+      return instr.args;
+    case "extern.call":
+      return [instr.receiver, ...instr.args];
+    case "extern.prop":
+      return [instr.receiver];
+    case "extern.propSet":
+      return [instr.receiver, instr.value];
+    case "extern.regex":
+      return [];
+    // Slice 12 (#1280): while.loop / for.loop. The cond / body / update
+    // buffers are already walked separately by the dead-code analysis
+    // walker (see the forof.* pattern above); the instr itself reports
+    // the condValue as a use so that the SSA def survives DCE.
+    case "while.loop":
+    case "for.loop":
+      return [instr.condValue];
+    // (#1373 Phase B) Async / await IR nodes — Phase C wires real
+    // analysis. For now, surface the single operand so DCE pins the
+    // SSA def; the wrapping IrInstr is side-effecting (control-flow)
+    // and must always be kept.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
   }
 }
 

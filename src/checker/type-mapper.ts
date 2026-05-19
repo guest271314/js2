@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import ts from "typescript";
+import { ts } from "../ts-api.js";
 import type { ValType } from "../ir/types.js";
 
 /** Types with built-in wasm GC handling that should NOT be treated as extern classes */
@@ -165,6 +165,13 @@ function isDeclareContext(node: ts.Node): boolean {
       return isDeclareContext(node.parent.parent);
     }
   }
+  // Top-level declarations in `.d.ts` files are implicitly ambient (#1287).
+  // Without this, `export class Foo { children: Foo[] }` in a `.d.ts` would
+  // be classified as a regular user class by `isExternalDeclaredClass` →
+  // `ensureStructForType` registers a WasmGC struct with a self-referencing
+  // field, producing a forward-reference heap type that fails Wasm validation.
+  const sf = node.getSourceFile();
+  if (sf && sf.isDeclarationFile) return true;
   return false;
 }
 

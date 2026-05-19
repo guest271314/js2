@@ -2,7 +2,7 @@
 /**
  * Variable declaration statement lowering.
  */
-import ts from "typescript";
+import { ts, forEachChild } from "../../ts-api.js";
 import { isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
@@ -18,6 +18,8 @@ import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitGuardedRefCast } from "../type-coercion.js";
 import { compileArrayDestructuring, compileObjectDestructuring } from "./destructuring.js";
 import { emitLocalTdzInit, emitTdzInit } from "./tdz.js";
+import { ensureNativeStringHelpers } from "../native-strings.js";
+import { compileStringBuilderInit } from "../string-builder.js";
 
 function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): ValType | null {
   if (!ts.isIdentifier(decl.name)) return null;
@@ -73,7 +75,7 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
       }
     }
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(scope);
@@ -159,6 +161,29 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     if (stmt.declarationList.flags & ts.NodeFlags.Const) {
       if (!fctx.constBindings) fctx.constBindings = new Set();
       fctx.constBindings.add(name);
+    }
+
+    // #1210: string-builder rewrite for `let s = "";` followed by an
+    // accumulating loop. Detected pre-pass populates `pendingStringBuilders`;
+    // emit the buffer-init sequence here and skip the normal local
+    // allocation (the binding name is intentionally NOT placed in
+    // `localMap` — `compileIdentifier` and `compileNativeStringCompoundAssignment`
+    // route through `fctx.stringBuilders` instead). The TDZ flag is also
+    // not allocated, since the variable is always logically initialised
+    // immediately after the buffer is created.
+    if (fctx.pendingStringBuilders?.has(decl)) {
+      // Native string helpers (incl. __str_buf_next_cap and __str_flatten)
+      // must be available before any append site emits a call to them. The
+      // detector only fires under nativeStrings; ensure here too in case the
+      // function body uses no other native-string helpers.
+      ensureNativeStringHelpers(ctx);
+      compileStringBuilderInit(ctx, fctx, name);
+      // Mark as initialized for any TDZ flag captured by enclosing closures.
+      // (compileStringBuilderInit didn't set localMap, so emitTdzInit only
+      // touches the flag local if one was already allocated by the hoist
+      // pre-pass.)
+      emitTdzInit(ctx, fctx, name);
+      continue;
     }
 
     // Class expression: const C = class { ... } — skip, already handled as class declaration
@@ -322,16 +347,41 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     // Check if this variable has widened properties (empty obj with later prop assignments)
     const widenedStructName = ctx.widenedVarStructMap.get(name);
     const widenedTypeIdx = widenedStructName !== undefined ? ctx.structMap.get(widenedStructName) : undefined;
-    const wasmType: ValType = isI32CoercedLocal
-      ? { kind: "i32" }
-      : widenedTypeIdx !== undefined
-        ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
-        : (inferredVecType ??
-          (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
-            ? { kind: "externref" as const }
-            : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
-              ? { kind: "externref" as const }
-              : resolveWasmType(ctx, varType)));
+    // #1197: i32-specialized number[] arrays get __vec_i32 instead of __vec_f64.
+    // The override is applied AFTER the standard type computation so it stacks
+    // cleanly with widened/inferred paths above (the analysis pass restricts
+    // candidates to bare `let arr: number[] = ...` so neither path applies).
+    const isI32SpecializedArray =
+      fctx.i32SpecializedArrays?.has(name) === true && (varType.flags & ts.TypeFlags.Object) !== 0;
+
+    // (#1239) If the initializer is an object literal carrying get/set
+    // accessor declarations, the variable holds a JS host object
+    // (externref) — never the inferred wasmGC struct type. Tag the var
+    // up-front so the local's wasm type and ctx.externrefAccessorVars
+    // stay in sync; later reads/writes via resolveStructNameForExpr will
+    // see the override.
+    const initIsAccessorLiteral =
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      decl.initializer.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p));
+    if (initIsAccessorLiteral) {
+      ctx.externrefAccessorVars.add(name);
+    }
+
+    const wasmType: ValType = initIsAccessorLiteral
+      ? { kind: "externref" as const }
+      : isI32CoercedLocal
+        ? { kind: "i32" }
+        : isI32SpecializedArray
+          ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
+          : widenedTypeIdx !== undefined
+            ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
+            : (inferredVecType ??
+              (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
+                ? { kind: "externref" as const }
+                : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
+                  ? { kind: "externref" as const }
+                  : resolveWasmType(ctx, varType)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
@@ -451,7 +501,18 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           stackType = closureType;
         }
       } else {
-        const resultType = compileExpression(ctx, fctx, decl.initializer, wasmType);
+        // #1197: while compiling the initializer for an i32-specialized number[]
+        // local, set a transient flag so the array literal / Array() constructor
+        // compiler emits an i32 backing array instead of f64.
+        const ctxAny = ctx as unknown as { _i32ElemArrayOverride?: boolean };
+        const prevElemOverride = ctxAny._i32ElemArrayOverride;
+        if (isI32SpecializedArray) ctxAny._i32ElemArrayOverride = true;
+        let resultType: ValType | null;
+        try {
+          resultType = compileExpression(ctx, fctx, decl.initializer, wasmType);
+        } finally {
+          ctxAny._i32ElemArrayOverride = prevElemOverride;
+        }
         stackType = resultType ?? wasmType;
         // Coerce if the expression produced a type that doesn't match the local
         if (resultType && !valTypesMatch(resultType, wasmType)) {

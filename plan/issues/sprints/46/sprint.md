@@ -1,212 +1,251 @@
 ---
 id: 46
-status: planning
+status: closed
+closed: 2026-05-02
 created: 2026-04-27
+groomed: 2026-04-30
+started: 2026-04-30
 wrap_checklist:
-  status_closed: false
+  status_closed: true
   retro_written: false
-  diary_updated: false
+  diary_updated: true
   end_tag_pushed: false
   begin_tag_pushed: false
+carry_overs:
+  - id: 742
+    status: blocked
+    note: compileCallExpression refactor — blocked, moved to backlog
+  - id: 1166
+    status: blocked
+    note: closed-world integer specialization — blocked, moved to backlog
+  - id: 1169
+    status: ready
+    note: IR Phase 4 umbrella tracker — ongoing through S47+
 ---
 
 # Sprint 46
 
-**Date**: TBD (follows sprint 45 close-out)
-**Baseline**: TBD (inherits from sprint 45 final test262 run)
-**Created**: 2026-04-27 — initial roadmap during the IR Phase 4 slice 6
-work. This file is a planning seed; PO will groom and prioritize during
-sprint planning.
+**Date**: 2026-04-30 → TBD
+**Baseline**: 25,830 / 43,168 = 59.8% (inherited from S45 close)
+**Created**: 2026-04-27 — initial seed during S45 IR slice 6 work
+**Groomed**: 2026-04-30 — PO + project lead planning session
 
-## Goal
+> **Note (2026-04-30 PO):** the original seed narrative below was
+> written before S45 actually shipped. Five of its "headline" issues
+> (#1185, #1186, #1169f, #1169g, #1169h) all landed in S45. The
+> sprint goal has been rewritten for the actual S46 shape decided
+> with the project lead.
 
-Continue the IR Phase 4 migration to the natural end of slice 6 and
-into slices 7 / 8 / E (async iter, destructuring, try-catch +
-iterator-close). Land architectural debt accumulated during slice 6
-BEFORE the next big slice goes in — specifically the `LowerCtx`
-resolver thread-through (#1185), which compounds in cost with every
-slice that ships on top of the per-feature shortcuts.
+## Sprint goal
 
-Secondary: clean up the legacy bugs surfaced during slice 6
-implementation (#1186 native-string helper staleness, #1187
-test-runtime string coercion).
+**Headline:** "Fix the visible gaps, then push conformance."
 
-## Headline themes
+S46 is sequenced **C-then-A**:
 
-### 1. IR architectural debt (do this FIRST)
+  - **Phase 1 (C — benchmark & visibility cleanup):** fix the
+    embarrassing gaps in the competitive benchmark table from S45
+    (hosted ESM error, fib-recursive type mismatch, string-hash GC
+    pressure), ship the custom domain, land the test-runtime
+    native-string coercion helper. Quick wins + one hard
+    performance issue (#1210).
+  - **Phase 2 (A — conformance progress):** finish IR Phase 4 with
+    Slice 10 steps B–E (TypedArray, ArrayBuffer/DataView,
+    Date/Error/Map/Set, Promise). Ship #1205 (TDZ flag boxing for
+    async/generators) so #1177 (TDZ closure captures) can be
+    re-attempted after its S45 revert.
 
-  - **#1185 — LowerCtx resolver refactor** (medium feasibility, high
-    reasoning). Threads `IrLowerResolver` through `LowerCtx`, retires
-    per-feature shortcuts (`nativeStrings`, `anyStrTypeIdx`,
-    `inferVecElementValTypeFromContext`, `inferVecDataValTypeFromContext`).
-    Adds slot-binding `asType?: IrType` widening so native-mode string
-    for-of can compose with slice-1 string ops.
-    Cost-of-delay: every slice (7, 8, E) shipped on top of the current
-    shortcuts will need its own threading hack and adds another
-    retire-cost when #1185 finally lands.
+**Theme B (credibility / per-path scores / differential testing /
+methodology document)** is deferred to S47. Theme A's #1126 (JS
+number → int32/uint32 inference) is also deferred to S47 — it
+competes with #1205 for senior-dev attention and benefits from
+having the IR slice 10 work fully landed first.
 
-### 2. IR Phase 4 — slice continuation
+## Capacity
 
-Sequenceable in parallel after #1185:
+  - **4 dev agents** for sprint dispatch
+  - **1 architect agent** for spec writing on hard issues
+    (spawned by tech lead 2026-04-30)
+  - PO available for backlog grooming and acceptance review
 
-  - **#1169f — Slice 7: async iter / for await** (depends on #1182).
-    Reuses the `iter.*` infrastructure with `__async_iterator` host
-    helpers. Mostly a copy-paste of slice 6 part 3 with `async: true`
-    threading.
-  - **#1169g — Slice 8: destructuring in for-of** (orthogonal to slice
-    7 — can run concurrently). Extends the for-of init grammar from
-    Identifier-only to ObjectBindingPattern / ArrayBindingPattern.
-    Touches selector + lowerForOf*.
-  - **#1169h — Slice E: try/catch + iterator-close on abrupt exit**
-    (depends on slices 7 and the legacy iterator-close pattern).
-    Adds the try/catch_all wrapper around `forof.iter` so abrupt
-    exits trigger `__iterator_return`.
+## Validations completed during planning (2026-04-30)
 
-After slice E, IR Phase 4 has parity with the legacy for-of /
-iteration surface. Remaining IR phase 4 work would be: closures
-within for-of bodies (currently rejected by the body grammar),
-nested function decls inside for-of, label/break out of nested
-for-of.
+  - **#1080** — All four umbrella children (#1076, #1077, #1078,
+    #1079) landed in S45 with `status: done`. Acceptance criteria
+    met. Closed and moved to `sprints/45/` to reflect actual
+    completion sprint.
+  - **#1126** — Deferred to S47. Frontmatter updated, file moved
+    to `plan/issues/backlog/`.
 
-### 3. Legacy bugs surfaced during slice-6 work
+## Architect spec requests (gating Phase 1 / Phase 2)
 
-  - **#1186 — fix(legacy): re-resolve native-string helpers post-shift**
-    (easy, medium reasoning). The pre-existing `compileForOfString`
-    bug that produces invalid Wasm in `nativeStrings: true` mode.
-    Mechanical fix.
-  - **#1187 — test-runtime: JS-string ↔ native-string coercion helper**
-    (easy, medium reasoning). Unblocks proper dual-run testing for
-    any IR feature that touches strings in `nativeStrings: true` mode.
-    Will be needed once #1186 lands (to re-enable the dual-run
-    cases I had to disable in `tests/issue-1183.test.ts`).
+The architect is asked to add `## Implementation Plan` sections to:
 
-### 4. forof.* family consolidation (opportunistic)
+  1. **#1210 — string-hash GC pressure** (gates Phase 1
+     completion). Decide between Option A (pre-allocated buffer
+     pattern detection), Option B (rope/StringBuilder), Option C
+     (defer with explanatory note). PO recommendation: Option A —
+     it's what AssemblyScript does and gets the benchmark from
+     20s timeout to ~6ms. Architect to confirm detection
+     feasibility and edge cases (`+=` in branches, escaping the
+     loop, mixed-pattern accumulation).
+  2. **#1205 — TDZ flag boxing for async/generators** (gates
+     Phase 2 completion). The issue file already has a detailed
+     implementation strategy (lines 91–126), but the spec was
+     written before slice 7 (#1169f) shipped. Architect to
+     validate that "mirror Stage 3 to async-fn / generator IR
+     path" still maps cleanly to the post-slice-7 generator IR
+     shape, and to identify any new capture-prepend sites in
+     `src/ir/from-ast.ts:liftAsyncFunction` that need flag-ref
+     boxing.
 
-While #1185 is open, consider factoring a shared
-`IrInstrForOfBase` interface across `forof.vec`, `forof.iter`, and
-`forof.string`. The pass updates (DCE, inline, monomorphize, verify)
-all have parallel switch arms — a helper would cut the per-slice
-maintenance cost. Probably a sub-issue of #1185 or a follow-up.
+## Phase 1 — Benchmark & visibility cleanup
 
-## Recommended task ordering
+| Order | Issue | Owner | Effort | Notes |
+|---|---|---|---|---|
+| 1 | **#1188** | dev | easy / low | js2.loopdive.com custom domain. Independent. Day-1 ship. |
+| 1 | **#1209** + **#1211** | dev (bundle) | easy + medium | labs hosted lane fixes — ESM resolver + fib-recursive type mismatch. Same harness, same lane, ship together. |
+| 2 | **#1187** | dev | easy / medium | test-runtime JS-string ↔ native-string coercion helper. Unblocks dual-run testing for native-strings IR features. |
+| 3 | **#1210** | senior dev | hard / high | string-hash GC pressure. Gated on architect spec. Senior dev only. |
+
+## Phase 2 — Conformance progress
+
+| Order | Issue | Owner | Effort | Notes |
+|---|---|---|---|---|
+| 4 | **#1169j** | dev | easy / medium | IR Slice 10 step B — TypedArray construction + index access. Pattern-copy of Step A. |
+| 4 | **#1169k** | dev | easy / medium | IR Slice 10 step C — ArrayBuffer + DataView. Parallelizable with #1169j / #1169l. |
+| 4 | **#1169l** | dev | easy / medium | IR Slice 10 step D — Date / Error / Map / Set. Parallelizable. |
+| 5 | **#1205** | senior dev | hard / max | TDZ flag boxing for async/generators. Gated on architect spec. |
+| 6 | **#1177** | dev | medium | TDZ closure captures re-attempt. Blocked on #1205 landing. Stage 1 was reverted in S45 with 14.7% regressions; #1205 fixes the underlying gap. |
+| 7 (stretch) | **#1169m** | dev | medium | IR Slice 10 step E — Promise (best-effort). Stretch goal if Phase 2 finishes early. |
+
+## Recommended dispatch ordering for 4 devs
 
 ```
-#1185 (resolver refactor)
-    ↓
-    ├── #1169f (slice 7, async iter)        ── parallel ──┐
-    ├── #1169g (slice 8, destructuring)     ── parallel ──┤
-    ↓                                                      ↓
-    #1169h (slice E, iterator-close)  ←  needs #1169f
+Day 1:
+  Dev 1 → #1188 (custom domain)
+  Dev 2 → #1209 + #1211 (labs hosted bundle)
+  Dev 3 → #1187 (test-runtime helper)
+  Dev 4 (senior) → wait for #1210 architect spec
+
+Day 2-N (Phase 1 merges, Phase 2 starts):
+  Dev 1 → #1169j (IR Slice 10 B - TypedArray)
+  Dev 2 → #1169k (IR Slice 10 C - ArrayBuffer/DataView)
+  Dev 3 → #1169l (IR Slice 10 D - Date/Error/Map/Set)
+  Dev 4 (senior) → #1210 string-hash → then #1205 TDZ async/gen
+
+Day N+1 (after #1205 lands):
+  Any dev → #1177 re-attempt
+  Stretch → #1169m Promise
 ```
 
-Independently:
+## Out of sprint (deferred to S47)
 
-```
-#1186 (legacy str helper fix)  ──→  #1187 (test-runtime helper)
-```
+  - **#1126** — JS number → int32/uint32 inference. High-priority
+    performance work, but hard / max reasoning effort, broad
+    scope, and competes with #1205 for senior-dev attention.
+    Better to land after IR Phase 4 fully closes.
+  - **#1190** — research: eliminate residual CI baseline drift.
+    Most concrete sub-issues already shipped in S45; remaining
+    work is research questions. S47 candidate.
+  - **#1201** — per-path test262 scores. Theme B; sequenced
+    before #1204.
+  - **#1203** — differential testing harness. Theme B.
+  - **#1204** — methodology document. Theme B; depends on #1201.
+  - **#1169** — IR Phase 4 umbrella tracker. Stays open through
+    S46; closure waits for slice 10 fully retired and legacy
+    `src/codegen/expressions.ts` / `statements.ts` removed (S47+
+    work).
 
-Both blocks can run in parallel.
+## Carry-overs / blocked
 
-## Issues currently in `plan/issues/ready/` with `sprint: 46`
-
-  - #1177 — (TBD — pre-existing)
-  - #1182 — DONE (closed during sprint 46 setup, reference only)
-  - #1183 — DONE (closed during sprint 46 setup, reference only)
-  - #1185 — refactor: LowerCtx resolver thread-through
-  - #1186 — fix(legacy): native-str helper post-shift re-resolve
-  - #1187 — test-runtime: JS-string ↔ native-string coercion
+  - **#742** — compileCallExpression refactor (blocked).
+  - **#1166** — closed-world integer specialization (blocked).
+  - **#1169** — IR Phase 4 umbrella; remains open as parent of
+    slice 10 sub-issues.
 
 ## Sprint planning checklist (PO)
 
-When grooming this sprint:
+  - [x] Validate each candidate issue against current main —
+    closed #1080 (already done in S45)
+  - [x] Defer #1126 to S47 — moved to backlog/
+  - [x] Architect spec requests filed for #1210 + #1205
+  - [x] Sprint narrative rewritten to reflect actual S46 shape
+  - [ ] Build dev TaskList from Phase 1 + Phase 2 tasks
+  - [ ] Push `sprint-46/begin` tag (tech lead, after dispatch
+    starts)
 
-  - [ ] Validate each candidate issue against current main (some may
-    already be obviated by slice-6 work).
-  - [ ] Confirm #1185 is the first task — every other IR slice
-    depends on it being clean.
-  - [ ] Decide whether to bundle #1186 + #1187 as a single PR (they
-    share the strings-mode test infrastructure).
-  - [ ] Set sprint dates and `begin_tag_pushed`.
+## Notes from S45 retrospective (relevant for S46 retro)
 
-## Notes from slice-6 retrospective (carry-over for this sprint's retro)
-
-  - LowerCtx threading shortcuts were a pragmatic shortcut at the
-    time but compounded fast — by slice 6 part 4 they were a clear
-    refactor target. Recommend: when introducing a new slice that
-    needs resolver-time info, prefer threading the resolver itself
-    over adding a per-feature flag.
-  - Testing native-strings mode features is currently blocked on
-    #1187 (no JS-string coercion). Workaround: inline string
-    literals in test fixtures. Real fix in #1187.
-  - Pre-existing legacy bugs (#1186) tend to surface during IR work
-    because the IR's symbolic-ref design is post-shift-safe and
-    exposes bugs the legacy path hides. Worth a habit: after every
-    slice, briefly check what the legacy path is doing in the same
-    scenarios for surfacable bugs.
+  - **#1177 revert** cost two sprint cycles. The Stage 1
+    capture-index correction was correct in isolation but
+    surfaced a regression because Stage 2/3 flag boxing didn't
+    reach the async-fn / generator path. **#1205 is the fix; it
+    must land before #1177 is re-attempted.** This sequencing is
+    locked into S46 dispatch.
+  - **Sprint 45 PR-relative net deltas overcounted** vs the
+    cumulative sprint delta. PRs measure against pre-merge bases
+    that already include other improvements. For S46, expect the
+    sprint-end test262 delta to be smaller than the sum of PR
+    deltas — that's normal.
+  - **Worktree cleanup** instinct improved in S45; S46 should
+    keep the same discipline (remove worktrees after merge,
+    write context summaries before agent termination).
+  - **Three benchmark issues** (#1209, #1210, #1211) surfaced
+    only during competitive benchmarking, not proactively. S46's
+    Phase 1 fixes them; lesson is to integrate benchmark runs
+    earlier in future sprints.
 
 <!-- GENERATED_ISSUE_TABLES_START -->
 ## Issue Tables
 
-_Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
 ### Blocked
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
+| #742 | Extract and refactor compileCallExpression (3,350 lines) | medium | blocked |
 | #1166 | Closed-world integer specialization from literal call sites | high | blocked |
 
 ### Ready
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #744 | Function monomorphization for polymorphic call sites | high | ready |
-| #773 | Monomorphize functions: compile with call-site types, not generic externref | critical | ready |
-| #1000 | Normalize issue frontmatter and repopulate historical sprint issue assignments | high | ready |
-| #1001 | Preallocate counted number[] push loops into dense WasmGC arrays | medium | ready |
-| #1003 | Normalize issue metadata: add ES edition, language feature, and task type to all issue frontmatter | high | ready |
-| #1004 | Optimize repeated string concatenation via compile-time folding and counted-loop aggregation | medium | ready |
-| #1005 | Benchmark cold-start startup across Wasmtime, Wasm in Node.js, and native JS in Node.js | medium | ready |
-| #1006 | Support eval via JS host import | medium | ready |
-| #1008 | Add mobile-first layout support to the playground | medium | ready |
-| #1044 | Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization) | high | ready |
-| #1045 | DOM globals as extern classes (DOM_HOST_GLOBALS, queueMicrotask, requestAnimationFrame) | high | ready |
-| #1058 | Compile the TypeScript compiler itself to Wasm — self-hosting stress test | high | ready |
-| #1067 | Dependency graph as a web component adopting the landing page color scheme | medium | ready |
-| #1073 | Scope injection for __extern_eval — pass harness environment bag to preserve caller-visible identifiers | high | ready |
-| #1075 | CommonJS module.exports / exports.foo support for compiling .cjs and unmodified npm CJS packages | high | ready |
-| #1080 | [umbrella] Fix CI baseline-drift regression gate — main is not self-healing | critical | ready |
-| #1093 | Systematic ECMAScript spec conformance audit — review compiled semantics against tc39.es/ecma262 | high | ready |
-| #1094 | Shrink runtime.ts host boundary — compile-away JS semantics currently in sidecar runtime | high | ready |
-| #1095 | Eliminate `as unknown as Instr` casts — extend Instr union to cover all emitted opcodes | medium | ready |
-| #1098 | Audit and reduce patch-layer accumulation in codegen (155 workarounds, special cases, fallbacks) | medium | ready |
-| #1099 | Standalone execution demo — compile and run a program on Wasmtime with zero JS host | high | ready |
-| #1122 | Keep standalone recursive numeric benchmark stable across non-run entry exports | high | ready |
-| #1123 | Verify landing page claims and code examples against current compiler behavior | high | ready |
-| #1126 | Infer when JavaScript number flows can be safely lowered to int32 or uint32 | high | ready |
-| #1147 | Add a public Docs page to the site | medium | ready |
 | #1169 | IR Phase 4 — migrate full compiler to IR path, retire legacy AST→Wasm codegen | high | ready |
-| #1169g | IR Phase 4 Slice 8 — destructuring and rest/spread through the IR path | high | ready |
-| #1169h | IR Phase 4 Slice 9 — try/catch/finally and throw through the IR path | high | ready |
-| #1169i | IR Phase 4 Slice 10 — remaining builtins (RegExp, TypedArray, DataView) through the IR path | high | ready |
-| #1172 | Codebase modularity audit — reduce coupling, improve layering, harden interfaces | high | ready |
-| #1180 | js2wasm emits `env::__unbox_number` (and sibling box/unbox helpers) host imports on `--target wasi` builds | high | ready |
-| #1182 | IR Phase 4 Slice 6 part 3 — host iterator protocol through the IR (`iter.*` instrs, Map/Set/generator iteration) | medium | ready |
-| #1183 | IR Phase 4 Slice 6 part 4 — string fast path through the IR (`for (c of \"hello\")`) | medium | ready |
-| #1186 | fix(legacy): re-resolve native-string helpers post-shift in compileForOfString (stale __str_charAt funcIdx) | high | ready |
-| #1187 | test-runtime: add JS-string → native-string coercion helper for dual-run testing in nativeStrings mode | medium | ready |
-| #1188 | Setup js2.loopdive.com custom domain for GitHub Pages | medium | ready |
-| #1189 | ci(test262): residual cross-PR regression overlap (~95%) from runner-load CT noise — not cache staleness | medium | ready |
-| #1190 | research: eliminate CI test262 baseline drift (umbrella for #1189, #1191, #1192) | high | ready |
-| #1191 | ci(test262): committed baseline (test262-current.jsonl) is 1634 tests behind reality — refresh + automate | medium | ready |
-| #1192 | ci(self-merge): exclude compile_timeout transitions from regression count (runner noise) | medium | ready |
-| #1193 | tooling: ci-status-watcher.sh hook doesn't push notifications to dev agents (uses gh @me which resolves to human, not agent) | medium | ready |
 
 ### Done
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #1181 | IR Phase 4 Slice 6 part 2 — AST→IR bridge for vec for-of (#1169e follow-up) | high | done |
-| #1182 | IR Phase 4 Slice 6 part 3 — host iterator protocol through the IR (`iter.*` instrs, Map/Set/generator iteration) | medium | done |
-| #1183 | IR Phase 4 Slice 6 part 4 — string fast path through the IR (`for (c of \"hello\")`) | medium | done |
+| #1169j | IR Phase 4 Slice 10 step B — TypedArray construction + index access through IR | medium | done |
+| #1169k | IR Phase 4 Slice 10 step C — ArrayBuffer + DataView through IR | medium | done |
+| #1169l | IR Phase 4 Slice 10 step D — Date / Error / Map / Set through IR | medium | done |
+| #1169m | IR Phase 4 Slice 10 step E — Promise through IR (best-effort) | low | done |
+| #1184 | __str_copy_tree worklist allocates O(node.len) per flatten — bound by depth instead | high | done |
+| #1187 | test-runtime: add JS-string → native-string coercion helper for dual-run testing in nativeStrings mode | medium | done |
+| #1188 | Setup js2.loopdive.com custom domain for GitHub Pages | medium | done |
+| #1190 | research: eliminate CI test262 baseline drift (umbrella for #1189, #1191, #1192) | high | done |
+| #1201 | credibility: per-path test262 scores in test262-report.json — wire categorical data into landing page and report.html | high | done |
+| #1203 | credibility: differential testing harness — compare js2wasm output vs V8/SpiderMonkey on 1000+ programs | high | done |
+| #1204 | credibility: methodology document — how js2wasm is built by an AI agent team | medium | done |
+| #1205 | Extend TDZ flag boxing to async functions / generators (#1177-followup) — async-fn closure capture path needs Stage 2/3 wiring | high | done |
+| #1209 | labs/benchmarks: js2wasm hosted lane fails — ESM resolver error in run-node-wasm-program.mjs | medium | done |
+| #1210 | labs/benchmarks: js2wasm string-hash Wasmtime lane hits 20s timeout — WasmGC i16-array GC pressure | high | done |
+| #1211 | js2wasm hosted fib-recursive: Wasm validator — call param types must match | medium | done |
+| #1212 | fix: Promise resolve/reject edge cases regress after #1211 any-boxing fix | medium | done |
+| #1213 | ci: refresh-benchmarks workflow fails on every PR — looks for sidebar baseline at gitignored path | medium | done |
+| #1214 | ci: playground benchmark baseline doesn't survive on CI runners — wasm/js timing 4x off committed numbers | medium | done |
+| #1215 | fix: numeric-array .join() / .toString() must register number_toString — Wasm validation error | high | done |
+| #1217 | ci(test262): smoke-canary — re-run main HEAD twice with fresh cache, fail if flip rate > 0 | medium | done |
+| #1218 | ci(test262): auto-validate committed baseline on PR — spot-check 50 random pass entries | medium | done |
+| #1219 | ArrayBindingPattern iter-close: destructuring hangs when iterator never sets done:true (26 compile_timeout tests) | high | done |
+| #1220 | test262-worker: Promise snapshot missing + prototype poisoning leaks across fork tests (+29 conformance) | high | done |
+| #1221 | test262-worker: outer catches misclassify WebAssembly.Exception as compile_error — fix harness to reclassify as fail (~256 flaky tests) | high | done |
+
+### Won't Fix
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1189 | ci(test262): residual cross-PR regression overlap (~95%) from runner-load CT noise — not cache staleness | medium | wont-fix |
 
 <!-- GENERATED_ISSUE_TABLES_END -->

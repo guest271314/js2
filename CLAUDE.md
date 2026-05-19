@@ -20,7 +20,8 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   - Read/Edit/Write tools use absolute paths and are unaffected.
   - The `pre-git-commit.sh` hook injects a "VERIFY BEFORE COMMITTING: pwd=/workspace branch=main" reminder; that's the hook reading the (reset) shell cwd, NOT the actual command's working dir. The reminder is informational — verify by reading the commit's branch in git output (`[issue-1183-string-forof-ir 0527c7c5]`-style line shows the real branch).
 - **Worktree creation**: `git worktree add /workspace/.claude/worktrees/issue-NNN-slug -b issue-NNN-slug origin/main`. Always branch from `origin/main` (post-fetch), never from local `main`.
-- **Worktree cleanup after merge**: tech-lead runs `git worktree remove /workspace/.claude/worktrees/<branch>` after the PR merges. Agents should NOT remove their own worktrees — that's tech-lead's call.
+- **Push safety**: `.git/config` sets `push.default=current` — `git push` always pushes to the remote branch matching the local branch name, regardless of upstream tracking. This prevents the `git worktree add -b <branch> origin/main` trap where the inherited tracking ref routes pushes to origin/main.
+- **Worktree cleanup after merge**: after a dev self-merges their PR, they remove their own worktree (`git worktree remove /workspace/.claude/worktrees/<branch>`) before claiming the next task. Tech-lead only removes worktrees for suspended or abandoned branches.
 
 ## Architecture Principles
 - **Dual-mode: JS host optional** — the compiler supports two modes: JS host mode (uses host imports for performance/completeness) and standalone mode (pure Wasm, no JS runtime). New features should have Wasm-native implementations for standalone mode; JS host imports are acceptable as a fast path when a JS runtime is available. Don't add new host imports without a standalone fallback.
@@ -35,12 +36,10 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Test262 runner (preferred): `pnpm run test:262` — vitest-based, auto-worktree, disk cache, default 3 forks. Use `TEST262_WORKERS=5` for solo runs (no dev agents).
 - Test262 runner history: `runs/index.json` is appended by the vitest runner after each run. `benchmarks/results/report.html` reads this for the trend graph.
 - Backlog: `plan/issues/backlog/backlog.md`
-- Sprints: `plan/sprints/sprint-{N}.md` — planning, task queue, results, retrospective (living doc updated during sprint)
-- Issues: `plan/issues/` — organized by state:
-  - `ready/` — no blockers, pick any to start (priority in `dependency-graph.md`)
-  - `blocked/` — waiting on a dependency
-  - `done/` — completed (with frontmatter + implementation summary)
-  - `backlog/` — large scope / future
+- Sprints: `plan/issues/sprints/{N}/sprint.md` — planning, task queue, results, retrospective (living doc updated during sprint)
+- Issues: `plan/issues/` — organized by sprint:
+  - `sprints/{N}/` — all issues for sprint N (status tracked via `status:` frontmatter field)
+  - `backlog/` — unscheduled issues (no sprint assigned yet)
   - `wont-fix/` — decided against implementing
 - Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
@@ -77,6 +76,48 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Issues #618-#634 cover current failure patterns (from 2026-03-19 error analysis)
 - parseInt import: `(externref, f64) -> f64` with NaN sentinel for missing radix
 
+### Baseline files (which is authoritative?)
+
+| File | Lives in | Authoritative for | Refreshed by | Validated by |
+|------|----------|-------------------|--------------|--------------|
+| `benchmarks/results/test262-current.jsonl` | main repo (committed, ~15MB) | `dev-self-merge` Step 4 bucket-by-path regression analysis | `refresh-committed-baseline.yml` (after every `Test262 Sharded` push to main) | `test262-baseline-validate.yml` spot-checks 50 random `pass` entries on every PR (#1218); fails the PR if any sampled entry no longer passes on main HEAD |
+| `benchmarks/results/test262-current.json` | main repo (committed, ~kB) | landing-page summary, pass/total badges | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run) | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `benchmarks/results/playground-benchmark-sidebar.json` | main repo (committed, ~1KB) | landing-page sidebar wasm/js perf chart; `benchmark-refresh.yml` regression diff baseline | `benchmark-refresh.yml` auto-commit step on every push to main (#1216) | (none) |
+
+The committed JSONL must be kept in sync with the JSON; otherwise the dev-self-merge bucket analysis reads stale "pass" entries and silently miscounts regressions. `refresh-committed-baseline.yml` is the dedicated workflow for that sync — it downloads the merged JSONL artifact from the most-recent successful `Test262 Sharded` run on main and commits it back with `[skip ci]`.
+
+To validate the committed JSONL on demand, run `pnpm run test:262:validate-baseline` (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to `refresh-committed-baseline.yml`.
+
+## IR Fallback Budget (#1376)
+
+The IR retirement gate `pnpm run check:ir-fallbacks` walks every `.ts` file
+under `playground/examples/` with `trackFallbacks: true` and aggregates
+rejection reasons against `scripts/ir-fallback-baseline.json`. CI fails when
+any **unintended** bucket grows.
+
+| Reason                       | Category   | Reduces with                         |
+|------------------------------|------------|--------------------------------------|
+| `body-shape-rejected`        | unintended | #1370 (class methods), #1373 (async) |
+| `external-call`              | unintended | #1371 (whitelist Math.* / parseInt)  |
+| `call-graph-closure`         | unintended | #1370, #1373                         |
+| `param-shape-rejected`       | unintended | #1372 (destructuring params)         |
+| `param-type-not-resolvable`  | unintended | better TypeMap propagation           |
+| `return-type-not-resolvable` | unintended | better TypeMap propagation           |
+| `type-resolution-failure`    | unintended | better TypeMap propagation           |
+| `async-generator`            | deferred   | (out of scope long-term)             |
+| `deferred-feature`           | deferred   | (eval / Proxy / with — wont-fix)     |
+| `type-parameters`            | deferred   | (generics specialisation, future)    |
+| `non-export-modifier`        | deferred   | (`async` / declare-only — narrow)    |
+| `unnamed`                    | deferred   | (anonymous default exports)          |
+
+Refresh the baseline on PRs that intentionally retire a bypass:
+
+```bash
+pnpm run check:ir-fallbacks -- --update
+git add scripts/ir-fallback-baseline.json
+```
+
 ## CLI Flags
 - `--target wasi` — emit WASI imports (fd_write, proc_exit) instead of JS host
 - `--optimize` / `-O` — run Binaryen wasm-opt on compiled binary
@@ -91,7 +132,7 @@ See [plan/method/team-setup.md](plan/method/team-setup.md) for full team config,
 - `plan/method/session-start-checklist.md` — tech lead reads at session start
 - `plan/method/pre-commit-checklist.md` — devs read before every git add/commit
 - `plan/method/pre-completion-checklist.md` — devs read before signaling task completion
-- `plan/method/pre-merge-checklist.md` — tester reads before every merge to main
+- `plan/method/pre-merge-checklist.md` — dev reads before merging to main
 
 **Skills** (on-demand role protocols — any agent can invoke these):
 - `/test-and-merge` — full tester pipeline: merge main into branch, equiv tests, ff-only merge
@@ -183,9 +224,9 @@ End of sprint:
 10. **PO** grooms backlog for next sprint
 
 **Tech lead discipline:**
-- **Populate TaskList** at sprint start from `plan/issues/ready/` and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
+- **Populate TaskList** at sprint start from `plan/issues/sprints/{N}/` (current sprint dir) and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
 - Batch doc/plan commits on main AFTER all pending agent merges, not between them (doc commits force agents to re-merge main)
-- Complete post-merge issue cleanup (move to done/, update dep graph) after each merge
+- Complete post-merge issue cleanup (set `status: done` in sprint dir issue file, update dep graph) after each merge
 - **Tag sprints**: `git tag sprint-N/begin` when starting a sprint, `git tag sprint/N` when it finishes. Sprint stats (duration, commits, issues) are auto-generated from tags during `build:pages`.
 
 ### Sprint planning (PO + Architect + Tech Lead)
@@ -232,11 +273,10 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
 
-### Issue completion (tester post-merge)
-1. Move issue file from `plan/issues/ready/` to `plan/issues/done/`
+### Issue completion (post-merge)
+1. Set `status: done` in the issue file at `plan/issues/sprints/{N}/{ID}.md`
 2. Update `plan/log/dependency-graph.md` — remove/strikethrough completed issue
-3. Update `plan/issues/backlog/backlog.md` — sprint priority
-4. Check for unblocked issues in `plan/issues/blocked/`
+3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 ### Sprint History
 - **Sprint 1**: 550 → 1,509 pass (+174%), 167 fail, 5,700 CE. Issues #138-#173.

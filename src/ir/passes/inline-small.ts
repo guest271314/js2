@@ -177,7 +177,10 @@ function inlineIntoFunction(
         }
       }
 
-      // Splice callee body into caller (renamed).
+      // Splice callee body into caller (renamed). `canInline` rejects
+      // body-bearing instrs (forof.*, try, while.loop, for.loop), so we
+      // never need to recurse into nested body buffers here — see
+      // canInline's #1374 comment.
       for (const inst of body.instrs) {
         newInstrs.push(renameAllInInstr(inst, calleeRename));
       }
@@ -230,10 +233,32 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
   const term = body.terminator;
   if (term.kind !== "return") return false;
   if (term.values.length !== 1) return false;
-  // raw.wasm may carry function-local backend indices that don't survive a
-  // change of enclosing function — conservative skip.
+  // #1374 — body-bearing instrs (forof.*, try, while.loop, for.loop) carry
+  // their own SSA def-spaces inside nested body buffers AND reference slot
+  // indices declared on the callee's `IrFunction.slots`. Splicing such a
+  // callee body into a caller without a deep SSA rename + slot migration
+  // would either leave duplicate SSA defs (caught later by `lower.ts`'s
+  // `registerInstrDefs` walk), produce stale local-index references that
+  // fail Wasm validation, or — when both happen at once — cause `lower.ts`
+  // emitter to infinite-recurse on a circular operand→result reference.
+  // Skip these conservatively. The caller still goes through IR; it just
+  // emits a regular `call` instr to the standalone callee. Lifting this
+  // restriction would require migrating callee slots into the caller and
+  // rewriting nested body-buffer SSA — out of scope for this slice.
+  // raw.wasm carries function-local backend indices that don't survive a
+  // change of enclosing function — conservative skip in the same spirit.
   for (const inst of body.instrs) {
     if (inst.kind === "raw.wasm") return false;
+    if (
+      inst.kind === "forof.vec" ||
+      inst.kind === "forof.iter" ||
+      inst.kind === "forof.string" ||
+      inst.kind === "try" ||
+      inst.kind === "while.loop" ||
+      inst.kind === "for.loop"
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -341,6 +366,30 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const f = mapId(rename, inst.whenFalse);
       if (c === inst.condition && t === inst.whenTrue && f === inst.whenFalse) return inst;
       return { ...inst, condition: c, whenTrue: t, whenFalse: f };
+    }
+    case "if": {
+      // (#1392) Renames in the cond + carrier values; arm-buffer instrs
+      // are walked recursively (each gets its own renameInstrOperands
+      // call). Conservative — if any sub-instr changed, rebuild the if;
+      // otherwise return unchanged.
+      const c = mapId(rename, inst.cond);
+      const t = mapId(rename, inst.thenValue);
+      const e = mapId(rename, inst.elseValue);
+      const newThen: IrInstr[] = [];
+      const newElse: IrInstr[] = [];
+      let armChanged = false;
+      for (const sub of inst.then) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newThen.push(r);
+      }
+      for (const sub of inst.else) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newElse.push(r);
+      }
+      if (c === inst.cond && t === inst.thenValue && e === inst.elseValue && !armChanged) return inst;
+      return { ...inst, cond: c, thenValue: t, elseValue: e, then: newThen, else: newElse };
     }
     case "box":
     case "unbox":
@@ -563,6 +612,126 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       }
       if (!bodyChanged) return inst;
       return { ...inst, str: v, body: newBody };
+    }
+    // Slice 9 (#1169h) — exception handling.
+    case "throw": {
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
+    }
+    case "try": {
+      let changed = false;
+      const newBody: IrInstr[] = [];
+      for (const sub of inst.body) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newBody.push(renamed);
+      }
+      let newCatch = inst.catchClause;
+      if (inst.catchClause) {
+        const newCatchBody: IrInstr[] = [];
+        let catchBodyChanged = false;
+        for (const sub of inst.catchClause.body) {
+          const renamed = renameInstrOperands(sub, rename);
+          if (renamed !== sub) catchBodyChanged = true;
+          newCatchBody.push(renamed);
+        }
+        if (catchBodyChanged) {
+          changed = true;
+          newCatch = { payloadSlot: inst.catchClause.payloadSlot, body: newCatchBody };
+        }
+      }
+      let newFinally = inst.finallyBody;
+      if (inst.finallyBody) {
+        const newFinBody: IrInstr[] = [];
+        let finBodyChanged = false;
+        for (const sub of inst.finallyBody) {
+          const renamed = renameInstrOperands(sub, rename);
+          if (renamed !== sub) finBodyChanged = true;
+          newFinBody.push(renamed);
+        }
+        if (finBodyChanged) {
+          changed = true;
+          newFinally = newFinBody;
+        }
+      }
+      if (!changed) return inst;
+      return {
+        ...inst,
+        body: newBody,
+        ...(newCatch ? { catchClause: newCatch } : {}),
+        ...(newFinally ? { finallyBody: newFinally } : {}),
+      };
+    }
+    // Slice 10 (#1169i): extern class ops.
+    case "extern.new": {
+      let changed = false;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, args: newArgs };
+    }
+    case "extern.call": {
+      const recv = mapId(rename, inst.receiver);
+      let changed = recv !== inst.receiver;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, receiver: recv, args: newArgs };
+    }
+    case "extern.prop": {
+      const recv = mapId(rename, inst.receiver);
+      if (recv === inst.receiver) return inst;
+      return { ...inst, receiver: recv };
+    }
+    case "extern.propSet": {
+      const recv = mapId(rename, inst.receiver);
+      const v = mapId(rename, inst.value);
+      if (recv === inst.receiver && v === inst.value) return inst;
+      return { ...inst, receiver: recv, value: v };
+    }
+    case "extern.regex":
+      return inst;
+    // Slice 12 (#1280): while.loop / for.loop. The cond/body/update
+    // buffers carry their own SSA values and are renamed via the
+    // recursive walker in inline-small's body-buffer pass (mirrors
+    // the forof.* handling above). Renaming the condValue keeps the
+    // instr-level reference consistent.
+    case "while.loop": {
+      const cv = mapId(rename, inst.condValue);
+      if (cv === inst.condValue) return inst;
+      return { ...inst, condValue: cv };
+    }
+    case "for.loop": {
+      const cv = mapId(rename, inst.condValue);
+      if (cv === inst.condValue) return inst;
+      return { ...inst, condValue: cv };
+    }
+    // (#1373 Phase B) Async / await IR nodes — rename single operand.
+    // Phase C may need richer renaming (continuation-closure capture
+    // sets); for now the simple operand rename is sufficient.
+    case "await": {
+      const op = mapId(rename, inst.operand);
+      if (op === inst.operand) return inst;
+      return { ...inst, operand: op };
+    }
+    case "async.return": {
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
+    }
+    case "async.throw": {
+      const r = mapId(rename, inst.reason);
+      if (r === inst.reason) return inst;
+      return { ...inst, reason: r };
     }
   }
 }

@@ -37,14 +37,12 @@ All issues below were not started in sprint 42 and carried over. Issues with ope
 <!-- GENERATED_ISSUE_TABLES_START -->
 ## Issue Tables
 
-_Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
 ### Ready
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #1127 | Nested rest patterns fail to decode even with explicit args — [...[x,y,z]], [...{length}], [...[,]] | medium | ready |
-| #1131 | Middle-end SSA IR: implementation plan | high | ready |
 | #1131 | Middle-end SSA IR: implementation plan | high | ready |
 
 ### Done

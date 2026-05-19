@@ -1,18 +1,21 @@
 ---
 id: 45
-status: planned
+status: closed
 created: 2026-04-23
 wrap_checklist:
-  status_closed: false
-  retro_written: false
-  diary_updated: false
-  end_tag_pushed: false
+  status_closed: true
+  retro_written: true
+  diary_updated: true
+  end_tag_pushed: true
   begin_tag_pushed: true
 ---
 
 # Sprint 45
 
-**Date**: TBD (follows sprint 44)
+**Date**: 2026-04-23 → 2026-04-29
+**Baseline start**: 25,276 / 43,172 = 58.6% (sprint 44 close)
+**Baseline end**: 25,830 / 43,168 = 59.8% (2026-04-28)
+**Net**: +554 tests
 **Baseline**: TBD (inherits from sprint 44 close-out)
 **Source**: Triaged out of sprint 44 on 2026-04-23 to keep the week-long sprint
 focused on the IR Phase 3/4 critical path, #1153 compiler crashes, and the
@@ -113,20 +116,35 @@ moved here. No issues were rescoped, rejected, or deleted — only relocated.
 <!-- GENERATED_ISSUE_TABLES_START -->
 ## Issue Tables
 
-_Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
-
-### Blocked
-
-| Issue | Title | Priority | Status |
-|---|---|---|---|
-| #742 | Extract and refactor compileCallExpression (3,350 lines) | medium | blocked |
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
 ### Ready
 
 | Issue | Title | Priority | Status |
 |---|---|---|---|
-| #1169f | IR Phase 4 Slice 7 — generators and async/await through the IR path | high | ready |
-| #1177 | TDZ propagation through closure captures — fix ReferenceError on pre-declaration capture | high | ready |
+| #744 | Function monomorphization for polymorphic call sites | high | ready |
+| #773 | Monomorphize functions: compile with call-site types, not generic externref | critical | ready |
+| #1000 | Normalize issue frontmatter and repopulate historical sprint issue assignments | high | ready |
+| #1003 | Normalize issue metadata: add ES edition, language feature, and task type to all issue frontmatter | high | ready |
+| #1004 | Optimize repeated string concatenation via compile-time folding and counted-loop aggregation | medium | ready |
+| #1008 | Add mobile-first layout support to the playground | medium | ready |
+| #1044 | Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization) | high | ready |
+| #1045 | DOM globals as extern classes (DOM_HOST_GLOBALS, queueMicrotask, requestAnimationFrame) | high | ready |
+| #1058 | Compile the TypeScript compiler itself to Wasm — self-hosting stress test | high | ready |
+| #1075 | CommonJS module.exports / exports.foo support for compiling .cjs and unmodified npm CJS packages | high | ready |
+| #1093 | Systematic ECMAScript spec conformance audit — review compiled semantics against tc39.es/ecma262 | high | ready |
+| #1095 | Eliminate `as unknown as Instr` casts — extend Instr union to cover all emitted opcodes | medium | ready |
+| #1098 | Audit and reduce patch-layer accumulation in codegen (155 workarounds, special cases, fallbacks) | medium | ready |
+| #1099 | Standalone execution demo — compile and run a program on Wasmtime with zero JS host | high | ready |
+| #1122 | Keep standalone recursive numeric benchmark stable across non-run entry exports | high | ready |
+| #1147 | Add a public Docs page to the site | medium | ready |
+| #1172 | Codebase modularity audit — reduce coupling, improve layering, harden interfaces | high | ready |
+
+### In Progress
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1206 | fix(build-pages): copy benchmark JSONs + frame-nav-sync.js to top-level pages-dist paths (404s on landing page) | medium | in-progress |
 
 ### Done
 
@@ -149,6 +167,7 @@ _Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun 
 | #1077 | CI: PR CI should fetch fresh baseline from origin/main at runtime, not read branch-tip copy | high | done |
 | #1078 | CI: emergency baseline-refresh workflow_dispatch — discoverable and unconditional promotion | medium | done |
 | #1079 | CI: baseline age stamp + SHA on landing page — make drift observable before crisis | medium | done |
+| #1080 | [umbrella] Fix CI baseline-drift regression gate — main is not self-healing | critical | done |
 | #1086 | codegen: dedup and memoize bodyUsesArguments to eliminate #96's O(N²) re-walk | medium | done |
 | #1096 | Isolate environment adapters — remove top-level await and browser/Node probing from core modules | medium | done |
 | #1109 | lodash-es clamp: Wasm validation error in typeof/RegExp codegen path | medium | done |
@@ -164,6 +183,10 @@ _Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun 
 | #1169c | IR Phase 4 Slice 3 — closures (captures, ref cells, transitive captures) through the IR path | high | done |
 | #1169d | IR Phase 4 Slice 4 — class instantiation and method calls through the IR path | high | done |
 | #1169e | IR Phase 4 Slice 6 — iterators and for-of through the IR path | high | done |
+| #1169f | IR Phase 4 Slice 7 — generators and async/await through the IR path | high | done |
+| #1169g | IR Phase 4 Slice 8 — destructuring and rest/spread through the IR path | high | done |
+| #1169h | IR Phase 4 Slice 9 — try/catch/finally and throw through the IR path | high | done |
+| #1169i | IR Phase 4 Slice 10 — remaining builtins (RegExp, TypedArray, DataView) through the IR path | high | done |
 | #1170 | Move test262 baselines out of Git LFS — eliminate LFS dependency from CI | high | done |
 | #1171 | Fix test262 timeout non-determinism — raise testTimeout to 30s, bust CI cache on config change | high | done |
 | #1173 | js2wasm output uses 'exact' reference types that wasmtime 44 rejects (array-sum benchmark crash) | high | done |
@@ -172,7 +195,17 @@ _Generated from issue frontmatter. Update issue `sprint` / `status`, then rerun 
 | #1177 | TDZ propagation through closure captures — fix ReferenceError on pre-declaration capture | high | done |
 | #1178 | string-hash benchmark hits `wasm trap: call stack exhausted` at runtime after #1175 fix | high | done |
 | #1179 | Improve js2wasm `array-sum` hot-runtime perf — currently ~9× slower than Node and behind Javy | high | done |
-| #1179-followup | i32 fast path for `*` is not spec-faithful when true product exceeds 2^53 | medium | done |
+| #1180 | js2wasm emits `env::__unbox_number` (and sibling box/unbox helpers) host imports on `--target wasi` builds | high | done |
+| #1181 | IR Phase 4 Slice 6 part 2 — AST→IR bridge for vec for-of (#1169e follow-up) | high | done |
+| #1182 | IR Phase 4 Slice 6 part 3 — host iterator protocol through the IR (`iter.*` instrs, Map/Set/generator iteration) | medium | done |
+| #1183 | IR Phase 4 Slice 6 part 4 — string fast path through the IR (`for (c of \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"hello\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\")`) | medium | done |
 | #1185 | IR Phase 4 — refactor: thread `IrLowerResolver` through `LowerCtx` (retire per-feature shortcuts) | medium | done |
+| #1186 | fix(legacy): re-resolve native-string helpers post-shift in compileForOfString (stale __str_charAt funcIdx) | high | done |
+| #1191 | ci(test262): committed baseline (test262-current.jsonl) is 1634 tests behind reality — refresh + automate | medium | done |
+| #1192 | ci(self-merge): exclude compile_timeout transitions from regression count (runner noise) | medium | done |
+| #1193 | tooling: ci-status-watcher.sh hook doesn't push notifications to dev agents (uses gh @me which resolves to human, not agent) | medium | done |
+| #1202 | credibility: Architecture Decision Records — document the 8 core design choices that define js2wasm | high | done |
+| #1208 | landing: surface ADRs — rename 'How it works' to 'Approach', add Architecture section with ADR HTML renderings | high | done |
+| #1256 | i32 fast path for `*` is not spec-faithful when true product exceeds 2^53 | medium | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->

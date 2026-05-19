@@ -54,16 +54,115 @@
 //     before the IR runs (allocated by `collectClassDeclaration`). The
 //     `localClasses` set drives that exemption.
 
-import ts from "typescript";
+import { ts, forEachChild } from "../ts-api.js";
 
 import type { LatticeType, TypeMap } from "./propagate.js";
 
+/**
+ * #1169q telemetry — record why a top-level FunctionDeclaration didn't make
+ * it into the IR claim set. The intent is to drive the legacy retirement:
+ * once the count of unintended fallbacks (excluding deferred features) is
+ * zero against the test262 corpus, the legacy expression / statement
+ * emitters can be retired.
+ */
+export type IrFallbackReason =
+  | "unnamed"
+  | "type-parameters"
+  | "non-export-modifier"
+  | "async-generator"
+  // (#1373) `async function` (without an asterisk) — distinguished from
+  // `async-generator` (`async function*`) and from generic
+  // `non-export-modifier` / `deferred-feature` so the IR-claim gate can
+  // conditionally accept async functions when the standalone
+  // `$Promise` + microtask-queue infra (#1326) is fully wired. Phase A
+  // (this slice) just buckets them; Phase C wires the lowering.
+  | "async-function"
+  | "return-type-not-resolvable"
+  | "param-type-not-resolvable"
+  | "param-shape-rejected" // optional/rest/initializer/non-identifier/duplicate
+  // #1372 — binding-pattern param shape too complex for slice 8a destructuring
+  // (rest, defaults, nested patterns, computed keys). Distinguished from
+  // `param-shape-rejected` so the param-shape bucket continues to track only
+  // optional/rest/initializer/duplicate cases.
+  | "destructuring-param-complex"
+  | "body-shape-rejected"
+  | "external-call" // calls a non-local identifier (parseInt, etc.)
+  | "call-graph-closure" // local caller/callee not claimed
+  | "type-resolution-failure" // overrideMap couldn't be built (set externally)
+  // #1370 Phase A — class method / constructor of a shape the IR selector
+  // doesn't yet handle. Examples: methods on a class with an `extends`
+  // clause (Phase E — inheritance), get/set accessors, abstract methods,
+  // computed property names. Distinguished from `body-shape-rejected` so a
+  // future slice can tell "method-specific gate failure" apart from generic
+  // body-shape rejections that apply to top-level FunctionDeclarations too.
+  | "class-method"
+  | "deferred-feature"; // permanently excluded (eval, with, import(), Proxy)
+
+export interface IrFallback {
+  readonly name: string;
+  readonly reason: IrFallbackReason;
+}
+
+/**
+ * (#1371) Whitelist of `Math.<name>(arg)` unary calls the IR can lower to a
+ * plain Wasm `f64.<op>` instruction without any host import. Each entry maps
+ * 1:1 to an op in the `IrUnop` extended set (`src/ir/nodes.ts`). Restricting
+ * the whitelist to ops with direct Wasm equivalents preserves bit-exact JS
+ * semantics:
+ *  - `Math.round` is intentionally excluded — JS rounds 0.5 → 1 (away from
+ *    zero) but `f64.nearest` rounds to even, so a 1:1 lowering is unsound.
+ *  - `Math.min` / `Math.max` are binary and live in `IR_MATH_BINARY_WHITELIST`
+ *    (deferred — needs an `IrBinop` extension).
+ */
+export const IR_MATH_UNARY_WHITELIST: ReadonlySet<string> = new Set(["abs", "sqrt", "floor", "ceil", "trunc"]);
+
+/**
+ * Map a whitelisted `Math.<name>` to its corresponding IR `f64.<op>` tag.
+ * Lives next to the whitelist so callers (selector + lowerer) share one
+ * source of truth.
+ */
+export function mathUnaryToIrOp(name: string): "f64.abs" | "f64.sqrt" | "f64.floor" | "f64.ceil" | "f64.trunc" | null {
+  switch (name) {
+    case "abs":
+      return "f64.abs";
+    case "sqrt":
+      return "f64.sqrt";
+    case "floor":
+      return "f64.floor";
+    case "ceil":
+      return "f64.ceil";
+    case "trunc":
+      return "f64.trunc";
+    default:
+      return null;
+  }
+}
+
 export interface IrSelection {
   readonly funcs: ReadonlySet<string>;
+  /** #1370 Phase A — synthetic-name set keyed by `${className}_${methodName}`
+   *  for instance/static methods, and `${className}_new` for constructors.
+   *  Populated when class members are IR-eligible. The naming convention
+   *  matches `ctx.funcMap` (see `class-bodies.ts:216,275,284`) so Phase B
+   *  can patch pre-allocated function slots by direct lookup.
+   *
+   *  Phase A is selector-only — the `IrSelection.classMembers` is reported
+   *  but `compileIrPathFunctions` does NOT yet patch class-method bodies.
+   *  Phase B wires the integration loop. */
+  readonly classMembers?: ReadonlySet<string>;
+  /** Top-level FunctionDeclaration names that did NOT make it into `funcs`,
+   *  paired with the rejection reason. Only populated when
+   *  `IrSelectionOptions.trackFallbacks` is true. */
+  readonly fallbacks?: ReadonlyArray<IrFallback>;
 }
 
 export interface IrSelectionOptions {
   readonly experimentalIR?: boolean;
+  /** When true, the returned selection includes a `fallbacks` array listing
+   *  every top-level FunctionDeclaration that the selector did NOT claim
+   *  along with the reason it was rejected. Off by default — populating
+   *  this list adds a small per-function overhead. */
+  readonly trackFallbacks?: boolean;
 }
 
 const EMPTY: IrSelection = { funcs: new Set<string>() };
@@ -95,16 +194,141 @@ export function planIrCompilation(
   // -------------------------------------------------------------------------
   const individuallyClaimed = new Set<string>();
   const declByName = new Map<string, ts.FunctionDeclaration>();
+  // #1169q telemetry — collect rejection reasons so the dispatcher can
+  // log/throw on legacy fallback. Only populated when trackFallbacks is on.
+  const trackFallbacks = options?.trackFallbacks === true;
+  const fallbackReasons = new Map<string, IrFallbackReason>();
+  // Track unnamed FunctionDeclarations too (rare but possible — `default`
+  // export of an anonymous function, etc.) so callers can see them.
+  let unnamedCount = 0;
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
-    if (!stmt.name) continue;
+    if (!stmt.name) {
+      if (trackFallbacks) unnamedCount++;
+      continue;
+    }
     declByName.set(stmt.name.text, stmt);
-    if (isIrClaimable(stmt, typeMap, localClasses)) {
+    const reason = trackFallbacks
+      ? whyNotIrClaimable(stmt, typeMap, localClasses)
+      : isIrClaimable(stmt, typeMap, localClasses)
+        ? null
+        : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
+    if (reason === null) {
       individuallyClaimed.add(stmt.name.text);
+    } else if (trackFallbacks) {
+      fallbackReasons.set(stmt.name.text, reason);
     }
   }
 
-  if (individuallyClaimed.size === 0) return EMPTY;
+  // -------------------------------------------------------------------------
+  // #1370 Phase A — class methods + constructors.
+  //
+  // For each top-level class declaration, walk its members and claim:
+  //   - the constructor (synthetic name `${ClassName}_new`),
+  //   - each instance method (`${ClassName}_${methodName}`),
+  //   - each static method (same shape — class-bodies.ts uses the same
+  //     `${className}_${methodName}` key for static and instance).
+  //
+  // Method bodies use the SAME shape rules as FunctionDeclarations (the
+  // existing `isPhase1StatementList`). The legacy `collectClassDeclaration`
+  // pass in `class-bodies.ts` pre-allocates funcMap entries with stable
+  // signatures BEFORE `compileIrPathFunctions` runs, which means Phase B
+  // (when wired) will patch existing slots rather than reserve new ones.
+  //
+  // Phase A scope:
+  //   - Flat classes only — classes with `extends` defer to Phase E
+  //     (inheritance + super.method() lowering).
+  //   - Identifier / string-literal / numeric-literal property names only.
+  //   - No async, no generators (deferred-feature), no abstract, no
+  //     get/set accessors (class-method).
+  //
+  // Phase A is **selector-only**: `compileIrPathFunctions` does not yet
+  // patch class-method bodies. Phase B will iterate `classMembers` and do
+  // the integration. Until then, populating `classMembers` is informative —
+  // the legacy `class-bodies.ts` path continues to emit the methods.
+  // -------------------------------------------------------------------------
+  const individuallyClaimedClassMembers = new Set<string>();
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isClassDeclaration(stmt)) continue;
+    if (!stmt.name) continue; // anonymous / default-export class — Phase A skips
+    const className = stmt.name.text;
+    // Phase A doesn't support `super` — skip classes with any heritage clause
+    // that introduces a parent (TS allows `implements` clauses too, which are
+    // erased at emit time and don't affect codegen, so only `extends` is
+    // disqualifying). Track the rejection reason for every method so the
+    // telemetry shows them as `class-method` rather than silently dropping.
+    const hasParent = stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword) ?? false;
+    for (const member of stmt.members) {
+      let memberName: string;
+      let memberNode: ts.MethodDeclaration | ts.ConstructorDeclaration;
+      if (ts.isConstructorDeclaration(member)) {
+        memberName = `${className}_new`;
+        memberNode = member;
+      } else if (ts.isMethodDeclaration(member)) {
+        if (!member.name) {
+          // Defensive — TS parser always populates `.name` for
+          // MethodDeclaration; the `null` branch is unreachable in practice.
+          continue;
+        }
+        const methodNameRaw = phase1MemberName(member.name);
+        if (methodNameRaw === null) {
+          // Computed property name (`[expr]() {}`) or private identifier
+          // (`#name() {}`) — Phase A doesn't claim these.
+          if (trackFallbacks) {
+            fallbackReasons.set(`${className}_<computed>`, "class-method");
+          }
+          continue;
+        }
+        memberName = `${className}_${methodNameRaw}`;
+        memberNode = member;
+      } else {
+        // PropertyDeclaration (field), GetAccessorDeclaration,
+        // SetAccessorDeclaration, IndexSignatureDeclaration,
+        // SemicolonClassElement, ClassStaticBlockDeclaration — none are
+        // claimed by Phase A. Telemetry reasons:
+        //   - get/set → "class-method" (will be lowered with the rest of
+        //     the class member surface in a follow-up slice).
+        //   - PropertyDeclaration → not a function — out of IR's scope.
+        if (trackFallbacks && (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member))) {
+          const accessorName = member.name && phase1MemberName(member.name);
+          const key = `${className}_${accessorName ?? "<accessor>"}`;
+          fallbackReasons.set(key, "class-method");
+        }
+        continue;
+      }
+      if (hasParent) {
+        if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
+        continue;
+      }
+      const reason = trackFallbacks
+        ? whyNotIrClaimable(memberNode, typeMap, localClasses, /*isMethod*/ true)
+        : isIrClaimable(memberNode, typeMap, localClasses, /*isMethod*/ true)
+          ? null
+          : "class-method"; // sentinel — not used when trackFallbacks=false
+      if (reason === null) {
+        individuallyClaimedClassMembers.add(memberName);
+      } else if (trackFallbacks) {
+        fallbackReasons.set(memberName, reason);
+      }
+    }
+  }
+
+  if (individuallyClaimed.size === 0) {
+    // Phase A: even when no top-level FunctionDeclaration is claimed, the
+    // class-member walk above may have populated `individuallyClaimedClassMembers`.
+    // Emit a selection that carries those even though `funcs` is empty.
+    if (!trackFallbacks) {
+      if (individuallyClaimedClassMembers.size === 0) return EMPTY;
+      return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers };
+    }
+    const fallbacks: IrFallback[] = [];
+    for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+    for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
+    if (individuallyClaimedClassMembers.size === 0) {
+      return { funcs: new Set<string>(), fallbacks };
+    }
+    return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers, fallbacks };
+  }
 
   // -------------------------------------------------------------------------
   // Step 2: call-graph closure.
@@ -127,7 +351,10 @@ export function planIrCompilation(
   // callees; the call-graph closure only tracks local edges so external
   // calls slipped through — catching them here prevents compile_errors.
   for (const name of [...claimed]) {
-    if (hasExternalCall.has(name)) claimed.delete(name);
+    if (hasExternalCall.has(name)) {
+      claimed.delete(name);
+      if (trackFallbacks) fallbackReasons.set(name, "external-call");
+    }
   }
 
   let changed = true;
@@ -153,74 +380,215 @@ export function planIrCompilation(
       }
       if (!safe) {
         claimed.delete(name);
+        if (trackFallbacks) fallbackReasons.set(name, "call-graph-closure");
         changed = true;
       }
     }
   }
 
-  return { funcs: claimed };
+  // #1370 Phase A: thread the class-member claim set through the final
+  // return. The set is `undefined` when empty so consumers can check for
+  // its presence cheaply (and keeps existing fixtures stable when no class
+  // declarations are present).
+  const classMembers = individuallyClaimedClassMembers.size > 0 ? individuallyClaimedClassMembers : undefined;
+
+  if (!trackFallbacks) {
+    return classMembers ? { funcs: claimed, classMembers } : { funcs: claimed };
+  }
+
+  const fallbacks: IrFallback[] = [];
+  for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason });
+  for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
+  return classMembers ? { funcs: claimed, classMembers, fallbacks } : { funcs: claimed, fallbacks };
 }
 
 // ---------------------------------------------------------------------------
 // Individual-claim check
 // ---------------------------------------------------------------------------
 
-function isIrClaimable(
-  fn: ts.FunctionDeclaration,
+/**
+ * #1370 Phase A: a node accepted by the per-function IR claim check. The
+ * three shapes share enough surface (`.parameters`, `.body`, `.type`,
+ * `.modifiers`, `.typeParameters`, `.asteriskToken`) that the existing
+ * `whyNotIrClaimable` body works almost verbatim once the input type is
+ * widened. The `isMethod` flag at the call site distinguishes
+ * FunctionDeclaration (top-level, with required name and Slice-1+ rules)
+ * from MethodDeclaration / ConstructorDeclaration (class-owned, with
+ * extra method-specific guards).
+ */
+type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.ConstructorDeclaration;
+
+/**
+ * Variant of `isIrClaimable` that returns the rejection reason instead of a
+ * boolean. Returns null on accept. Used by `planIrCompilation` when
+ * `trackFallbacks` is enabled so the dispatcher can log/throw with a useful
+ * cause for each legacy fallback. Mirrors `isIrClaimable` exactly — keep the
+ * two in sync.
+ *
+ * #1370 Phase A: widened to also accept ts.MethodDeclaration and
+ * ts.ConstructorDeclaration. Pass `isMethod=true` when invoked for a class
+ * member; the function applies the same body / param / return-type gate as
+ * for top-level FunctionDeclarations, with method-specific guards added
+ * inline (no name → ConstructorDeclaration is fine; computed name →
+ * `class-method`; async/generator/abstract methods are filtered ahead of
+ * this call so the existing reasons (`body-shape-rejected`,
+ * `deferred-feature`) cover them).
+ */
+function whyNotIrClaimable(
+  fn: IrClaimableSubject,
   typeMap: TypeMap | undefined,
   localClasses: ReadonlySet<string>,
-): boolean {
-  if (!fn.name) return false;
-  if (fn.typeParameters && fn.typeParameters.length > 0) return false;
-  if (fn.modifiers && fn.modifiers.some((m) => m.kind !== ts.SyntaxKind.ExportKeyword)) return false;
+  isMethod: boolean = false,
+): IrFallbackReason | null {
+  // Top-level FunctionDeclaration must be named; constructor declarations
+  // never carry a `name`; a MethodDeclaration with an undefined / computed
+  // name is rejected as a Phase-A method-shape failure.
+  if (!isMethod) {
+    if (!ts.isFunctionDeclaration(fn) || !fn.name) return "unnamed";
+  }
+  if (fn.typeParameters && fn.typeParameters.length > 0) return "type-parameters";
+  // Modifier surface differs between FunctionDeclaration and class members:
+  //   - FunctionDeclaration: `export` is the only acceptable modifier.
+  //   - Method/Constructor: ignore visibility (`public`/`private`/`protected`)
+  //     and `static` for the IR claim check; reject `abstract`, `async`, and
+  //     accessor (`get`/`set`) modifiers explicitly so they slot into the
+  //     right fallback bucket.
+  if (!isMethod) {
+    if (fn.modifiers) {
+      // (#1373) Bucket `async` separately from generic non-export modifiers
+      // so the IR-claim gate can conditionally accept async functions once
+      // Phase B/C lowering lands. Async generators (`async function*`)
+      // route into the existing `"async-generator"` bucket; plain async
+      // functions get the new `"async-function"` bucket.
+      const hasAsyncModifier = fn.modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
+      const isGeneratorFn =
+        (ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && !!(fn as ts.FunctionDeclaration).asteriskToken;
+      if (hasAsyncModifier) {
+        return isGeneratorFn ? "async-generator" : "async-function";
+      }
+      if (fn.modifiers.some((m) => m.kind !== ts.SyntaxKind.ExportKeyword)) return "non-export-modifier";
+    }
+  } else {
+    if (fn.modifiers) {
+      for (const m of fn.modifiers) {
+        if (m.kind === ts.SyntaxKind.AbstractKeyword) return "class-method";
+        // (#1373) Same async-function vs async-generator distinction for
+        // class methods. Async generator methods land in the existing
+        // `async-generator` bucket via the post-modifier check below.
+        if (m.kind === ts.SyntaxKind.AsyncKeyword) {
+          const isGeneratorMethod = ts.isMethodDeclaration(fn) && !!fn.asteriskToken;
+          return isGeneratorMethod ? "async-generator" : "async-function";
+        }
+      }
+    }
+  }
 
-  // Slice 7a (#1169f): accept `function*` (generator). The generator's
-  // source-level return type is `Generator<T>` / `IterableIterator<T>` —
-  // those resolve to ResolvedKind="object" in `resolveReturnType` and
-  // would normally pass the type gate but force the lowerer down the
-  // shape-resolution path. The lowerer overrides the IR-level result
-  // type to `externref` regardless of the source annotation, so the
-  // selector just needs to permit the function shape. Async generators
-  // (`async function*`) are NOT in 7a — defer to a follow-up slice.
-  const isGenerator = !!fn.asteriskToken;
+  // Generator detection. ConstructorDeclaration has no asteriskToken.
+  const isGenerator = (ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && !!fn.asteriskToken;
   if (isGenerator && fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
-    return false;
+    return "async-generator";
   }
+  // #1370 Phase A: defer generator methods (and constructors-as-generators
+  // are syntactically invalid). The top-level FunctionDeclaration generator
+  // path lands via Slice 7a's lowerer; lifting that to method position
+  // requires extra wiring (Phase D).
+  if (isMethod && isGenerator) return "deferred-feature";
 
-  const entry = typeMap?.get(fn.name.text);
+  // Method/constructor names don't participate in TypeMap propagation today
+  // — that map is keyed by top-level FunctionDeclaration text. Phase A
+  // simply skips the propagation lookup for class members; resolveReturnType
+  // / resolveParamType still fall back to the AST annotation, which is
+  // sufficient for the explicit-typed-method shape the spec targets.
+  const entry = !isMethod && ts.isFunctionDeclaration(fn) && fn.name ? typeMap?.get(fn.name.text) : undefined;
 
-  // Return type must resolve to a concrete primitive (or, for
-  // generators, ANY annotation — the lowerer overrides to externref).
-  // For generators the source-level return type is typically
-  // `Generator<number>` (TypeReferenceNode → ResolvedKind="object"),
-  // but missing or unusual annotations also pass; the lowerer always
-  // emits externref for generator results regardless of what the
-  // selector saw.
+  let isVoidReturn = false;
   if (!isGenerator) {
-    const returnResolved = resolveReturnType(fn, entry?.returnType);
-    if (returnResolved === null) return false;
+    if (ts.isConstructorDeclaration(fn)) {
+      // Constructors have no source-level return type — they always return
+      // the constructed instance. Phase A doesn't yet flow that through to
+      // the IR (Phase C builds the `struct.new + $self` epilogue). For now
+      // we accept the shape and treat the return resolution as "object"
+      // implicitly; Phase B/C will use the className from the parent node
+      // to produce the correct class-typed return.
+    } else {
+      const returnResolved = resolveReturnType(fn, entry?.returnType);
+      if (returnResolved === null) return "return-type-not-resolvable";
+      isVoidReturn = returnResolved === "void";
+    }
   }
 
-  // All params must resolve to a concrete primitive.
   const scope = new Set<string>();
+  // Method bodies and constructor bodies see `this` as an implicit local;
+  // mark it so a `return this;` / `this.field` reference passes the
+  // identifier-in-scope check at Phase-1 expression position.
+  if (isMethod) scope.add("this");
   for (let i = 0; i < fn.parameters.length; i++) {
     const p = fn.parameters[i]!;
-    if (!ts.isIdentifier(p.name)) return false;
-    if (p.questionToken) return false;
-    if (p.dotDotDotToken) return false;
-    if (p.initializer) return false;
-    if (scope.has(p.name.text)) return false;
+    // #1372 — binding-pattern params: `function f({ x, y }: Point): …` /
+    // `function f([a, b]: number[]): …`. Selector accepts when the pattern
+    // is identifier-leaf + no-default + no-rest + no-nested (the slice 8a
+    // shape, reused via `isPhase1BindingPattern`). Wider patterns fall
+    // through with `destructuring-param-complex` so the legacy lowerer's
+    // wider destructure machinery handles them.
+    if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) {
+      if (p.questionToken) return "param-shape-rejected";
+      if (p.dotDotDotToken) return "param-shape-rejected";
+      if (p.initializer) return "param-shape-rejected";
+      if (!isPhase1BindingPattern(p.name, scope)) return "destructuring-param-complex";
+
+      const mapped = entry?.params[i];
+      const paramResolved = resolveParamType(p, mapped);
+      if (paramResolved === null) return "param-type-not-resolvable";
+
+      collectPatternNames(p.name, scope);
+      continue;
+    }
+
+    if (!ts.isIdentifier(p.name)) return "param-shape-rejected";
+    if (p.questionToken) return "param-shape-rejected";
+    if (p.dotDotDotToken) return "param-shape-rejected";
+    if (p.initializer) return "param-shape-rejected";
+    if (scope.has(p.name.text)) return "param-shape-rejected";
 
     const mapped = entry?.params[i];
     const paramResolved = resolveParamType(p, mapped);
-    if (paramResolved === null) return false;
+    if (paramResolved === null) return "param-type-not-resolvable";
 
     scope.add(p.name.text);
   }
 
   const body = fn.body;
-  if (!body) return false;
-  return isPhase1StatementList(body.statements, scope, localClasses, isGenerator);
+  if (!body) return "body-shape-rejected";
+  // #1370 Phase A: constructor bodies don't have a return-statement tail —
+  // the legacy lowerer (and Phase C) synthesise the implicit `return this;`.
+  // Accept the body as a list of Phase-1 body statements instead, which
+  // covers `this.field = expr;`, `this.method(...)`, and bare calls. This
+  // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
+  if (ts.isConstructorDeclaration(fn)) {
+    const ctorScope = new Set(scope);
+    for (const s of body.statements) {
+      if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return "body-shape-rejected";
+    }
+    return null;
+  }
+  if (!isPhase1StatementList(body.statements, scope, localClasses, isGenerator, isVoidReturn))
+    return "body-shape-rejected";
+
+  return null;
+}
+
+function isIrClaimable(
+  fn: IrClaimableSubject,
+  typeMap: TypeMap | undefined,
+  localClasses: ReadonlySet<string>,
+  isMethod: boolean = false,
+): boolean {
+  // #1370 Phase A: keeping `isIrClaimable` and `whyNotIrClaimable` in sync
+  // is brittle when both have to grow new method-specific guards. Delegate
+  // to the reason-returning variant; the per-call overhead of allocating
+  // and discarding a string return is negligible against the AST walk in
+  // `isPhase1StatementList`.
+  return whyNotIrClaimable(fn, typeMap, localClasses, isMethod) === null;
 }
 
 /**
@@ -232,13 +600,25 @@ function isIrClaimable(
  * call sites still treats the result as a null-vs-non-null discriminator,
  * so adding a third positive value is backward-compatible.
  */
-type ResolvedKind = "f64" | "bool" | "string" | "object" | null;
+// Slice 14 (#1228) — `any` and `void` are accepted at the selector level:
+//   - `any` (param or return) lowers to externref via `resolvePositionType`.
+//   - `void` (return only) means the function has zero result types; lowering
+//     constructs the IrFunctionBuilder with `[]` results and accepts bare
+//     `return;` / fall-through tails. `void` in param position is rejected
+//     (no JS source emits a `void`-typed param value, so there's nothing to
+//     accept).
+type ResolvedKind = "f64" | "bool" | "string" | "object" | "any" | "void" | null;
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
   if (p.type) {
     if (p.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
     if (p.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
     if (p.type.kind === ts.SyntaxKind.StringKeyword) return "string";
+    // Slice 14 (#1228) — `any` param lowers to externref. The IR's
+    // `resolvePositionType` returns `irVal({ kind: "externref" })` for
+    // AnyKeyword. JS spec leaves operations on `any` to runtime semantics,
+    // and externref is the catch-all that already accepts any host value.
+    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
     // Slice 2 (#1169b) — accept TypeLiteral / TypeReference at the
     // selector level. The actual shape resolution happens in
     // codegen/index.ts:resolvePositionType, which materializes an
@@ -260,11 +640,23 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
   return null;
 }
 
-function resolveReturnType(fn: ts.FunctionDeclaration, mapped: LatticeType | undefined): ResolvedKind {
+// #1370 Phase A: widened to also accept ts.MethodDeclaration. The `.type`
+// (return-type annotation) field is identical in shape across both AST
+// nodes (it's `TypeNode | undefined`), and so is the dispatch logic below.
+// ts.ConstructorDeclaration is excluded — constructors don't carry a
+// source-level return type; the caller short-circuits before this.
+function resolveReturnType(
+  fn: ts.FunctionDeclaration | ts.MethodDeclaration,
+  mapped: LatticeType | undefined,
+): ResolvedKind {
   if (fn.type) {
     if (fn.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
     if (fn.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
     if (fn.type.kind === ts.SyntaxKind.StringKeyword) return "string";
+    // Slice 14 (#1228) — `void` return: function has zero result types.
+    if (fn.type.kind === ts.SyntaxKind.VoidKeyword) return "void";
+    // Slice 14 (#1228) — `any` return lowers to externref (same as for params).
+    if (fn.type.kind === ts.SyntaxKind.AnyKeyword) return "any";
     if (ts.isTypeLiteralNode(fn.type) || ts.isTypeReferenceNode(fn.type) || ts.isArrayTypeNode(fn.type))
       return "object";
     return null;
@@ -291,6 +683,10 @@ function isPhase1StatementList(
   // bare returns continue to be rejected (their return type wouldn't
   // resolve to a primitive anyway).
   isGenerator: boolean = false,
+  // Slice 14 (#1228): when true, the enclosing function returns void.
+  // Allows bare `return;` and ExpressionStatement at the tail position
+  // (the lowerer synthesizes the implicit empty-values return).
+  isVoidReturn: boolean = false,
 ): boolean {
   if (stmts.length < 1) return false;
   for (let i = 0; i < stmts.length - 1; i++) {
@@ -370,9 +766,9 @@ function isPhase1StatementList(
     // reinterpret as `if (cond) <tail> else { <rest> }`.
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1Expr(s.expression, scope, localClasses)) return false;
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator)) return false;
+      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
       const rest = stmts.slice(i + 1);
-      return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator);
+      return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
     }
     // Slice 6 part 2 (#1181) — for-of statement (always non-tail). The
     // body is itself shape-checked. The bridge in `from-ast.ts` lowers
@@ -383,9 +779,116 @@ function isPhase1StatementList(
       if (!isPhase1ForOf(s, scope, localClasses)) return false;
       continue;
     }
+    // Slice 12 (#1280) — `while` / `for` (C-style) as non-tail
+    // statements. The body is shape-checked via `isPhase1BodyStatement`
+    // (same restrictions as for-of).
+    if (ts.isWhileStatement(s)) {
+      if (!isPhase1WhileStatement(s, scope, localClasses)) return false;
+      continue;
+    }
+    if (ts.isForStatement(s)) {
+      if (!isPhase1ForStatement(s, scope, localClasses)) return false;
+      // Add init's let-declared names into outer scope so subsequent
+      // statements can reference the loop counter (TypeScript would
+      // narrow scope to the for-statement, but our scope tracker is
+      // a flat set; the conservative addition is fine for shape check).
+      if (s.initializer && ts.isVariableDeclarationList(s.initializer)) {
+        for (const d of s.initializer.declarations) {
+          if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+        }
+      }
+      continue;
+    }
+    // Slice 9 (#1169h) — throw / try as a non-tail statement. A throw
+    // doesn't fall through, but the selector accepts it in non-tail
+    // position and the lowerer emits a `throw` instr followed by an
+    // implicit unreachable. (Code AFTER a throw in the same block is
+    // dead but structurally valid.)
+    if (ts.isThrowStatement(s)) {
+      if (!isPhase1ThrowStatement(s, scope, localClasses)) return false;
+      continue;
+    }
+    if (ts.isTryStatement(s)) {
+      if (!isPhase1TryStatement(s, scope, localClasses)) return false;
+      continue;
+    }
     return false;
   }
-  return isPhase1Tail(stmts[stmts.length - 1]!, scope, localClasses, isGenerator);
+  return isPhase1Tail(stmts[stmts.length - 1]!, scope, localClasses, isGenerator, isVoidReturn);
+}
+
+/**
+ * Slice 9 (#1169h): shape-check a `throw <expr>;` statement. Bare
+ * `throw;` (no expression) is rejected — the legacy path handles that
+ * rare case. The expression must itself be a Phase-1 expression, so the
+ * lowerer can produce a value to coerce to externref before throwing.
+ */
+function isPhase1ThrowStatement(
+  stmt: ts.ThrowStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!stmt.expression) return false;
+  return isPhase1Expr(stmt.expression, scope, localClasses);
+}
+
+/**
+ * Slice 9 (#1169h): shape-check a `try { ... } [catch (e) { ... }]
+ * [finally { ... }]` statement.
+ *
+ * Accepted shapes (selector level):
+ *   try { <body> } catch (id) { <handler> }
+ *   try { <body> } catch { <handler> }                  (ES2019 optional catch)
+ *   try { <body> } finally { <cleanup> }
+ *   try { <body> } catch (id) { <handler> } finally { <cleanup> }
+ *
+ * Where `<body>`, `<handler>`, and `<cleanup>` are each Phase-1 body
+ * statement lists (no early return / break / continue out of the try
+ * region — slice 9 doesn't yet thread the finally-stack inlining for
+ * abrupt completions).
+ *
+ * Rejected (deferred to slice 9.5):
+ *   - destructuring catch param (`catch ({message})`).
+ *   - `throw` with no expression (handled in `isPhase1ThrowStatement`).
+ *   - `try` with neither catch nor finally (TS already rejects this).
+ *   - early-return / break / continue inside try / catch / finally bodies
+ *     (the body-statement recogniser doesn't allow them anyway).
+ */
+function isPhase1TryStatement(
+  stmt: ts.TryStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!stmt.catchClause && !stmt.finallyBlock) return false;
+
+  // Try body: must be a Phase-1 body statement list.
+  const tryScope = new Set(scope);
+  for (const s of stmt.tryBlock.statements) {
+    if (!isPhase1BodyStatement(s, tryScope, localClasses)) return false;
+  }
+
+  if (stmt.catchClause) {
+    const catchScope = new Set(scope);
+    if (stmt.catchClause.variableDeclaration) {
+      const v = stmt.catchClause.variableDeclaration;
+      // Slice 9 only accepts identifier bindings. Destructuring catch
+      // (`catch ({message})`) defers to slice 9.5.
+      if (!ts.isIdentifier(v.name)) return false;
+      catchScope.add(v.name.text);
+    }
+    for (const s of stmt.catchClause.block.statements) {
+      if (!isPhase1BodyStatement(s, catchScope, localClasses)) return false;
+    }
+  }
+
+  if (stmt.finallyBlock) {
+    const finallyScope = new Set(scope);
+    for (const s of stmt.finallyBlock.statements) {
+      if (!isPhase1BodyStatement(s, finallyScope, localClasses)) return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -414,6 +917,122 @@ function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses
   const innerScope = new Set(scope);
   innerScope.add(decl.name.text);
   return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+}
+
+/**
+ * Slice 12 (#1280): shape-check `while (cond) body`.
+ *   - `cond` must be a Phase-1 expression.
+ *   - `body` must be a single statement that's a Phase-1 body statement
+ *     (same restrictions as a for-of body — see `isPhase1BodyStatement`).
+ */
+function isPhase1WhileStatement(
+  stmt: ts.WhileStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
+  return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses);
+}
+
+/**
+ * Slice 12 (#1280): shape-check `for (init; cond; update) body`.
+ *
+ *   - `init`   optional. When present, accepts either a
+ *              `VariableDeclarationList` (`for (let i = 0; ...)`) — same
+ *              shape as `isPhase1VarDecl` (single named decl with a
+ *              Phase-1 initializer; multi-decl is OK if each is named) —
+ *              or a Phase-1 expression (`for (i = 0; ...)`).
+ *   - `cond`   optional. Empty cond means infinite loop — rejected for
+ *              now; the typical pattern `for (;;) { ... break ... }`
+ *              would require break support which is deferred. When
+ *              present, must be a Phase-1 expression.
+ *   - `update` optional. Phase-1 expression. The most common shapes are
+ *              postfix `i++` / `i--`, prefix `++i` / `--i`, compound
+ *              assignment `i += 1`, or plain assignment `i = i + 1`.
+ *   - `body`   single Phase-1 body statement.
+ *
+ * The init's let-bindings enter scope before cond/update/body are
+ * shape-checked.
+ */
+function isPhase1ForStatement(
+  stmt: ts.ForStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  // Cond must be present (no infinite loops in slice 12).
+  if (!stmt.condition) return false;
+
+  const innerScope = new Set(scope);
+
+  // Init: optional. Variable declaration adds bindings; expression init
+  // doesn't. Both must be Phase-1.
+  if (stmt.initializer) {
+    if (ts.isVariableDeclarationList(stmt.initializer)) {
+      const flags = stmt.initializer.flags;
+      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return false;
+      for (const d of stmt.initializer.declarations) {
+        if (!ts.isIdentifier(d.name)) return false;
+        if (!d.initializer) return false;
+        if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return false;
+        if (innerScope.has(d.name.text)) return false; // duplicate
+        innerScope.add(d.name.text);
+      }
+    } else {
+      // Expression init.
+      if (!isPhase1Expr(stmt.initializer, innerScope, localClasses)) return false;
+    }
+  }
+
+  // Cond: must be a Phase-1 expression in the inner scope.
+  if (!isPhase1Expr(stmt.condition, innerScope, localClasses)) return false;
+
+  // Update: optional. When present, must be a Phase-1 expression OR a
+  // postfix `i++` / `i--` (which `isPhase1Expr` doesn't accept on its
+  // own because postfix mutates state — but it's the canonical for-loop
+  // update so we accept it explicitly here).
+  if (stmt.incrementor) {
+    if (!isPhase1ForUpdateExpr(stmt.incrementor, innerScope, localClasses)) return false;
+  }
+
+  // Body: single Phase-1 body statement.
+  return isPhase1BodyStatement(stmt.statement, innerScope, localClasses);
+}
+
+/**
+ * Slice 12 (#1280): the `update` clause of a `for` loop. Same as
+ * Phase-1 expressions plus postfix `i++` / `i--` on identifiers in
+ * scope (which the body-statement layer accepts as an
+ * ExpressionStatement but `isPhase1Expr` does not — postfix is a
+ * mutation, not a pure expression).
+ */
+function isPhase1ForUpdateExpr(
+  expr: ts.Expression,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (ts.isPostfixUnaryExpression(expr)) {
+    const op = expr.operator;
+    if (op === ts.SyntaxKind.PlusPlusToken || op === ts.SyntaxKind.MinusMinusToken) {
+      return ts.isIdentifier(expr.operand) && scope.has(expr.operand.text);
+    }
+    return false;
+  }
+  if (ts.isBinaryExpression(expr)) {
+    const op = expr.operatorToken.kind;
+    // Plain or compound assignment to an identifier in scope.
+    if (
+      op === ts.SyntaxKind.EqualsToken ||
+      op === ts.SyntaxKind.PlusEqualsToken ||
+      op === ts.SyntaxKind.MinusEqualsToken ||
+      op === ts.SyntaxKind.AsteriskEqualsToken ||
+      op === ts.SyntaxKind.SlashEqualsToken
+    ) {
+      if (!ts.isIdentifier(expr.left)) return false;
+      if (!scope.has(expr.left.text)) return false;
+      return isPhase1Expr(expr.right, scope, localClasses);
+    }
+  }
+  return isPhase1Expr(expr, scope, localClasses);
 }
 
 /**
@@ -481,10 +1100,44 @@ function isPhase1BodyStatement(stmt: ts.Statement, scope: Set<string>, localClas
         }
       }
     }
+    // Slice 12 (#1280): postfix `i++` / `i--` / prefix `++i` / `--i`
+    // as expression statements inside a loop body. Mutates the
+    // identifier's slot, not a pure expression — but as a statement
+    // it's the canonical loop counter mutation.
+    if (ts.isPostfixUnaryExpression(stmt.expression) || ts.isPrefixUnaryExpression(stmt.expression)) {
+      const op = stmt.expression.operator;
+      if (op === ts.SyntaxKind.PlusPlusToken || op === ts.SyntaxKind.MinusMinusToken) {
+        return ts.isIdentifier(stmt.expression.operand) && scope.has(stmt.expression.operand.text);
+      }
+    }
     return false;
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses);
+  }
+  // Slice 12 (#1280) — nested while / for inside a body buffer.
+  if (ts.isWhileStatement(stmt)) {
+    return isPhase1WhileStatement(stmt, scope, localClasses);
+  }
+  if (ts.isForStatement(stmt)) {
+    if (!isPhase1ForStatement(stmt, scope, localClasses)) return false;
+    if (stmt.initializer && ts.isVariableDeclarationList(stmt.initializer)) {
+      for (const d of stmt.initializer.declarations) {
+        if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+      }
+    }
+    return true;
+  }
+  // Slice 9 (#1169h) — throw / try inside a body statement list.
+  // Accepting these here lets a try body / catch body / finally body
+  // contain nested throws and nested try-statements (composes with the
+  // outer try's catch / finally inlining via the lowerer's structured
+  // emission).
+  if (ts.isThrowStatement(stmt)) {
+    return isPhase1ThrowStatement(stmt, scope, localClasses);
+  }
+  if (ts.isTryStatement(stmt)) {
+    return isPhase1TryStatement(stmt, scope, localClasses);
   }
   return false;
 }
@@ -494,26 +1147,41 @@ function isPhase1Tail(
   scope: Set<string>,
   localClasses: ReadonlySet<string>,
   isGenerator: boolean = false,
+  isVoidReturn: boolean = false,
 ): boolean {
   if (ts.isReturnStatement(stmt)) {
     // Slice 7b (#1169f): bare `return;` (no expression) is allowed in
     // generator tails — the lowerer's `lowerTail` generator branch
     // handles the no-expression case by emitting the epilogue without
-    // a final push. Non-generator bare returns continue to be rejected
-    // (they'd type as void, which the selector's return-type gate
-    // already rules out anyway).
-    if (!stmt.expression) return isGenerator;
+    // a final push.
+    //
+    // Slice 14 (#1228): bare `return;` is also allowed in void-returning
+    // functions. The lowerer's void branch terminates with empty values.
+    if (!stmt.expression) return isGenerator || isVoidReturn;
     return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   if (ts.isBlock(stmt)) {
-    return isPhase1StatementList(stmt.statements, new Set(scope), localClasses, isGenerator);
+    return isPhase1StatementList(stmt.statements, new Set(scope), localClasses, isGenerator, isVoidReturn);
   }
   if (ts.isIfStatement(stmt)) {
     if (!stmt.elseStatement) return false;
     if (!isPhase1Expr(stmt.expression, scope, localClasses)) return false;
-    if (!isPhase1Tail(stmt.thenStatement, new Set(scope), localClasses, isGenerator)) return false;
-    if (!isPhase1Tail(stmt.elseStatement, new Set(scope), localClasses, isGenerator)) return false;
+    if (!isPhase1Tail(stmt.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
+    if (!isPhase1Tail(stmt.elseStatement, new Set(scope), localClasses, isGenerator, isVoidReturn)) return false;
     return true;
+  }
+  // Slice 9 (#1169h) — throw at function tail. `function f() { throw new
+  // Error(); }` is a valid Phase-1 tail because the throw produces an
+  // abrupt completion that terminates the function (no return needed).
+  if (ts.isThrowStatement(stmt)) {
+    return isPhase1ThrowStatement(stmt, scope, localClasses);
+  }
+  // Slice 14 (#1228) — void function tail: an ExpressionStatement (call
+  // or other side-effect expression) can stand in for the implicit
+  // return. The lowerer's void branch synthesizes the empty-values
+  // terminator after the expression's side effects.
+  if (isVoidReturn && ts.isExpressionStatement(stmt)) {
+    return isPhase1Expr(stmt.expression, scope, localClasses);
   }
   return false;
 }
@@ -524,6 +1192,27 @@ function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localCl
   if (stmt.modifiers && stmt.modifiers.length > 0) return false;
   const isConst = !!(flags & ts.NodeFlags.Const);
   for (const d of stmt.declarationList.declarations) {
+    // Slice 8a (#1169g): destructuring binding patterns for `const`-bound
+    // declarations only. Object pattern: identifier-only properties with
+    // optional renaming, no defaults, no nesting, no rest. Array pattern:
+    // identifier-only positional bindings, no defaults, no nesting, no
+    // rest. Anything wider (rest, defaults, nested patterns) defers to
+    // slice 8.5+ — the legacy `destructuring.ts` path remains for those.
+    if (ts.isObjectBindingPattern(d.name) || ts.isArrayBindingPattern(d.name)) {
+      if (!isConst) return false;
+      if (!d.initializer) return false;
+      if (!isPhase1BindingPattern(d.name, scope)) return false;
+      // Initializer must be Phase-1 expressible. The lowerer inspects
+      // its IrType to decide between object.get (object pattern) and
+      // vec.get (array pattern); if the resolved IrType isn't compatible
+      // with the pattern shape, lowering throws and the function falls
+      // back to legacy.
+      if (!isPhase1Expr(d.initializer, scope, localClasses)) return false;
+      // Pre-add every leaf identifier to scope so subsequent statements
+      // see the new names.
+      collectPatternNames(d.name, scope);
+      continue;
+    }
     if (!ts.isIdentifier(d.name)) return false;
     if (scope.has(d.name.text)) return false;
     if (!d.initializer) return false;
@@ -546,6 +1235,75 @@ function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localCl
     scope.add(d.name.text);
   }
   return true;
+}
+
+/**
+ * Slice 8a (#1169g): shape-check a destructuring binding pattern. Only
+ * identifier-leaf, no-default, no-rest, no-nested patterns are accepted
+ * — the lowerer expands these into a sequence of single-name `object.get`
+ * / `vec.get` reads at compile time. Wider shapes (rest, defaults,
+ * nested) defer to slice 8.5; the function falls back to legacy.
+ *
+ * Object patterns:
+ *   - { a, b }                   — shorthand
+ *   - { a: x, b: y }             — renaming (computed key rejected)
+ *
+ * Array patterns:
+ *   - [a, b, c]
+ *   - [, b, , d]                 — omitted slots (sparse) accepted
+ */
+function isPhase1BindingPattern(p: ts.BindingPattern, scope: ReadonlySet<string>): boolean {
+  if (ts.isObjectBindingPattern(p)) {
+    if (p.elements.length === 0) return false; // empty pattern — nothing to bind
+    const localNames = new Set<string>();
+    for (const elem of p.elements) {
+      // Rest deferred — slice 8b adds object spread/rest collection.
+      if (elem.dotDotDotToken) return false;
+      // Default value `{ a = 1 }` deferred — needs runtime undefined check.
+      if (elem.initializer) return false;
+      // Property name must be Identifier or StringLiteral (no computed).
+      if (elem.propertyName) {
+        if (!ts.isIdentifier(elem.propertyName) && !ts.isStringLiteral(elem.propertyName)) return false;
+      }
+      // Binding target must be a plain identifier (no nested patterns).
+      if (!ts.isIdentifier(elem.name)) return false;
+      const name = elem.name.text;
+      if (scope.has(name) || localNames.has(name)) return false;
+      localNames.add(name);
+    }
+    return true;
+  }
+  if (ts.isArrayBindingPattern(p)) {
+    if (p.elements.length === 0) return false; // empty `[] = expr` — defer
+    const localNames = new Set<string>();
+    for (const elem of p.elements) {
+      // Omitted (sparse) slots are allowed — `[a, , c]` skips index 1.
+      if (ts.isOmittedExpression(elem)) continue;
+      // Rest deferred — slice 8b adds vec slice / iter drain.
+      if (elem.dotDotDotToken) return false;
+      // Default value deferred.
+      if (elem.initializer) return false;
+      // Binding target must be a plain identifier (no nested patterns).
+      if (!ts.isIdentifier(elem.name)) return false;
+      const name = elem.name.text;
+      if (scope.has(name) || localNames.has(name)) return false;
+      localNames.add(name);
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Slice 8a (#1169g): collect every identifier name introduced by a binding
+ * pattern (the leaves) into the given scope. Mirrors the Phase-1 var-decl
+ * scope-tracking machinery.
+ */
+function collectPatternNames(p: ts.BindingPattern, scope: Set<string>): void {
+  for (const elem of p.elements) {
+    if (ts.isOmittedExpression(elem)) continue;
+    if (ts.isIdentifier(elem.name)) scope.add(elem.name.text);
+  }
 }
 
 /**
@@ -671,9 +1429,9 @@ function bodyReferencesIdentifier(body: ts.Block, name: string): boolean {
     ) {
       return;
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(body, visit);
+  forEachChild(body, visit);
   return found;
 }
 
@@ -685,10 +1443,66 @@ function isPhase1TypeNode(node: ts.TypeNode): boolean {
   );
 }
 
+/**
+ * Slice 10 (#1169i) — host-class names known to the IR. Mirrors the legacy
+ * `ctx.externClasses` registration set (see `registerBuiltinExternClasses`
+ * in `src/codegen/index.ts:5527-5715`). Functions that USE values of
+ * these classes (construction, method calls, property access, RegExp
+ * literals) become IR-claimable; the actual lowering throws cleanly if
+ * the resolver doesn't carry metadata for the class, falling the
+ * function back to legacy via `safeSelection`.
+ *
+ * Kept in sync with the legacy registration list — drift produces
+ * over-claims that fall back at lowering, which is acceptable but
+ * suboptimal.
+ */
+const KNOWN_EXTERN_CLASSES = new Set<string>([
+  "RegExp",
+  "Date",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "URIError",
+  "EvalError",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "DataView",
+  "Uint8Array",
+  "Int8Array",
+  "Uint8ClampedArray",
+  "Uint16Array",
+  "Int16Array",
+  "Uint32Array",
+  "Int32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  "Promise",
+]);
+
+function isKnownExternClass(name: string): boolean {
+  return KNOWN_EXTERN_CLASSES.has(name);
+}
+
 function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClasses: ReadonlySet<string>): boolean {
   if (ts.isParenthesizedExpression(expr)) return isPhase1Expr(expr.expression, scope, localClasses);
   if (ts.isNumericLiteral(expr)) return true;
   if (expr.kind === ts.SyntaxKind.TrueKeyword || expr.kind === ts.SyntaxKind.FalseKeyword) return true;
+  // Slice 10 (#1169i): RegExp literals lower to `extern.regex` (a
+  // `RegExp_new(pattern, flags)` host call). Pattern + flags are
+  // string-literal globals, already pre-registered by the legacy
+  // `collectStringLiterals` pass (see
+  // `src/codegen/index.ts:3274-3278`). Selector accepts the shape
+  // unconditionally; the lowerer enforces the resolver carries
+  // metadata for the "RegExp" extern class.
+  if (expr.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
   // Slice 1 (issue #1168): claim string literals and `null` so that
   // `typeof x === "string"` / `x === null` / `x == null` patterns can
   // compose out of Phase-1 primitives. Actual lowering for non-f64/bool
@@ -703,6 +1517,15 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // (only valid as the callee of a CallExpression, handled below).
     // A bare identifier that isn't in scope is not a valid Phase-1 expr.
     return scope.has(expr.text);
+  }
+  // #1370 Phase A — `this` reference inside a method or constructor body.
+  // The selector marks `this` as an in-scope binding for class members
+  // (see `whyNotIrClaimable` with `isMethod=true`); accept the keyword
+  // expression here if "this" is in scope. Outside of class members the
+  // keyword never enters scope, so this branch is a no-op for the
+  // FunctionDeclaration path.
+  if (expr.kind === ts.SyntaxKind.ThisKeyword) {
+    return scope.has("this");
   }
   if (ts.isPrefixUnaryExpression(expr)) {
     if (!isPhase1PrefixOp(expr.operator)) return false;
@@ -726,26 +1549,60 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // `methodName`. If not, the function falls back to legacy.
     if (ts.isPropertyAccessExpression(expr.expression)) {
       if (!ts.isIdentifier(expr.expression.name)) return false;
+      // (#1371) Whitelist `Math.<unary>(arg)` for a small set of f64-mapped
+      // ops. The receiver `Math` is a host global, never in scope, so the
+      // generic receiver check below would reject these. Recognise the shape
+      // here and accept it; the lowerer in from-ast.ts emits a plain unary
+      // f64 op for the call.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        expr.expression.expression.text === "Math" &&
+        IR_MATH_UNARY_WHITELIST.has(expr.expression.name.text) &&
+        expr.arguments.length === 1 &&
+        !ts.isSpreadElement(expr.arguments[0]!)
+      ) {
+        return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+      }
       if (!isPhase1Expr(expr.expression.expression, scope, localClasses)) return false;
       for (const arg of expr.arguments) {
+        // Slice 8a (#1169g): spread args restricted to method calls is
+        // out of scope — methods on classes have known signatures and
+        // expanding spread would blur them. Reject for now.
+        if (ts.isSpreadElement(arg)) return false;
         if (!isPhase1Expr(arg, scope, localClasses)) return false;
       }
       return true;
     }
     if (!ts.isIdentifier(expr.expression)) return false;
     for (const arg of expr.arguments) {
+      // Slice 8a (#1169g): accept `f(...source)` where the spread source
+      // is an ArrayLiteralExpression with no nested spread. The lowerer
+      // expands this at compile time into individual call arguments
+      // (matches the legacy `expandSpreadCallArgs` fast path). Spread
+      // sources of dynamic length (e.g. an arbitrary identifier of vec
+      // type) are deferred — they'd require runtime arity expansion
+      // which the IR doesn't model in slice 8a.
+      if (ts.isSpreadElement(arg)) {
+        if (!isStaticSpreadSource(arg.expression, scope, localClasses)) return false;
+        continue;
+      }
       if (!isPhase1Expr(arg, scope, localClasses)) return false;
     }
     return true;
   }
-  // Slice 4 (#1169d): NewExpression. Callee must be an Identifier
-  // naming a class declared in the same compilation unit; args are
-  // Phase-1 expressions. The lowerer validates the constructor's
-  // signature against the args. ParenthesizedExpression callees and
-  // generic type-args are rejected at the lowering layer.
+  // Slice 4 (#1169d) + Slice 10 (#1169i): NewExpression. Callee must be
+  // an Identifier naming either:
+  //   - a class declared in the same compilation unit (slice 4), or
+  //   - a host extern class known to the IR (slice 10 — RegExp,
+  //     Uint8Array, DataView, Map, …).
+  // Args are Phase-1 expressions. The lowerer validates the
+  // constructor's signature against the args (slice 4 against the
+  // class shape; slice 10 against `getExternClassInfo`'s
+  // constructorParams).
   if (ts.isNewExpression(expr)) {
     if (!ts.isIdentifier(expr.expression)) return false;
-    if (!localClasses.has(expr.expression.text)) return false;
+    const ctorName = expr.expression.text;
+    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName)) return false;
     if (expr.typeArguments && expr.typeArguments.length > 0) return false; // defer generics
     if (!expr.arguments) return true;
     for (const arg of expr.arguments) {
@@ -791,20 +1648,74 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // resolved IrType).
   if (ts.isPropertyAccessExpression(expr)) {
     if (!ts.isIdentifier(expr.name)) return false;
+    // Slice 11 (#1169n) — optional chaining (`obj?.prop`). The lowerer
+    // doesn't yet emit the null-guard branch, so accept the shape
+    // structurally but the lowerer will throw clean fallback when it
+    // encounters one. Listed explicitly so a follow-up slice can
+    // implement the lowering without touching the selector.
     return isPhase1Expr(expr.expression, scope, localClasses);
   }
   // Slice 2 — element access with a literal string key (sugar for
-  // property access on a known shape). Numeric/computed keys are
-  // out of scope and rejected here so the function falls back to
-  // legacy.
+  // property access on a known shape).
+  //
+  // Slice 12 (#1169o) — broaden to accept any Phase-1 argument
+  // expression. The lowerer dispatches by receiver type:
+  //   - String-literal arg + object receiver → existing object-shape
+  //     property path (unchanged).
+  //   - Any other arg + vec receiver         → `vec.get` with
+  //     i32-coerced index.
+  //   - Other combinations                    → throw clean fallback so
+  //     the function reverts to legacy.
   if (ts.isElementAccessExpression(expr)) {
-    const arg = expr.argumentExpression;
-    if (!ts.isStringLiteral(arg) && arg.kind !== ts.SyntaxKind.NoSubstitutionTemplateLiteral) {
-      return false;
-    }
+    return (
+      isPhase1Expr(expr.expression, scope, localClasses) && isPhase1Expr(expr.argumentExpression, scope, localClasses)
+    );
+  }
+  // Slice 12 (#1169o) — array literals not yet selector-accepted in
+  // expression position. `f([1, 2, 3])` keeps falling back to legacy
+  // because the call-graph closure drops the caller. A follow-up
+  // slice that adds a `vec.new_fixed` IR instr can flip this on.
+  // Slice 11 (#1169n) — `delete <expr>` and `void <expr>`. Both are
+  // accepted at the selector level when their operand is a Phase-1
+  // expression. Lowering emits:
+  //   - `delete obj.prop`     → const `true` (most deletes succeed
+  //                              syntactically; runtime rejection is
+  //                              rare at the IR-claim shape).
+  //   - `void <expr>`         → lower expr for side effects, push
+  //                              `f64 NaN` (the undefined sentinel
+  //                              the IR uses in f64-typed contexts).
+  if (ts.isDeleteExpression(expr)) {
+    return isPhase1Expr(expr.expression, scope, localClasses);
+  }
+  if (ts.isVoidExpression(expr)) {
     return isPhase1Expr(expr.expression, scope, localClasses);
   }
   return false;
+}
+
+/**
+ * Slice 8a (#1169g) — does this expression have a statically-known length
+ * suitable for compile-time spread expansion in a call? Restricted to
+ * `ArrayLiteralExpression` with no nested SpreadElement: the lowerer
+ * inlines each element verbatim, so the call's arity is the literal's
+ * `elements.length`. Other shapes (vec-typed identifiers, function
+ * results) need runtime length introspection and are deferred.
+ *
+ * Each element of the literal must itself be a Phase-1 expression so the
+ * lowerer can lower it in argument position.
+ */
+function isStaticSpreadSource(
+  expr: ts.Expression,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+): boolean {
+  if (!ts.isArrayLiteralExpression(expr)) return false;
+  for (const elem of expr.elements) {
+    if (ts.isSpreadElement(elem)) return false; // nested spread defer
+    if (ts.isOmittedExpression(elem)) return false; // sparse defer
+    if (!isPhase1Expr(elem, scope, localClasses)) return false;
+  }
+  return true;
 }
 
 /**
@@ -863,6 +1774,27 @@ function phase1PropertyName(name: ts.PropertyName): string | null {
   return null;
 }
 
+/**
+ * #1370 Phase A: extract a class-member's name as a string suitable for the
+ * `${className}_${methodName}` synthetic key the legacy `class-bodies.ts`
+ * registers in `ctx.funcMap`. Mirrors `phase1PropertyName`'s acceptance set
+ * — identifier / string-literal / numeric-literal — but is its own function
+ * so a future slice that broadens object-literal property acceptance
+ * (e.g. computed-key constants) doesn't accidentally widen the class
+ * member naming surface, where collision with non-Phase-1 members would
+ * cause Phase B to patch the wrong slot.
+ *
+ * Returns null for computed names (`[expr]() {}`) and private identifiers
+ * (`#priv() {}`) — Phase A can't form a stable funcMap key for either.
+ */
+function phase1MemberName(name: ts.PropertyName): string | null {
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isStringLiteral(name)) return name.text;
+  if (ts.isNumericLiteral(name)) return name.text;
+  // ComputedPropertyName, PrivateIdentifier — Phase A skips both.
+  return null;
+}
+
 function isPhase1PrefixOp(op: ts.PrefixUnaryOperator): boolean {
   return op === ts.SyntaxKind.MinusToken || op === ts.SyntaxKind.PlusToken || op === ts.SyntaxKind.ExclamationToken;
 }
@@ -883,6 +1815,26 @@ function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
     case ts.SyntaxKind.ExclamationEqualsToken:
     case ts.SyntaxKind.AmpersandAmpersandToken:
     case ts.SyntaxKind.BarBarToken:
+      return true;
+    // Slice 11 (#1169n) — bitwise ops on f64 operands. JS ToInt32
+    // each operand, apply the i32 op, convert back to f64. Lowering
+    // emits this sequence inline using a per-function scratch local.
+    case ts.SyntaxKind.AmpersandToken:
+    case ts.SyntaxKind.BarToken:
+    case ts.SyntaxKind.CaretToken:
+    case ts.SyntaxKind.LessThanLessThanToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
+      return true;
+    // Slice 11 (#1169n) — shape-only acceptance for ops the lowerer
+    // doesn't yet implement. Lowering throws cleanly so the function
+    // falls back to legacy via `safeSelection`. Listed individually
+    // so future slices can flip them on without touching the selector.
+    case ts.SyntaxKind.PercentToken: // % — needs JS-conformant fmod-style remainder
+    case ts.SyntaxKind.AsteriskAsteriskToken: // ** — needs Math.pow host call
+    case ts.SyntaxKind.QuestionQuestionToken: // ?? — needs nullable-LHS handling
+    case ts.SyntaxKind.InKeyword: // in — needs prototype-chain probe
+    case ts.SyntaxKind.InstanceOfKeyword: // instanceof — needs class-shape check
       return true;
     default:
       return false;
@@ -924,7 +1876,15 @@ function buildLocalCallGraph(
       // stable signature. Walk into the args (which may contain real
       // calls), but don't mark the outer as having an external call.
       if (ts.isNewExpression(node)) {
-        if (ts.isIdentifier(node.expression) && localClasses.has(node.expression.text)) {
+        if (
+          ts.isIdentifier(node.expression) &&
+          (localClasses.has(node.expression.text) || isKnownExternClass(node.expression.text))
+        ) {
+          // Slice 4: local class — `<Class>_new` has a stable signature.
+          // Slice 10 (#1169i): known extern class — `<Class>_new` is
+          // registered as a host import by the legacy
+          // `collectUsedExternImports` pass with a stable signature too.
+          // Either case → not external; walk into args for nested calls.
           if (node.arguments) {
             for (const a of node.arguments) visit(a);
           }
@@ -963,6 +1923,20 @@ function buildLocalCallGraph(
           //
           // Walk into the receiver and args to catch real external calls
           // nested inside.
+          //
+          // (#1371) Special case: `Math.<whitelisted>(arg)` lowers to a
+          // pure Wasm op (no host import), so we DO NOT walk into the
+          // receiver — `Math` is a host global that the receiver-walk
+          // would otherwise mark as external. We still walk args to
+          // catch nested external calls.
+          if (
+            ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "Math" &&
+            IR_MATH_UNARY_WHITELIST.has(node.expression.name.text)
+          ) {
+            for (const a of node.arguments) visit(a);
+            return;
+          }
           visit(node.expression.expression);
           for (const a of node.arguments) visit(a);
           return;
@@ -973,9 +1947,9 @@ function buildLocalCallGraph(
           hasExternalCall.add(callerName);
         }
       }
-      ts.forEachChild(node, visit);
+      forEachChild(node, visit);
     };
-    ts.forEachChild(fn.body, visit);
+    forEachChild(fn.body, visit);
   }
   return { callers, callees, hasExternalCall };
 }
@@ -1044,9 +2018,9 @@ function collectLocalClosureBindings(fn: ts.FunctionDeclaration): Set<string> {
         }
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   };
-  ts.forEachChild(fn.body, visit);
+  forEachChild(fn.body, visit);
   return names;
 }
 

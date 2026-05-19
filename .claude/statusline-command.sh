@@ -19,11 +19,41 @@ else                                           model_color='00;32'
 fi
 branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
-[ -n "$issue" ] && printf '\033[01;33m#%s\033[00m ' "$issue"
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
 [ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 [ -n "$effort" ] && [ "$effort" != "none" ] && [ "$effort" != "disabled" ] && printf ' \033[00;33m%s\033[00m' "$effort"
+
+# Agent PR badge — only shown when inside a worktree, for that worktree's own agent
+status_dir="/workspace/.claude/agent-status"
+if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
+  current_agent=$(basename "$in_worktree")
+  f="$status_dir/${current_agent}.json"
+  if [ -f "$f" ]; then
+    now_sec=$(date +%s)
+    state=$(jq -r '.state // empty' "$f" 2>/dev/null)
+    if [ "$state" != "active" ]; then
+      since=$(jq -r '.since // empty' "$f" 2>/dev/null)
+      if [ -n "$since" ]; then
+        elapsed=$(( now_sec - since ))
+        [ "$elapsed" -lt 0 ] && elapsed=0
+        if [ "$elapsed" -lt 60 ]; then age="${elapsed}s"
+        elif [ "$elapsed" -lt 3600 ]; then age="$((elapsed / 60))m"
+        else age="$((elapsed / 3600))h$((elapsed % 3600 / 60))m"; fi
+        pr=$(jq -r '.pr // empty' "$f" 2>/dev/null)
+        issue=$(jq -r '.issue // empty' "$f" 2>/dev/null)
+        task=$(jq -r '.task // empty' "$f" 2>/dev/null)
+        [ -n "$pr" ] && ref="#${pr}" || ref="${issue:-${task}}"
+        [ -n "$ref" ] && label="${ref} ${age}" || label="${age}"
+        if [ "$elapsed" -ge 900 ]; then   color="48;5;196;37"
+        elif [ "$elapsed" -ge 300 ]; then color="43;30"
+        else                              color="100;37"; fi
+        printf ' \033[%sm %s \033[00m' "$color" "$label"
+      fi
+    fi
+  fi
+fi
+
 if [ -n "$used" ] || [ -n "$weekly" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
@@ -79,12 +109,12 @@ bg_progress_bar() {
   }'
 }
 
-# Pass bar: green>=55%, yellow>=50%, red<50%
+# Pass bar: green>=2/3, yellow>=1/3, red<1/3
 pass_bar() {
   awk -v p="$1" -v label="$2" 'BEGIN {
-    if (p >= 55)      { fill=42; fg=30 }
-    else if (p >= 33) { fill=43; fg=30 }
-    else              { fill="48;5;196"; fg=37 }
+    if (p >= 66.7)     { fill=42; fg=30 }
+    else if (p >= 33.3){ fill=43; fg=30 }
+    else               { fill="48;5;196"; fg=37 }
   }
   END {
     width = 12
@@ -98,13 +128,13 @@ pass_bar() {
   }' /dev/null
 }
 
-# Free bar: green>=8G, yellow>=4G, red<4G (fills proportionally out of 16G)
+# Free bar: green>=2/3 free, yellow>=1/3 free, red<1/3 free (out of 16G)
 free_bar() {
   awk -v free_g="$1" 'BEGIN {
     total_g = 16
     pct = free_g * 100 / total_g
-    if (free_g >= 8)      { fill=42; fg=30 }
-    else if (free_g >= 4) { fill=43; fg=30 }
+    if (pct >= 66.7)      { fill=42; fg=30 }
+    else if (pct >= 33.3) { fill=43; fg=30 }
     else                  { fill="48;5;196"; fg=37 }
     width = 10
     filled = int(pct * width / 100)
@@ -118,6 +148,90 @@ free_bar() {
   }'
 }
 
+# Sprint progress bar (only on main workspace, not in worktrees)
+if [ -z "$in_worktree" ]; then
+  sprint_n=""
+  sprint_done=0
+  sprint_total=0
+  sprints_json="/workspace/dashboard/data/sprints.json"
+  if [ -f "$sprints_json" ]; then
+    # Read from pre-built sprints.json (deduplicated, wont-fix counted as done)
+    sprint_data=$(jq -r '
+      [ .[] | select(.sprintNumber != null and .isClosed == false and .isPlanning == false) ]
+      | sort_by(.sprintNumber) | last
+      | "\(.sprintNumber) \(.completedIssueIds | length) \(.issueIds | length)"
+    ' "$sprints_json" 2>/dev/null)
+    if [ -n "$sprint_data" ]; then
+      sprint_n=$(echo "$sprint_data" | awk '{print $1}')
+      sprint_done=$(echo "$sprint_data" | awk '{print $2}')
+      sprint_total=$(echo "$sprint_data" | awk '{print $3}')
+    fi
+  fi
+  if [ -z "$sprint_n" ]; then
+    # Fallback: raw scan when sprints.json not available
+    sprint_dir="/workspace/plan/issues/sprints"
+    if [ -d "$sprint_dir" ]; then
+      for n in $(ls "$sprint_dir" | grep -E '^[0-9]+$' | sort -rn); do
+        files=$(find "$sprint_dir/$n" -maxdepth 1 -name '*.md' ! -name 'sprint.md' 2>/dev/null)
+        if [ -n "$files" ]; then
+          done_n=$(echo "$files" | xargs grep -lE '^status: (done|wont-fix)' 2>/dev/null | wc -l)
+          if [ "$done_n" -gt 0 ] || [ -z "$sprint_n" ]; then
+            sprint_n="$n"
+            sprint_total=$(echo "$files" | wc -l)
+            sprint_done="$done_n"
+            [ "$done_n" -gt 0 ] && break
+          fi
+        fi
+      done
+    fi
+  fi
+  # Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts)
+  resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+  if [ -n "$resets_at" ]; then
+    now_sec=$(date +%s)
+    remaining_sec=$((${resets_at%.*} - now_sec))
+    if [ "$remaining_sec" -gt 0 ]; then
+      days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
+      days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
+      elapsed_pct=$(awk "BEGIN {printf \"%.4f\", (7 - $remaining_sec / 86400) * 100 / 7}")
+      awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
+        if (days_int >= 4) {
+          # Green zone: plain green text, no background bar — less salient
+          printf " \033[32m%sd left\033[00m", left
+        } else {
+          if (days_int >= 2) { fill=43;         fg=30 }
+          else               { fill="48;5;196"; fg=37 }
+          width = 10
+          filled = int(elapsed_pct * width / 100 + 0.5)
+          label = sprintf(" %sd left", left)
+          bar = ""
+          for (i = 0; i < width; i++) bar = bar " "
+          bar = label substr(bar, length(label) + 1)
+          filled_part = substr(bar, 1, filled)
+          empty_part  = substr(bar, filled + 1)
+          printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
+        }
+      }' /dev/null
+    fi
+  fi
+  if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
+    sprint_pct=$((sprint_done * 100 / sprint_total))
+    awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
+      if (p >= 67)      { fill=42;         fg=30 }
+      else if (p >= 33) { fill=43;         fg=30 }
+      else              { fill="48;5;196"; fg=37 }
+      width = 12
+      filled = int(p * width / 100)
+      label = sprintf(" s%d %d/%d", n, done, total)
+      bar = ""
+      for (i = 0; i < width; i++) bar = bar " "
+      bar = label substr(bar, length(label) + 1)
+      filled_part = substr(bar, 1, filled)
+      empty_part  = substr(bar, filled + 1)
+      printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
+    }' /dev/null
+  fi
+fi
 if [ -n "$precompiling" ]; then
   done_n=$(wc -l < "$compile_jsonl" 2>/dev/null || echo 0)
   printf ' \033[00;33m⟳compile:%s/48K\033[00m' "$done_n"
@@ -181,69 +295,5 @@ elif [ -f "$report" ]; then
     printf ' %s %s' "$p_bar" "$f_bar"
   fi
 fi
-# Sprint progress bar (only on main workspace, not in worktrees)
-if [ -z "$in_worktree" ]; then
-  sprint_dir="/workspace/plan/issues/sprints"
-  sprint_n=""
-  sprint_done=0
-  sprint_total=0
-  if [ -d "$sprint_dir" ]; then
-    for n in $(ls "$sprint_dir" | grep -E '^[0-9]+$' | sort -rn); do
-      files=$(find "$sprint_dir/$n" -maxdepth 1 -name '*.md' ! -name 'sprint.md' 2>/dev/null)
-      if [ -n "$files" ]; then
-        done_n=$(echo "$files" | xargs grep -l '^status: done' 2>/dev/null | wc -l)
-        # Pick highest sprint that has at least one done issue (active sprint)
-        # Fall back to highest with any issues if none have done issues yet
-        if [ "$done_n" -gt 0 ] || [ -z "$sprint_n" ]; then
-          sprint_n="$n"
-          sprint_total=$(echo "$files" | wc -l)
-          sprint_done="$done_n"
-          [ "$done_n" -gt 0 ] && break
-        fi
-      fi
-    done
-  fi
-  if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
-    sprint_pct=$((sprint_done * 100 / sprint_total))
-    awk -v p="$sprint_pct" -v n="$sprint_n" 'BEGIN {
-      if (p >= 55)      { fill=42;         fg=30 }
-      else if (p >= 33) { fill=43;         fg=30 }
-      else              { fill="48;5;196"; fg=37 }
-      width = 9
-      filled = int(p * width / 100)
-      label = sprintf(" %d%% s%d ", p, n)
-      bar = ""
-      for (i = 0; i < width; i++) bar = bar " "
-      bar = label substr(bar, length(label) + 1)
-      filled_part = substr(bar, 1, filled)
-      empty_part  = substr(bar, filled + 1)
-      printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
-    }' /dev/null
-  fi
-  # Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts)
-  resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
-  if [ -n "$resets_at" ]; then
-    now_sec=$(date +%s)
-    remaining_sec=$((${resets_at%.*} - now_sec))
-    if [ "$remaining_sec" -gt 0 ]; then
-      days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
-      days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
-      elapsed_pct=$(awk "BEGIN {printf \"%d\", (7 - $remaining_sec / 86400) * 100 / 7}")
-      awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
-        if (days_int >= 4)     { fill=42;         fg=30 }
-        else if (days_int >= 2){ fill=43;         fg=30 }
-        else                   { fill="48;5;196"; fg=37 }
-        width = 8
-        filled = int(elapsed_pct * width / 100)
-        label = sprintf(" %sd left", left)
-        bar = ""
-        for (i = 0; i < width; i++) bar = bar " "
-        bar = label substr(bar, length(label) + 1)
-        filled_part = substr(bar, 1, filled)
-        empty_part  = substr(bar, filled + 1)
-        printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
-      }' /dev/null
-    fi
-  fi
-fi
+[ -z "$in_worktree" ] && [ -n "$branch" ] && [ "$branch" != "main" ] && printf ' \033[00;37m%s\033[00m' "$branch"
 printf '\n'

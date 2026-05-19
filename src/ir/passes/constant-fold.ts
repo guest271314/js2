@@ -100,6 +100,13 @@ export function constantFold(fn: IrFunction): IrFunction {
 function tryFoldInstr(instr: IrInstr, constDefs: ReadonlyMap<IrValueId, IrConst>): IrInstr {
   if (instr.kind === "binary") return tryFoldBinary(instr, constDefs);
   if (instr.kind === "unary") return tryFoldUnary(instr, constDefs);
+  // (#1392) `if` is value-producing but its arms are sequences of IR
+  // instrs, not constants. We DON'T fold the arms themselves here (the
+  // arm buffers hold their own instrs that constant-fold can be re-run
+  // on as a follow-up pass). However, when the cond is a known const,
+  // we COULD collapse to one branch — left as a future optimization.
+  // Leaving the if-instr unmodified preserves correctness; we miss the
+  // dead-arm DCE opportunity but the lowerer still emits valid Wasm.
   return instr;
 }
 
@@ -196,6 +203,32 @@ const BINARY_FOLD_TABLE: Readonly<Record<IrBinop, BinaryFolder>> = {
   // i32 logical (bool && / bool ||, operands are 0|1).
   "i32.and": (l, r) => i32Bool(l, r, (a, b) => a !== 0 && b !== 0),
   "i32.or": (l, r) => i32Bool(l, r, (a, b) => a !== 0 || b !== 0),
+  // #1126 Stage 3 — i32 magnitude compares. Signed ops compare values as
+  // signed 32-bit integers; unsigned ops as unsigned. We coerce constants
+  // to i32 first then compare in the appropriate domain. JS `>>>0` gives
+  // the unsigned 32-bit interpretation of an i32 bit pattern.
+  "i32.lt_s": (l, r) => i32CmpSigned(l, r, (a, b) => a < b),
+  "i32.le_s": (l, r) => i32CmpSigned(l, r, (a, b) => a <= b),
+  "i32.gt_s": (l, r) => i32CmpSigned(l, r, (a, b) => a > b),
+  "i32.ge_s": (l, r) => i32CmpSigned(l, r, (a, b) => a >= b),
+  "i32.lt_u": (l, r) => i32CmpUnsigned(l, r, (a, b) => a < b),
+  "i32.le_u": (l, r) => i32CmpUnsigned(l, r, (a, b) => a <= b),
+  "i32.gt_u": (l, r) => i32CmpUnsigned(l, r, (a, b) => a > b),
+  "i32.ge_u": (l, r) => i32CmpUnsigned(l, r, (a, b) => a >= b),
+  // Slice 11 (#1169n) — JS bitwise ops over f64 operands. ToInt32 each
+  // operand (JS coerces) and apply the i32 op; result is the int32 value
+  // re-coerced to f64. Uses native JS operators which already implement
+  // ToInt32 and ToUint32 — so the constants we produce match what the
+  // backend would produce at runtime.
+  "js.bitand": (l, r) => jsBitwiseF64(l, r, (a, b) => a & b),
+  "js.bitor": (l, r) => jsBitwiseF64(l, r, (a, b) => a | b),
+  "js.bitxor": (l, r) => jsBitwiseF64(l, r, (a, b) => a ^ b),
+  "js.shl": (l, r) => jsBitwiseF64(l, r, (a, b) => a << b),
+  "js.shr_s": (l, r) => jsBitwiseF64(l, r, (a, b) => a >> b),
+  // `>>>` returns a Uint32 in JS — wrap explicitly so TS doesn't widen
+  // the lambda return to `number` ambiguously, and so the const f64 we
+  // produce is the unsigned interpretation.
+  "js.shr_u": (l, r) => jsBitwiseF64(l, r, (a, b) => a >>> b),
 };
 
 function foldBinary(op: IrBinop, l: IrConst, r: IrConst): IrConst | null {
@@ -212,6 +245,25 @@ function foldUnary(op: IrUnop, rand: IrConst): IrConst | null {
       if (v === null) return null;
       return { kind: "bool", value: v === 0 };
     }
+    case "i32.trunc_sat_f64_s": {
+      // Slice 12 (#1169o) — saturating f64 → i32. Match Wasm semantics:
+      //   NaN → 0, +∞ → INT32_MAX, -∞ → INT32_MIN, otherwise truncate
+      //   toward zero with saturation at int32 range.
+      if (rand.kind !== "f64") return null;
+      const v = rand.value;
+      if (Number.isNaN(v)) return { kind: "i32", value: 0 };
+      if (v >= 2147483647) return { kind: "i32", value: 2147483647 };
+      if (v <= -2147483648) return { kind: "i32", value: -2147483648 };
+      return { kind: "i32", value: Math.trunc(v) };
+    }
+    // (#1392) `ref.is_null` is non-foldable — we don't track ref-typed
+    // constants in the IrConst lattice, so we can't statically decide
+    // whether a Wasm reference is null at compile time. The runtime
+    // Wasm `ref.is_null` instruction handles this dynamically.
+    case "ref.is_null":
+      return null;
+    default:
+      return null;
   }
 }
 
@@ -247,4 +299,45 @@ function toI32(c: IrConst): number | null {
   if (c.kind === "i32") return c.value;
   if (c.kind === "bool") return c.value ? 1 : 0;
   return null;
+}
+
+/**
+ * #1126 Stage 3 — fold a signed i32 magnitude compare over two i32 / bool
+ * constants. JS `<`, `<=`, etc. on signed `number`s match Wasm `i32.lt_s`
+ * etc. directly because the values fit in [-2^31, 2^31).
+ */
+function i32CmpSigned(l: IrConst, r: IrConst, fn: (a: number, b: number) => boolean): IrConst | null {
+  const la = toI32(l);
+  const ra = toI32(r);
+  if (la === null || ra === null) return null;
+  // Sign-extend by `| 0` to ensure values are interpreted as signed Int32
+  // even if a const slipped through with the bit-pattern of a Uint32.
+  return { kind: "bool", value: fn(la | 0, ra | 0) };
+}
+
+/**
+ * #1126 Stage 3 — fold an unsigned i32 magnitude compare. `>>> 0` reads the
+ * bit pattern as a Uint32 (range [0, 2^32)); the comparison then works on
+ * the unsigned interpretation.
+ */
+function i32CmpUnsigned(l: IrConst, r: IrConst, fn: (a: number, b: number) => boolean): IrConst | null {
+  const la = toI32(l);
+  const ra = toI32(r);
+  if (la === null || ra === null) return null;
+  return { kind: "bool", value: fn(la >>> 0, ra >>> 0) };
+}
+
+/**
+ * Slice 11 (#1169n) — fold a `js.bit*` op over two f64 constants. JS
+ * coerces each operand to ToInt32/ToUint32, applies the i32 op, and the
+ * result is a 32-bit integer that we re-coerce to f64 for IR const land.
+ *
+ * Native JS `&`, `|`, `^`, `<<`, `>>`, `>>>` implement ToInt32/ToUint32 by
+ * spec, so applying the JS operator inside the lambda gives a correct
+ * result; we just box it back as `kind: "f64"` so downstream IR sees an
+ * f64-typed constant matching the result type the lowerer will emit.
+ */
+function jsBitwiseF64(l: IrConst, r: IrConst, fn: (a: number, b: number) => number): IrConst | null {
+  if (l.kind !== "f64" || r.kind !== "f64") return null;
+  return { kind: "f64", value: fn(l.value, r.value) };
 }
