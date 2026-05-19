@@ -1,176 +1,178 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-//
-// #1379 — prefix/postfix ++/-- on null/undefined/string operands must run the
-// spec's ToNumeric coercion (§13.4 + §7.1.4 ToNumber). Before the fix, the
-// codegen called `emitSafeExternrefToF64` which gated `__unbox_number` behind
-// a `__typeof_number` check and went to `f64.const NaN` for any non-Number
-// externref — so `var x = null; ++x` produced NaN (expected 1) and `var x =
-// "1"; x--` produced NaN (expected 0).
-//
-// Fix (src/codegen/type-coercion.ts): drop the typeof guard and always call
-// `__unbox_number` directly. The host import is `Number(v)` which implements
-// ToNumber per spec: null→0, undefined→NaN, "1"→1, true→1, etc. With #1319's
-// `_hostToPrimitive` fallback already in place, plain wasm-structs without
-// conversion methods route through "[object Object]" → NaN instead of
-// throwing TypeError, so the simplification is safe.
+/**
+ * Issue #1379 — `++` / `--` on null / undefined / string / object operands
+ * must perform spec-correct ToNumeric coercion.
+ *
+ * UpdateExpression (ECMA-262 §13.4) is defined as:
+ *   oldValue = ToNumeric(GetValue(operand))
+ *   newValue = oldValue ± 1
+ *   PutValue(operand, newValue)
+ * The post-decrement / pre-increment value follows from the old/new pair.
+ *
+ * Before this fix the externref code path used `emitSafeExternrefToF64`,
+ * which short-circuited every value whose `typeof` was not `"number"` to
+ * NaN. That defeated the spec-required ToNumber chain for null (→ 0),
+ * "1" (→ 1), { valueOf: () => "5" } (→ 5), etc. Test262 assertions like
+ * `var x = null; ++x; x === 1` failed with `Actual: NaN`.
+ *
+ * The fix replaces the safe-NaN coercion with a direct `__unbox_number`
+ * call. The runtime "unbox/number" intent (#1319) already performs the
+ * full ToPrimitive → Number chain, including dispatch into WasmGC closure
+ * structs for valueOf / toString / @@toPrimitive.
+ *
+ * Test262 cases driving the fix:
+ *   language/expressions/postfix-decrement/S11.3.2_A4_T3.js (string)
+ *   language/expressions/prefix-increment/S11.4.4_A3_T4.js  (null/undef)
+ *   language/expressions/postfix-increment/S11.3.1_A4_T4.js (null/undef)
+ *   language/expressions/prefix-decrement/S11.4.5_A3_T5.js  (object)
+ */
+import { describe, it, expect } from "vitest";
+import { compileToWasm } from "./equivalence/helpers.js";
 
-import { describe, expect, it } from "vitest";
-
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
-interface RunResult {
-  exports: Record<string, Function>;
+async function runWasm(src: string): Promise<unknown> {
+  const exports = await compileToWasm(src);
+  const fn = exports.test as () => unknown;
+  return fn();
 }
 
-async function run(source: string): Promise<RunResult> {
-  const r = compile(source, { fileName: "test.ts" });
-  if (!r.success) {
-    throw new Error(`compile failed:\n${r.errors.map((e) => `  L${e.line}:${e.column} ${e.message}`).join("\n")}`);
-  }
-  new WebAssembly.Module(r.binary);
-  const imports: any = buildImports(r.imports as never, undefined, r.stringPool);
-  const inst = await WebAssembly.instantiate(r.binary, imports);
-  if (typeof imports.setExports === "function") imports.setExports(inst.instance.exports);
-  return { exports: inst.instance.exports as Record<string, Function> };
-}
-
-describe("#1379 — prefix/postfix ++/-- ToNumeric coercion", () => {
-  /**
-   * Spec test pattern from `language/expressions/prefix-increment/S11.4.4_A3_T4.js`:
-   * `var x = null; ++x` is `1` per ToNumber(null) = +0 then +1.
-   */
-  it("++null is 1 (ToNumber(null) = +0)", async () => {
-    const { exports } = await run(`
-      export function test(): number {
-        let x: any = null;
+describe("#1379 — ++/-- ToNumeric coercion on non-number operands", () => {
+  it("++ on null local yields 1 (Number(null) = 0, then +1)", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = null;
         ++x;
-        return x as number;
-      }
-    `);
-    expect(exports.test!()).toBe(1);
+        return x === 1 ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * `language/expressions/postfix-decrement/S11.3.2_A4_T3.js`:
-   * `var x = "1"; var y = x--; y === 1` per ToNumber("1") = 1.
-   */
-  it("postfix x-- on string '1' returns 1, leaves x at 0", async () => {
-    const { exports } = await run(`
-      export function test_y(): number {
-        let x: any = "1";
-        const y = x--;
-        return y as number;
-      }
-      export function test_x(): number {
-        let x: any = "1";
-        x--;
-        return x as number;
-      }
-      export function test(): number { return 1; }
-    `);
-    expect(exports.test_y!()).toBe(1);
-    expect(exports.test_x!()).toBe(0);
+  it("++ on undefined local yields NaN", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any;
+        ++x;
+        return Number.isNaN(x) ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * `language/expressions/postfix-increment/S11.3.1_A4_T4.js`:
-   * `var x = null; var y = x++; y === 0` per ToNumber(null) = 0.
-   */
-  it("postfix x++ on null returns 0, leaves x at 1", async () => {
-    const { exports } = await run(`
-      export function test_y(): number {
-        let x: any = null;
-        const y = x++;
-        return y as number;
-      }
-      export function test_x(): number {
-        let x: any = null;
-        x++;
-        return x as number;
-      }
-      export function test(): number { return 1; }
-    `);
-    expect(exports.test_y!()).toBe(0);
-    expect(exports.test_x!()).toBe(1);
+  it("postfix x-- on string '1' returns 1, leaves x = 0", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = "1";
+        var y: any = x--;
+        return y === 1 && x === 0 ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * Empty string coerces to 0 per ToNumber("") = 0.
-   */
-  it("empty string ++x is 1", async () => {
-    const { exports } = await run(`
-      export function test(): number {
-        let x: any = "";
-        ++x;
-        return x as number;
-      }
-    `);
-    expect(exports.test!()).toBe(1);
+  it("postfix x-- on string 'x' returns NaN", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = "x";
+        var y: any = x--;
+        return Number.isNaN(y) ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * Number-shaped string coerces correctly with whitespace trim.
-   * `Number(" 42 ")` is 42 per spec.
-   */
-  it("' 42 ' ++ becomes 43", async () => {
-    const { exports } = await run(`
-      export function test(): number {
-        let x: any = " 42 ";
+  it("++ on empty string yields 1", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = "";
         ++x;
-        return x as number;
-      }
-    `);
-    expect(exports.test!()).toBe(43);
+        return x === 1 ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * Non-numeric string remains NaN — `Number("abc")` is NaN, NaN+1 is NaN.
-   * Spec-conforming but worth pinning to catch regressions.
-   */
-  it("'abc' ++x is NaN", async () => {
-    const { exports } = await run(`
-      export function test(): number {
-        let x: any = "abc";
-        ++x;
-        return x as number;
-      }
-    `);
-    expect(Number.isNaN(exports.test!() as number)).toBe(true);
+  it("postfix null++ returns 0, leaves x = 1", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = null;
+        var y: any = x++;
+        return y === 0 && x === 1 ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * Already-number path must keep working — regression guard.
-   */
-  it("regression guard: ++x on a number-typed local works", async () => {
-    const { exports } = await run(`
-      export function test(): number {
-        let x: number = 5;
-        ++x;
-        return x;
-      }
-    `);
-    expect(exports.test!()).toBe(6);
+  it("postfix undefined++ returns NaN", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any;
+        var y: any = x++;
+        return Number.isNaN(y) ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 
-  /**
-   * Boolean coercion: `Number(true) === 1`, `Number(false) === 0`.
-   */
-  it("++true is 2, ++false is 1", async () => {
-    const { exports } = await run(`
-      export function test_t(): number {
-        let x: any = true;
+  it("--{} yields NaN", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = {};
+        --x;
+        return Number.isNaN(x) ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("--object with valueOf returning string '5' yields 4", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = { valueOf: function () { return "5"; } };
+        var r: any = --x;
+        return r === 4 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("--object with valueOf returning number yields valueOf()-1", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = { valueOf: function () { return 7; } };
+        var r: any = --x;
+        return r === 6 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("postfix true++ returns 1, leaves x = 2 (boolean ToNumber)", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = true;
+        var y: any = x++;
+        return y === 1 && x === 2 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("postfix false-- returns 0, leaves x = -1", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = false;
+        var y: any = x--;
+        return y === 0 && x === -1 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("++ on whitespace-padded numeric string trims and parses", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = "  42  ";
         ++x;
-        return x as number;
-      }
-      export function test_f(): number {
-        let x: any = false;
+        return x === 43 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("++ on non-numeric string yields NaN", async () => {
+    expect(
+      await runWasm(`export function test(): number {
+        var x: any = "abc";
         ++x;
-        return x as number;
-      }
-      export function test(): number { return 1; }
-    `);
-    expect(exports.test_t!()).toBe(2);
-    expect(exports.test_f!()).toBe(1);
+        return Number.isNaN(x) ? 1 : 0;
+      }`),
+    ).toBe(1);
   });
 });
