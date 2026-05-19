@@ -4673,11 +4673,12 @@ assert._isSameValue = isSameValue;
             if (v != null && typeof v === "object") {
               const prim = _toPrimitive(v, "number", callbackState);
               if (prim !== undefined) {
-                try {
-                  return Number(prim);
-                } catch {
-                  /* */
-                }
+                // #1434 — Number() throws TypeError on Symbol/BigInt primitives.
+                // Per ECMA-262 §7.1.4 ToNumber, Symbol MUST throw TypeError; the
+                // unbox/number intent is the centralized ToNumber funnel, so we
+                // let the exception propagate to Wasm catch_all instead of
+                // silently turning it into NaN.
+                return Number(prim);
               }
               // _toPrimitive returned undefined — try the full host ToPrimitive (#1090)
               // which checks real JS properties, sidecar, and Wasm exports.
@@ -4685,11 +4686,11 @@ assert._isSameValue = isSameValue;
               const prim2 = _hostToPrimitive(v, "number", callbackState);
               return Number(prim2);
             }
-            try {
-              return Number(v);
-            } catch {
-              return NaN;
-            }
+            // #1434 — Symbol/BigInt primitives: Number() throws TypeError per
+            // §7.1.4. The previous try/catch swallowed this and returned NaN,
+            // letting `Number(Symbol())`, `+Symbol()`, `-Symbol()`, `~Symbol()`,
+            // `0 + Symbol()` etc. silently coerce. Let the exception propagate.
+            return Number(v);
           };
     case "truthy_check":
       return (v: any) => (v ? 1 : 0);
