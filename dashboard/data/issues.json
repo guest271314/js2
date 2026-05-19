@@ -285,16 +285,6 @@
       "sprint": "52"
     },
     {
-      "id": "1434",
-      "title": "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases",
-      "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "52"
-    },
-    {
       "id": "1433",
       "title": "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics",
       "priority": "medium",
@@ -2026,6 +2016,16 @@
   ],
   "review": [],
   "done": [
+    {
+      "id": "1434",
+      "title": "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "52"
+    },
     {
       "id": "1398",
       "title": "report: edition filter on category table — per-category edition breakdown",

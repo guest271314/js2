@@ -181,7 +181,7 @@ pass rate goes from "good" to "excellent."
 | **1431** | spec gap: assignment operators — destructuring completion, defaults, and compound side effects | 52 | ready | medium |
 | **1432** | spec gap: parameter lists — rest/destructuring iterator semantics and default initializers | 52 | ready | medium |
 | **1433** | spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics | 52 | ready | medium |
-| **1434** | spec gap: ToNumber/ToNumeric coercion and unary operator edge cases | 52 | ready | medium |
+| **1434** | spec gap: ToNumber/ToNumeric coercion and unary operator edge cases | 52 | done | medium |
 | **1435** | spec gap: lexical grammar and syntax-directed early errors | 52 | ready | medium |
 | **1436** | spec gap: global object descriptors and global function coercion/URI semantics | 52 | ready | medium |
 | **1437** | spec gap: Math numeric edge cases beyond random source | 52 | in-progress | low |
