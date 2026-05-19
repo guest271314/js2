@@ -1,6 +1,6 @@
 ---
 id: 1373
-sprint: 51
+sprint: 52
 title: "IR: claim async functions (async/await through IR path)"
 status: ready
 created: 2026-05-08

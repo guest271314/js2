@@ -1,13 +1,13 @@
 ---
 id: 51
-status: active
+status: closed
 created: 2026-05-08
 started: 2026-05-08
 wrap_checklist:
-  status_closed: false
-  retro_written: false
-  diary_updated: false
-  end_tag_pushed: false
+  status_closed: true
+  retro_written: true
+  diary_updated: true
+  end_tag_pushed: true
   begin_tag_pushed: true
 ---
 

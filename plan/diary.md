@@ -1,5 +1,17 @@
 # Project Diary
 
+## 2026-05-20 — Sprint 51 close / Sprint 52 start
+
+**Sprint 51 closed** (2026-05-08 → 2026-05-20, 12 days including a week-long pause from context limit + Codex restructuring overlap).
+
+**Results**: 26,777 → 28,147 pass (**+1,370 net**, 65.2%). 70 PRs merged. 34/50 issues done. 16 carried to S52.
+
+**Key wins**: IR retirement gate (#1376) now enforced in CI. Spec-gap wave (#1358–#1382) closed array callbacks, string methods, iterator helpers, promise combinators, class builtins. IR slices #1370–#1374 retired class methods, extern whitelist, destructuring params. Branch audit recovered 10 unmerged PRs (#341–350) now in CI queue.
+
+**Process issues**: Codex force-pushed to origin/main mid-sprint (rolled back); sprint file status drift (4 issues marked wrong); 10 issue files existed only in labs. Labs migration done this session: js2wasm-labs/main now = labs/ (private) + public/ (subtree).
+
+**Sprint 52 started** (2026-05-20). Theme: spec-completeness continuation + wasm closure bridge. 7 dev agents dispatched day 1 on #1396 (+400 passes), #1431–#1434, #1437–#1438. 10 audit PRs in CI. Baseline: 28,147 / 43,160 (65.2%). Target: +1,500 → ~29,650.
+
 ## 2026-05-07 — Sprint 49 close / Sprint 50 start
 
 **Sprint 49 closed.** 4-day sprint (2026-05-03 → 2026-05-07). 8 issues merged.
