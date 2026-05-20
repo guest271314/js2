@@ -139,3 +139,12 @@ include them as new work.
 - Carry-forward S52 issues either landed or have explicit `status: blocked` /
   `wont-fix` with documented rationale.
 - Net test262 pass-rate up vs baseline (28,168 / 43,160).
+
+<!-- GENERATED_ISSUE_TABLES_START -->
+## Issue Tables
+
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+
+No issues currently assigned to this sprint.
+
+<!-- GENERATED_ISSUE_TABLES_END -->

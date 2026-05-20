@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
+      if (typeof __DEFINES__ === "undefined") window.__DEFINES__ = {};
+    </script>
+    <script>
       (() => {
         const base = document.createElement("base");
         base.href = location.hostname === "loopdive.github.io" ? "/js2wasm/" : "/";
@@ -3094,9 +3097,9 @@ match (value) {
               <perf-benchmark-chart
                 src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                 mode="perf"
-                title="Speed vs JS in V8"
-                baseline-label="JS in V8"
-                legend="Speedup relative to JS baseline in V8. 2x = twice as fast. 0.8x = 20% slower. Geometric mean of repeated calls inside one fresh process after module load."
+                title="Speed relative to V8 with JIT"
+                baseline-label="V8 with JIT"
+                legend="Speedup relative to V8 with JIT. 2x = twice as fast. 0.57x = 57% the speed. Geometric mean of repeated calls inside one fresh process after module load."
               ></perf-benchmark-chart>
             </div>
             <div
@@ -3110,7 +3113,7 @@ match (value) {
                 title="Module Size"
                 baseline-label="JS source (minified)"
                 show-delta
-                delta-kind="size"
+                delta-kind="factor"
                 legend="Geometric mean of raw deployable module size; JS source counts only the minified benchmark .js files. Parenthetical interpreter payload is not included in the bar or delta."
               ></perf-benchmark-chart>
             </div>
