@@ -328,6 +328,7 @@ type HoistFunctionDeclarationsFn = (
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmts: ts.NodeArray<ts.Statement> | ts.Statement[],
+  depth?: number,
 ) => void;
 
 let _hoistFunctionDeclarations: HoistFunctionDeclarationsFn = () => {
@@ -342,8 +343,9 @@ export function hoistFunctionDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmts: ts.NodeArray<ts.Statement> | ts.Statement[],
+  depth?: number,
 ): void {
-  _hoistFunctionDeclarations(ctx, fctx, stmts);
+  _hoistFunctionDeclarations(ctx, fctx, stmts, depth);
 }
 
 // ── emitNestedBindingDefault ──────────────────────────────────────────

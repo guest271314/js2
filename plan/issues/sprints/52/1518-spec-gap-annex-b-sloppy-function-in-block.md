@@ -2,7 +2,7 @@
 id: 1518
 sprint: 52
 title: "spec gap: Annex B.3.2 — sloppy-mode function-in-block hoisting (`var` shadow)"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: medium
 feasibility: hard
@@ -104,3 +104,78 @@ because the test impact is large (~200 tests), but the team may
 choose to defer it to sprint 53 if the parser/scope changes risk
 churning the working compile path. An alternative: skip-filter the
 whole `annexB/language/eval-code/` directory and document the gap.
+
+## Implementation notes (Phase 1 — sprint 52)
+
+**Scope landed.** This PR implements the function-code / global-code
+paths (no eval). The `eval-code/` directory is deferred to a follow-up
+because direct-eval needs the caller's varEnv plumbing, which our
+runtime-eval shim doesn't currently expose.
+
+**Compiler changes** (all under `src/codegen/`):
+
+1. `context/types.ts` — new `FunctionContext.annexBHoistedVars?: Set<string>`.
+   Membership signals "this name has been hoisted as an Annex B var binding
+   in the current function scope".
+2. `statements/nested-declarations.ts` — `hoistFunctionDeclarations` now
+   takes a `depth` parameter. At `depth > 0` (recursive entry into a
+   block / if / switch / try / loop / labeled-statement), each
+   FunctionDeclaration is evaluated as an Annex B candidate:
+   - `isStrictModeContext(decl)` short-circuits hoisting in strict code.
+   - `hasAnnexBConflict(fctx, ctx, name, decl)` returns true when the
+     surrounding function has a clashing parameter, top-level `let`/
+     `const`/`class` of the same name, a `for (let|const X)` shadow on
+     the path from the decl to its enclosing function, or `name ===
+     "arguments"` (covers the `*-skip-early-err-*`, `*-skip-arguments`,
+     `*-skip-param.js` patterns).
+   - When conflict → we skip the funcMap registration ENTIRELY at this
+     depth. The decl reverts to pure block-scope lexical semantics, so
+     `typeof f === "undefined"` outside the block now matches spec.
+     (Pre-#1518 the funcMap entry leaked out and made `typeof f` const-
+     fold to `"function"`.)
+   - When no conflict + non-strict → `compileNestedFunctionDeclaration`
+     runs (funcMap registration unchanged), then `ensureAnnexBVarBinding`
+     allocates an externref local in the surrounding fctx, initialised
+     to `__get_undefined()`, and records the name in
+     `fctx.annexBHoistedVars`. The allocation happens AFTER the lifted
+     compilation so the lifted function's capture analysis doesn't
+     mis-classify the outer var slot as a closure capture.
+3. `statements.ts` — `compileStatement(FunctionDeclaration)` now emits a
+   dual-write at the decl's evaluation site: `emitFuncRefAsClosure` →
+   `extern.convert_any` → `local.set` of the var slot. This realises
+   step 3.e/f of §B.3.3.1 ("Let fobj be ! benvRec.GetBindingValue(F,
+   false); Perform ! fenvRec.SetMutableBinding(F, fobj, false)"). The
+   write is guarded by a slot-type check — only externref slots accept
+   the coercion safely.
+4. `typeof-delete.ts` — `compileTypeofExpression` bypasses the static
+   fast-path when the operand identifier is in
+   `fctx.annexBHoistedVars`. Otherwise TS would const-fold `typeof f`
+   to `"function"` (because TS sees only the FunctionDeclaration
+   signature) and break the `f === undefined` initial-state asserts.
+
+**Known limitation: typeof on the assigned value.** Tests that
+read `after = f` and then assert `typeof after === "function"` rely
+on JS-side `__typeof` recognising the wasm closure struct as a
+callable. JS sees the externref-wrapped wasm-GC struct as an opaque
+object, so today `typeof after === "object"`. The Wasm-side call
+itself works (`after()` dispatches through the externref call_ref
+path with `any.convert_extern` + `ref.cast`), so `after() === ...`
+asserts pass even when the typeof assert doesn't. Fixing the typeof
+side requires the closure-as-JS-function bridge tracked in #1382.
+Until then, `*-func-update.js` test262 cases that ALSO check `typeof`
+won't flip.
+
+**Test coverage.** New `tests/issue-1518.test.ts` mirrors four of the
+core patterns: init (var binding initialised to undefined),
+update (post-block value via Wasm call), skip-early-err-for (no
+hoist under `for (let f; ;)`), and strict-mode (no Annex B under
+`"use strict"`).
+
+**Expected test262 impact.** Conservative: ~50 flips driven by the
+init pattern across function-code, global-code, and the skip patterns
+that previously fell into `typeof === "function"` false positives.
+Pessimistic: regressions on `*-no-init.js` tests where a `var f`
+co-exists with `function f(){}` in a block — our dual-write emission
+is guarded against non-externref slot types, so it should NOT trap,
+but the post-block read would see the pre-existing typed-var value
+instead of the function. CI will tell.

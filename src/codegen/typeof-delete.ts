@@ -749,10 +749,20 @@ export function compileTypeofExpression(
 
   const tsType = ctx.checker.getTypeAtLocation(operand);
 
-  // Try static resolution first via the shared helper
-  const staticResult = staticTypeofForType(ctx, tsType);
-  if (staticResult !== null) {
-    return compileStringLiteral(ctx, fctx, staticResult);
+  // #1518: Annex B.3.2 var bindings are dynamic — `typeof f` flips from
+  // 'undefined' (before the block evaluates the FunctionDeclaration) to
+  // 'function' (after) within the SAME function. The TS checker sees only
+  // the function signature and would const-fold to 'function', breaking
+  // `typeof f === 'undefined'` asserts (e.g. in the `*-skip-early-err-*`
+  // and `*-func-init.js` patterns). Force the runtime __typeof path so
+  // the per-execution undefined / closure value is observed.
+  const isAnnexBOperand = ts.isIdentifier(operand) && fctx.annexBHoistedVars?.has(operand.text);
+  if (!isAnnexBOperand) {
+    // Try static resolution first via the shared helper
+    const staticResult = staticTypeofForType(ctx, tsType);
+    if (staticResult !== null) {
+      return compileStringLiteral(ctx, fctx, staticResult);
+    }
   }
 
   // Fast mode: any-typed operand -> runtime typeof via __any_typeof
