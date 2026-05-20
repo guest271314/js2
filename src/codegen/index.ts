@@ -3149,9 +3149,12 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     ctx.wasiFdCloseIdx = ctx.funcMap.get("fd_close")!;
   }
 
-  // Register a helper function: __wasi_write_string(strPtr: i32, strLen: i32) -> void
-  // This writes to stdout (fd=1) using fd_write
+  // Register helper functions:
+  //   __wasi_write_string_fd(fd, ptr, len) — writes to the given fd via fd_write
+  //   __wasi_write_string(ptr, len)        — convenience wrapper, fd=1 (stdout)
+  // Both are registered together so callers can pick fd=1 (stdout) or fd=2 (stderr).
   if (needsFdWrite) {
+    emitWasiWriteStringFdHelper(ctx);
     emitWasiWriteStringHelper(ctx);
   }
 
@@ -3161,31 +3164,64 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   }
 }
 
-/** Emit __wasi_write_string(ptr: i32, len: i32) helper that calls fd_write(1, iov, 1, nwritten) */
-function emitWasiWriteStringHelper(ctx: CodegenContext): void {
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], []);
+/**
+ * Emit __wasi_write_string_fd(fd: i32, ptr: i32, len: i32) helper that calls
+ * fd_write(fd, iov, 1, nwritten). The fd is supplied by the caller — typically
+ * 1 (stdout) for console.log/info/debug or 2 (stderr) for console.error/warn.
+ */
+function emitWasiWriteStringFdHelper(ctx: CodegenContext): void {
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set("__wasi_write_string", funcIdx);
+  ctx.funcMap.set("__wasi_write_string_fd", funcIdx);
 
-  // Parameters: 0=ptr, 1=len
+  // Parameters: 0=fd, 1=ptr, 2=len
   // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
   // nwritten at memory[8]
   const body: Instr[] = [
     // Store ptr at memory[0] (iovec.buf)
     { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: 1 } as Instr,
     { op: "i32.store", align: 2, offset: 0 } as Instr,
     // Store len at memory[4] (iovec.buf_len)
     { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
+    { op: "local.get", index: 2 } as Instr,
     { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: 1 } as Instr, // fd = stdout
+    // Call fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "local.get", index: 0 } as Instr, // fd parameter
     { op: "i32.const", value: 0 } as Instr, // iovs pointer
     { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
     { op: "i32.const", value: 8 } as Instr, // nwritten pointer
     { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
     { op: "drop" } as Instr, // drop the return value (errno)
+  ];
+
+  ctx.mod.functions.push({
+    name: "__wasi_write_string_fd",
+    typeIdx: funcTypeIdx,
+    locals: [],
+    body,
+    exported: false,
+  });
+}
+
+/**
+ * Emit __wasi_write_string(ptr: i32, len: i32) helper — thin wrapper around
+ * __wasi_write_string_fd that hardcodes fd=1 (stdout). Kept for backwards
+ * compatibility with existing callers that always want stdout.
+ */
+function emitWasiWriteStringHelper(ctx: CodegenContext): void {
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__wasi_write_string", funcIdx);
+
+  const writeFdIdx = ctx.funcMap.get("__wasi_write_string_fd")!;
+
+  // Parameters: 0=ptr, 1=len — forward to __wasi_write_string_fd(1, ptr, len)
+  const body: Instr[] = [
+    { op: "i32.const", value: 1 } as Instr, // fd = stdout
+    { op: "local.get", index: 0 } as Instr, // ptr
+    { op: "local.get", index: 1 } as Instr, // len
+    { op: "call", funcIdx: writeFdIdx } as Instr,
   ];
 
   ctx.mod.functions.push({
