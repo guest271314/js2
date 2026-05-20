@@ -484,6 +484,25 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     }
   }
 
+  // #1502 — Browser Storage globals (localStorage / sessionStorage). Emit
+  // a host import that resolves to the real browser Storage when running
+  // inside a browser / jsdom, and to an in-memory polyfill in standalone
+  // mode (Node / Bun / WASI). Recognised by name so callers don't need a
+  // `declare var` in source — lib.dom.d.ts already provides the type.
+  if (name === "localStorage" || name === "sessionStorage") {
+    const importName = name === "localStorage" ? "__get_localStorage" : "__get_sessionStorage";
+    let funcIdx = ctx.funcMap.get(importName);
+    if (funcIdx === undefined) {
+      const importsBefore = ctx.numImportFuncs;
+      const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+      addImport(ctx, "env", importName, { kind: "func", typeIdx });
+      shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+      funcIdx = ctx.funcMap.get(importName)!;
+    }
+    fctx.body.push({ op: "call", funcIdx });
+    return { kind: "externref" };
+  }
+
   // globalThis — return the JS global object via host import
   if (name === "globalThis") {
     let funcIdx = ctx.funcMap.get("__get_globalThis");

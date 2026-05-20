@@ -1760,11 +1760,52 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+/** Per-instance state shared across imports inside one `buildImports()`
+ *  call. Currently used by the `web_storage` intent so localStorage /
+ *  sessionStorage resolve to a stable per-instance polyfill in standalone
+ *  mode (Node, Bun, WASI). */
+interface InstanceState {
+  webStorage: { local?: any; session?: any };
+}
+
+function makeWebStoragePolyfill(): any {
+  const store = new Map<string, string>();
+  return {
+    get length(): number {
+      return store.size;
+    },
+    clear(): void {
+      store.clear();
+    },
+    getItem(k: any): string | null {
+      const key = String(k);
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(k: any, v: any): void {
+      store.set(String(k), String(v));
+    },
+    removeItem(k: any): void {
+      store.delete(String(k));
+    },
+    key(i: any): string | null {
+      const idx = Number(i);
+      if (!Number.isFinite(idx) || idx < 0) return null;
+      let n = 0;
+      for (const k of store.keys()) {
+        if (n === idx) return k;
+        n++;
+      }
+      return null;
+    },
+  };
+}
+
 function resolveImport(
   intent: ImportIntent,
   deps?: Record<string, any>,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
   globalSandbox?: Record<string, any>,
+  instanceState?: InstanceState,
 ): Function {
   switch (intent.type) {
     case "string_literal":
@@ -4676,6 +4717,38 @@ assert._isSameValue = isSameValue;
       }
       return () => {};
     }
+    case "web_storage": {
+      // #1502 — Browser Storage interface (localStorage / sessionStorage).
+      // Prefer the real host global (works in browser + jsdom); fall back to
+      // an in-memory Map-based polyfill for Node / Bun / WASI so compiled
+      // code that uses these globals still runs end-to-end. The polyfill is
+      // memoised per `buildImports()` call so repeated reads / writes share
+      // a single store and `localStorage` / `sessionStorage` remain
+      // distinct stores (mirroring browser semantics).
+      const which = intent.which;
+      return () => {
+        const cached = instanceState?.webStorage[which];
+        if (cached !== undefined) return cached;
+        // deps override allows tests / runners to inject a custom Storage.
+        const depKey = which === "local" ? "localStorage" : "sessionStorage";
+        const depVal = deps?.[depKey];
+        if (depVal !== undefined) {
+          if (instanceState) instanceState.webStorage[which] = depVal;
+          return depVal;
+        }
+        // Prefer the real host global when available (browser / jsdom).
+        const g: any = globalThis as any;
+        const real = g?.[depKey];
+        if (real !== undefined && real !== null) {
+          if (instanceState) instanceState.webStorage[which] = real;
+          return real;
+        }
+        // Standalone fallback.
+        const polyfill = makeWebStoragePolyfill();
+        if (instanceState) instanceState.webStorage[which] = polyfill;
+        return polyfill;
+      };
+    }
     case "proxy_create":
       return (target: any, handler: any) => {
         // Wrap the Wasm struct target in a real JS Proxy with the given handler.
@@ -4945,6 +5018,9 @@ export function buildImports(
   const MAX_HOST_RECURSION_DEPTH = 100;
   let hostCallDepth = 0;
 
+  // Per-instance state for stateful imports (e.g. localStorage polyfill).
+  const instanceState: InstanceState = { webStorage: {} };
+
   for (const imp of manifest) {
     if (imp.module !== "env") continue;
     let fn: Function;
@@ -4956,7 +5032,7 @@ export function buildImports(
       continue;
     }
 
-    fn = resolveImport(imp.intent, deps, callbackState, options?.globalSandbox);
+    fn = resolveImport(imp.intent, deps, callbackState, options?.globalSandbox, instanceState);
 
     // DOM containment wrapping
     if (options?.domRoot) {

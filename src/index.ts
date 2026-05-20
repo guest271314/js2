@@ -30,7 +30,8 @@ export type ImportIntent =
   | { type: "same_value_zero" }
   | { type: "dynamic_import" }
   | { type: "proxy_create" }
-  | { type: "node_builtin"; moduleName: string };
+  | { type: "node_builtin"; moduleName: string }
+  | { type: "web_storage"; which: "local" | "session" };
 
 export interface ImportDescriptor {
   module: "env" | "wasm:js-string" | "string_constants";
