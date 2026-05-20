@@ -56,8 +56,6 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1387 | feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies | medium | ready |
 | #1394 | class method-closure caching: C.prototype.method returns stable singleton closure | high | ready |
 | #1400 | npm: compile ESLint package entry to valid Wasm | high | ready |
-| #1435 | spec gap: lexical grammar and syntax-directed early errors | medium | ready |
-| #1436 | spec gap: global object descriptors and global function coercion/URI semantics | medium | ready |
 | #1439 | spec gap: RegExp.prototype Symbol.* protocol methods (replace/match/split/matchAll/search) | high | ready |
 | #1440 | spec gap: Date setters ToNumber coercion + Invalid Date (NaN) propagation | high | ready |
 | #1441 | spec gap: String.prototype.split — Array result shape + String wrapper receivers | high | ready |
@@ -80,7 +78,6 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1465 | spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity | medium | ready |
 | #1466 | spec gap: Proxy + Reflect trap / operation fidelity | medium | ready |
 | #1467 | spec gap: Error / AggregateError / Symbol prototype protocol | medium | ready |
-| #1468 | for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close | medium | ready |
 | #1470 | host-independence: eliminate JS host string ops for standalone Wasm | high | ready |
 | #1471 | host-independence: eliminate JS host boxing/unboxing for standalone Wasm | high | ready |
 | #1472 | host-independence: eliminate JS host object/property ops for standalone Wasm | high | ready |
@@ -101,6 +98,16 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1502 | browser: localStorage / sessionStorage host imports with standalone fallback | medium | ready |
 | #1503 | browser: crypto.getRandomValues / crypto.randomUUID host imports | medium | ready |
 | #1504 | browser: marshal compiled export return values (structs/arrays) to plain JS | medium | ready |
+| #1510 | spec gap: for-await-of destructuring — await on IteratorStep + binding initialization | high | ready |
+| #1511 | spec gap: arguments object — mapped semantics, descriptors, trailing-comma length | high | ready |
+| #1512 | spec gap: dynamic import — early SyntaxErrors for nested syntactic contexts | medium | ready |
+| #1513 | spec gap: Reflect — TypeError on non-object/Symbol target + abrupt-completion propagation | high | ready |
+| #1514 | spec gap: Set.prototype.{union,intersection,difference,…} accept set-like protocol | medium | ready |
+| #1515 | spec gap: DataView — ToIndex(byteOffset), detached-buffer TypeError, BigInt setter coercion | medium | ready |
+| #1516 | spec gap: GeneratorPrototype — this-value coercion + name/length/property descriptors | medium | ready |
+| #1517 | spec gap: Array.fromAsync — ES2024 async-iteration constructor | medium | ready |
+| #1518 | spec gap: Annex B.3.2 — sloppy-mode function-in-block hoisting (`var` shadow) | medium | ready |
+| #1519 | spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call | medium | ready |
 
 ### In Progress
 
@@ -108,7 +115,11 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 |---|---|---|---|
 | #1431 | spec gap: assignment operators — destructuring completion, defaults, and compound side effects | medium | in-progress |
 | #1433 | spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics | medium | in-progress |
+| #1435 | spec gap: lexical grammar and syntax-directed early errors | medium | in-progress |
+| #1436 | spec gap: global object descriptors and global function coercion/URI semantics | medium | in-progress |
 | #1438 | spec gap: Map, WeakMap, and WeakSet residual collection semantics | medium | in-progress |
+| #1468 | for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close | medium | in-progress |
+| #1505 | spec audit: comprehensive ECMAScript implementation gap analysis | high | in-progress |
 
 ### Done
 
