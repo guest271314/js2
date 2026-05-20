@@ -138,3 +138,189 @@ The architect spec must define:
 - Architect spec needed because the change touches the resolver's
   central decision path and a regression here breaks every npm
   import path.
+
+## Implementation Plan
+
+### Root cause confirmed
+
+`src/resolve.ts:147-160` currently has:
+
+```ts
+// TypeScript's standard resolver prefers `.d.ts` declarations from
+// `@types/<pkg>` over the real implementation at `<pkg>/...`. ...
+if (pkgName && /[/\\]@types[/\\]/.test(resolved)) {
+  const implPath = this.findImplementationBody(pkgName, specifier, containingFile);
+  if (implPath) {
+    resolved = implPath;
+  }
+}
+```
+
+The `@types/<pkg>` redirect is the ONLY trigger for switching to an
+implementation body. For self-typed packages like ESLint:
+
+```json
+{
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/api.js"
+    }
+  }
+}
+```
+
+TypeScript's resolver picks `./lib/types/index.d.ts` (the `types`
+condition is preferred). That path does NOT contain `@types/`, so the
+redirect at line 155 never fires, and codegen receives a `.d.ts` file
+as if it were the implementation.
+
+### Fix — extend the `.d.ts` → implementation redirect
+
+Two-line conceptual change in `src/resolve.ts::resolveModule`:
+
+```ts
+// BEFORE
+if (pkgName && /[/\\]@types[/\\]/.test(resolved)) { ... }
+
+// AFTER
+if (pkgName && (
+    /[/\\]@types[/\\]/.test(resolved) ||
+    resolved.endsWith(".d.ts")
+)) {
+  const implPath = this.findImplementationBody(pkgName, specifier, containingFile);
+  if (implPath) {
+    resolved = implPath;
+  }
+}
+```
+
+Rationale:
+- The existing `findImplementationBody` already does the right thing
+  for bare-package imports — it reads `package.json` `module ?? main`
+  to find the impl entry (line 255). For ESLint, `pkg.main` is
+  `./lib/api.js`, exactly what we want.
+- Subpath specifiers (`import x from "pkg/sub"`) already work via
+  `probeImplementationPath`'s direct-file probe.
+
+### Caveats / edge cases
+
+1. **Packages that ship only `.d.ts` (declaration-only externs).**
+   If `findImplementationBody` returns `null`, the resolver
+   currently falls back to the `.d.ts` result. This is correct —
+   the existing logic at line 158 already guards with
+   `if (implPath)`. No change needed: declaration-only packages
+   stay as externs.
+
+2. **`exports` map conditions order**: TypeScript respects `types`
+   first by default, but `module` / `node` / `default` conditions
+   can shift the chosen path. Since we read `package.json.module ??
+   package.json.main` directly in `probeImplementationPath`, we
+   bypass the `exports` map and pick whichever entry point the
+   package author marked as the "real" implementation.
+   - **This is a known divergence from Node's resolution algorithm**,
+     but it matches the existing `@types/*` redirect's behavior. The
+     correctness story is: "the type-checker uses TS's resolver; the
+     codegen picks the impl entry as published in `main`/`module`".
+
+3. **Conditional `exports` with no `main` field.** Some modern
+   ESM-only packages drop `main` entirely and rely solely on
+   `exports`. `probeImplementationPath` will fall through to the
+   `index.{js,mjs,cjs,ts}` probe. If even that fails, we keep the
+   `.d.ts` result. Add a regression test for this case to prevent
+   future regressions.
+
+4. **Mixed bare + subpath in the same package.** Calling
+   `findImplementationBody("eslint", "eslint", containingFile)`
+   resolves the bare specifier via `package.json.main`. Calling
+   `findImplementationBody("eslint", "eslint/lib/rules", containingFile)`
+   resolves the subpath via `probeImplementationPath`. Both already
+   work — the bug is only in the trigger condition (line 155), not
+   in the implementation-finder.
+
+### Test plan
+
+Add `tests/issue-1559.test.ts` with the following cases:
+
+1. **Bare-package self-typed (the ESLint case)**: synthesize a
+   minimal `.tmp/issue-1559/node_modules/foo/` fixture with:
+   ```
+   package.json:  { "main": "./impl.js", "types": "./types.d.ts" }
+   impl.js:       export class Foo { bar() { return 42; } }
+   types.d.ts:    export declare class Foo { bar(): number; }
+   ```
+   Compile an entry with `import { Foo } from "foo"; new Foo();`.
+   Assert: `r.imports` does NOT contain `__new_Foo`. The compiled
+   module references the impl class.
+
+2. **Bare-package `exports` map (the modern ESM case)**:
+   ```
+   package.json: {
+     "exports": {
+       ".": { "types": "./types.d.ts", "default": "./impl.js" }
+     }
+   }
+   ```
+   Same assertions as case 1.
+
+3. **Declaration-only extern (regression guard)**: fixture with
+   only `.d.ts`, no `.js` body. Assert: resolves to the `.d.ts`
+   (extern fallback), `r.success` is true.
+
+4. **`@types/*` separate package (#1060 regression guard)**:
+   `@types/foo` + `foo` in separate `node_modules` dirs. Assert
+   the existing #1060 behaviour still holds — impl wins.
+
+5. **Subpath import (regression guard)**:
+   `import x from "foo/sub"` resolves the same way it did before
+   (subpath probe). No regression.
+
+6. **ESLint smoke**: Tier 1a entry compiles, and `r.imports`
+   does NOT contain `__new_Linter`. (This becomes the end-to-end
+   gate for #1559 + #1560 together.)
+
+### Files to touch
+
+- `src/resolve.ts` — extend trigger condition (5 lines)
+- `tests/issue-1559.test.ts` — new (~150 lines, six cases above)
+- `tests/stress/eslint-tier1.test.ts` — add assertion to Tier 1a
+  that `r.imports` does NOT contain `__new_Linter`. Optionally
+  unskip Tier 1e if #1560 has also landed.
+
+### Risk assessment
+
+- **Low blast radius**: the change is gated on `resolved.endsWith(".d.ts")`,
+  so it only affects paths that resolved to a declaration file. Real
+  `.ts`/`.js` source resolutions are untouched.
+- **Existing tests cover the regression-sensitive paths**: #1060
+  regression test (lodash bundled prettier), Hono Tier 1-6 (real
+  CJS package compilation), lodash Tier 1+2 (function re-exports).
+  Run these before merging.
+- **`module` vs `main` precedence**: keep the current
+  `pkg.module ?? pkg.main` ordering (`module` preferred — already
+  honored by `probeImplementationPath`).
+
+### Estimated effort
+
+- Codegen change: 30 min
+- Test fixtures + assertions: 90 min
+- Local validation against lodash / Hono / ESLint stress tests: 30 min
+- **Total**: ~2.5 hours, single dev, medium feasibility (not hard)
+
+### Feasibility downgrade
+
+This issue's frontmatter currently says `feasibility: hard,
+reasoning_effort: max`. After this spec, **downgrade to
+`feasibility: medium, reasoning_effort: high`** — the actual code
+change is localized and the test plan is well-defined. The
+architect spec was needed for correctness reasoning (decision-point
+identification), not implementation complexity.
+
+### Status transition
+
+Once this spec is approved, flip frontmatter:
+```yaml
+status: needs-spec  →  status: ready
+feasibility: hard   →  feasibility: medium
+reasoning_effort: max →  reasoning_effort: high
+```
