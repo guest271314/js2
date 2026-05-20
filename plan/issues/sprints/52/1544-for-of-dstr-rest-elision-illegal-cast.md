@@ -1,7 +1,7 @@
 ---
 id: 1544
 title: "for-of / for-await-of destructuring of iterator results throws illegal cast"
-status: ready
+status: needs-spec
 created: 2026-05-20
 parent: 820
 priority: high
