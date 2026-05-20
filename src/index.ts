@@ -31,6 +31,7 @@ export type ImportIntent =
   | { type: "dynamic_import" }
   | { type: "proxy_create" }
   | { type: "node_builtin"; moduleName: string }
+  | { type: "node_builtin_fn"; moduleName: string; name: string }
   | { type: "timer_set"; mode: "timeout" | "interval" }
   | { type: "timer_clear"; mode: "timeout" | "interval" };
 
@@ -158,6 +159,11 @@ export interface CompileOptions {
    *  Values must be valid JS expression literals (strings need inner quotes).
    *  Also supports shorthand: `"production"` mode sets process.env.NODE_ENV and typeof guards. */
   define?: Record<string, string>;
+  /** Allow synchronous file-system access via `node:fs` (`readFileSync`, `writeFileSync`)
+   *  as JS host imports in non-WASI targets (#1491). Gated behind an explicit flag
+   *  to prevent accidental capability leakage when compiling third-party code.
+   *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
+  allowFs?: boolean;
 }
 
 import * as path from "path";
