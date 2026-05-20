@@ -91,6 +91,25 @@ const _wasmSealedObjs = new WeakSet<object>();
 const _wasmNonExtensibleObjs = new WeakSet<object>();
 
 /**
+ * User-class instanceof support for subclasses of builtins (#1455).
+ *
+ * When the compiler emits `class Sub extends Map {}`, the constructor calls
+ * `__new_Map(arg)` to produce a real JS Map instance (externref). The instance
+ * does NOT have `Sub.prototype` in its `[[Prototype]]` chain, so the natural
+ * `v instanceof Sub` would return false. We tag each constructed instance via
+ * `__tag_user_class(instance, "Sub", parentTag)` and consult the tag chain
+ * inside the modified `__instanceof` host check.
+ *
+ * - `_userClassTags` — innermost user-class name attached to each externref
+ *   instance (only set for externref-backed user subclasses).
+ * - `_userClassParents` — user-class parent chain. When a user subclass
+ *   extends another user subclass (e.g. `class A extends B extends Map`),
+ *   walking the chain from "A" via parents finds "B" → null.
+ */
+const _userClassTags = new WeakMap<object, string>();
+const _userClassParents = new Map<string, string | null>();
+
+/**
  * DataView subview metadata (#1064).
  *
  * The compiler emits `new DataView(buffer, byteOffset, byteLength)` as the raw
@@ -1852,6 +1871,19 @@ function resolveImport(
           RegExp,
           ArrayBuffer,
           DataView,
+          // (#1455) TypedArray constructors for subclass-builtins host
+          // construction (`class Sub extends Float32Array {}` etc.).
+          Int8Array,
+          Uint8Array,
+          Uint8ClampedArray,
+          Int16Array,
+          Uint16Array,
+          Int32Array,
+          Uint32Array,
+          Float32Array,
+          Float64Array,
+          ...(typeof BigInt64Array !== "undefined" ? { BigInt64Array } : {}),
+          ...(typeof BigUint64Array !== "undefined" ? { BigUint64Array } : {}),
           Error,
           TypeError,
           RangeError,
@@ -1889,11 +1921,42 @@ function resolveImport(
         // not "" (which new String() with no args produces).
         const isWrapperCtor =
           intent.className === "String" || intent.className === "Number" || intent.className === "Boolean";
+        // (#1455) DataView / TypedArray constructors expect a real JS
+        // ArrayBuffer, but our compiler emits `new ArrayBuffer(N)` as a
+        // wasm-vec struct. When the first arg is a wasm-vec carrying byte
+        // data, convert it to a real ArrayBuffer using the exported
+        // `__dv_byte_*` accessors before invoking the host constructor.
+        const isBufferConsumer =
+          intent.className === "DataView" ||
+          intent.className === "Int8Array" ||
+          intent.className === "Uint8Array" ||
+          intent.className === "Uint8ClampedArray" ||
+          intent.className === "Int16Array" ||
+          intent.className === "Uint16Array" ||
+          intent.className === "Int32Array" ||
+          intent.className === "Uint32Array" ||
+          intent.className === "Float32Array" ||
+          intent.className === "Float64Array" ||
+          intent.className === "BigInt64Array" ||
+          intent.className === "BigUint64Array";
         return (...args: any[]) => {
           if (!isWrapperCtor) {
             let len = args.length;
             while (len > 0 && args[len - 1] == null) len--;
             args = args.slice(0, len);
+          }
+          if (isBufferConsumer && args.length > 0 && _isWasmStruct(args[0])) {
+            const exports = callbackState?.getExports();
+            const dvLen = exports?.__dv_byte_len as ((v: any) => number) | undefined;
+            const dvGet = exports?.__dv_byte_get as ((v: any, i: number) => number) | undefined;
+            if (typeof dvLen === "function" && typeof dvGet === "function") {
+              const bufLen = dvLen(args[0]);
+              if (bufLen >= 0) {
+                const bytes = new Uint8Array(bufLen);
+                for (let i = 0; i < bufLen; i++) bytes[i] = dvGet(args[0], i) & 0xff;
+                args[0] = bytes.buffer;
+              }
+            }
           }
           return new Ctor(...args);
         };
@@ -4448,10 +4511,36 @@ assert._isSameValue = isSameValue;
         return (v: any, ctorName: string) => {
           try {
             const ctor = (globalThis as any)[ctorName];
-            if (typeof ctor !== "function") return 0;
-            return v instanceof ctor ? 1 : 0;
+            if (typeof ctor === "function" && v instanceof ctor) return 1;
           } catch {
-            return 0;
+            /* fall through to user-class tag check */
+          }
+          // (#1455) User-class instanceof for subclasses of builtins. The
+          // constructor tags the instance with the innermost class name; walk
+          // the parent chain looking for `ctorName`.
+          if (v != null && (typeof v === "object" || typeof v === "function")) {
+            let tag: string | null | undefined = _userClassTags.get(v as object);
+            const guard = new Set<string>();
+            while (tag != null && !guard.has(tag)) {
+              if (tag === ctorName) return 1;
+              guard.add(tag);
+              tag = _userClassParents.get(tag) ?? null;
+            }
+          }
+          return 0;
+        };
+      // (#1455) Tag an externref-backed user-class instance with the innermost
+      // user-class name and register its user-class parent (or null if the
+      // direct parent is a builtin like Map).
+      if (name === "__tag_user_class")
+        return (instance: any, className: string, parentName: string | null | undefined) => {
+          if (instance == null) return;
+          if (typeof instance !== "object" && typeof instance !== "function") return;
+          _userClassTags.set(instance as object, className);
+          // Register the parent edge (idempotent). Null parent indicates the
+          // direct parent is a builtin, so the chain terminates.
+          if (!_userClassParents.has(className)) {
+            _userClassParents.set(className, parentName == null ? null : parentName);
           }
         };
       // parseInt / parseFloat host imports
