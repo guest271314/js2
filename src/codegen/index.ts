@@ -1012,6 +1012,12 @@ export function generateModule(
     emitClosureCallExport3(ctx);
     emitClosureCallExport4(ctx);
 
+    // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
+    // can discriminate a closure struct return from a vec/struct return
+    // (necessary because __vec_len returns 0 for both empty arrays and
+    // non-vec structs — JS cannot tell them apart without this probe).
+    emitIsClosureExport(ctx);
+
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
 
@@ -2095,6 +2101,75 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 }
 
 /**
+ * Emit __is_closure(externref) -> i32 (#1504). Returns 1 if the value is a
+ * registered Wasm closure struct, 0 otherwise. Used by the JS-side
+ * `wrapExports` to discriminate closures from named structs / vecs so it can
+ * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
+ * (#1504). No-op when the module has no closures.
+ */
+function emitIsClosureExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect base wrapper struct types (deduped). Concrete closure subtypes
+  // share their funcref signature with the base wrapper post-V8 canonicalisation,
+  // so ref.test against the base catches all of them.
+  const baseTypeIdxs: number[] = [];
+  const seenBase = new Set<number>();
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (!info) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    // Walk up to the root struct in the chain.
+    let root = typeIdx;
+    let cur = typeDef;
+    while (cur && cur.kind === "struct" && cur.superTypeIdx >= 0) {
+      const parent = mod.types[cur.superTypeIdx];
+      if (!parent || parent.kind !== "struct") break;
+      root = cur.superTypeIdx;
+      cur = parent;
+    }
+    if (!seenBase.has(root)) {
+      seenBase.add(root);
+      baseTypeIdxs.push(root);
+    }
+  }
+  if (baseTypeIdxs.length === 0) return;
+
+  const isClosureTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_closure_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // body: convert extern→any, then chained ref.test → return 1 on first match.
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 1 } as Instr,
+  ];
+  for (const closureType of baseTypeIdxs) {
+    body.push({ op: "local.get", index: 1 } as Instr);
+    body.push({ op: "ref.test", typeIdx: closureType } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: 0 } as Instr);
+
+  mod.functions.push({
+    name: "__is_closure",
+    typeIdx: isClosureTypeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__is_closure",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * Emit __call_toString and __call_valueOf exports for ToPrimitive dispatch (#866).
  * These allow the JS runtime to call toString/valueOf on WasmGC structs
  * that are opaque to JavaScript (struct fields are funcrefs, not JS functions).
@@ -2323,8 +2398,17 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
-  if (!ctx.funcMap.has("__iterator") && !ctx.funcMap.has("JSON_stringify") && !ctx.funcMap.has("__make_iterable"))
+  // - #1504: wrapExports marshaling of compiled array returns to plain JS,
+  //   which needs __vec_len / __vec_get unconditionally for any module that
+  //   declares vec types.
+  if (
+    !ctx.funcMap.has("__iterator") &&
+    !ctx.funcMap.has("JSON_stringify") &&
+    !ctx.funcMap.has("__make_iterable") &&
+    ctx.vecTypeMap.size === 0
+  ) {
     return;
+  }
   try {
     _emitVecAccessExportsInner(ctx);
   } catch {
@@ -2913,6 +2997,9 @@ export function generateMultiModule(
 
     // Emit __call_fn_1 export for calling one-arg closures from JS (#1090, #1308).
     emitClosureCallExport1(ctx);
+
+    // #1504: emit __is_closure for wrapExports discrimination.
+    emitIsClosureExport(ctx);
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
