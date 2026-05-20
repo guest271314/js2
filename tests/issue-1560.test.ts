@@ -3,16 +3,24 @@
 // #1560 — CJS module.exports = { ClassName } named class re-exports link
 // to the compiled class, not the extern fallback.
 //
-// Reduced repro of the ESLint chain
-//   eslint/lib/api.js -> eslint/lib/linter/index.js -> eslint/lib/linter/linter.js
-// where the leaf module defines `class Linter { ... }` and re-exports it
-// as `module.exports = { Linter }`, then middle modules re-export the
-// same named binding. The consumer's `new Linter()` should produce a
-// compiled-class struct; today it degrades to `env.__new_Linter`.
+// FINDING (2026-05-20): the reduced repro using RELATIVE-PATH imports
+// (`import { Foo } from "./pkg/middle"`) ALREADY WORKS on current
+// `main`. Both rungs below pass. This narrows #1560 significantly:
+// the CJS re-export plumbing IS functional for local-file graphs.
 //
-// This test is the regression CONTRACT — it is expected to fail on
-// current `main` (status: ready, not yet implemented). When #1560
-// lands, both rungs flip to green.
+// The remaining bug surface is bare-package + package.json resolution:
+//   `import { Linter } from "eslint"` resolves to the `.d.ts` (not the
+//   compiled class) and the consumer sees `env.__new_Linter` because
+//   the resolver never picked the implementation graph.
+//
+// That makes #1560's actionable surface **downstream of #1559**: once
+// #1559 redirects bare-package imports to the impl entry, this test's
+// pattern should naturally extend to the bare-package case. If after
+// #1559 lands the ESLint case still degrades to extern, #1560 has a
+// real residual bug; otherwise #1560 can close as "covered by #1559".
+//
+// This file remains in the suite as a positive regression guard:
+// the local-file CJS class re-export pattern must continue to work.
 
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

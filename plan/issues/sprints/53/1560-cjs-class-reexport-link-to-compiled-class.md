@@ -147,3 +147,48 @@ the class survives the dict round-trip in-module but not the
   CJS plumbing already supports function values — extending it to
   class values should be a localized change in the export
   resolution.
+
+## Finding (2026-05-20) — reduced repro PASSES on current main
+
+While building the regression test (`tests/issue-1560.test.ts`), we
+discovered that the **local-file** CJS class re-export pattern
+(`./pkg/leaf` -> `./pkg/middle` -> `entry.ts`) ALREADY WORKS:
+
+- `compileProject` succeeds.
+- `r.imports` contains no `__new_Foo` extern.
+- The binary instantiates and `new Foo().hello()` returns 42 end-to-end.
+
+This narrows #1560's scope significantly. The CJS re-export plumbing
+established by #1277 and #1279 IS functional for local-file graphs;
+class values DO survive the `module.exports = { ClassName }` hop.
+
+The remaining bug surface is **bare-package + package.json resolution
+specific**: the failure observed in #1400 (`__new_Linter` extern
+appearing in `r.imports`) is most likely caused by #1559 (resolver
+returns the `.d.ts` instead of the impl), not by a CJS re-export
+linkage gap.
+
+### Revised dispatch plan
+
+1. Land #1559 first (resolver picks impl entry for bare-package codegen).
+2. Re-test ESLint Tier 1a with the #1559 fix in place — verify
+   `r.imports` no longer contains `__new_Linter`.
+3. If `__new_Linter` is gone after #1559, **close #1560 as "covered
+   by #1559"**.
+4. If `__new_Linter` is still present after #1559, the residual bug
+   IS in the bare-package CJS class re-export hop, and #1560 stays
+   open with a refined test that exercises a synthetic
+   `node_modules/foo/` fixture (not relative paths).
+
+### Status transition recommendation
+
+Flip frontmatter to:
+```yaml
+status: blocked   # blocked by #1559
+depends_on: [1559]
+```
+
+Until #1559 lands, this issue cannot be confirmed live. The current
+regression test in `tests/issue-1560.test.ts` remains as a positive
+guard for local-file CJS class re-exports — that pattern must
+continue to work.
