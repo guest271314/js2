@@ -48,6 +48,292 @@ function _getNodeRequire(): ((id: string) => any) | undefined {
 const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
 
 /**
+ * (#1516) Per-generator-instance state: `{buf, index, pendingThrow}`.
+ *
+ * Storing state in a WeakMap (keyed by the generator instance) instead of as
+ * own closure-captured properties on the instance lets the prototype methods
+ * `next`/`return`/`throw` be *shared* on `%GeneratorPrototype%` (spec
+ * §27.5.1) and perform the GeneratorValidate this-value check (§27.5.3.2)
+ * — `if (!_GeneratorState.has(this)) throw TypeError(...)`. The old
+ * implementation attached own methods to every instance which made
+ * `Generator.prototype.next.call(non_gen)` succeed (wrong).
+ *
+ * State shape:
+ *   buf: any[]            — eager-yield buffer (filled by the generator body)
+ *   index: number         — next read position in `buf`
+ *   pendingThrow: any     — exception captured by the generator body, to be
+ *                            re-thrown on the first `next()` after the
+ *                            buffer is drained (#928)
+ *   asyncWrap?: boolean   — `true` for async-generator state (so the same
+ *                            map can back both `%GeneratorPrototype%` and
+ *                            `%AsyncGeneratorPrototype%` methods)
+ */
+const _GeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
+const _AsyncGeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
+
+let _GeneratorPrototypeCache: any = null;
+let _GeneratorFunctionPrototypeCache: any = null;
+let _AsyncGeneratorPrototypeCache: any = null;
+let _AsyncGeneratorFunctionPrototypeCache: any = null;
+
+/**
+ * Install a built-in method on a prototype with spec-mandated descriptor
+ * flags. ES2024 §17 specifies that built-in function objects have:
+ *   - `length`: { value: N, writable: false, enumerable: false, configurable: true }
+ *   - `name`:   { value: "<name>", writable: false, enumerable: false, configurable: true }
+ * and that built-in methods on a prototype are installed with
+ *   { writable: true, enumerable: false, configurable: true }.
+ */
+function _installBuiltinMethod(
+  proto: object,
+  name: string,
+  length: number,
+  impl: (this: any, ...args: any[]) => any,
+): void {
+  // Re-assign `name`/`length` to match spec descriptors. We name the
+  // function via `Object.defineProperty` so it doesn't appear as an
+  // anonymous arrow in stack traces.
+  Object.defineProperty(impl, "length", {
+    value: length,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(impl, "name", {
+    value: name,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(proto, name, {
+    value: impl,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/** Build `%GeneratorPrototype%` (spec §27.5.1). Idempotent. */
+function _getGeneratorPrototype(): any {
+  if (_GeneratorPrototypeCache) return _GeneratorPrototypeCache;
+  // GeneratorPrototype inherits from IteratorPrototype so .map/.filter/etc.
+  // (#1367) resolve via the prototype chain.
+  const iterProto = (
+    typeof (globalThis as any).Iterator === "function" ? ((globalThis as any).Iterator as any).prototype : null
+  ) as any;
+  const proto = iterProto ? Object.create(iterProto) : Object.create(Object.prototype);
+  _GeneratorPrototypeCache = proto;
+
+  _installBuiltinMethod(proto, "next", 1, function (this: any, _value?: any) {
+    const state = _GeneratorState.get(this);
+    if (!state) {
+      throw new TypeError("Generator.prototype.next called on incompatible receiver");
+    }
+    if (state.index < state.buf.length) {
+      return { value: state.buf[state.index++], done: false };
+    }
+    if (state.pendingThrow !== null && state.pendingThrow !== undefined) {
+      const e = state.pendingThrow;
+      state.pendingThrow = null;
+      throw e;
+    }
+    return { value: undefined, done: true };
+  });
+
+  _installBuiltinMethod(proto, "return", 1, function (this: any, value?: any) {
+    const state = _GeneratorState.get(this);
+    if (!state) {
+      throw new TypeError("Generator.prototype.return called on incompatible receiver");
+    }
+    state.index = state.buf.length;
+    return { value, done: true };
+  });
+
+  _installBuiltinMethod(proto, "throw", 1, function (this: any, e?: any) {
+    const state = _GeneratorState.get(this);
+    if (!state) {
+      throw new TypeError("Generator.prototype.throw called on incompatible receiver");
+    }
+    state.index = state.buf.length;
+    throw e;
+  });
+
+  // `[Symbol.iterator]` returning `this` — generators are their own iterators
+  // (Iterator.prototype already provides this via @@iterator returning this,
+  // but install it explicitly to be robust against missing %IteratorPrototype%
+  // in older runtimes).
+  if (!(Symbol.iterator in proto)) {
+    Object.defineProperty(proto, Symbol.iterator, {
+      value: function (this: any) {
+        return this;
+      },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // Symbol.toStringTag = 'Generator' (spec §27.5.1.5)
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "Generator",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  // The `constructor` slot points at %Generator% (= %GeneratorFunction.prototype%),
+  // installed lazily so circular setup doesn't loop.
+  Object.defineProperty(proto, "constructor", {
+    get() {
+      return _getGeneratorFunctionPrototype();
+    },
+    enumerable: false,
+    configurable: true,
+  });
+
+  return proto;
+}
+
+/** Build `%GeneratorFunction.prototype%` (= `%Generator%`, spec §27.3.3). */
+function _getGeneratorFunctionPrototype(): any {
+  if (_GeneratorFunctionPrototypeCache) return _GeneratorFunctionPrototypeCache;
+  // %Generator% inherits from %Function.prototype% so `typeof g.constructor === 'function'`.
+  const proto = Object.create(Function.prototype);
+  _GeneratorFunctionPrototypeCache = proto;
+
+  // `prototype` slot = `%GeneratorPrototype%` (writable: false, !enum, configurable: false per spec —
+  //   §27.3.3.3 — though several engines ship it as configurable; configurable is what test262
+  //   verifyProperty defaults check against).
+  Object.defineProperty(proto, "prototype", {
+    value: _getGeneratorPrototype(),
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "GeneratorFunction",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  return proto;
+}
+
+/** Build `%AsyncGeneratorPrototype%` (spec §27.6.1). */
+function _getAsyncGeneratorPrototype(): any {
+  if (_AsyncGeneratorPrototypeCache) return _AsyncGeneratorPrototypeCache;
+  const asyncIterProto = (
+    typeof (globalThis as any).AsyncIterator === "function"
+      ? ((globalThis as any).AsyncIterator as any).prototype
+      : null
+  ) as any;
+  const proto = asyncIterProto ? Object.create(asyncIterProto) : Object.create(Object.prototype);
+  _AsyncGeneratorPrototypeCache = proto;
+
+  function mkResult(value: any, done: boolean) {
+    const plain = { value, done };
+    return {
+      value,
+      done,
+      then(res: any, rej: any) {
+        return Promise.resolve(plain).then(res, rej);
+      },
+    };
+  }
+  function mkError(e: any) {
+    return {
+      done: true,
+      value: undefined as any,
+      then(res: any, rej: any) {
+        return Promise.reject(e).then(res, rej);
+      },
+    };
+  }
+
+  _installBuiltinMethod(proto, "next", 1, function (this: any, _value?: any) {
+    const state = _AsyncGeneratorState.get(this);
+    if (!state) {
+      return mkError(new TypeError("AsyncGenerator.prototype.next called on incompatible receiver"));
+    }
+    if (state.index < state.buf.length) return mkResult(state.buf[state.index++], false);
+    if (state.pendingThrow !== null && state.pendingThrow !== undefined) {
+      const e = state.pendingThrow;
+      state.pendingThrow = null;
+      return mkError(e);
+    }
+    return mkResult(undefined, true);
+  });
+
+  _installBuiltinMethod(proto, "return", 1, function (this: any, value?: any) {
+    const state = _AsyncGeneratorState.get(this);
+    if (!state) {
+      return mkError(new TypeError("AsyncGenerator.prototype.return called on incompatible receiver"));
+    }
+    state.index = state.buf.length;
+    return mkResult(value, true);
+  });
+
+  _installBuiltinMethod(proto, "throw", 1, function (this: any, e?: any) {
+    const state = _AsyncGeneratorState.get(this);
+    if (!state) {
+      return mkError(new TypeError("AsyncGenerator.prototype.throw called on incompatible receiver"));
+    }
+    state.index = state.buf.length;
+    return mkError(e);
+  });
+
+  if (!(Symbol.asyncIterator in proto)) {
+    Object.defineProperty(proto, Symbol.asyncIterator, {
+      value: function (this: any) {
+        return this;
+      },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "AsyncGenerator",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(proto, "constructor", {
+    get() {
+      return _getAsyncGeneratorFunctionPrototype();
+    },
+    enumerable: false,
+    configurable: true,
+  });
+
+  return proto;
+}
+
+/** Build `%AsyncGeneratorFunction.prototype%` (= `%AsyncGenerator%`, spec §27.4.3). */
+function _getAsyncGeneratorFunctionPrototype(): any {
+  if (_AsyncGeneratorFunctionPrototypeCache) return _AsyncGeneratorFunctionPrototypeCache;
+  const proto = Object.create(Function.prototype);
+  _AsyncGeneratorFunctionPrototypeCache = proto;
+  Object.defineProperty(proto, "prototype", {
+    value: _getAsyncGeneratorPrototype(),
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "AsyncGeneratorFunction",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
+
+/**
  * (#1334) Per-object set of property keys that were explicitly deleted via
  * the `delete` operator. WasmGC structs have a fixed shape — fields can't
  * be removed at runtime — so a successful `delete obj.x` only sets the
@@ -3284,6 +3570,14 @@ assert._isSameValue = isSameValue;
             return null;
           }
         };
+      // (#1516) `Object.getPrototypeOf(generatorFunc)` must return
+      // `%GeneratorFunction.prototype%` (= `%Generator%`) whose `.prototype` is
+      // `%GeneratorPrototype%`. The compiled-Wasm closure that backs a `function*`
+      // declaration is opaque to the host, so codegen routes the well-typed
+      // call site `Object.getPrototypeOf(g)` (where `g ∈ ctx.generatorFunctions`)
+      // through this dedicated import instead of the generic `__getPrototypeOf`.
+      if (name === "__get_generator_function_prototype") return () => _getGeneratorFunctionPrototype();
+      if (name === "__get_async_generator_function_prototype") return () => _getAsyncGeneratorFunctionPrototype();
       // __create_descriptor(value, flags) → {value, writable, enumerable, configurable}
       // flags: bit 0 = writable, bit 1 = enumerable, bit 2 = configurable
       if (name === "__create_descriptor")
@@ -3954,92 +4248,34 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__create_generator")
         return (buf: any[], pendingThrow: any) => {
-          let index = 0;
-          // (#1367) Generator objects must inherit from Iterator.prototype so
-          // helpers like .drop, .take, .map, .filter, .some, .every, .find,
-          // .reduce, .toArray, .forEach, .flatMap work without extra plumbing
-          // (Iterator.prototype methods are spec-compliant in the host engine
-          // including AlreadyCalled / IteratorClose semantics).
-          const proto = (
-            typeof (globalThis as any).Iterator === "function" ? ((globalThis as any).Iterator as any).prototype : null
-          ) as any;
-          const obj: any = proto ? Object.create(proto) : {};
-          obj.next = () => {
-            if (index < buf.length) {
-              return { value: buf[index++], done: false };
-            }
-            // If the generator body threw before yielding all values,
-            // re-throw on the first next() call after buffer is exhausted.
-            if (pendingThrow !== null && pendingThrow !== undefined) {
-              const e = pendingThrow;
-              pendingThrow = null;
-              throw e;
-            }
-            return { value: undefined, done: true };
-          };
-          obj.return = (value: any) => {
-            index = buf.length;
-            return { value, done: true };
-          };
-          obj.throw = (e: any) => {
-            index = buf.length;
-            throw e;
-          };
-          obj[Symbol.iterator] = function () {
-            return this;
-          };
+          // (#1516) Generator instances now share `%GeneratorPrototype%` (built
+          // by `_getGeneratorPrototype`) so `next`/`return`/`throw` are NOT own
+          // properties — they live on the prototype and read instance state
+          // from `_GeneratorState`. This makes
+          // `Generator.prototype.next.call(non_gen)` throw TypeError per spec
+          // §27.5.3.2 (GeneratorValidate), and installs the spec-mandated
+          // property descriptors ({writable: true, enumerable: false,
+          // configurable: true} for the methods, `Symbol.toStringTag` =
+          // "Generator", etc.).
+          //
+          // %GeneratorPrototype% inherits from %IteratorPrototype% so
+          // .map/.filter/.drop/.take/... (#1367) still resolve through the
+          // chain.
+          const proto = _getGeneratorPrototype();
+          const obj: any = Object.create(proto);
+          _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
         };
       if (name === "__create_async_generator")
         return (buf: any[], pendingThrow: any) => {
-          let index = 0;
-          // Returns a thenable with done/value properties so that:
-          // - g.next().then(cb) works (Promise chaining)
-          // - result = await g.next() with no-op await gives result.done/result.value directly
-          function mkResult(value: any, done: boolean) {
-            const plain = { value, done };
-            return {
-              value,
-              done,
-              then(res: any, rej: any) {
-                return Promise.resolve(plain).then(res, rej);
-              },
-            };
-          }
-          // Returns a thenable that rejects with e, but also has done/value for no-op await:
-          // - g.throw(e).then(res, rej) works (rej called with e)
-          // - result = await g.throw(e) with no-op await gives result.done=true
-          function mkError(e: any) {
-            return {
-              done: true,
-              value: undefined as any,
-              then(res: any, rej: any) {
-                return Promise.reject(e).then(res, rej);
-              },
-            };
-          }
-          return {
-            next() {
-              if (index < buf.length) return mkResult(buf[index++], false);
-              if (pendingThrow !== null && pendingThrow !== undefined) {
-                const e = pendingThrow;
-                pendingThrow = null;
-                return mkError(e);
-              }
-              return mkResult(undefined, true);
-            },
-            return(v: any) {
-              index = buf.length;
-              return mkResult(v, true);
-            },
-            throw(e: any) {
-              index = buf.length;
-              return mkError(e);
-            },
-            [Symbol.asyncIterator]() {
-              return this;
-            },
-          };
+          // (#1516) Async generators share `%AsyncGeneratorPrototype%`. See the
+          // matching comment on `__create_generator`. The instance is just a
+          // plain object whose [[Prototype]] is the singleton — state lives in
+          // `_AsyncGeneratorState`.
+          const proto = _getAsyncGeneratorPrototype();
+          const obj: any = Object.create(proto);
+          _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
+          return obj;
         };
       if (name === "__gen_next")
         return (gen: any) => {

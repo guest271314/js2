@@ -2247,6 +2247,43 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return { kind: "externref" };
       }
 
+      // (#1516) `Object.getPrototypeOf(g)` where `g` is a generator function
+      // declaration must return `%GeneratorFunction.prototype%` (= `%Generator%`)
+      // — the object whose `.prototype` is `%GeneratorPrototype%`. The compiled
+      // closure is opaque to the host, so we resolve the call statically here
+      // by routing to a dedicated runtime import.
+      //
+      // Same shape for `async function*`. Tests rely on this:
+      //   var GeneratorPrototype = Object.getPrototypeOf(g).prototype;
+      //   GeneratorPrototype.next.call(non_gen);  // → TypeError
+      if (ts.isIdentifier(arg0)) {
+        const argName = arg0.text;
+        const isGen = ctx.generatorFunctions.has(argName);
+        // ctx.asyncFunctions excludes async generators by design — codegen
+        // checks the original AST for the async keyword. Re-derive the flag
+        // from the symbol declaration so we route async-generators correctly.
+        let isAsyncGen = false;
+        if (isGen) {
+          const sym = ctx.checker.getSymbolAtLocation(arg0);
+          const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+          if (decl && (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl))) {
+            isAsyncGen = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+          }
+        }
+        if (isGen) {
+          const helperName = isAsyncGen
+            ? "__get_async_generator_function_prototype"
+            : "__get_generator_function_prototype";
+          const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (helperIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: helperIdx });
+            return { kind: "externref" };
+          }
+          // Standalone mode (no host): fall through to legacy null path.
+        }
+      }
+
       const argTsType = ctx.checker.getTypeAtLocation(arg0);
       const className = resolveStructName(ctx, argTsType);
 
