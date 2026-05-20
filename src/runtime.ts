@@ -107,6 +107,16 @@ const _wasmNonExtensibleObjs = new WeakSet<object>();
  */
 const _dvViewMeta = new WeakMap<object, { offset: number; length: number }>();
 
+/**
+ * Tracks ArrayBuffer-shaped wasmGC structs that have been detached via
+ * `$DETACHBUFFER` (test262 harness) or `transfer()` (#1515).
+ *
+ * Per ECMA §25.1.5.1, all DataView and TypedArray operations on a detached
+ * buffer must throw TypeError. We track by struct identity — the wasmGC
+ * i32_byte vec struct that backs an ArrayBuffer.
+ */
+const _detachedBuffers = new WeakSet<object>();
+
 const _SC_WRITABLE = 1;
 const _SC_ENUMERABLE = 2;
 const _SC_CONFIGURABLE = 4;
@@ -3324,6 +3334,21 @@ assert._isSameValue = isSameValue;
             _dvViewMeta.set(buf, { offset: off, length: len });
           }
         };
+      // #1515: mark an ArrayBuffer-shaped wasmGC struct as detached. Invoked
+      // by the `$DETACHBUFFER` test262 harness shim and from `transfer()`.
+      // Subsequent DataView/TypedArray ops on the buffer throw TypeError.
+      if (name === "__detach_buffer")
+        return (buf: any): void => {
+          if (buf != null && typeof buf === "object") {
+            _detachedBuffers.add(buf);
+          }
+        };
+      // #1515: query whether a buffer is detached. Returns 1 if detached, 0 otherwise.
+      if (name === "__is_detached_buffer")
+        return (buf: any): number => {
+          if (buf != null && typeof buf === "object" && _detachedBuffers.has(buf)) return 1;
+          return 0;
+        };
       // Generic method call on externref receiver (#799 WI3)
       if (name === "__extern_method_call")
         return (obj: any, method: string, args: any[]) => {
@@ -3391,6 +3416,16 @@ assert._isSameValue = isSameValue;
                 method,
               );
             if (dvMatch && _isWasmStruct(obj) && exports) {
+              // #1515: spec §25.3.1.* SetViewValue/GetViewValue step 5 — if the
+              // underlying buffer is detached, throw TypeError BEFORE any other
+              // validation. Note: `obj` here is the DataView's backing vec
+              // struct (which is also the buffer struct under our representation).
+              // The detached state can be set by `$DETACHBUFFER` (test262 harness)
+              // via either the WeakSet (host-import path) or a sidecar property
+              // (user-land assignment path).
+              if (_detachedBuffers.has(obj) || _sidecarGet(obj, "__detached__")) {
+                throw new TypeError("Attempted to access detached ArrayBuffer");
+              }
               const dvLen = exports.__dv_byte_len as ((v: any) => number) | undefined;
               const dvGet = exports.__dv_byte_get as ((v: any, i: number) => number) | undefined;
               const dvSet = exports.__dv_byte_set as ((v: any, i: number, b: number) => void) | undefined;
@@ -3411,11 +3446,43 @@ assert._isSameValue = isSameValue;
                   const realDv = new DataView(bytes.buffer, viewOffset, viewLength);
                   const nativeFn = (realDv as any)[method];
                   if (typeof nativeFn === "function") {
-                    const result = nativeFn.apply(realDv, args ?? []);
+                    // #1515: BigInt setters require the value (2nd arg) to be
+                    // a BigInt per spec §25.3.1.16/.17 step 8 — coerce numeric
+                    // values via ToBigInt to match. The native setter would
+                    // otherwise throw with the wrong error shape.
+                    let callArgs = args ?? [];
+                    if (dvMatch[1] === "set" && (dvMatch[2] === "BigInt64" || dvMatch[2] === "BigUint64")) {
+                      const v = callArgs[1];
+                      if (typeof v !== "bigint" && v !== undefined) {
+                        // ToBigInt: Number → BigInt only for safe integers, else throws.
+                        if (typeof v === "number") {
+                          if (!Number.isInteger(v) || !Number.isFinite(v)) {
+                            throw new RangeError("The number " + v + " cannot be converted to a BigInt");
+                          }
+                          callArgs = callArgs.slice();
+                          callArgs[1] = BigInt(v);
+                        } else if (typeof v === "boolean") {
+                          callArgs = callArgs.slice();
+                          callArgs[1] = v ? 1n : 0n;
+                        } else if (typeof v === "string") {
+                          callArgs = callArgs.slice();
+                          callArgs[1] = BigInt(v); // throws SyntaxError if invalid
+                        } else if (typeof v === "object" && v !== null) {
+                          // Object → ToPrimitive(number) → ToBigInt. Let native handle this.
+                          // Leave as-is; native setBigInt64 will run ToBigInt itself.
+                        } else {
+                          // null/undefined/symbol → TypeError per spec.
+                          throw new TypeError("Cannot convert " + (v === null ? "null" : typeof v) + " to a BigInt");
+                        }
+                      }
+                    }
+                    const result = nativeFn.apply(realDv, callArgs);
                     if (dvMatch[1] === "set" && typeof dvSet === "function") {
                       const endByte = viewOffset + viewLength;
                       for (let i = viewOffset; i < endByte; i++) dvSet(obj, i, bytes[i]!);
                     }
+                    // #1515: setters return undefined per spec.
+                    if (dvMatch[1] === "set") return undefined;
                     return result;
                   }
                 }
