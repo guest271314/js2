@@ -590,6 +590,7 @@ export interface CodegenContext {
   wasiProcExitIdx: number;
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
+  wasiPollOneoffIdx?: number;
   wasiBumpPtrGlobalIdx: number;
   /** Set of node:fs functions used in WASI mode */
   wasiNodeFsFuncs: Set<string>;

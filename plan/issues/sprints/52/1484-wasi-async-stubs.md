@@ -2,7 +2,7 @@
 id: 1484
 sprint: 52
 title: "wasi: provide standalone setTimeout/setInterval via poll_oneoff (or fail loud)"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: medium
