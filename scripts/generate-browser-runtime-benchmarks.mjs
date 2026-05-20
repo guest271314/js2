@@ -115,6 +115,50 @@ function runPlaywrightCommand(args, options = {}) {
   });
 }
 
+/** Fetch the per-benchmark progress trace from the live Playwright page. The
+ *  page-side helper is installed by `public/benchmarks/runtime-benchmark.js`
+ *  (see #1392). Returns `null` if the helper isn't available or the eval
+ *  itself times out — we never want diagnostics to mask the real error. */
+function fetchProgressDiagnostics() {
+  try {
+    const raw = runPlaywrightCommand(
+      [
+        "eval",
+        "(window.__ts2wasmPollBrowserRuntimeBenchmarks ? window.__ts2wasmPollBrowserRuntimeBenchmarks() : null)",
+      ],
+      // Short timeout: if even this read hangs, the browser is wedged
+      // and we'd rather propagate the original timeout error than block
+      // the operator further. The page-side helper is a trivial
+      // `JSON.stringify` so it should complete in milliseconds.
+      { timeoutMs: 5_000 },
+    );
+    return extractJson(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Identify the most likely "stuck" benchmark from the progress trace: the
+ *  most recent `start` event without a matching `done`/`error`. Returns a
+ *  short label suitable for inclusion in an error message. */
+function summarizeStuck(progress) {
+  if (!Array.isArray(progress) || progress.length === 0) {
+    return "no progress events recorded — benchmarks may not have started";
+  }
+  const open = new Map();
+  for (const event of progress) {
+    if (!event || typeof event.name !== "string") continue;
+    if (event.type === "start") open.set(event.name, event);
+    else if (event.type === "done" || event.type === "error") open.delete(event.name);
+  }
+  if (open.size === 0) {
+    const last = progress[progress.length - 1];
+    return `last event: ${last.type} ${last.name ?? ""}`;
+  }
+  const stuckNames = [...open.keys()].join(", ");
+  return `stuck on: ${stuckNames}`;
+}
+
 /** Run a Playwright eval with a bounded timeout, logging a heartbeat at
  *  `HEARTBEAT_MS` intervals so a stuck stage is visible without polling.
  *  Returns the raw stdout on success; throws on timeout or non-zero exit. */
@@ -139,13 +183,19 @@ function runPlaywrightEvalWithHeartbeat(label, expr, timeoutMs) {
       (error && (error.code === "ETIMEDOUT" || error.signal === "SIGTERM")) || Date.now() - start >= timeoutMs;
     if (isTimeout) {
       const elapsedSec = Math.round((Date.now() - start) / 1000);
+      // The Playwright child has been killed but the browser session is
+      // still alive on the wrapper side, so a follow-up `eval` can pull
+      // the per-benchmark progress trace and identify the stuck entry.
+      const diagnostics = fetchProgressDiagnostics();
+      const stuckSummary = diagnostics ? summarizeStuck(diagnostics.progress) : "diagnostics unavailable";
       const wrapped = new Error(
         `Browser-runtime stage timed out after ${elapsedSec}s (limit ${Math.round(timeoutMs / 1000)}s) ` +
-          `running ${label}. Set BROWSER_EVAL_TIMEOUT_MS to extend, or inspect the browser ` +
-          `console at ${`http://${HOST}:${PORT}${PAGE_PATH}`} to identify the stuck benchmark.`,
+          `running ${label}. ${stuckSummary}. Set BROWSER_EVAL_TIMEOUT_MS to extend, or inspect the ` +
+          `browser console at ${`http://${HOST}:${PORT}${PAGE_PATH}`} to identify the stuck benchmark.`,
       );
       wrapped.cause = error;
       wrapped.timeout = true;
+      wrapped.diagnostics = diagnostics;
       throw wrapped;
     }
     throw error;
@@ -243,8 +293,17 @@ main().catch((error) => {
   // can react to "stuck-benchmark" rollups separately.
   if (error && error.timeout) {
     console.error(`[browser-runtime] TIMEOUT: ${error.message}`);
+    if (error.diagnostics) {
+      console.error("[browser-runtime] page diagnostics at timeout:");
+      console.error(JSON.stringify(error.diagnostics, null, 2));
+    }
   } else {
     console.error(error);
   }
+  // Acceptance criterion #5: a timeout must never leave a partially written
+  // `browser-runtime-benchmarks.json` behind. `writeJson(BROWSER_RESULTS_PATH, ...)`
+  // is only called inside `main()` AFTER `extractJson(rawOutput)` succeeds,
+  // so a timeout (which throws before that line) leaves the existing
+  // on-disk artifact untouched. Nothing to clean up here.
   process.exitCode = 1;
 });
