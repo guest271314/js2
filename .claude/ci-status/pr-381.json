@@ -5,7 +5,7 @@
   "head_branch": "issue-1517-array-fromasync",
   "head_sha": "a064a4073a93329c32373458b68c761ba8fafa88",
   "run_url": "https://github.com/loopdive/js2wasm/pull/381",
-  "timestamp": "2026-05-20T13:47:06Z",
+  "timestamp": "2026-05-20T13:47:11Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
