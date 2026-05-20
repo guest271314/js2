@@ -89,9 +89,75 @@ should happen in narrower children.
 - #826: illegal-cast umbrella follow-up
 - #929: `Object.defineProperty called on non-object`
 - #983: WasmGC objects leak to JS host as opaque values
+- **#1542** (new, ~134 fails): Class method destructured-pattern param default not applied
+- **#1543** (new, ~74 fails): Async-generator method with destructured default params throws illegal cast
+- **#1544** (new, ~45 fails): for-of / for-await-of destructuring of iterator results throws illegal cast
+
+## 2026-05-20 Architect re-analysis
+
+Latest baseline (`benchmarks/results/test262-current.jsonl`, run 2026-05-20):
+filtering official tests only, the matching FAIL count is **3,009**, not 6,993
+as the issue header states. The original 6,993 figure was from
+`20260407-111308` and included `built-ins/Temporal/*` (now correctly scoped as
+`proposal`, not `scope_official`). Temporal/* contributes ≈700+ fails that
+look identical (`Cannot read properties of null (reading 'since' | 'until' |
+'subtract' | 'round' | 'equals' | 'with' | 'total')`) — these are
+**feature-incompleteness**, not codegen bugs; tracked separately under the
+Temporal proposal scope. They should NOT be addressed in this umbrella.
+
+Of the 3,009 official fails, the actionable concentrations:
+
+| Cluster | Count | Sub-issue |
+|---------|-------|-----------|
+| Class method dstr default param not applied | ~134 | **#1542** |
+| Async-gen-meth dstr default → illegal cast | ~74 | **#1543** |
+| for-of / for-await-of dstr → illegal cast | ~45 | **#1544** |
+| RegExp Symbol.replace/match/search/matchAll null deref | ~90 | (next sub-issue — see below) |
+| Object accessor-name computed (hex-escape etc) null deref | ~22 | (next sub-issue) |
+| Function.prototype.bind / Symbol.hasInstance null deref | ~8 | (long-tail) |
+| eval-code/direct arguments interaction | ~20 | known umbrella, narrow |
+| Generic `Cannot access property on null or undefined` | ~80 | long-tail; needs per-site analysis |
+
+**Total addressable via the three new sub-issues: ~253 fails** (~8.4% of the
+official umbrella).
+
+### Additional sub-clusters not yet ticketed
+
+Two further high-value clusters are documented here for follow-up sub-issues:
+
+#### RegExp Symbol.replace / Symbol.match / Symbol.search null deref (~90)
+
+Tests under `built-ins/RegExp/prototype/Symbol.replace/`,
+`Symbol.match/`, `Symbol.search/`, `Symbol.matchAll/`, plus
+`RegExpStringIteratorPrototype/next/` produce `L41:3 dereferencing a null
+pointer` and `L55:3 dereferencing a null pointer` deep inside the
+`Symbol.replace`/`Symbol.match` implementation.
+
+Likely root cause: the RegExp builtins (in `src/codegen/builtins/regexp.ts` or
+the dual regex backend `#682`) return `null` for "no match" but downstream
+code that consumes the result (substitution helper, iterator) does not
+re-check for null before reading `.index` or `.length` fields. Audit the
+match-result consumption paths in the JS-host regex backend.
+
+#### Object accessor-name computed-property string-escape (~22)
+
+Tests under `language/expressions/object/accessor-name-*` exercise
+computed accessor names that use string escapes (`'hex\x45scape'`, numeric
+literals coerced to strings, etc). The `L55:3 dereferencing a null pointer`
+fires inside the accessor lookup path, suggesting the object-literal
+emission writes the accessor under one key while the lookup resolves under
+the unescaped form. Audit:
+- `src/codegen/literals.ts` accessor-property emission (search
+  `getAccessor`/`setAccessor`)
+- `src/codegen/property-access.ts` string-key normalisation
+
+Both can be filed as additional sub-issues when bandwidth allows; specs are
+mechanical follow-ups.
 
 ## Acceptance criteria
 
-- reduce the combined umbrella materially from `6,993`
+- reduce the combined umbrella materially from current `3,009` official fails
 - keep the umbrella analytical: concrete fixes should land in narrower child issues
 - no regressions in pass count
+- close (or downgrade priority of) the umbrella once #1542, #1543, #1544 land
+  and the residual is < 500 fails
