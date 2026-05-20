@@ -1,8 +1,9 @@
 ---
 id: 1556
 title: "architect-spec: struct-field type mismatch in binding-pattern param destructuring — root cause of #1543/#1544 illegal-cast cluster"
-status: needs-spec
+status: spec-done
 created: 2026-05-20
+spec_done: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -108,6 +109,94 @@ emit `ref.test (ref extern)` before the `struct.get`.
    - Type-widening strategy
    - Which existing tests serve as regression gates
    - Whether Path C guard is needed as a complement
+
+## Architect decision (2026-05-20)
+
+**Chosen approach: Path B (narrowed) + Path D (defensive coercion).**
+Full implementation plan written into **#1543** and **#1544** (both
+closed by one shared patch). Summary:
+
+### Path B is now safe (audit of the 150-regression claim)
+
+The `literals.ts:447` exclusion was added in `67c59de60` (fix #929,
+2026-04-11). At that time `destructureParamObject` had only a single
+code path: `ref.cast` the externref to the expected struct, with no
+guard — passing in `__new_plain_object()` would null-deref. That is the
+"150+ dstr regression" scenario the exclusion was guarding.
+
+**That guard is now obsolete**: commit `9d82b4e2d` (PR #177 / #852)
+rewrote `destructureParamObject` lines 489–521 to (a) `ref.test` first,
+(b) take the struct fast path when true, (c) fall back to
+`destructureParamObjectExternref` (which uses `__extern_get`) when
+false. The 150-regression scenario is now caught by step (c) — the
+exclusion is dead code masking a real bug.
+
+### Path D (defensive coercion) as belt-and-suspenders
+
+The new Path D — introduced during this architect-spec — addresses a
+subtle gap I found while reading the destructure code:
+`emitDefaultValueCheck` accepts an optional `targetType` parameter that
+controls coercion of the struct-field type to the binding local's
+declared type, **but the callsite at `destructuring-params.ts:620` does
+not pass it**. As a result, when the struct-field path fires for a typed
+struct whose field type doesn't match its local (e.g. field `i32`, local
+`externref`), the value path emits an i32 → local.set externref
+mismatch. Pass `targetType = getLocalType(localIdx)` to fix.
+
+### Why not Path A
+
+Path A (widening all binding-pattern struct field types to externref via
+a sibling-struct registration) is the spec-cleanest fix but requires:
+
+- Recognising binding-pattern context inside `ensureStructForType`.
+- Registering a parallel widened struct (the original struct may still
+  be in use elsewhere).
+- Threading the widened type through `function-body.ts` param-type
+  resolution.
+
+Estimated ~150–200 lines. Held in reserve as the fallback if the
+regression gate (full `dstr/*` family) flags regressions after Path B+D.
+
+### Why not Path C alone
+
+Path C (ref.test guards at all destructure use sites) only converts
+runtime wasm traps into JS TypeErrors. It does NOT fix the **compile-
+time Wasm validation error** documented as #1556 Shape 1 — that occurs
+before any ref.test can run. Path C is therefore insufficient as a
+standalone fix.
+
+However, **Path C as a complement to B+D** is valuable for #1544's
+for-of iteration-source `ref.cast` site (`loops.ts:2064–2072`). The
+audit details are in **#1544's plan**.
+
+### Regression gate
+
+Before merge, run on the test262 vitest runner:
+
+```bash
+pnpm run test:262 -- --filter "language/destructuring/"
+pnpm run test:262 -- --filter "language/statements/for-of/dstr/"
+pnpm run test:262 -- --filter "language/statements/for-await-of/"
+pnpm run test:262 -- --filter "language/statements/class/dstr/"
+pnpm run test:262 -- --filter "language/expressions/class/dstr/"
+pnpm run test:262 -- --filter "language/expressions/function/dstr/"
+pnpm run test:262 -- --filter "language/expressions/arrow-function/dstr/"
+```
+
+Net pass must be ≥ 0 on every dir. Any dir-level regression triggers
+fallback to Path A.
+
+### Complexity
+
+- Primary fix (B+D shared between #1543 and #1544): **~15 lines**.
+- #1544-specific ref.test guard if Audit-1 trap persists: **~10 lines**.
+- Total: **~15–25 lines**. Path A fallback: ~150–200 lines.
+
+### #1543 vs #1544
+
+Both close on the **same** patch. #1543 is the async-gen-method shape;
+#1544 is the for-of rest/elision shape. Different test262 buckets,
+identical compiler root cause. One PR, two issue closures.
 
 ## Notes
 
