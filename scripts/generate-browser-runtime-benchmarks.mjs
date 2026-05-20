@@ -26,6 +26,21 @@ const HOST = "127.0.0.1";
 const PORT = 4174;
 const PAGE_PATH = "/benchmarks/runtime-benchmark.html";
 const RESULT_ID = "result";
+// #1392 — bounded timeout for the Playwright `eval` step so the whole
+// `pnpm run refresh:benchmarks` pipeline can no longer hang indefinitely
+// when a browser-side benchmark promise fails to settle. Override via the
+// `BROWSER_EVAL_TIMEOUT_MS` env var when iterating on slow benchmarks.
+const DEFAULT_EVAL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const BROWSER_EVAL_TIMEOUT_MS = (() => {
+  const raw = process.env.BROWSER_EVAL_TIMEOUT_MS;
+  if (!raw) return DEFAULT_EVAL_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_EVAL_TIMEOUT_MS;
+  return parsed;
+})();
+// Heartbeat interval so the operator can tell the script is alive while
+// waiting on the browser-runtime stage.
+const HEARTBEAT_MS = 30_000;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -85,14 +100,58 @@ function playwrightWrapperPath() {
   return join(codexHome, "skills", "playwright", "scripts", "playwright_cli.sh");
 }
 
-function runPlaywrightCommand(args) {
+function runPlaywrightCommand(args, options = {}) {
   const pwcli = playwrightWrapperPath();
   return execFileSync(pwcli, args, {
     cwd: ROOT,
     env: { ...process.env, CODEX_HOME: process.env.CODEX_HOME || resolve(os.homedir(), ".codex") },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    // `execFileSync` kills the child with SIGTERM when the timeout fires
+    // and then throws an Error with `.signal === "SIGTERM"`. Callers that
+    // need to differentiate "hang" from "command failed" inspect that
+    // property on the rethrown error.
+    timeout: options.timeoutMs,
   });
+}
+
+/** Run a Playwright eval with a bounded timeout, logging a heartbeat at
+ *  `HEARTBEAT_MS` intervals so a stuck stage is visible without polling.
+ *  Returns the raw stdout on success; throws on timeout or non-zero exit. */
+function runPlaywrightEvalWithHeartbeat(label, expr, timeoutMs) {
+  const start = Date.now();
+  let heartbeat;
+  if (HEARTBEAT_MS > 0) {
+    heartbeat = setInterval(() => {
+      const elapsedSec = Math.round((Date.now() - start) / 1000);
+      const limitSec = Math.round(timeoutMs / 1000);
+      console.log(`[browser-runtime] still waiting on ${label}: ${elapsedSec}s / ${limitSec}s`);
+    }, HEARTBEAT_MS);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
+  try {
+    return runPlaywrightCommand(["eval", expr], { timeoutMs });
+  } catch (error) {
+    // execFileSync surfaces timeouts as ETIMEDOUT (Node ≥18) or via the
+    // `signal` field. Surface a clearer error so the operator sees that
+    // it was a timeout, not a Playwright-internal error.
+    const isTimeout =
+      (error && (error.code === "ETIMEDOUT" || error.signal === "SIGTERM")) || Date.now() - start >= timeoutMs;
+    if (isTimeout) {
+      const elapsedSec = Math.round((Date.now() - start) / 1000);
+      const wrapped = new Error(
+        `Browser-runtime stage timed out after ${elapsedSec}s (limit ${Math.round(timeoutMs / 1000)}s) ` +
+          `running ${label}. Set BROWSER_EVAL_TIMEOUT_MS to extend, or inspect the browser ` +
+          `console at ${`http://${HOST}:${PORT}${PAGE_PATH}`} to identify the stuck benchmark.`,
+      );
+      wrapped.cause = error;
+      wrapped.timeout = true;
+      throw wrapped;
+    }
+    throw error;
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
 }
 
 function extractJson(text) {
@@ -145,13 +204,21 @@ async function main() {
   try {
     const pageUrl = `http://${HOST}:${PORT}${PAGE_PATH}`;
     console.log(`Opening ${pageUrl} in Playwright...`);
-    runPlaywrightCommand(["open", pageUrl]);
+    // The `open` step itself is bounded so a stuck browser launch doesn't
+    // wedge the pipeline either. Use a shorter limit since it's a fixed-cost
+    // navigation, not a benchmark loop.
+    runPlaywrightCommand(["open", pageUrl], { timeoutMs: 60_000 });
 
-    console.log("Running browser runtime benchmarks...");
-    const rawOutput = runPlaywrightCommand([
-      "eval",
+    console.log(`Running browser runtime benchmarks (timeout ${Math.round(BROWSER_EVAL_TIMEOUT_MS / 1000)}s)...`);
+    const rawOutput = runPlaywrightEvalWithHeartbeat(
+      "__ts2wasmRunBrowserRuntimeBenchmarks",
       `window.__ts2wasmRunBrowserRuntimeBenchmarks().then((rows) => { document.getElementById("${RESULT_ID}").textContent = JSON.stringify(rows); return document.getElementById("${RESULT_ID}").textContent; })`,
-    ]);
+      BROWSER_EVAL_TIMEOUT_MS,
+    );
+    // Parse BEFORE writing anything so a malformed result doesn't truncate
+    // the committed JSON. If `extractJson` throws, the catch block in
+    // `main().catch(...)` will surface it and the on-disk artifacts stay
+    // unchanged (acceptance criterion #5).
     const browserRows = extractJson(rawOutput);
     writeJson(BROWSER_RESULTS_PATH, browserRows);
     copyFileTo(BROWSER_RESULTS_PATH, BROWSER_PUBLIC_PATH);
@@ -165,11 +232,19 @@ async function main() {
     console.log(`Wrote ${BROWSER_RESULTS_PATH}`);
     console.log(`Updated ${PLAYGROUND_RESULTS_PATH}`);
   } finally {
+    // `server.close()` waits for in-flight requests to finish; combined
+    // with the bounded eval timeout this is now guaranteed to exit.
     await new Promise((resolve) => server.close(resolve));
   }
 }
 
 main().catch((error) => {
-  console.error(error);
+  // Distinguish timeout from other failures so log scrapers / CI badges
+  // can react to "stuck-benchmark" rollups separately.
+  if (error && error.timeout) {
+    console.error(`[browser-runtime] TIMEOUT: ${error.message}`);
+  } else {
+    console.error(error);
+  }
   process.exitCode = 1;
 });
