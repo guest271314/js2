@@ -4863,20 +4863,37 @@ function wrapWithContainment(
  *
  * Usage:
  *   const wasi = buildWasiPolyfill();
- *   const { instance } = await WebAssembly.instantiate(binary, { wasi_snapshot_preview1: wasi });
+ *   const { instance } = await WebAssembly.instantiate(binary, {
+ *     wasi_snapshot_preview1: wasi,
+ *     env: wasi.envImports,
+ *   });
  *   wasi.setMemory(instance.exports.memory as WebAssembly.Memory);
  *   (instance.exports._start as Function)();
+ *
+ * #1482: The polyfill now exposes `envImports.__wasi_env_get_str` for the
+ * `process.env.X` fast path under `--target wasi`, plus `environ_sizes_get`
+ * and `environ_get` shims (memory-writing) for true WASI hosts. The defaults
+ * read from Node's `process.env`; pass `{ env: {...} }` to override.
  */
-export function buildWasiPolyfill(): {
+export function buildWasiPolyfill(options?: { env?: Record<string, string | undefined> }): {
   fd_write: (fd: number, iovs: number, iovs_len: number, nwritten: number) => number;
   proc_exit: (code: number) => void;
+  environ_sizes_get: (countPtr: number, bufSizePtr: number) => number;
+  environ_get: (envPtrsPtr: number, envBufPtr: number) => number;
   setMemory: (mem: WebAssembly.Memory) => void;
+  envImports: Record<string, Function>;
 } {
   let memory: WebAssembly.Memory | undefined;
   // Partial line buffer per fd for data not ending in newline
   const lineBuffers: Record<number, string> = {};
 
-  return {
+  // #1482: source of environment data. Caller-supplied dict wins; otherwise
+  // default to Node's `process.env` (browser → empty dict).
+  const envSource: Record<string, string | undefined> =
+    options?.env ??
+    (typeof process !== "undefined" && process.env ? (process.env as Record<string, string | undefined>) : {});
+
+  const polyfill = {
     setMemory(mem: WebAssembly.Memory) {
       memory = mem;
     },
@@ -4917,7 +4934,68 @@ export function buildWasiPolyfill(): {
       }
       throw new Error(`WASI proc_exit(${code})`);
     },
+
+    // #1482: WASI environ_sizes_get — report `[count, total_buf_bytes]`. The
+    // buffer layout we report (when environ_get fires) is `KEY=VALUE\0`
+    // repeated, UTF-8 encoded. We compute it from `envSource` on each call;
+    // the cost is negligible for typical env sizes and avoids stale results
+    // when callers mutate the source between invocations.
+    environ_sizes_get(countPtr: number, bufSizePtr: number): number {
+      if (!memory) return -1;
+      const entries = Object.entries(envSource).filter(([, v]) => v !== undefined) as [string, string][];
+      const enc = new TextEncoder();
+      let bufBytes = 0;
+      for (const [k, v] of entries) {
+        bufBytes += enc.encode(`${k}=${v}`).length + 1; // +1 for NUL terminator
+      }
+      const view = new DataView(memory.buffer);
+      view.setUint32(countPtr, entries.length, true);
+      view.setUint32(bufSizePtr, bufBytes, true);
+      return 0;
+    },
+
+    // #1482: WASI environ_get — write the env pointer table at `envPtrsPtr`
+    // and the `KEY=VALUE\0...` buffer at `envBufPtr`. Iteration order MUST
+    // match what environ_sizes_get reported, otherwise the guest's allocator
+    // will mis-size the buffer.
+    environ_get(envPtrsPtr: number, envBufPtr: number): number {
+      if (!memory) return -1;
+      const entries = Object.entries(envSource).filter(([, v]) => v !== undefined) as [string, string][];
+      const view = new DataView(memory.buffer);
+      const mem = new Uint8Array(memory.buffer);
+      const enc = new TextEncoder();
+      let cursor = envBufPtr;
+      for (let i = 0; i < entries.length; i++) {
+        const [k, v] = entries[i]!;
+        view.setUint32(envPtrsPtr + i * 4, cursor, true);
+        const bytes = enc.encode(`${k}=${v}`);
+        mem.set(bytes, cursor);
+        cursor += bytes.length;
+        mem[cursor++] = 0; // NUL terminator
+      }
+      return 0;
+    },
+
+    /**
+     * #1482: env-namespace host imports for compiled modules that use
+     * `process.env.X` under `--target wasi`. Wire as `{ env: wasi.envImports }`
+     * alongside `wasi_snapshot_preview1: wasi` when instantiating.
+     *
+     * `__wasi_env_get_str(key)` is the JS-polyfill fast path — it returns
+     * the value (or `undefined`) directly as a JS string, sidestepping the
+     * memory marshalling of `environ_get`. The Wasm side type signature is
+     * `(externref) -> externref`.
+     */
+    envImports: {
+      __wasi_env_get_str(key: unknown): string | undefined {
+        if (typeof key !== "string") return undefined;
+        const v = envSource[key];
+        return v === undefined ? undefined : v;
+      },
+    } as Record<string, Function>,
   };
+
+  return polyfill;
 }
 
 /** Build the WebAssembly import object from a closed manifest */

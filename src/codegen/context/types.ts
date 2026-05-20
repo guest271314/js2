@@ -591,6 +591,12 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiBumpPtrGlobalIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
+  wasiEnvironSizesGetIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_get import index (-1 = not registered) */
+  wasiEnvironGetIdx: number;
+  /** #1482: env::__wasi_env_get_str late import index for JS-polyfill fast path (-1 = not registered) */
+  wasiEnvGetStrIdx: number;
   /** Set of node:fs functions used in WASI mode */
   wasiNodeFsFuncs: Set<string>;
   /** Map from let/const module global variable name → TDZ flag global index */

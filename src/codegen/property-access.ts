@@ -906,6 +906,31 @@ export function compilePropertyAccess(
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
 
+  // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
+  // generic `__extern_get` host-import path: the standalone WASI module has
+  // no `process` global, and even with a JS polyfill the generic extern lookup
+  // path wouldn't know how to route through the WASI environ table. Lower to
+  // a host-import call `__wasi_env_get_str(<key>) -> externref` (registered by
+  // `registerWasiImports` when usage is detected). The JS polyfill supplies a
+  // `(key) => process.env[key]` shim; a future pure-WASI implementation can
+  // replace the host import with an inline call to `environ_get`.
+  if (
+    ctx.wasi &&
+    ctx.wasiEnvGetStrIdx >= 0 &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "process" &&
+    expr.expression.name.text === "env"
+  ) {
+    // Push the property name as an externref string (NativeString → externref).
+    const keyType = compileStringLiteral(ctx, fctx, propName);
+    if (keyType && keyType.kind !== "externref") {
+      coerceType(ctx, fctx, keyType, { kind: "externref" });
+    }
+    fctx.body.push({ op: "call", funcIdx: ctx.wasiEnvGetStrIdx });
+    return { kind: "externref" };
+  }
+
   // (#1104 Phase 2) WASI/standalone-mode native Error property access.
   //
   // When the LHS TypeScript type resolves to a built-in Error subclass
@@ -2637,6 +2662,27 @@ export function compileElementAccess(
   // Handle super[expr] — access parent class property via computed key on `this`
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
     return compileSuperElementAccess(ctx, fctx, expr);
+  }
+
+  // #1482 — `process.env[<expr>]` under `--target wasi`. Mirrors the
+  // PropertyAccess short-circuit but the key is a runtime expression, so we
+  // compile it inline rather than using compileStringLiteral. The key must be
+  // a string; we let the type checker enforce that and emit a coercion to
+  // externref before the host-import call.
+  if (
+    ctx.wasi &&
+    ctx.wasiEnvGetStrIdx >= 0 &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "process" &&
+    expr.expression.name.text === "env"
+  ) {
+    const keyType = compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+    if (keyType && keyType.kind !== "externref") {
+      coerceType(ctx, fctx, keyType, { kind: "externref" });
+    }
+    fctx.body.push({ op: "call", funcIdx: ctx.wasiEnvGetStrIdx });
+    return { kind: "externref" };
   }
 
   // Handle ClassName[key] for static accessors and static properties (#848)
