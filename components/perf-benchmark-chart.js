@@ -661,7 +661,25 @@ class PerfBenchmarkChart extends HTMLElement {
     const maxValue = Math.max(absoluteMax, baselineMax > 0 ? baselineMax * 1.08 : 0, 1);
     const baselinePct = baselineValue > 0 ? (baselineValue / maxValue) * 100 : 0;
 
-    if (baselineValue > 0) {
+    // Ratio-normalised scale: when every row has its own per-row baseline, derive a
+    // single scale factor from the worst-case slowdown ratio (max value / baseline).
+    // All JS baseline markers then land at the same horizontal position (1/maxRatio),
+    // and the slowest row fills 100% of the track width.
+    const hasAllPerRowBaselines = !hasSharedBaseline && baselineValues.length === absoluteRows.length;
+    const maxRatio = hasAllPerRowBaselines
+      ? Math.max(
+          ...absoluteRows.map((row) => {
+            const bv = this._rowBaselineValue(row);
+            return bv > 0 ? (row.value + Math.max(0, Number(row.extraValue ?? 0))) / bv : 1;
+          }),
+          1,
+        )
+      : 1;
+    const useRatioNorm = hasAllPerRowBaselines && maxRatio > 1;
+    const ratioNormBaselinePct = useRatioNorm ? (1 / maxRatio) * 100 : 0;
+    const showGlobalBaseline = baselineValue > 0 || useRatioNorm;
+
+    if (showGlobalBaseline) {
       jsLabelEl.style.display = "";
       jsLineEl.style.display = "";
       jsLabelEl.textContent = baselineLabel;
@@ -673,8 +691,10 @@ class PerfBenchmarkChart extends HTMLElement {
     const duration = 3293;
     const ease = (t) => 1 - (1 - t) * (1 - t);
     const barData = [];
-    const baselineLinePct = baselineValue > 0 ? Math.min(100, Math.max(0, baselinePct)) : 0;
-    const baselineLabelPct = baselineValue > 0 ? Math.min(94, Math.max(6, baselinePct)) : 0;
+    const baselineLinePct =
+      baselineValue > 0 ? Math.min(100, Math.max(0, baselinePct)) : Math.min(100, Math.max(0, ratioNormBaselinePct));
+    const baselineLabelPct =
+      baselineValue > 0 ? Math.min(94, Math.max(6, baselinePct)) : Math.min(94, Math.max(6, ratioNormBaselinePct));
     const forceRowBaseline = absoluteRows.some((row) => row.compareFromBaseline);
     const showDelta = this.hasAttribute("show-delta");
     if (forceRowBaseline && baselineValue > 0) {
@@ -688,7 +708,12 @@ class PerfBenchmarkChart extends HTMLElement {
       const rowExtraValue = Math.max(0, Number(row.extraValue ?? 0));
       const rowTotalValue = row.value + rowExtraValue;
       const scalePerRow = row.scalePerRow ?? !hasSharedBaseline;
-      const rowScaleMax = rowBaselineValue > 0 && scalePerRow ? Math.max(rowTotalValue, rowBaselineValue, 1) : maxValue;
+      const rowScaleMax =
+        rowBaselineValue > 0 && scalePerRow
+          ? useRatioNorm
+            ? maxRatio * rowBaselineValue
+            : Math.max(rowTotalValue, rowBaselineValue, 1)
+          : maxValue;
       const rowDeltaBaselineValue = rowBaselineValue > 0 ? rowBaselineValue : baselineValue;
       const targetValueLeft = (rowTotalValue / rowScaleMax) * 100;
       const targetBaselineLeft = rowBaselineValue > 0 ? (rowBaselineValue / rowScaleMax) * 100 : 0;
@@ -759,8 +784,8 @@ class PerfBenchmarkChart extends HTMLElement {
         targetBaselineLeft: row.targetBaselineLeft,
         targetBaselineLabelLeft: row.targetBaselineLabelLeft,
         valueIsBelowBaseline: row.valueIsBelowBaseline,
-        showRowBaseline: row.rowBaselineValue > 0,
-        showRowBaselineLabel: Boolean(row.rowBaselineLabel),
+        showRowBaseline: row.rowBaselineValue > 0 && !useRatioNorm,
+        showRowBaselineLabel: Boolean(row.rowBaselineLabel) && !useRatioNorm,
         customLabel: row.valueLabel,
         fillEl: rowEl.querySelector(".bench-fill"),
         extraFillEl: rowEl.querySelector(".bench-extra-fill"),
@@ -816,7 +841,7 @@ class PerfBenchmarkChart extends HTMLElement {
     const positionAbsoluteBaseline = () => {
       const track = container.querySelector(".bench-track");
       const wrap = shadow.querySelector(".bars-wrap");
-      if (baselineValue > 0 && track && wrap && jsLabelEl && jsLineEl) {
+      if (showGlobalBaseline && track && wrap && jsLabelEl && jsLineEl) {
         const wrapRect = wrap.getBoundingClientRect();
         const trackRect = track.getBoundingClientRect();
         const lineX = trackRect.left + (trackRect.width * baselineLinePct) / 100 - wrapRect.left;
