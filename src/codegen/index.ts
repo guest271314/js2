@@ -4694,8 +4694,13 @@ function collectPromiseImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
     if (!ctx.funcMap.has(importName)) {
       // (#1368) Aggregators (all/race/allSettled/any) take (thisArg, iterable);
       // resolve/reject keep their original 1-arg signature.
+      // (#1116) Aggregators add an i32 `directCall` flag — 1 when codegen used
+      // the bare `Promise.METHOD(iter)` form (substitute globalThis.Promise),
+      // 0 when user wrote `Promise.METHOD.call(thisArg, iter)` (use thisArg).
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
-      const params: ValType[] = isAggregator ? [{ kind: "externref" }, { kind: "externref" }] : [{ kind: "externref" }];
+      const params: ValType[] = isAggregator
+        ? [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }]
+        : [{ kind: "externref" }];
       const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
     }

@@ -3934,33 +3934,37 @@ assert._isSameValue = isSameValue;
         // Otherwise treat as Wasm vec — materialize into an array.
         return _vecToArray(iter);
       };
-      const _resolveCtor = (thisArg: any): any => {
+      const _resolveCtor = (thisArg: any, directCall: number): any => {
         // Step 1 of spec algorithm: `Let C be the this value`.
-        // - Codegen emits `ref.null.extern` for unsubscribed thisArg → default
-        //   to global Promise (matches current behavior for `Promise.all(it)`).
-        // - Otherwise treat as the explicit constructor and let the native
-        //   engine throw TypeError if it isn't a constructor.
-        if (thisArg == null) return Promise;
+        // (#1116) The codegen passes `directCall=1` when the user wrote
+        // `Promise.METHOD(iter)` (no explicit thisArg) — substitute
+        // globalThis.Promise so the existing behavior is preserved.
+        // For `directCall=0` (user wrote `.call(thisArg, iter)`), pass the
+        // value through unchanged: V8's `Promise.METHOD.call(thisArg, …)`
+        // then performs spec §27.2.4.X step 2 (`If Type(C) is not Object,
+        // throw a TypeError exception`) — which is what test262
+        // `ctx-non-object.js` files exercise for undefined/null/primitive.
+        if (directCall) return Promise;
         return thisArg;
       };
       if (name === "Promise_all")
-        return (thisArg: any, arr: any) => {
-          const C = _resolveCtor(thisArg);
+        return (thisArg: any, arr: any, directCall: number) => {
+          const C = _resolveCtor(thisArg, directCall);
           return Promise.all.call(C, _toIterable(arr));
         };
       if (name === "Promise_race")
-        return (thisArg: any, arr: any) => {
-          const C = _resolveCtor(thisArg);
+        return (thisArg: any, arr: any, directCall: number) => {
+          const C = _resolveCtor(thisArg, directCall);
           return Promise.race.call(C, _toIterable(arr));
         };
       if (name === "Promise_allSettled")
-        return (thisArg: any, arr: any) => {
-          const C = _resolveCtor(thisArg);
+        return (thisArg: any, arr: any, directCall: number) => {
+          const C = _resolveCtor(thisArg, directCall);
           return Promise.allSettled.call(C, _toIterable(arr));
         };
       if (name === "Promise_any")
-        return (thisArg: any, arr: any) => {
-          const C = _resolveCtor(thisArg);
+        return (thisArg: any, arr: any, directCall: number) => {
+          const C = _resolveCtor(thisArg, directCall);
           return (Promise as any).any.call(C, _toIterable(arr));
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
