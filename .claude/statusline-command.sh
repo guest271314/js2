@@ -280,8 +280,9 @@ if [ -z "$in_worktree" ]; then
         file_age=$((now_sec - since))
       fi
       [ "$file_age" -gt 10800 ] && continue  # skip very old files (>3h)
+      [ "$file_age" -ge 600 ] && continue   # skip stale — shown separately as ✕
       total_agents=$((total_agents + 1))
-      [ "$file_age" -lt 600 ] && [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
+      [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
     done
     idle_agents=$((total_agents - busy_agents))
     if [ "$idle_agents" -gt 0 ] && [ "$total_agents" -gt 0 ]; then
