@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
+      if (typeof __DEFINES__ === "undefined") window.__DEFINES__ = {};
+    </script>
+    <script>
       (() => {
         const base = document.createElement("base");
         base.href = location.hostname === "loopdive.github.io" ? "/js2wasm/" : "/";
