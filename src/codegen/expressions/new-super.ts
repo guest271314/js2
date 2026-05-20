@@ -33,6 +33,7 @@ import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
   emitThrowString,
+  emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
@@ -1216,7 +1217,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
   if (classNameForCheck && ctx.classThrowsOnEval.has(classNameForCheck)) {
-    emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+    emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
     fctx.body.push({ op: "unreachable" } as unknown as Instr);
     return { kind: "externref" };
   }
