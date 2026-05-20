@@ -1,10 +1,11 @@
 {
   "pr": 397,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1502-browser-localstorage",
-  "head_sha": "18a771cebbb3147e6195d49237c878b42665757a",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26150358175",
-  "timestamp": "2026-05-20T08:51:12Z",
+  "head_sha": "58bbf97b68f85818e1ca1939fb7157138cf904f5",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/397",
+  "timestamp": "2026-05-20T20:55:02Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
