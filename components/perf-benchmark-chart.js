@@ -616,6 +616,10 @@ class PerfBenchmarkChart extends HTMLElement {
     const baselineValue = Number(baseline);
     if (!Number.isFinite(metricValue) || !Number.isFinite(baselineValue) || baselineValue <= 0) return "";
     if (metricValue <= 0) return "";
+    if (kind === "factor") {
+      const ratio = metricValue / baselineValue;
+      return ratio >= 10 ? `${Math.round(ratio)}x` : `${ratio.toFixed(1)}x`;
+    }
     if (Math.abs(metricValue - baselineValue) <= Math.max(0.0001, baselineValue * 0.0005)) {
       return "0%";
     }
