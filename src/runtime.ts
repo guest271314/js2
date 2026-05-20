@@ -4869,16 +4869,58 @@ function wrapWithContainment(
  */
 export function buildWasiPolyfill(): {
   fd_write: (fd: number, iovs: number, iovs_len: number, nwritten: number) => number;
+  fd_read: (fd: number, iovs: number, iovs_len: number, nread: number) => number;
   proc_exit: (code: number) => void;
   setMemory: (mem: WebAssembly.Memory) => void;
+  setStdin: (data: Uint8Array | string) => void;
 } {
   let memory: WebAssembly.Memory | undefined;
   // Partial line buffer per fd for data not ending in newline
   const lineBuffers: Record<number, string> = {};
+  // Buffered stdin bytes; consumed by fd_read until EOF (length 0).
+  // Tests/harnesses can preload bytes via setStdin().
+  let stdinBuf: Uint8Array = new Uint8Array(0);
+  let stdinPos = 0;
 
   return {
     setMemory(mem: WebAssembly.Memory) {
       memory = mem;
+    },
+
+    /** Preload stdin bytes for the next sequence of fd_read calls. */
+    setStdin(data: Uint8Array | string) {
+      stdinBuf = typeof data === "string" ? new TextEncoder().encode(data) : data;
+      stdinPos = 0;
+    },
+
+    /**
+     * Minimal fd_read for fd=0 (stdin). Reads from the preloaded buffer
+     * (see setStdin); returns 0 bytes (EOF) once exhausted. fd != 0 yields
+     * EBADF-like behavior by writing nread=0 and returning 0.
+     */
+    fd_read(fd: number, iovs: number, iovs_len: number, nread: number): number {
+      if (!memory) return -1;
+      const view = new DataView(memory.buffer);
+      let totalRead = 0;
+
+      if (fd === 0) {
+        for (let i = 0; i < iovs_len; i++) {
+          const ptr = view.getUint32(iovs + i * 8, true);
+          const len = view.getUint32(iovs + i * 8 + 4, true);
+          if (len === 0) continue;
+          const remaining = stdinBuf.length - stdinPos;
+          if (remaining <= 0) break;
+          const take = Math.min(len, remaining);
+          const dest = new Uint8Array(memory.buffer, ptr, take);
+          dest.set(stdinBuf.subarray(stdinPos, stdinPos + take));
+          stdinPos += take;
+          totalRead += take;
+          if (take < len) break; // partial fill = drained
+        }
+      }
+
+      view.setUint32(nread, totalRead, true);
+      return 0; // __WASI_ERRNO_SUCCESS
     },
 
     fd_write(fd: number, iovs: number, iovs_len: number, nwritten: number): number {
