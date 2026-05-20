@@ -1,10 +1,11 @@
 {
   "pr": 378,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1462-getownpropertydescriptor",
-  "head_sha": "abe657fe4eeea128ef0ccbcd066184cd13860f1e",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26151080086",
-  "timestamp": "2026-05-20T10:38:29Z",
+  "head_sha": "925993d4372f17a4276cdf7932f232d9b2d76fb3",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/378",
+  "timestamp": "2026-05-20T16:42:33Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
