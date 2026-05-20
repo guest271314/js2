@@ -94,8 +94,12 @@ export interface CompileOptions {
   sourceMap?: boolean;
   /** Source map URL to embed in the wasm binary (default: "module.wasm.map") */
   sourceMapUrl?: string;
-  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory), or "wasi" (WASI-compatible GC) */
-  target?: "gc" | "linear" | "wasi";
+  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory),
+   *  "wasi" (WASI-compatible GC), or "standalone" (pure WasmGC, no JS host
+   *  and no WASI runtime — #1470). `target: "standalone"` implies
+   *  `nativeStrings: true` and refuses to emit any `wasm:js-string` or
+   *  `env` JS-host string imports. */
+  target?: "gc" | "linear" | "wasi" | "standalone";
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
   /** Use WasmGC-native strings (array i16) instead of wasm:js-string imports.

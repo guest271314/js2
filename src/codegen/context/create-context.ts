@@ -86,7 +86,11 @@ export function createCodegenContext(
     sourceMap: options?.sourceMap ?? false,
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
-    nativeStrings: options?.nativeStrings ?? options?.fast ?? options?.wasi ?? false,
+    // #1470 — standalone target forces nativeStrings:true so the module has
+    // no `wasm:js-string` and no env JS-host string helpers. Use logical OR
+    // for the implication chain so `wasi: false` doesn't short-circuit
+    // `standalone: true` (`?? ` returns the LHS on `false`).
+    nativeStrings: options?.nativeStrings ?? !!(options?.fast || options?.wasi || options?.standalone),
     testRuntime: options?.testRuntime ?? false,
     nativeStrDataTypeIdx: -1,
     anyStrTypeIdx: -1,
@@ -130,6 +134,7 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
+    standalone: options?.standalone ?? false,
     wasiFdWriteIdx: -1,
     wasiProcExitIdx: -1,
     wasiPathOpenIdx: -1,

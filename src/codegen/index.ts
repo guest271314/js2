@@ -3567,6 +3567,16 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
 /** Register wasm:js-string builtin imports (called on demand when strings are used) */
 export function addStringImports(ctx: CodegenContext): void {
   if (ctx.hasStringImports) return;
+  // #1470: standalone target must never register the wasm:js-string namespace.
+  // The nativeStrings path is the standalone alternative and is forced on for
+  // ctx.standalone in createCodegenContext. If a caller still reaches this
+  // path under standalone (e.g. via a missed gate), no-op so the resulting
+  // module remains JS-host-free. WASI mode keeps the historical no-op
+  // behavior via the same nativeStrings forcing.
+  if (ctx.standalone || ctx.wasi) {
+    ctx.hasStringImports = true;
+    return;
+  }
   ctx.hasStringImports = true;
 
   // Record import count before adding so we can shift function indices
