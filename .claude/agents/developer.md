@@ -111,12 +111,12 @@ Message **specific agents only** — no broadcasts unless claiming a shared file
    - `rm -f "/workspace/.claude/agent-status/issue-{N}-{slug}.json"` — clear your status
    - `git worktree remove /workspace/.claude/worktrees/<branch>` — clean up your own worktree
    - `TaskUpdate(status: completed)`
-   - `TaskList` → claim next task, or shut down if queue is empty
+   - `TaskList` → claim next task, or if queue is empty: `tmux kill-pane -t $TMUX_PANE`
 
 ### Pause / Suspend / Shutdown
 - **PAUSE message from tech lead**: stop immediately, kill running tests. Reply: `"Paused on #N."` Wait for RESUME.
-- **SUSPEND message from tech lead**: commit WIP, write `## Suspended Work` section to issue file (worktree path, branch, done, remaining, resume steps), reply: `"Suspended #N."`, then terminate.
-- **`shutdown_request` from tech lead**: acknowledge with a brief final summary, then **stop responding entirely**. Do not wait for input. Do not send idle notifications. The session will close when you stop.
+- **SUSPEND message from tech lead**: commit WIP, write `## Suspended Work` section to issue file (worktree path, branch, done, remaining, resume steps), reply: `"Suspended #N."`, then run `tmux kill-pane -t $TMUX_PANE`.
+- **`shutdown_request` from tech lead**: acknowledge with a brief final summary, run `tmux kill-pane -t $TMUX_PANE` as your last Bash call, then stop responding.
 
 ## Validation pattern
 

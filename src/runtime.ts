@@ -4834,22 +4834,24 @@ assert._isSameValue = isSameValue;
       return () => {};
     }
     case "node_builtin_fn": {
-      // #1492 — Bind a single function exported by a Node.js builtin module
-      // (e.g. `crypto.randomUUID`). Resolution order:
-      //   1. `deps[moduleName][fnName]` — explicit dep override (test injection).
-      //   2. `require(moduleName)[fnName]` — Node.js runtime.
-      //   3. `globalThis.crypto[fnName]` / `getRandomValues` — browser fallback.
-      //   4. Last-resort math-random shim — keeps the call non-throwing under
+      // #1491 / #1492 — Bind a single function exported by a Node.js builtin
+      // module (e.g. `fs.readFileSync`, `crypto.randomUUID`). Resolution order:
+      //   1. `deps[moduleName][name]` — explicit dep override (test injection).
+      //   2. `require(moduleName)[name]` — Node.js runtime.
+      //   3. `globalThis.crypto[name]` / `getRandomValues` — browser fallback
+      //      for the crypto module (#1492).
+      //   4. Last-resort non-crypto shim — keeps the call non-throwing under
       //      pure standalone Wasm but the result is NOT cryptographically
-      //      strong (logged once for visibility).
+      //      strong (logged once for visibility) (#1492).
       //
       // `randomBytes(n)` returns a `Uint8Array` (Node returns a Buffer; we
       // wrap it so .length and indexed reads behave identically on both
       // backends). `randomUUID()` returns a string.
-      const { moduleName, fnName } = intent;
-      const depMod = deps?.[moduleName];
+      const moduleName = intent.moduleName;
+      const fnName = intent.name;
+      const depMod = deps?.[moduleName] as Record<string, unknown> | undefined;
       if (depMod && typeof depMod[fnName] === "function") {
-        return makeNodeBuiltinFnAdapter(moduleName, fnName, depMod[fnName].bind(depMod));
+        return makeNodeBuiltinFnAdapter(moduleName, fnName, (depMod[fnName] as Function).bind(depMod));
       }
       const req = _getNodeRequire();
       if (req) {
