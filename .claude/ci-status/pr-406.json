@@ -1,10 +1,11 @@
 {
   "pr": 406,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1500-browser-fetch",
-  "head_sha": "b02945607e26f4d063fa9088513415be7e0542fd",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26151229241",
-  "timestamp": "2026-05-20T11:27:05Z",
+  "head_sha": "1a06723e9c48a6df43e524537505fbf71a413fc9",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/406",
+  "timestamp": "2026-05-20T17:44:46Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
