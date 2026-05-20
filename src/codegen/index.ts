@@ -2323,7 +2323,19 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
-  if (!ctx.funcMap.has("__iterator") && !ctx.funcMap.has("JSON_stringify") && !ctx.funcMap.has("__make_iterable"))
+  // - Promise combinators (Promise_all / Promise_race / Promise_allSettled /
+  //   Promise_any) — runtime helper needs to materialise wasm vec iterables
+  //   into JS arrays so the native engine's GetIterator can drive them per
+  //   spec (#1465).
+  if (
+    !ctx.funcMap.has("__iterator") &&
+    !ctx.funcMap.has("JSON_stringify") &&
+    !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("Promise_all") &&
+    !ctx.funcMap.has("Promise_race") &&
+    !ctx.funcMap.has("Promise_allSettled") &&
+    !ctx.funcMap.has("Promise_any")
+  )
     return;
   try {
     _emitVecAccessExportsInner(ctx);

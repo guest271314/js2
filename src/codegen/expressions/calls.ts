@@ -297,6 +297,72 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
  * Skips nested function/function-expression scopes (they have their own `arguments`),
  * but traverses arrow functions (which inherit the enclosing `arguments`).
  */
+/**
+ * (#1465) Emit an iterable argument for a host-bound Promise combinator
+ * (Promise.all / race / allSettled / any).
+ *
+ * The runtime helper delegates to native `Promise.METHOD.call(C, iter)` which
+ * drives the spec's `GetIterator(iter)` algorithm — strings, arguments,
+ * generators, custom Symbol.iterator objects, Set/Map/TypedArrays all "just
+ * work" when the host engine sees them as real iterables.
+ *
+ * The pain point is array literals: by default `[p1, p2]` compiles to a
+ * wasm vec or tuple struct, which is opaque to the host engine. Native
+ * GetIterator on an opaque externref throws "object is not iterable".
+ *
+ * Fix: when the iterable argument is a syntactic ArrayLiteralExpression,
+ * compile each element to externref and push it into a JS array via
+ * `__js_array_new` / `__js_array_push`. For any other shape (variables,
+ * function returns, spread, …) fall back to plain externref coercion and
+ * trust the runtime helper's `_toIterable` to dispatch (it handles strings,
+ * known JS iterables, and wasm vec via __vec_len/__vec_get).
+ */
+function emitIterableArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): void {
+  // Strip parens/as so `(p as any[])` and similar wrappers still match.
+  let inner: ts.Expression = argExpr;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+    inner = inner.expression;
+  }
+  if (ts.isArrayLiteralExpression(inner)) {
+    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+    if (arrNewIdx !== undefined && arrPushIdx !== undefined) {
+      // Build a JS array eagerly, push each element coerced to externref.
+      fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+      const jsArrLocal = allocLocal(fctx, `__promise_iter_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: jsArrLocal });
+      for (const el of inner.elements) {
+        // Spread inside the array literal: fall back to a generic coercion of
+        // the entire literal to externref. Native engine will iterate the
+        // spread source on our behalf.
+        if (ts.isSpreadElement(el)) {
+          fctx.body.push({ op: "drop" } as Instr);
+          compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: jsArrLocal });
+        // OmittedExpression (sparse array hole) — push undefined sentinel.
+        if (ts.isOmittedExpression(el)) {
+          emitUndefined(ctx, fctx);
+        } else {
+          const elType = compileExpression(ctx, fctx, el, { kind: "externref" });
+          if (elType && elType.kind !== "externref") {
+            // compileExpression with target externref should coerce already;
+            // belt-and-braces fallback.
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+      }
+      fctx.body.push({ op: "local.get", index: jsArrLocal });
+      return;
+    }
+  }
+  // Default: coerce to externref and let the runtime helper dispatch.
+  compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+}
+
 function usesArguments(node: ts.Node): boolean {
   if (ts.isIdentifier(node) && node.text === "arguments") return true;
   if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) {
@@ -3359,9 +3425,16 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // (Subclass `Sub.all(iter)` is handled below via the receiver-detection branch.)
           fctx.body.push({ op: "ref.null.extern" });
           if (expr.arguments.length >= 1) {
-            compileExpression(ctx, fctx, expr.arguments[0]!, {
-              kind: "externref",
-            });
+            // (#1465) The runtime helper delegates to native
+            // `Promise.METHOD.call(C, iter)` which drives `GetIterator(iter)`
+            // per spec. For that to work the host engine must see a real JS
+            // iterable. Array literals tend to compile to a wasm tuple/vec
+            // struct that's opaque to the host, so materialise them into a
+            // JS array eagerly here. Other expressions fall back to plain
+            // externref coercion (the runtime helper handles strings, JS
+            // arrays, generators, custom iterables, and known wasm vec
+            // shapes via __vec_len/__vec_get).
+            emitIterableArg(ctx, fctx, expr.arguments[0]!);
           } else {
             fctx.body.push({ op: "ref.null.extern" });
           }
@@ -3449,9 +3522,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (funcIdx !== undefined) {
         // arg0 = thisArg
         compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
-        // arg1 = iterable (or ref.null if missing)
+        // arg1 = iterable (or ref.null if missing). #1465: materialise array
+        // literals to JS arrays so native GetIterator can drive them.
         if (expr.arguments.length >= 2) {
-          compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+          emitIterableArg(ctx, fctx, expr.arguments[1]!);
         } else {
           fctx.body.push({ op: "ref.null.extern" });
         }

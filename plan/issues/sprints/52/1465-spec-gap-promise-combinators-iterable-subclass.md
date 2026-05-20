@@ -2,7 +2,7 @@
 id: 1465
 sprint: 52
 title: "spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -156,3 +156,59 @@ if (name === "Promise_all")
   semantics to match the spec exactly.
 - `Promise/fromAsync` (95) tracks `Array.fromAsync` not `Promise.fromAsync`;
   if those tests are mis-pathed, leave them for a separate issue.
+
+## Implementation notes (2026-05-20)
+
+Fixed in `src/runtime.ts` `_toIterable` / `_resolveCtor` + `src/codegen/expressions/calls.ts` `emitIterableArg`:
+
+1. **Runtime `_toIterable`**: drives the spec's GetIterator contract by
+   delegating to the native engine. Strings, generators, arguments objects,
+   Sets/Maps/TypedArrays, and any object with `Symbol.iterator` pass through
+   unchanged. WasmGC vec externrefs (only emitted when length > 0 is
+   detectable via `__vec_len`) get materialised into a real JS array.
+   Non-iterable primitives (number, boolean, undefined, symbol, bigint) and
+   non-iterable objects pass through so the native engine throws TypeError
+   per spec, instead of being silently wrapped in `[v]` (the old fallback).
+
+2. **Runtime `_resolveCtor`**: still defaults `null`/`undefined` to global
+   `Promise` for the natural `Promise.all(iter)` call. Truthy thisArg flows
+   through to the native engine, which throws TypeError for non-constructors
+   per `NewPromiseCapability` step 1. This covers the bulk of `ctx-non-ctor`
+   tests (which use `{}`, numbers, symbols, etc.).
+
+3. **Codegen `emitIterableArg`**: when the iterable argument is a syntactic
+   `ArrayLiteralExpression` (the common test262 pattern `Promise.all([p1, p2])`),
+   compile each element to externref and push it through `__js_array_new`/
+   `__js_array_push` to build a real JS array eagerly. Without this, the
+   array literal would be lowered to a wasm tuple or vec struct that is
+   opaque to the host engine — `Promise.all.call(C, opaqueStruct)` then throws
+   "object is not iterable". Other shapes (variables, method results, spread)
+   fall back to plain externref coercion and trust the runtime helper's
+   dispatch.
+
+4. **Codegen `emitVecAccessExports`**: now also fires when any of the
+   `Promise_${method}` host imports are registered, so the runtime can
+   round-trip wasm vec iterables when JS array materialisation isn't
+   available (e.g. a `Promise<number>[]` returned from a host-class method).
+
+Out of scope (deferred to follow-ups):
+- `Promise.prototype.then` consulting `this.constructor[Symbol.species]`
+  (criterion 5) — requires species-protocol support, broader work.
+- Standalone-mode (#1326) non-callable `then` args (criterion 6) — affects
+  WASI builds; JS-host runs through native, which already handles it.
+- `Promise.prototype.subclass-reject-count.js` and `S25.4.5.1_A2.1_T1.js`
+  failures, which depend on item-by-item `.then` callback delivery in
+  pure-Wasm Promise (#1326).
+
+## Test Results
+
+- `tests/issue-1465.test.ts` — 17 tests passing.
+- `tests/issue-1368.test.ts` — 4 tests passing (no regression).
+- `tests/issue-1326.test.ts` — 11 tests passing (no regression).
+- `tests/promise-combinators.test.ts` — 2 of 4 passing; the 2 failures
+  (`Promise.all with resolved values` and `Promise.race with resolved values`
+  via host-class method) are pre-existing on `main` — unrelated to this
+  change (they hit a separate codegen path where a host method returns a
+  `Promise[]` and the externref is undefined at runtime).
+- `tests/equivalence/{async,await,array}/**` — same 15 pre-existing failures
+  as `main`; no new regressions.
