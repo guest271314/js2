@@ -1719,6 +1719,65 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return compileConsoleCall(ctx, fctx, expr, propAccess.name.text);
     }
 
+    // (#1503) Web Crypto host imports: crypto.randomUUID() / crypto.getRandomValues(buf).
+    // Available wherever the host exposes a `crypto` global (browsers + Node 19+).
+    // In WASI mode there is no JS host, so the imports are still added but resolve
+    // to a throw at runtime (no silent fallback to Math.random — that would be a
+    // security trap, see issue #1503). Shadow-aware.
+    if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "crypto") {
+      const isShadowed = fctx.localMap.has("crypto") || (fctx.boxedCaptures?.has("crypto") ?? false);
+      if (!isShadowed) {
+        const cryptoMethod = propAccess.name.text;
+        if (cryptoMethod === "randomUUID") {
+          const idx = ensureLateImport(ctx, "__crypto_random_uuid", [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+        if (cryptoMethod === "getRandomValues") {
+          // Compile the typed-array argument. Uint8Array compiles to a vec
+          // struct typed `ref_null $vec_f64`. We need to pass the RAW
+          // extern-wrapped vec to the host (so the host can call back
+          // `__vec_set_byte(vec, i, byte)` and mutate the same struct).
+          // The generic coerceType path would wrap the vec with
+          // `__make_iterable` (so JS sees a real iterable) — but that
+          // wrapping strips the vec identity, leaving the host unable to
+          // ref.test against the vec type. Emit `extern.convert_any`
+          // directly to bypass `__make_iterable`.
+          const idx = ensureLateImport(
+            ctx,
+            "__crypto_get_random_values",
+            [{ kind: "externref" }],
+            [{ kind: "externref" }],
+          );
+          if (expr.arguments.length >= 1) {
+            const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+            if (argType?.kind === "ref" || argType?.kind === "ref_null") {
+              fctx.body.push({ op: "extern.convert_any" } as Instr);
+            } else if (argType && argType.kind !== "externref") {
+              // Fall back to the standard coerce for non-ref result types.
+              coerceType(ctx, fctx, argType, { kind: "externref" });
+            }
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            // Fallback: pop the arg and push null so the stack stays balanced.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+      }
+    }
+
     // WASI mode: process.exit(code) -> proc_exit(code)
     if (
       ctx.wasi &&

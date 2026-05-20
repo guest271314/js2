@@ -983,6 +983,9 @@ export function generateModule(
     // DataView.prototype.{get,set}{Uint,Int,Float}* on i32_byte vec structs (#1056)
     emitDataViewByteExports(ctx);
 
+    // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
+    emitVecSetByteExport(ctx);
+
     // Emit __test_str_from_externref / __test_str_to_externref exports for
     // dual-run testing in nativeStrings mode (#1187). No-op unless
     // ctx.testRuntime && ctx.nativeStrings.
@@ -2323,7 +2326,12 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
-  if (!ctx.funcMap.has("__iterator") && !ctx.funcMap.has("JSON_stringify") && !ctx.funcMap.has("__make_iterable"))
+  if (
+    !ctx.funcMap.has("__iterator") &&
+    !ctx.funcMap.has("JSON_stringify") &&
+    !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("__crypto_get_random_values") // (#1503)
+  )
     return;
   try {
     _emitVecAccessExportsInner(ctx);
@@ -2477,6 +2485,105 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       desc: { kind: "func", index: getFuncIdx },
     });
   }
+}
+
+/**
+ * (#1503) Emit `__vec_set_byte(externref vec, i32 idx, i32 byte) -> ()` so
+ * the JS runtime can write bytes back into a WasmGC vec struct from inside
+ * `crypto.getRandomValues(...)`. Mirrors the dispatch pattern of
+ * `__vec_get` / `__dv_byte_set`: ref.test against every registered vec
+ * type, then ref.cast + struct.get the underlying array, then array.set the
+ * element. The element-type conversion depends on the vec's element kind:
+ *
+ *   - "f64"      → f64.convert_i32_u then array.set       (TypedArrays — Uint8Array etc.)
+ *   - "i32"      → array.set directly                     (plain JS arrays of numbers stored as i32 — rare)
+ *   - "i32_byte" → array.set directly                     (ArrayBuffer / DataView backing)
+ *   - other      → skipped (no safe coercion from a byte)
+ *
+ * Gated on `__crypto_get_random_values` being imported; otherwise we'd add
+ * a dead export and bloat every module.
+ */
+function emitVecSetByteExport(ctx: CodegenContext): void {
+  if (!ctx.funcMap.has("__crypto_get_random_values")) return;
+  try {
+    _emitVecSetByteExportInner(ctx);
+  } catch {
+    // Non-fatal — if dispatch emission fails the runtime call will throw
+    // a descriptive TypeError when the export is missing.
+  }
+}
+
+function _emitVecSetByteExportInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecEntries = Array.from(ctx.vecTypeMap.entries());
+  if (vecEntries.length === 0) return;
+
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }, { kind: "i32" }],
+    [],
+    "$__vec_set_byte_type",
+  );
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // local 0 = vec externref, local 1 = idx i32, local 2 = byte i32, local 3 = anyref
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 3 } as Instr,
+  ];
+
+  let current: Instr[] = [];
+  for (let i = vecEntries.length - 1; i >= 0; i--) {
+    const [elemKey, vecTypeIdx] = vecEntries[i]!;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) continue;
+    let writeInstrs: Instr[];
+    if (elemKey === "f64") {
+      writeInstrs = [
+        { op: "local.get", index: 3 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: 1 } as Instr, // idx
+        { op: "local.get", index: 2 } as Instr, // byte (i32)
+        { op: "f64.convert_i32_u" } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+      ];
+    } else if (elemKey === "i32" || elemKey === "i32_byte") {
+      writeInstrs = [
+        { op: "local.get", index: 3 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "local.get", index: 2 } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+      ];
+    } else {
+      // Element types we don't know how to write a byte to (externref,
+      // i64, etc.) — skip silently. The runtime will TypeError if asked.
+      continue;
+    }
+    current = [
+      { op: "local.get", index: 3 } as Instr,
+      { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...writeInstrs, { op: "return" } as Instr],
+        else: current,
+      } as Instr,
+    ];
+  }
+  body.push(...current);
+
+  mod.functions.push({
+    name: "__vec_set_byte",
+    typeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as any);
+  mod.exports.push({ name: "__vec_set_byte", desc: { kind: "func", index: funcIdx } });
 }
 
 /**
