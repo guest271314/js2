@@ -164,6 +164,7 @@ if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
   _n_active=0; _n_ciwait=0; _n_stale=0
   for _f in /workspace/.claude/agent-status/*.json; do
     [ -f "$_f" ] || continue
+    [ "$(basename "$_f")" = "tech-lead.json" ] && continue
     _state=$(jq -r '.state // empty' "$_f" 2>/dev/null)
     [ -z "$_state" ] && continue
     # Freshness: prefer last_seen heartbeat; fall back to "not stale" if no heartbeat yet
@@ -266,6 +267,7 @@ if [ -z "$in_worktree" ]; then
     busy_agents=0
     for f in "$agent_status_dir"/*.json; do
       [ -f "$f" ] || continue
+      [ "$(basename "$f")" = "tech-lead.json" ] && continue
       state=$(jq -r '.state // empty' "$f" 2>/dev/null)
       [ -z "$state" ] && continue
       last_seen=$(jq -r '.last_seen // empty' "$f" 2>/dev/null)
