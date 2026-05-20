@@ -286,3 +286,47 @@ and private members are deferred to subsequent slices (1364b/c/d).
 - Regression: instance method invocation (`c.m()`) still works
 - Regression: instance field descriptor unchanged
 - Regression: unknown method returns falsy (pre-existing null/undefined gap)
+
+## Slice B — delete C.m / delete C.prototype.m (this PR)
+
+### Problem
+
+`verifyProperty` (test262 harness) reads the descriptor of `C.m` / `C.prototype.m`,
+confirms `configurable: true`, then does a second-pass invariant check:
+deletes the property and asserts the descriptor lookup now returns
+`undefined`. Slice A made the initial descriptor lookup correct, but
+`delete C.m` still reported success while leaving the entry in
+`_prototypeMethodNames` / `_staticMethodNames`. The second-pass lookup
+therefore re-returned the same method descriptor and verifyProperty
+failed.
+
+### Implementation
+
+- **`src/runtime.ts:_deletedClassPropNames`** — per-receiver `Set<string>`
+  of method/static names that have been deleted. `_isDeletedClassProp`
+  unifies this with the existing `_wasmStructDeletedKeys` tombstone (set
+  by `__delete_property`) so both the codegen path
+  (`delete C.m` → `__delete_property(C, "m")`) and the proxy trap path
+  (native JS `delete proxy.m`) hide the entry from subsequent lookups.
+- **`__getOwnPropertyDescriptor` host import** — both the proto-method
+  arm (#1364a) and the static-method arm (#1395) gate on
+  `!_isDeletedClassProp(obj, propStr)`.
+- **`__getOwnPropertyNames` host import** — `_prototypeMethodNames` /
+  `_staticMethodNames` lists are filtered through the deletion set so
+  enumeration stops returning deleted names.
+- **`_wrapForHost` proxy traps** — `fieldNamesForHost` filters its
+  allowlist, `has` consults the deletion set, and `deleteProperty` calls
+  `_markDeletedClassProp` for native-JS-side deletes.
+
+### Test results
+
+`tests/issue-1364b-class-method-delete.test.ts` — 8 cases pass:
+
+- `delete C.m` removes the static method descriptor
+- `delete C.prototype.m` removes the instance method descriptor
+- `hasOwnProperty.call(C.prototype, "m")` is `false` after delete
+- Sibling methods (instance + static) survive a targeted delete
+- verifyProperty-style invariant: read → delete → read returns undefined
+- Regression: deleting an unknown name still reports `true`
+  (ECMA-262 §13.5.1 — vacuously true)
+- Regression: instance method invocation through preserved siblings still works
