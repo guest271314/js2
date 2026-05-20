@@ -59,7 +59,7 @@ import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js"
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
-import { emitSetExtrasArgv, ensureArgcGlobal } from "../statements/nested-declarations.js";
+import { emitSetExtrasArgv, ensureArgcGlobal, ensureExtrasArgvGlobal } from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import {
   defaultValueInstrs,
@@ -431,6 +431,103 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
   const argc = Math.min(actualArgCount, paramCount);
   fctx.body.push({ op: "i32.const", value: argc });
   fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+}
+
+/**
+ * Reset the __argc and __extras_argv globals to their sentinel values
+ * (-1 / null). Used after closure / indirect call paths where we set the
+ * globals unconditionally but can't be sure the callee consumed them
+ * (its prologue only consumes when the body reads `arguments`). Without
+ * cleanup, a subsequent function that does read `arguments` would
+ * inherit a stale extras_argv and produce a wrong arguments.length.
+ * (#1511)
+ */
+function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+}
+
+/**
+ * For indirect (closure / call_ref) call paths where the callee is not
+ * statically known, set `__argc` and (if there are overflow args) build
+ * `__extras_argv` from the call-site args beyond `paramCount`. The
+ * lifted callee's prologue reads these to compute `arguments.length`
+ * correctly even when more args were passed than the lifted function's
+ * formal signature accepts.
+ *
+ * Must be called AFTER the formal args have been compiled / pushed onto
+ * the stack (or saved to locals), but BEFORE the call_ref. Pair with
+ * `emitResetArgcExtras` after the call to prevent stale-extras leaking
+ * into a subsequent callee that DOES read `arguments`. (#1511)
+ */
+function emitClosureCallArgcExtras(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+  paramCount: number,
+): void {
+  if (args.length > paramCount) {
+    emitSetExtrasArgv(ctx, fctx, args as unknown as ts.Expression[], paramCount);
+  }
+  emitSetArgc(ctx, fctx, args.length, paramCount);
+}
+
+/**
+ * Build the wasm instructions that set `__extras_argv` from a list of
+ * pre-saved externref locals, and `__argc` to (paramCount + extrasLocals.length).
+ *
+ * Used by indirect-call paths that have already compiled overflow args
+ * into externref locals (so we don't re-evaluate side effects). The
+ * returned instruction list leaves the wasm value stack unchanged.
+ * (#1511)
+ */
+function buildArgcExtrasSetupFromLocals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  paramCount: number,
+  extrasLocals: number[],
+): Instr[] {
+  const out: Instr[] = [];
+  const callArgCount = paramCount + extrasLocals.length;
+  if (extrasLocals.length > 0) {
+    const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+    const extrasArrTi = getArrTypeIdxFromVec(ctx, extrasVecTi);
+    for (const el of extrasLocals) {
+      out.push({ op: "local.get", index: el } as Instr);
+    }
+    out.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+    const arrTmp = allocLocal(fctx, `__extras_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: extrasArrTi });
+    out.push({ op: "local.set", index: arrTmp } as Instr);
+    out.push({ op: "i32.const", value: extrasLocals.length } as Instr);
+    out.push({ op: "local.get", index: arrTmp } as Instr);
+    out.push({ op: "struct.new", typeIdx: extrasVecTi } as Instr);
+    out.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  }
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  out.push({ op: "i32.const", value: Math.min(callArgCount, paramCount) } as Instr);
+  out.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  return out;
+}
+
+/**
+ * Build the wasm instructions that reset `__argc` and `__extras_argv` to
+ * their sentinel values. Useful for inlining into dispatch arms / if
+ * bodies. The returned list leaves the wasm value stack unchanged.
+ * (#1511)
+ */
+function buildArgcExtrasReset(ctx: CodegenContext): Instr[] {
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  return [
+    { op: "ref.null", typeIdx: extrasVecTi } as Instr,
+    { op: "global.set", index: extrasGlobalIdx } as Instr,
+    { op: "i32.const", value: -1 } as Instr,
+    { op: "global.set", index: argcGlobalIdx } as Instr,
+  ];
 }
 
 /**
@@ -5731,8 +5828,13 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Compile call arguments with type coercion (only up to declared param count)
           // Save them to locals so they can be re-pushed in each dispatch branch.
           const argLocals: number[] = [];
+          const cpParamCnt = matchedClosureInfo.paramTypes.length;
+          // (#1511) Save overflow args to externref locals so we can pack them
+          // into __extras_argv right before the call (whichever dispatch arm
+          // wins). The lifted callee may read `arguments` and needs the full
+          // call-site arg list.
+          const cpExtrasLocals: number[] = [];
           {
-            const cpParamCnt = matchedClosureInfo.paramTypes.length;
             for (let i = 0; i < Math.min(expr.arguments.length, cpParamCnt); i++) {
               compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
               const argLocal = allocLocal(fctx, `__carg_${fctx.locals.length}`, matchedClosureInfo.paramTypes[i]!);
@@ -5740,10 +5842,32 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               argLocals.push(argLocal);
             }
             for (let i = cpParamCnt; i < expr.arguments.length; i++) {
-              const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-              if (extraType !== null) {
-                fctx.body.push({ op: "drop" });
+              const extraType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+              if (extraType === null) {
+                fctx.body.push({ op: "ref.null.extern" });
+              } else if (extraType.kind === "f64") {
+                const boxIdx = ctx.funcMap.get("__box_number");
+                if (boxIdx !== undefined) {
+                  fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else {
+                  fctx.body.push({ op: "drop" });
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else if (extraType.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+                const boxIdx = ctx.funcMap.get("__box_number");
+                if (boxIdx !== undefined) {
+                  fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else {
+                  fctx.body.push({ op: "drop" });
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
+                fctx.body.push({ op: "extern.convert_any" } as Instr);
               }
+              const extraLocal = allocLocal(fctx, `__cextra_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: extraLocal });
+              cpExtrasLocals.push(extraLocal);
             }
           }
 
@@ -5785,6 +5909,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             for (const al of argLocals) {
               fctx.body.push({ op: "local.get", index: al });
             }
+            // (#1511) Set __extras_argv from saved overflow locals + __argc
+            for (const ins of buildArgcExtrasSetupFromLocals(ctx, fctx, cpParamCnt, cpExtrasLocals)) {
+              fctx.body.push(ins);
+            }
             // Push funcref back, guarded cast, call
             fctx.body.push({ op: "local.get", index: funcrefLocal } as unknown as Instr);
             emitGuardedFuncRefCast(fctx, matchedClosureInfo.funcTypeIdx);
@@ -5793,6 +5921,16 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               op: "call_ref",
               typeIdx: matchedClosureInfo.funcTypeIdx,
             });
+            // (#1511) Reset globals (callee may not have consumed them).
+            // Return value already on stack — save, reset, restore.
+            if (expectedReturn !== null) {
+              const _retL = allocLocal(fctx, `__cp_ret_${fctx.locals.length}`, expectedReturn);
+              fctx.body.push({ op: "local.set", index: _retL });
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+              fctx.body.push({ op: "local.get", index: _retL });
+            } else {
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+            }
           } else {
             // (#1131) Multi-funcref-type dispatch: the closure may have a different
             // return type than declared (e.g. () => string passed as () => void).
@@ -7288,23 +7426,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
 
         // Push call arguments (only up to declared param count)
+        const crParamCnt = matchedClosureInfo.paramTypes.length;
         {
-          const crParamCnt = matchedClosureInfo.paramTypes.length;
           for (let i = 0; i < Math.min(expr.arguments.length, crParamCnt); i++) {
             compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
-          }
-          for (let i = crParamCnt; i < expr.arguments.length; i++) {
-            const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-            if (extraType !== null) {
-              fctx.body.push({ op: "drop" });
-            }
           }
         }
 
         // Pad missing arguments with defaults
-        for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
+        for (let i = expr.arguments.length; i < crParamCnt; i++) {
           pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
         }
+
+        // (#1511) For indirect calls we cannot know whether the lifted target
+        // reads `arguments`; pack any overflow args into `__extras_argv` and
+        // set `__argc` so a callee that DOES read `arguments` sees the full
+        // call-site length. Overflow args are NOT pushed to the wasm stack —
+        // they live in the global. Cleanup happens after call_ref.
+        emitClosureCallArgcExtras(ctx, fctx, expr.arguments, crParamCnt);
 
         // Push the funcref from the closure struct (field 0) — null-check → TypeError (#728)
         fctx.body.push({ op: "local.get", index: closureLocal });
@@ -7323,6 +7462,18 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           op: "call_ref",
           typeIdx: matchedClosureInfo.funcTypeIdx,
         });
+
+        // (#1511) Reset __argc / __extras_argv. A callee that doesn't read
+        // `arguments` never consumed them and would otherwise leak stale
+        // values into the next call.
+        if (matchedClosureInfo.returnType === null) {
+          emitResetArgcExtras(ctx, fctx);
+        } else {
+          const _retLocal = allocLocal(fctx, `__cr_ret_${fctx.locals.length}`, matchedClosureInfo.returnType);
+          fctx.body.push({ op: "local.set", index: _retLocal });
+          emitResetArgcExtras(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: _retLocal });
+        }
 
         // Return VOID_RESULT for void closures so compileExpression doesn't
         // treat the null return as a compilation failure and roll back instructions
@@ -7469,10 +7620,37 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "local.set", index: argLocal });
           argLocals.push({ local: argLocal, type: closureInfo.paramTypes[i]! });
         }
-        // Excess args: compile for side effects, drop.
+        // (#1511) Excess args: compile and save to externref locals so we can
+        // pack them into __extras_argv inside the then branch without
+        // re-running side effects.
+        const extrasLocals: number[] = [];
         for (let i = ccParamCnt; i < expr.arguments.length; i++) {
-          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extraType !== null) fctx.body.push({ op: "drop" });
+          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+          if (extraType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          } else if (extraType.kind === "f64") {
+            const boxIdx = ctx.funcMap.get("__box_number");
+            if (boxIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: boxIdx });
+            } else {
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } else if (extraType.kind === "i32") {
+            fctx.body.push({ op: "f64.convert_i32_s" });
+            const boxIdx = ctx.funcMap.get("__box_number");
+            if (boxIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: boxIdx });
+            } else {
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+          }
+          const extraLocal = allocLocal(fctx, `__cb_cextra_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: extraLocal });
+          extrasLocals.push(extraLocal);
         }
         // Pad missing args. For non-nullable ref params widen to nullable so
         // `pushDefaultValue` emits a plain `ref.null` (no `ref.as_non_null`
@@ -7532,6 +7710,28 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "local.get", index: al.local });
         }
 
+        // (#1511) Set __extras_argv (from saved extras locals) and __argc so
+        // the lifted callee can compute the correct arguments.length when it
+        // reads `arguments`. Stack contributions are immediately consumed.
+        if (extrasLocals.length > 0) {
+          const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+          const extrasArrTi = getArrTypeIdxFromVec(ctx, extrasVecTi);
+          for (const el of extrasLocals) {
+            fctx.body.push({ op: "local.get", index: el });
+          }
+          fctx.body.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+          const arrTmp = allocLocal(fctx, `__cb_extras_arr_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: extrasArrTi,
+          });
+          fctx.body.push({ op: "local.set", index: arrTmp });
+          fctx.body.push({ op: "i32.const", value: extrasLocals.length });
+          fctx.body.push({ op: "local.get", index: arrTmp });
+          fctx.body.push({ op: "struct.new", typeIdx: extrasVecTi });
+          fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+        }
+        emitSetArgc(ctx, fctx, expr.arguments.length, ccParamCnt);
+
         // Push funcref from closure struct, guarded cast + null-check, call_ref.
         fctx.body.push({ op: "local.get", index: closureLocal });
         fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 0 });
@@ -7545,6 +7745,14 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "ref.null.extern" });
         } else if (closureInfo.returnType.kind !== "externref") {
           coerceType(ctx, fctx, closureInfo.returnType, { kind: "externref" });
+        }
+        // (#1511) Reset argc/extras after the call. Return value (externref) is
+        // on the stack at this point — save, reset, restore.
+        {
+          const _retL = allocLocal(fctx, `__cb_ret_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: _retL });
+          emitResetArgcExtras(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: _retL });
         }
 
         // 6. else branch — graceful null.
@@ -7899,23 +8107,21 @@ function compileExpressionCallee(
       emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
 
       // Push call arguments (only up to declared param count)
+      const ecParamCnt = matchedClosureInfo.paramTypes.length;
       {
-        const ecParamCnt = matchedClosureInfo.paramTypes.length;
         for (let i = 0; i < Math.min(expr.arguments.length, ecParamCnt); i++) {
           compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
-        }
-        for (let i = ecParamCnt; i < expr.arguments.length; i++) {
-          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extraType !== null) {
-            fctx.body.push({ op: "drop" });
-          }
         }
       }
 
       // Pad missing arguments
-      for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
+      for (let i = expr.arguments.length; i < ecParamCnt; i++) {
         pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
       }
+
+      // (#1511) Indirect call — propagate overflow args via __extras_argv so
+      // a callee reading `arguments` gets the correct length.
+      emitClosureCallArgcExtras(ctx, fctx, expr.arguments, ecParamCnt);
 
       // Push the funcref from closure struct and call_ref — null-check → TypeError (#728)
       fctx.body.push({ op: "local.get", index: closureLocal });
@@ -7932,6 +8138,16 @@ function compileExpressionCallee(
         op: "call_ref",
         typeIdx: matchedClosureInfo.funcTypeIdx,
       });
+
+      // (#1511) Cleanup
+      if (matchedClosureInfo.returnType === null) {
+        emitResetArgcExtras(ctx, fctx);
+      } else {
+        const _retLocal = allocLocal(fctx, `__ec_ret_${fctx.locals.length}`, matchedClosureInfo.returnType);
+        fctx.body.push({ op: "local.set", index: _retLocal });
+        emitResetArgcExtras(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: _retLocal });
+      }
 
       return matchedClosureInfo.returnType ?? VOID_RESULT;
     }
