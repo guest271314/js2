@@ -183,9 +183,9 @@ if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
   done
   _total=$(( _n_active + _n_ciwait + _n_stale ))
   if [ "$_total" -gt 0 ]; then
-    [ "$_n_active" -gt 0 ] && printf ' \033[00;32m%d↻\033[00m' "$_n_active"
-    [ "$_n_ciwait" -gt 0 ] && printf ' \033[00;33m%d⟳\033[00m' "$_n_ciwait"
-    [ "$_n_stale"  -gt 0 ] && printf ' \033[00;90m%d?\033[00m'  "$_n_stale"
+    [ "$_n_active" -gt 0 ] && printf ' \033[00;32m%d▶\033[00m' "$_n_active"
+    [ "$_n_ciwait" -gt 0 ] && printf ' \033[00;33m%d⏸\033[00m' "$_n_ciwait"
+    [ "$_n_stale"  -gt 0 ] && printf ' \033[00;90m%d✕\033[00m'  "$_n_stale"
   fi
 fi
 
@@ -257,25 +257,6 @@ if [ -z "$in_worktree" ]; then
       }' /dev/null)
     fi
   fi
-  if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
-    sprint_pct=$((sprint_done * 100 / sprint_total))
-    awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
-      if (p >= 67)      { fill=42;         fg=30 }
-      else if (p >= 33) { fill=43;         fg=30 }
-      else              { fill="48;5;196"; fg=37 }
-      width = 12
-      filled = int(p * width / 100)
-      label = sprintf(" %d/%d s%d", done, total, n)
-      bar = ""
-      for (i = 0; i < width; i++) bar = bar " "
-      bar = label substr(bar, length(label) + 1)
-      # Always show at least the label in fill color so bar is visible even at 0%
-      if (filled < length(label)) filled = length(label)
-      filled_part = substr(bar, 1, filled)
-      empty_part  = substr(bar, filled + 1)
-      printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
-    }' /dev/null
-  fi
   # Agent activity bar: busy (active) vs total agents
   agent_status_dir="/workspace/.claude/agent-status"
   if [ -d "$agent_status_dir" ]; then
@@ -313,6 +294,25 @@ if [ -z "$in_worktree" ]; then
         printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
       }' /dev/null
     fi
+  fi
+  if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
+    sprint_pct=$((sprint_done * 100 / sprint_total))
+    awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
+      if (p >= 67)      { fill=42;         fg=30 }
+      else if (p >= 33) { fill=43;         fg=30 }
+      else              { fill="48;5;196"; fg=37 }
+      width = 12
+      filled = int(p * width / 100)
+      label = sprintf(" %d/%d s%d", done, total, n)
+      bar = ""
+      for (i = 0; i < width; i++) bar = bar " "
+      bar = label substr(bar, length(label) + 1)
+      # Always show at least the label in fill color so bar is visible even at 0%
+      if (filled < length(label)) filled = length(label)
+      filled_part = substr(bar, 1, filled)
+      empty_part  = substr(bar, filled + 1)
+      printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
+    }' /dev/null
   fi
 fi
 if [ -n "$precompiling" ]; then
