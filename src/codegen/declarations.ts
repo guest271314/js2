@@ -3089,14 +3089,20 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       } else if (ts.isFunctionDeclaration(stmt) && stmt.body) {
         compileClassesFromStatements(stmt.body.statements, true);
       } else if (ts.isIfStatement(stmt)) {
+        // #1542: propagate `insideFunction` so a class nested inside a block/try
+        // inside a function is still treated as nested. Without this the body
+        // would be eagerly compiled at module level before the enclosing
+        // function's `hoistFunctionDeclarations` pass runs, leaving sibling
+        // function declarations (e.g. `function* g` used as a method-default
+        // initializer) absent from `funcMap` at body-compile time.
         if (ts.isBlock(stmt.thenStatement)) {
-          compileClassesFromStatements(stmt.thenStatement.statements);
+          compileClassesFromStatements(stmt.thenStatement.statements, insideFunction);
         }
         if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
-          compileClassesFromStatements(stmt.elseStatement.statements);
+          compileClassesFromStatements(stmt.elseStatement.statements, insideFunction);
         }
       } else if (ts.isBlock(stmt)) {
-        compileClassesFromStatements(stmt.statements);
+        compileClassesFromStatements(stmt.statements, insideFunction);
       } else if (
         ts.isForStatement(stmt) ||
         ts.isForInStatement(stmt) ||
@@ -3106,23 +3112,23 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ) {
         const body = stmt.statement;
         if (ts.isBlock(body)) {
-          compileClassesFromStatements(body.statements);
+          compileClassesFromStatements(body.statements, insideFunction);
         }
       } else if (ts.isSwitchStatement(stmt)) {
         for (const clause of stmt.caseBlock.clauses) {
-          compileClassesFromStatements(clause.statements);
+          compileClassesFromStatements(clause.statements, insideFunction);
         }
       } else if (ts.isTryStatement(stmt)) {
-        compileClassesFromStatements(stmt.tryBlock.statements);
+        compileClassesFromStatements(stmt.tryBlock.statements, insideFunction);
         if (stmt.catchClause) {
-          compileClassesFromStatements(stmt.catchClause.block.statements);
+          compileClassesFromStatements(stmt.catchClause.block.statements, insideFunction);
         }
         if (stmt.finallyBlock) {
-          compileClassesFromStatements(stmt.finallyBlock.statements);
+          compileClassesFromStatements(stmt.finallyBlock.statements, insideFunction);
         }
       } else if (ts.isLabeledStatement(stmt)) {
         if (ts.isBlock(stmt.statement)) {
-          compileClassesFromStatements(stmt.statement.statements);
+          compileClassesFromStatements(stmt.statement.statements, insideFunction);
         }
       }
       // Compile bodies for anonymous class expressions in new expressions

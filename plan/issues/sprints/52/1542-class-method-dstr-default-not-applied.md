@@ -1,7 +1,7 @@
 ---
 id: 1542
 title: "Class method destructured-pattern param default not applied; throws \"Cannot destructure null\" instead"
-status: ready
+status: in-progress
 created: 2026-05-20
 parent: 820
 priority: high
@@ -9,6 +9,31 @@ feasibility: medium
 goal: test262-conformance
 test262_fail: 134
 ---
+
+## Resolution
+
+Root cause was **not** in `coerceType` as the architect spec suggested. The
+default initializer (e.g. `g()`) was being compiled to `ref.null extern`
+because the function declaration `g` was not yet in `funcMap` at the time the
+class method body was compiled.
+
+`compileClassesFromStatements` in `src/codegen/declarations.ts` lost the
+`insideFunction` flag when recursing through control-flow constructs
+(`isBlock`, `isIfStatement`, `isTryStatement`, loop bodies, `isSwitchStatement`,
+`isLabeledStatement`). A class declaration nested inside e.g. a try-block of a
+function was therefore treated as if at module level and its body was eagerly
+compiled at module pass time — BEFORE the enclosing function's
+`hoistFunctionDeclarations` pass ran. Sibling function declarations were
+absent from `funcMap` at class-body compile time, and the call-expression
+compiler emitted the graceful `ref.null.extern` fallback.
+
+Test262 wraps every test in `export function test() { try { ... } catch ... }`,
+so this hits every class-with-method-default test262 case.
+
+Fix: propagate `insideFunction` through every recursive descent so a class
+inside any control-flow construct within a function is correctly **deferred**
+until the enclosing function compiles its body (at which point
+`hoistFunctionDeclarations` has registered sibling functions).
 
 # #1542 — Class method destructured-pattern param default not applied
 
