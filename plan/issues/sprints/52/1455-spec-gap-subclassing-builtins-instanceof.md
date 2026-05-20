@@ -2,7 +2,7 @@
 id: 1455
 sprint: 52
 title: "spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …)"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -136,3 +136,78 @@ which path is already in place vs missing.
 - `Symbol.species` overriding `Array.prototype.map` etc. return
   type (separate, sparse failure set).
 - `instance instanceof` cross-realm shenanigans.
+
+## Implementation
+
+Three coordinated changes land the `instance instanceof Sub` fix without
+disturbing existing externref-backed Error subclassing (#1366a):
+
+1. **Runtime registry of synthetic subclasses (`src/runtime.ts`)**.
+   - New host import `__set_subclass_proto(instance, subName, parentName)
+     -> externref` is called by the subclass constructor after
+     `__new_<Parent>(...)` returns. It lazily creates a `class Sub extends
+     Parent {}` JS subclass, caches it in `_subclassCtors` (a `Map<string,
+     Function[]>` so name collisions across test fixtures don't shadow each
+     other), and `Object.setPrototypeOf(instance, Sub.prototype)`. The cache
+     is bucketed because vitest reuses module state and the same `Subclass`
+     name appears with different parents across tests.
+   - Updated `__instanceof(v, name)` first consults the registry and tries
+     each bucket entry; only when nothing matches does it fall back to
+     `globalThis[name]` (the legacy path for direct builtin `instanceof`).
+   - `builtinCtors` resolver now exposes `Date` plus all TypedArrays and
+     `SharedArrayBuffer` so `__new_<TypedArray>` resolves without "No
+     dependency provided for extern class".
+
+2. **Codegen: emit `__set_subclass_proto` calls
+   (`src/codegen/class-bodies.ts`)**.
+   - New helper `emitSetSubclassProto(ctx, fctx, selfLocal, subName,
+     parentName)` pushes the instance externref, the two name strings, calls
+     the host import, and stores the (still-same) externref back into the
+     self local. A `ref.is_null` guard skips the call on the standalone path
+     where the import is unavailable.
+   - Helper is invoked from both the implicit-super path (no-ctor subclass
+     of a builtin) and the explicit-super path inside `compileSuperCall`
+     for any class in `classExternrefBackedSet`.
+
+3. **Builtin parent registry (`src/codegen/builtin-tags.ts`)**.
+   - `BUILTIN_TYPE_TAGS` now covers `WeakRef`, all TypedArrays, and the
+     wrapper types (`Boolean`, `Number`, `String`). They're added solely so
+     `isBuiltinTypeName(parentName)` returns true for them.
+   - `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE` is extended with the same set
+     plus `DataView` and `SharedArrayBuffer`, routing them through the
+     externref-backed constructor path so `__set_subclass_proto` actually
+     fires.
+
+4. **Instanceof dispatch (`src/codegen/expressions.ts` + `identifiers.ts`)**.
+   - The static-resolution branch for externref-backed RHS used to emit
+     constant 0 when LHS type was unresolvable; it now falls through to
+     `compileHostInstanceOf`, which calls `__instanceof(v, name)` so the
+     registry walk decides at runtime.
+   - `compileHostInstanceOf` maps RHS identifier text through
+     `classExprNameMap` so `const Sub = class extends Map {}` lookups go
+     against the synthetic name that `__set_subclass_proto` registered.
+
+## Test Results
+
+- `tests/issue-1455.test.ts`: 10 tests across Map, Float32Array, WeakRef,
+  Uint8ClampedArray, Set, WeakMap and an Error regression — all pass.
+- `tests/issue-1366a.test.ts` and `tests/issue-1366b.test.ts` (existing
+  Error / Map / Array / Set / Promise / WeakMap suites): all pass — no
+  regression to the static-fast-path or runtime hooks.
+- Test262 sweep over `language/{statements,expressions}/class/subclass-builtins/`:
+  **60 / 64** scripts now pass (excluding the four out-of-scope skips
+  Function / Object / Promise / NativeError). Remaining 4 fails per folder:
+  - `subclass-AggregateError.js`: AggregateError requires an iterable arg
+    — orthogonal to the instanceof fix.
+  - `subclass-DataView.js`: needs a real `ArrayBuffer` externref but the
+    compiler short-circuits `new ArrayBuffer(N)` to a Wasm-native vec
+    struct (`new-super.ts:2303`). Separate ArrayBuffer-codegen issue.
+  - `subclass-WeakRef.js`: implicit `super()` passes null to `new
+    WeakRef()`, which is invalid. Needs a follow-up that threads a real
+    target.
+
+This satisfies AC1 (Map), AC2 (Float32Array), AC5 (Uint8ClampedArray),
+AC6 (instance method dispatch), and AC7 (≥40 fewer fails — closer to
+~50 fewer based on the sweep). AC3 (WeakRef) and AC4 (DataView) hit
+upstream argument-passing issues that are out of scope for the
+prototype-chain fix.

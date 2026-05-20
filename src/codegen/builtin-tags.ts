@@ -44,6 +44,11 @@ export const BUILTIN_TYPE_TAGS = {
   // Indexed collections
   Array: -3,
 
+  // Wrapper types (#1455)
+  Boolean: -4,
+  Number: -5,
+  String: -6,
+
   // Errors (Error is the parent of all *Error subclasses)
   Error: -10,
   TypeError: -11,
@@ -59,6 +64,7 @@ export const BUILTIN_TYPE_TAGS = {
   Set: -21,
   WeakMap: -22,
   WeakSet: -23,
+  WeakRef: -24,
 
   // Built-in objects
   Date: -30,
@@ -69,6 +75,20 @@ export const BUILTIN_TYPE_TAGS = {
   ArrayBuffer: -50,
   SharedArrayBuffer: -51,
   DataView: -52,
+
+  // TypedArrays (#1455 — needed so `isBuiltinTypeName` recognises them and
+  // `class Sub extends Float32Array {}` enters the host-constructible path)
+  Int8Array: -60,
+  Uint8Array: -61,
+  Uint8ClampedArray: -62,
+  Int16Array: -63,
+  Uint16Array: -64,
+  Int32Array: -65,
+  Uint32Array: -66,
+  Float32Array: -67,
+  Float64Array: -68,
+  BigInt64Array: -69,
+  BigUint64Array: -70,
 } as const;
 
 export type BuiltinTypeName = keyof typeof BUILTIN_TYPE_TAGS;
@@ -179,6 +199,31 @@ export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = 
   "Promise",
   "RegExp",
   "ArrayBuffer",
+  // #1455 — additional builtins covered by the subclass-builtins test262
+  // suite. Each is constructible with 0–1 args and `__set_subclass_proto`
+  // adjusts the instance's [[Prototype]] post-construction so
+  // `instance instanceof Sub` walks through `Sub.prototype` while
+  // `instance instanceof Parent` still resolves via the engine's chain.
+  "WeakRef",
+  "DataView",
+  "SharedArrayBuffer",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  // #1455 — wrapper types + Date. `new Sub()` lowers to `new Wrapper()` /
+  // `new Date()` and the instance's [[Prototype]] is set to `Sub.prototype`.
+  "Boolean",
+  "Number",
+  "String",
+  "Date",
 ]);
 
 /**

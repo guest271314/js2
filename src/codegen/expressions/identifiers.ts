@@ -735,6 +735,14 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   let ctorName: string | undefined;
   if (ts.isIdentifier(expr.right)) {
     ctorName = expr.right.text;
+    // (#1455) Class expressions are registered under a synthetic name
+    // (e.g. `const Sub = class extends Map {}` → `__class_expr_0`). The
+    // `__set_subclass_proto` host import stores its registry entry under the
+    // synthetic name, so we must look up the same synthetic name in
+    // `__instanceof` — otherwise `sub instanceof Sub` (where `Sub` is the
+    // variable referring to the class expression) never finds the registry.
+    const mapped = ctx.classExprNameMap.get(ctorName);
+    if (mapped) ctorName = mapped;
   }
 
   if (!ctorName) {

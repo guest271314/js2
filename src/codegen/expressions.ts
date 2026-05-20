@@ -816,12 +816,14 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
           fctx.body.push({ op: "i32.const", value: staticAnswer ? 1 : 0 });
           return { kind: "i32" };
         }
-        // Could not decide statically — return false (host-side
-        // __instanceof against MyError name would return 0 anyway).
-        const leftType = compileExpression(ctx, fctx, expr.left);
-        if (leftType) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        return { kind: "i32" };
+        // (#1455) Could not decide statically. Subclasses of host builtins
+        // now register a synthetic JS subclass via `__set_subclass_proto`
+        // on construction, so the host-side `__instanceof(value, subName)`
+        // walks the instance's [[Prototype]] chain and finds the synthetic
+        // `Sub.prototype` (real `instanceof` semantics). Fall through to
+        // the host fallback. (Previously this returned constant 0, which
+        // is what breaks ~58 test262 `subclass-builtins/*` tests.)
+        return compileHostInstanceOf(ctx, fctx, expr);
       }
     }
     return compileBinaryExpression(ctx, fctx, expr);
