@@ -2,10 +2,11 @@
 id: 1553
 sprint: 52
 title: "spec gap: let/const/var destructuring declarations — residuals after #1432/#1450/#1454/#1550"
-status: ready
+status: needs-spec
 created: 2026-05-20
+investigated: 2026-05-20
 priority: medium
-feasibility: medium
+feasibility: hard
 reasoning_effort: high
 task_type: bugfix
 area: codegen
@@ -233,3 +234,123 @@ null/undefined coercibility) are then small.
   function/script) — separate concern.
 - TDZ for `let`/`const` before initialization — already supported.
 - For-loop init binding pattern scope — tracked by #1452/#1453.
+
+## Investigation 2026-05-20 (dev-1553) — NEEDS-SPEC
+
+Smoke-tested 6 representative shapes against current main. Confirmed the
+issue is bigger than a localized fix: bugs span 5 distinct codegen paths
+in `src/codegen/statements/destructuring.ts` plus collateral concerns in
+`type-coercion.ts` and `array-methods.ts`. **A targeted single-call-site
+patch is not sufficient.**
+
+### Reproductions on current main
+
+| Probe | Source | Current result | Expected |
+| --- | --- | --- | --- |
+| `let {w:{x,y,z}={x:1,y:2,z:3}}={w:undefined}` (typed struct RHS) | typed path | throws TypeError | x=1,y=2,z=3 |
+| `let {w:{x,y,z}={...}} = ({w:undefined} as any)` (externref RHS) | externref path | throws TypeError | x=1,y=2,z=3 |
+| `let {w:{x,y,z}={...}} = ({w:null} as any)` | externref path | "no-throw" (silent) | TypeError |
+| `let [x = (function(){throw 'bang'})()] = []` | tuple/vec path | x=NaN, no throw | throws 'bang' |
+| `let [x = bump()] = [undefined as any]` | vec(f64) path | count=0, x=NaN | count=1, x=42 |
+| `let {fn = function(){}} = ({} as any)` | externref path | fn.name = "" | fn.name = "fn" |
+| `let {...r} = obj-with-non-enum` | externref rest | excludes wrong props | excludes only non-enum |
+
+### Root causes identified (5 distinct subsystems)
+
+1. **`compileExternrefObjectDestructuringDecl` (destructuring.ts:842-854)** —
+   nested ObjectBindingPattern/ArrayBindingPattern branch silently drops
+   `element.initializer`. Sister function for arrays at lines 1031-1056
+   does handle it. **Partial fix tested**: copying the array branch's
+   default check to the object branch lets `(... as any)` cases
+   proceed past the null/undef gate, BUT…
+2. **`__extern_get` cannot read fields of a WasmGC struct exposed as
+   externref** — when the default `{x:1,y:2,z:3}` compiles to a struct
+   ref and we `extern.convert_any` + use externref destructure, the
+   host import `__extern_get(obj, "x")` returns `undefined` for every
+   field because a wasm struct is opaque to JS property access. So
+   even after fix (1) lands, the recursive descent into the default
+   produces all-undefined bindings. **This is the blocker** — the
+   externref helper cannot operate on struct-typed defaults.
+3. **`compileObjectDestructuring` typed-struct path (destructuring.ts:509-598)** —
+   has no `element.initializer` handling for nested object/array
+   patterns at all. Independent of (1)/(2).
+4. **`null` RHS on nested element** — `compileExternrefObjectDestructuringDecl`
+   has a top-level null guard but no per-element guard for "value is
+   null AND target is a binding pattern" — `null !== undefined`, so the
+   default does NOT fire; spec requires destructuring `null` → TypeError.
+5. **f64-array OOB and `[undefined]`** — `emitBoundsCheckedArrayGet`
+   returns the sNaN sentinel for OOB; `emitDefaultValueCheck` matches
+   that sentinel. But for `[undefined]` (explicit `undefined` value in
+   an `any[]` source), the f64 element gets a *generic* NaN (or 0), not
+   the sentinel — so the default never fires. f64 cannot distinguish
+   "no value" from "the value was literally undefined".
+6. **Vec rest with literal source** (`let [a, ...rest] = [1,2,3,4]`) —
+   produced `[1,0]` (rest collapsed to length integer). Likely
+   localMap collision: `ensureBindingLocals` pre-allocates `rest` as
+   externref, then `allocLocal` at the rest-binding site adds a *second*
+   slot with the vec-ref type but later reads pick up the wrong slot.
+7. **NamedEvaluation** (#1450) is wired for function params but the
+   declaration path doesn't trigger it — `let {fn = function(){}} = {}`
+   leaves `fn.name === ""`.
+8. **CopyDataProperties for rest** — externref rest binding inverts
+   what it includes vs excludes (host `__extern_rest_object` semantics
+   suspect; needs cross-check against #1552 catch-rest fix).
+
+### Why a one-call-site fix isn't enough
+
+The issue file's recommendation — "delegate to the shared
+`destructureParam*` helpers used by function parameters" — is the right
+fix. The current declaration path has its own twin loops (typed-struct
+and externref) that have diverged from the param path in:
+
+- Default-on-undefined-OR-null gating
+- Default value coercion when default is itself a struct/vec
+- NamedEvaluation invocation
+- Rest binding enumerable filtering
+
+**Estimated change**: replace ~600 lines in `compileObjectDestructuring` /
+`compileExternrefObjectDestructuringDecl` / `compileExternrefArrayDestructuringDecl`
+with a thin wrapper that funnels into `destructureParam*` from
+`src/codegen/destructuring-params.ts` (~1425 lines, already battle-tested
+for params + catch). That helper would need a `mode: 'decl' | 'param' | 'catch'`
+flag and a binding-kind hint (`let | const | var`) — likely 50-100 lines
+of additions there.
+
+**Files touched (minimum estimate, > 5):**
+- `src/codegen/statements/destructuring.ts` (rewrite 3 export funcs)
+- `src/codegen/statements/variables.ts` (call new entrypoints)
+- `src/codegen/destructuring-params.ts` (add decl mode, NamedEvaluation hook)
+- `src/codegen/type-coercion.ts` (default sentinel handling for f64)
+- `src/codegen/array-methods.ts` (`emitBoundsCheckedArrayGet` undefined sentinel propagation)
+- `src/runtime.ts` (`__require_object_coercible`, `__extern_rest_object`
+  enumerable semantics fix if (8) confirmed)
+- `tests/issue-1553.test.ts` (new file)
+
+**Recommendation: route to architect** for a step-by-step spec that
+sequences the helper merge so it stays under PR-review size. Probable
+slicing:
+
+- **1553a**: Add `decl` mode to `destructureParamObject` + null/undef gate
+  + thread NamedEvaluation hook. Land first, no behavior change for
+  param/catch callers.
+- **1553b**: Switch `compileObjectDestructuring` (typed-struct path) to
+  call `destructureParamObject({mode:'decl'})`. Deletes ~250 lines.
+- **1553c**: Switch externref decl path to same helper. Deletes ~200 lines.
+- **1553d**: Same for arrays.
+- **1553e**: Fix f64-undefined-in-array sentinel propagation (orthogonal —
+  may end up as its own issue).
+
+Each slice should be < 200 LOC delta and individually testable. Attempting
+all in one PR would land an unreviewable patch and risk regressions on
+the ~1100 currently-passing dstr cases.
+
+## Suspended Work
+
+No partial implementation kept. The single change I prototyped (adding
+the nested-default `if` to `compileExternrefObjectDestructuringDecl`)
+was reverted because (1) it does not pass any test262 case end-to-end
+without the matching fix to default-struct destructure semantics, and
+(2) it would mask the real architectural gap.
+
+Worktree `/workspace/.claude/worktrees/issue-1553-dstr-residuals` is
+clean (no commits) and can be removed.
