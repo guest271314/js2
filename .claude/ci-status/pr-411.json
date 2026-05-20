@@ -1,1 +1,23 @@
-{ "head_sha": "da47a58c7", "conclusion": "pending", "net_per_test": null, "timestamp": "2026-05-20T14:41:40Z" }
+{
+  "pr": 411,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1521-test262-ci-speedup",
+  "head_sha": "da47a58c7c9c524766e3711433922bbc04b96aa1",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/411",
+  "timestamp": "2026-05-20T14:48:22Z",
+  "pass": null,
+  "fail": null,
+  "compile_error": null,
+  "snapshot_delta": null,
+  "net_per_test": null,
+  "regressions": null,
+  "regressions_real": null,
+  "regressions_wasm_change": null,
+  "wasm_identical_noise": null,
+  "compile_timeouts": null,
+  "improvements": null,
+  "baseline_sha": null,
+  "baseline_staleness_commits": null,
+  "baseline_stale": false
+}
