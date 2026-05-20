@@ -1920,6 +1920,55 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
+    // Handle Array.fromAsync(items, mapFn?, thisArg?) — ES2024 (#1517)
+    // Delegates to host import which implements the spec algorithm using
+    // native `for await...of` over async iterables, sync iterables (awaiting
+    // each value), and array-likes. Returns a Promise externref; the outer
+    // `await` unwraps it via the standard async/await machinery.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Array" &&
+      propAccess.name.text === "fromAsync"
+    ) {
+      // items
+      if (expr.arguments.length >= 1) {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // mapFn
+      if (expr.arguments.length >= 2) {
+        const mapType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+        if (mapType && mapType.kind !== "externref") coerceType(ctx, fctx, mapType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // thisArg
+      if (expr.arguments.length >= 3) {
+        const thisType = compileExpression(ctx, fctx, expr.arguments[2]!, { kind: "externref" });
+        if (thisType && thisType.kind !== "externref") coerceType(ctx, fctx, thisType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const fromAsyncIdx = ensureLateImport(
+        ctx,
+        "__array_from_async",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (fromAsyncIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: fromAsyncIdx });
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+
     // Handle Array.from(arr) — array copy
     if (
       ts.isIdentifier(propAccess.expression) &&

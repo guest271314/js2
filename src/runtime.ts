@@ -3545,6 +3545,77 @@ assert._isSameValue = isSameValue;
           }
           return Array.from(iter, mapFn);
         };
+      // Array.fromAsync(items, mapFn?, thisArg?) — ES2024 §23.1.2.2 (#1517).
+      //
+      // Async sibling of Array.from. Three branches:
+      //   1. items has Symbol.asyncIterator → `for await...of` iterates the
+      //      async iterator, awaiting each yielded value.
+      //   2. items has Symbol.iterator → iterate sync, but `await` each
+      //      yielded value before storing (sync iterable of thenables).
+      //   3. items is array-like (or non-null object without iterator) →
+      //      ToObject + ToLength(o.length), walk indices, await each o[k].
+      //
+      // mapFn is awaited as well. Wasm closures are wrapped via
+      // `_wrapWasmClosure` (arity 2 — mapFn receives (value, index)).
+      // The host runtime returns a Promise<any[]>; the compiled caller
+      // sees it as an externref and unwraps with the standard await
+      // machinery.
+      if (name === "__array_from_async")
+        return (items: any, mapFn: any, thisArg: any): Promise<any[]> => {
+          const wrappedMap = mapFn != null && _isWasmStruct(mapFn) ? _wrapWasmClosure(mapFn, 2, callbackState) : null;
+          const callMap = async (v: any, k: number): Promise<any> => {
+            if (mapFn == null) return v;
+            const fn = wrappedMap ?? (mapFn as Function);
+            return await fn.call(thisArg, v, k);
+          };
+          return (async () => {
+            const result: any[] = [];
+            if (items == null) {
+              throw new TypeError("Array.fromAsync requires a non-null argument");
+            }
+            // Materialize opaque Wasm vec to a real iterable (#1382).
+            const src = _materializeIterable(items, callbackState);
+            // Async iterable branch.
+            const asyncIter =
+              typeof src === "object" && src != null && typeof (src as any)[Symbol.asyncIterator] === "function"
+                ? (src as any)[Symbol.asyncIterator]()
+                : null;
+            if (asyncIter) {
+              let k = 0;
+              while (true) {
+                const step = await asyncIter.next();
+                if (step.done) break;
+                const v = step.value;
+                result.push(await callMap(v, k));
+                k++;
+              }
+              return result;
+            }
+            // Sync iterable branch (await each value).
+            const isIterable =
+              typeof src === "object" && src != null && typeof (src as any)[Symbol.iterator] === "function";
+            const isString = typeof src === "string";
+            if (isIterable || isString) {
+              let k = 0;
+              for (const raw of src as Iterable<any>) {
+                const v = await raw;
+                result.push(await callMap(v, k));
+                k++;
+              }
+              return result;
+            }
+            // Array-like branch.
+            const o = Object(src) as any;
+            const rawLen = o.length;
+            const lenNum = Number(rawLen);
+            const len = Number.isFinite(lenNum) ? Math.max(0, Math.trunc(lenNum)) : 0;
+            for (let k = 0; k < len; k++) {
+              const v = await o[k];
+              result.push(await callMap(v, k));
+            }
+            return result;
+          })();
+        };
       // Array.of(...items) — creates array from arguments (#965)
       if (name === "__array_of") return (items: any[]): any[] => items;
       // Object.prototype methods for extern class dispatch (#799 WI2)
