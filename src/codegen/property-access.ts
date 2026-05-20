@@ -1106,6 +1106,33 @@ export function compilePropertyAccess(
     return { kind: "externref" };
   }
 
+  // (#1490) Non-WASI Node.js host mode: process.argv / process.env / process.platform.
+  // These are JS host imports that read from the live Node process at runtime.
+  // The local `process` identifier must not be shadowed by a local variable.
+  // In WASI mode, `process.env` is handled separately via WASI environ (#1482),
+  // so this path is gated on !ctx.wasi.
+  if (!ctx.wasi && ts.isIdentifier(expr.expression) && expr.expression.text === "process") {
+    const isShadowed = fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false);
+    if (!isShadowed) {
+      const procProp = propName;
+      let hostImport: string | undefined;
+      if (procProp === "argv") hostImport = "__get_process_argv";
+      else if (procProp === "env") hostImport = "__get_process_env";
+      else if (procProp === "platform") hostImport = "__get_process_platform";
+      else if (procProp === "arch") hostImport = "__get_process_arch";
+      if (hostImport !== undefined) {
+        const idx = ensureLateImport(ctx, hostImport, [], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (idx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: idx });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // Handle BuiltIn.prop where BuiltIn is a known global constructor/namespace (String, Number,
   // Boolean, Math, Object, Array, etc.) that would otherwise compile to ref.null.extern.
   // Examples: String.prototype, Number.prototype, Boolean.prototype, Math.abs, Array.isArray.

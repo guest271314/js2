@@ -1719,6 +1719,39 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return compileConsoleCall(ctx, fctx, expr, propAccess.name.text);
     }
 
+    // (#1490) Non-WASI Node.js host mode: process.exit(code) and process.cwd().
+    // process.exit routes to the __process_exit host import (calls real process.exit
+    // when running under Node). process.cwd() returns a string via __get_process_cwd.
+    if (!ctx.wasi && ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "process") {
+      const isShadowed = fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false);
+      if (!isShadowed) {
+        const procMethod = propAccess.name.text;
+        if (procMethod === "exit") {
+          const idx = ensureLateImport(ctx, "__process_exit", [{ kind: "f64" }], []);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            if (expr.arguments.length >= 1) {
+              compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+            } else {
+              fctx.body.push({ op: "f64.const", value: 0 });
+            }
+            fctx.body.push({ op: "call", funcIdx: idx });
+          }
+          return VOID_RESULT;
+        }
+        if (procMethod === "cwd") {
+          const idx = ensureLateImport(ctx, "__get_process_cwd", [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+      }
+    }
+
     // WASI mode: process.exit(code) -> proc_exit(code)
     if (
       ctx.wasi &&
