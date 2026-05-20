@@ -2,7 +2,7 @@
 id: 1451
 sprint: 52
 title: "spec gap: class/object-literal method parameter destructuring with non-trivial defaults"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: hard
@@ -147,3 +147,59 @@ duplicates and lightly diverges from the function-declaration path:
 - Async-generator method body lowering — tracked by #1373.
 - Function `length` property when params have defaults — tracked by
   #1364 / verifyProperty cluster.
+
+## Fix applied (2026-05-20)
+
+Mirrored the function-decl `_arrayLiteralForceVec` pattern (from
+`function-body.ts:696-713`) into three sites in `class-bodies.ts`:
+
+1. **Class method emitter** (around line 1175) — when the binding pattern
+   is an array and the param slot is `externref` (widened by
+   `bindingPatternNeedsWiden`), set the `_arrayLiteralForceVec` context
+   flag while compiling the initializer. This forces a default array
+   literal like `[1, 2]` to be built as a vec struct (iterable) rather
+   than a tuple, so `destructureParamArray`'s rest-element handler can
+   walk it without an array.copy trap / null-pointer dereference.
+2. **Class constructor emitter** (around line 869) — same fix for
+   completeness (constructor doesn't currently call
+   `destructureParamArray` for binding patterns, but the
+   `_arrayLiteralForceVec` is a safe no-op for the existing path and
+   future-proofs constructor-param destructuring).
+3. **Class setter emitter** (around line 1535) — same fix; setter params
+   with binding patterns + default need vec-shape defaults too.
+
+Object-literal methods already had the fix via `emitMethodParamDefaults`
+in `closures.ts:935`, so no change needed there. The trampoline
+(`__obj_meth_tramp_*`) also did not need changes — missing args are
+already padded by the call-site (callers pass `__get_undefined()` for
+omitted args before reaching the trampoline).
+
+## Test Results
+
+`tests/issue-1451.test.ts` (15 cases, all passing):
+
+| Pattern | Result |
+|--------|--------|
+| class method `[a,b,c] = [1,2,3]` | PASS |
+| class method `[,,...x] = [1,2]` (rest-elision) | PASS |
+| class method nested `[[x,y,z]=[4,5,6]]=[]` | PASS |
+| static class method `[a,b] = [3,4]` | PASS |
+| class method explicit `undefined` arg | PASS |
+| class method explicit `null` arg throws TypeError | PASS |
+| class method arg provided (no default) | PASS |
+| class method `{a,b}={a:5,b:7}` | PASS |
+| class method `{a=1} with arg {a:2}` (init skipped) | PASS |
+| generator method `[a,b]=[1,2]` | PASS |
+| static generator method `{a}` | PASS |
+| generator method rest-elision default | PASS |
+| object literal method `[a,b]=[10,20]` | PASS |
+| object literal method `{a,...rest}` | PASS |
+| object literal method rest-elision (externref) | PASS |
+
+Regression checks:
+- `tests/issue-1432.test.ts` (8 cases) — all pass
+- `tests/issue-1158.test.ts` (10 cases) — all pass
+- `tests/issue-862.test.ts` (4 cases) — all pass
+
+Pre-existing `string_constants` import setup failures in `class-methods.test.ts`
+are unrelated to this fix (also fail on main).
