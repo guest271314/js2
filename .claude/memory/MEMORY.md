@@ -71,6 +71,9 @@
 ### Model usage
 - [feedback_sonnet_for_sprint_loop.md](feedback_sonnet_for_sprint_loop.md) — Use Sonnet for routine sprint loop; Opus only for crisis/architecture
 
+### Reporting
+- [feedback_sprint_status_format.md](feedback_sprint_status_format.md) — Sprint status format: `s52: 17/82 done`
+
 ### General behavior
 - [feedback_ask_role.md](feedback_ask_role.md) — Ask at conversation start: Tech Lead or Product Owner
 - [feedback_ask_ralph_loop.md](feedback_ask_ralph_loop.md) — Ask if Ralph loop should be started for current goals
