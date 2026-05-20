@@ -1,7 +1,7 @@
 ---
 id: 1543
 title: "Async-generator method with destructured default params throws illegal cast instead of expected error"
-status: ready
+status: needs-spec
 created: 2026-05-20
 parent: 820
 priority: high
