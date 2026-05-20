@@ -157,9 +157,9 @@ free_bar() {
   }'
 }
 
-# Agent summary (only on main workspace — state counts from agent-status/*.json)
+# Agent summary (only on tech-lead/main — state counts from agent-status/*.json)
 # Shows: Nactive Mci-wait, colored by freshness via last_seen heartbeat where available.
-if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
+if [ -z "$in_worktree" ] && [ "$branch" = "main" ] && [ -d "/workspace/.claude/agent-status" ]; then
   _now=$(date +%s)
   _n_active=0; _n_ciwait=0; _n_stale=0
   for _f in /workspace/.claude/agent-status/*.json; do
@@ -194,8 +194,8 @@ if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
   fi
 fi
 
-# Sprint progress bar (only on main workspace, not in worktrees)
-if [ -z "$in_worktree" ]; then
+# Sprint progress bar, idle indicator, days bar (only on tech-lead/main)
+if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
   sprint_n=""
   sprint_done=0
   sprint_total=0
