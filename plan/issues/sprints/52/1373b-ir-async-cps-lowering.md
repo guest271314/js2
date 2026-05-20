@@ -15,6 +15,15 @@ depends_on: [1326c]
 ---
 # #1373b — IR async Phase C: CPS lowering
 
+## Joint architect spec (S53)
+
+This issue is **Phase 2B** of the S53 async cluster. The joint spec at
+`plan/issues/sprints/53/async-cluster-architect-spec.md` defines the shared
+CPS module (`src/codegen/async-cps.ts`) that both this issue and #1042 must
+consume — **do not duplicate the transform**. Phase 2B blocks on #1326c
+Phase 1C-B (`emitStandalonePromiseThen`) AND on #1042 introducing
+`async-cps.ts`. Read the joint spec before starting Phase C work.
+
 ## Background
 
 #1373 Phase A (PR #328) shipped:
@@ -133,385 +142,586 @@ Each sub-slice is independently shippable.
 
 ---
 
-## Implementation Plan
+## Implementation Plan (S53 architect — joint spec for #1042 / #1373 / #1373b)
 
-**Authored**: 2026-05-20 by senior-dev-conflicts
-**Targets**: post-#1326c-Phase-1C-B (real `emitStandalonePromiseThen`)
+This plan covers the remaining slices (2, 1b, 3) on top of the Slice 1
+scaffolding that landed in PR #441 (commit `3ea48c20c`). It is the
+single source of truth for the async-model cluster — see #1042 and
+#1373 for the upstream framing; this file is where devs read the IR
+patterns and file:line targets.
 
-### Architectural overview — CPS state-machine transform
+### Slice 1 recap (already on main as of `3ea48c20c`)
 
-Every async function lowers to a **synthesised state machine**: the
-function body is sliced at each `await` point into a chain of
-"continuation" functions, each of which advances the machine by one
-state. The outer function returns the synthesised outer Promise
-immediately; suspension/resumption is driven by the microtask queue.
+To avoid duplication, here is what is **already done** and MUST NOT be
+rewritten:
 
-Functions with N `await` operands produce N+1 IR functions in the
-emitted module:
+- `CodegenContext.supportsAsyncIr: boolean` (default `false`) in
+  `src/codegen/context/types.ts:588` + `src/codegen/context/create-context.ts:130`.
+- `IrSelectionOptions.supportsAsyncIr` + `isAsyncIrReady(options, fn)`
+  hardcoded `false` gate in `src/ir/select.ts:163` (TODO marker at
+  line 194 for the Slice 2 body-shape check).
+- `IrLowerResolver.resolvePromiseType?(): number` in `src/ir/lower.ts:303`
+  bound to `getOrRegisterPromiseType(ctx)` from
+  `src/codegen/async-scheduler.ts:84` via `makeResolver` in
+  `src/ir/integration.ts:1009`.
+- `lower.ts` `case "async.return"` / `case "async.throw"` (lines
+  ~1819–1849): emit `i32.const FULFILLED|REJECTED` + value +
+  `ref.null.extern` + `struct.new $Promise` + `extern.convert_any`.
+  Result on stack: externref-wrapped Promise.
+- `lower.ts` `case "await"` (lines ~1850–1934): casts operand to
+  `(ref $Promise)`, tees into `awaitScratchPromiseIdx` local, branches
+  on `$Promise.state`:
+  - FULFILLED → `struct.get $value` (externref).
+  - REJECTED → `struct.get $value` + `throw $exn`.
+  - PENDING → `unreachable` (this slice fills it in).
 
-- **F₀** (the original): allocates the outer Promise (state=pending),
-  runs prelude code up to the first await, registers the State-1
-  continuation, returns the outer Promise.
-- **F₁ … Fₙ** (synthesised continuations): each one consumes a single
-  resolved value, runs the slice of original-body code up to the next
-  await (or to the function end), and either registers Fᵢ₊₁ or settles
-  the outer Promise via `emitStandalonePromiseResolve` /
-  `emitStandalonePromiseReject`.
+### Strategy: state-machine via heap frame + uniform-arity continuations
 
-A "zero-await" async function (no `await` in body) lowers without any
-synthesised continuations — F₀ runs the whole body and settles the
-outer Promise synchronously before returning it. This is the
-**FULFILLED/REJECTED fast path** described below and is the **only
-shape that works without #1326c Phase 1C-B**.
+WasmGC has neither stack switching nor coroutines, so the only viable
+encoding for "suspend at await, resume on settle" is a **state machine
+with a heap-allocated frame**. We deliberately reject the
+trampoline-only approach (where every async fn returns a thunk JS
+unwraps) because it requires a host loop and breaks WASI standalone
+mode (#1042 acceptance criterion 5).
 
-### Continuation closure signature
+The transform mirrors TypeScript's own `--target es5` async lowering
+but emits everything as wasm:
 
-All continuations are uniformly typed:
+1. **Split** the async fn body at each `await` point into states
+   `0..N`. State 0 is the entry; state `i` resumes after the `i`-th
+   await. State `N` is the tail (no more awaits — settles the outer
+   promise).
+2. **Synthesise a frame struct** `$<fnName>__frame` carrying:
+   - `state: i32` (next state index, for resume dispatch)
+   - `outer: ref $Promise` (the Promise this async fn returned to its caller)
+   - one field per source param (typed to the param's lowered IR type)
+   - one field per local that crosses an await boundary (mutable;
+     non-crossing locals stay as Wasm locals inside the state body)
+3. **Synthesise N+1 continuation funcs** `$<fnName>__state_<i>` of
+   **uniform signature** `(externref capsAsExtern, externref resolvedOrRejected) -> void`.
+   Each func:
+   - `any.convert_extern` + `ref.cast $<fnName>__frame` to recover the frame.
+   - Reads frame fields into Wasm locals.
+   - Runs the state-`i` body. On hitting the next await:
+     - Lower the awaited expression (a Promise as externref).
+     - Compute the next-state funcref via `ref.func $<fnName>__state_<i+1>`.
+     - Call `emitStandalonePromiseThen(awaited, continuationClosure)` —
+       where the "closure" is the frame itself, treated as the
+       `caps: externref` arg. The drain loop will then call
+       `$state_<i+1>(frameAsExtern, resolvedValue)`.
+     - Write `state := i+1` into the frame, return.
+   - On reaching the tail (no more awaits) → settle the outer promise
+     by writing `state := FULFILLED`, `value := result` to
+     `frame.outer`, fire any pending `.then` callbacks via
+     `__promise_settle` (Phase 1C-B helper), and return.
+4. **Entry function `f(p1, p2, ...)`** (the original async fn name —
+   keeps the same Wasm funcIdx so callers stay valid):
+   - `struct.new $<fnName>__frame` with `state := 0`, params copied
+     in, locals zero-initialised, `outer := new pending $Promise`.
+   - `ref.func $<fnName>__state_0` + `extern.convert_any frame` +
+     `i32.const 0` (state-arg sentinel, ignored on initial entry) →
+     pushed onto the microtask queue via `__microtask_enqueue` so the
+     state-0 body runs in the next microtask tick (matches JS spec
+     §27.7.5.1 step 4: AsyncFunctionStart creates a new execution
+     context and resumes it). Then return `frame.outer` (externref).
+   - The result is a fresh pending Promise the caller can `.then` or
+     `await` exactly like a host-Promise.
 
-```wat
-(type $continuation (func (param externref) (result externref)))
-```
+### Why uniform `(externref, externref) -> void` continuation arity
 
-- **Param** `externref` is the resolved/rejected value from the
-  awaited Promise.
-- **Return** `externref` is one of:
-  - The outer Promise (still pending, more awaits to come)
-  - The settled outer Promise (final state)
+The microtask queue (#1326c §1d) stores `(funcref, caps: externref,
+arg: externref)` triples and drains via `call_ref` with no per-site
+signature knowledge. Every continuation MUST therefore share one
+typeIdx. We pick `(externref, externref) -> void`:
+- `caps`: the frame (`extern.convert_any` lifted).
+- `arg`: the resolved value (for FULFILLED) or rejection reason (for
+  REJECTED). The continuation dispatches on the frame's `state` field,
+  not on which signal it received — REJECTED routing is encoded by
+  setting the frame to a designated "reject" state before enqueueing
+  (see Slice 2.4 below).
 
-Captures (variables bound in the outer scope that the continuation
-needs) are bound via a closure struct field — same mechanism as
-existing user-level closures in `src/codegen/closures.ts`. The closure
-struct is allocated once at F₀ entry and shared by every continuation
-in the chain (mutated as the function progresses).
+### Frame as struct (not vec)
 
-**Rationale for uniform arity**: the microtask drain loop in
-`async-scheduler.ts` invokes continuations via `call_ref`. Variable
-signatures would require either a function table per signature
-(complex) or boxing (loses type info). The uniform `(externref) →
-externref` signature lets one drain loop fire all continuations.
-Rejection vs fulfillment is encoded by a second
-boolean-flagged variant or by tagging via the closure struct — see
-"Error path" below.
+A per-fn struct is cheaper than a generic `externref` vec because:
+- `struct.get` / `struct.set` are O(1) typed reads — no boxing of
+  numeric locals back through `__box_number`.
+- The verifier already accepts struct types up the WasmGC chain.
+- Each frame is freed by the GC when no live continuation refs it.
 
-### CPS algorithm (Phase C lowering, in `src/ir/lower.ts`)
+The cost is N+1 synthesised funcs and one struct type per async fn.
+Both are accepted in the existing IR pipeline (lifted closures go
+through the same path — `result.lifted` in
+`compileIrPathFunctions`).
 
-For an async function whose IR body is a linear sequence of blocks
-B₀, B₁, …, Bₘ where some blocks end in `IrInstrAwait`:
+---
 
-1. **Outer Promise allocation**: at F₀ entry, allocate
-   `outerPromise: ref $Promise` with `state=PENDING`,
-   `value=ref.null.extern`, `callbacks=ref.null.extern`. Store in a
-   captured closure field `$outer`.
+### Slice 2 — PENDING-path CPS continuation synthesis
 
-2. **Identify split points**: walk the IR body, marking each
-   `IrInstrAwait` block as a split point. Each split produces:
-   - A "pre-await" sub-graph (everything from the previous split point
-     up to but not including the await).
-   - A "continuation" stub (everything from immediately after the
-     await up to the next split point, or the function end).
+**Goal**: replace the `unreachable` PENDING branch in `lower.ts` with
+real state-machine emission. Gate stays closed
+(`isAsyncIrReady` still hardcoded `false`); Slice 2 is reachable only
+via direct IR construction in tests.
 
-3. **Capture analysis**: for each continuation, compute the set of
-   IrValueIds defined before the split that the post-split code reads.
-   These become fields on the closure struct. The closure type is
-   synthesised per-function: `$cont_capture_<fn>_<idx>`.
+**Blocked on**: #1326c Phase 1C-B (`emitStandalonePromiseThen` no
+longer throws; microtask queue is drainable). Do NOT begin Slice 2
+implementation until #1326c lands `__microtask_enqueue` +
+`__drain_microtasks` + `emitStandalonePromiseThen` with non-throw
+bodies. The selector gate prevents users from hitting the unfinished
+path, but the dev's smoke tests rely on those helpers working.
 
-4. **Emit F₀** (the entry):
-   ```
-   <prelude: outerPromise allocation, closure struct allocation>
-   <pre-await block 0 instructions>
-   <await operand evaluation → %p>
-   <fast-path check>
-   if %p.state == FULFILLED:
-     %resolved = %p.value
-     <jump to State-1 inline> ← same-function continuation, NO closure synthesis
-   elif %p.state == REJECTED:
-     <jump to rejection handler> ← either try/catch handler or settle outerPromise as rejected
-   else:  // PENDING
-     %cont = closure.new $cont_capture_fn_1 (captures...)
-     emitStandalonePromiseThen(%p, %cont)
-     return outerPromise   ← pending; resumption happens via microtask drain
-   ```
+#### 2.1 Frame-type registry
 
-5. **Emit F₁ … Fₙ** (continuations) as separate top-level IR functions.
-   Each is registered in `ctx.mod.functions` with a synthesised name
-   like `${fnName}/continuation_${i}`. The signature is the uniform
-   `(externref) → externref`. The body:
-   ```
-   <local: $resolvedValue = param 0>
-   <local: $closureSelf = local.get/cast>
-   <restore captures from closureSelf into locals>
-   <post-await block i instructions, using $resolvedValue for the await's result>
-   <next await → recurse with State-(i+1) continuation>
-   <or: settle outerPromise via emitStandalonePromiseResolve(returnValue)>
-   ```
-
-6. **Settle on completion**: every path through F₀…Fₙ that doesn't
-   register a further continuation MUST settle the outer Promise:
-   - Normal return: `emitStandalonePromiseResolve(outerPromise, returnValue)`
-   - Throw: `emitStandalonePromiseReject(outerPromise, reason)`
-   - The settle helper mutates the outer Promise's `state` from
-     PENDING → FULFILLED/REJECTED and fires any registered `.then`
-     callbacks via the microtask queue (this is what #1326c Phase
-     1C-B will plumb).
-
-### `IrInstrAwait` lowering (the critical path)
-
-Stack contract: operand has type `IrType.externref` (a Promise, possibly
-unboxed if statically a `$Promise` ref). Lowering steps:
-
-1. Cast operand to `ref $Promise`. If operand is `ref null $Promise`,
-   first ref.cast-guard against null (null is not a Promise → spec says
-   wrap in `Promise.resolve(null)`, which is FULFILLED with value=null).
-
-2. Branch on `state`:
-
-   **FULFILLED path** (state == 1):
-   ```wat
-   local.tee $p_local           ;; save promise
-   struct.get $Promise $state
-   i32.const 1                  ;; FULFILLED
-   i32.eq
-   if (result externref)
-     local.get $p_local
-     struct.get $Promise $value ;; resolved value as externref
-   else ...
-   ```
-   The resolved value becomes the IR value bound to the await's result
-   `IrValueId`. Control flow continues in the SAME wasm function —
-   no continuation synthesis, no microtask scheduling. This is the
-   **only path that works pre-1C-B**.
-
-   **REJECTED path** (state == 2):
-   - If inside `try/catch`: branch to the catch handler with the
-     rejection value as the caught exception. Implementation: use the
-     same Wasm exception tag the `IrInstrThrow` lowerer uses; the
-     handler catches it normally.
-   - If not inside `try/catch`: settle `outerPromise` as REJECTED with
-     the rejection value, then return `outerPromise`.
-
-   **PENDING path** (state == 0):
-   - **Phase C scaffolding slice** (pre-1C-B): emit `unreachable` with
-     a marker comment, OR call a host import that throws "async
-     suspension not yet supported" so the failure is observable but
-     non-fatal.
-   - **Phase C full slice** (post-1C-B): synthesise the continuation
-     closure as described in step 5 above, register it via
-     `emitStandalonePromiseThen(%p, %cont)`, and `return outerPromise`.
-     Control reaches drain when the host yields.
-
-3. The IR-level result `IrValueId` is bound only in the FULFILLED
-   branch; the REJECTED and PENDING branches do not produce a value
-   (they terminate or schedule a continuation respectively). Lowerer
-   must therefore wrap the await result in an `if/else` with explicit
-   block result type, OR emit each branch as a separate basic block
-   with proper SSA renaming.
-
-### `IrInstrAsyncReturn` lowering
-
-```wat
-;; stack: <returnValue: externref>
-local.get $outerPromise
-swap
-call $emit_settle_resolved  ;; pseudo — actually emits inline:
-                            ;;   struct.set $Promise $state (i32.const 1)
-                            ;;   struct.set $Promise $value (resolved)
-                            ;;   drain pending callbacks via 1C-B
-local.get $outerPromise
-return                       ;; F₀'s caller gets the (now-settled) Promise
-```
-
-Implementation: call `emitStandalonePromiseResolve(ctx, fctx,
-valueInstrs)` with `outerPromise` accessible via the captured closure
-struct field. Add a new variant
-`emitStandalonePromiseSettleResolve(ctx, fctx, promiseLocalIdx,
-valueInstrs)` that MUTATES an existing pending Promise rather than
-allocating a fresh one — needed because the outer Promise was already
-returned to the caller.
-
-### `IrInstrAsyncThrow` lowering
-
-Symmetric to async-return: settle `outerPromise` as REJECTED with the
-thrown reason. Implementation: new helper
-`emitStandalonePromiseSettleReject(ctx, fctx, promiseLocalIdx,
-reasonInstrs)`.
-
-The Phase C lowerer also recognises **uncaught Wasm throws** inside
-the function body (i.e. `IrInstrThrow` that reaches the function
-boundary without a matching `try/catch`). These must be intercepted
-at the function epilogue and re-routed to `async-throw` semantics —
-otherwise the host sees a raw Wasm exception instead of a rejected
-Promise.
-
-### try/catch interaction
-
-`try { … await x; … } catch (e) { … }` requires the catch handler
-itself to be a continuation: when `x` rejects, control must transfer
-to the catch handler with the rejection value as `e`, NOT propagate
-as a Wasm exception (the function has already returned `outerPromise`
-to its caller).
-
-Implementation approach: associate each `IrInstrAwait` with the
-**innermost enclosing try-block**'s catch handler IrBlockId (computed
-during from-ast lowering). The PENDING-path continuation synthesis
-must then emit TWO callbacks:
-
-- `onFulfilled`: standard continuation
-- `onRejected`: enters the catch handler with the rejection value
-
-This means the microtask scheduler must distinguish fulfillment vs
-rejection callbacks. Two options:
-
-A. **Two parallel queues** (recommended for Phase C v1): every
-   continuation gets two slots in the callback vec; `__promise_then`
-   takes two funcref params. Simpler, doubles closure storage.
-
-B. **Tagged single queue**: each continuation funcref is wrapped in a
-   struct `{ fulfilled: funcref, rejected: funcref }`. More memory
-   per pending await but uniform scheduler interface.
-
-**try/catch is OUT OF SCOPE for the first Phase C slice.** Initial
-implementation rejects (defers) async functions whose bodies contain
-`try`/`catch` around an `await`. Adding catch handler routing is a
-follow-up.
-
-### Integration with tail-call infrastructure (`return_call` / `return_call_ref`)
-
-The existing tail-call mechanism (used for non-async functions in
-return position) DOES NOT apply to async continuations — async always
-returns through the outer Promise, never via direct tail-call to the
-caller. Phase C lowerer must explicitly NOT emit `return_call` in
-async function bodies. The selector should mark async-function bodies
-with a flag that `peephole.ts` reads to skip the tail-call rewrite.
-
-### Selector gate (`supportsAsyncIr` flag)
-
-In `src/ir/select.ts`, the `whyNotIrClaimable` function returns
-`"async-function"` for plain `async function` / `async` methods.
-Phase C threads a new flag through the codegen context:
+**File: `src/codegen/async-scheduler.ts`** (new helper near
+`getOrRegisterPromiseType` at line ~84)
 
 ```ts
-// src/codegen/context/types.ts
-interface CodegenContext {
-  // ...existing fields
-  /** #1373b — when true, async functions flow through IR's CPS lowering;
-   * when false, they fall back to the legacy direct codegen. */
-  supportsAsyncIr: boolean;
+export interface AsyncFrameDescriptor {
+  readonly frameTypeIdx: number;
+  readonly stateFieldIdx: 0;      // always 0 by convention
+  readonly outerFieldIdx: 1;      // ref $Promise
+  /** Map from param/local name → field index (≥ 2) and ValType. */
+  readonly slots: ReadonlyMap<string, { fieldIdx: number; type: ValType }>;
+}
+
+export function getOrRegisterAsyncFrameType(
+  ctx: CodegenContext,
+  fnName: string,
+  slotSpec: ReadonlyArray<{ name: string; type: ValType }>,
+): AsyncFrameDescriptor;
+```
+
+The slot spec is keyed by IR local name; lower.ts builds it from
+`func.params` + the "live across await" subset of `func.locals`
+(computed via a liveness sweep — see 2.2).
+
+The promise field uses `ref $Promise` (typed, not externref) because
+the frame is internal and the cast cost can be avoided. The `state`
+field is `i32` matching the Slice 1 sentinel space, with two new
+sentinels reserved:
+```ts
+export const ASYNC_STATE_REJECTING = 0x7FFF_FFFE;  // route to reject in next resume
+export const ASYNC_STATE_DONE      = 0x7FFF_FFFF;  // outer promise settled — no more states
+```
+
+#### 2.2 Liveness sweep (which locals cross awaits?)
+
+**File: `src/ir/lower.ts`** — new helper near `collectIrUses` at line
+~1889.
+
+```ts
+function collectAsyncFrameSlots(func: IrFunction): {
+  crossingValues: ReadonlySet<IrValueId>;
+  awaitSites: ReadonlyArray<{ blockIdx: number; instrIdx: number; operand: IrValueId; result: IrValueId }>;
 }
 ```
 
-The selector reads this flag and CLAIMS async functions when both:
-1. `supportsAsyncIr === true` (config opt-in)
-2. The function body matches the "Phase C v1" subset (no
-   try/catch/finally wrapping awaits — see "try/catch" above)
+Algorithm: walk every block; for each `await`-kind instr, record the
+site; for each value used in a block strictly later in CFG order than
+its defining await, mark it as "live across await". Use the existing
+`crossBlock` machinery from `lowerIrFunctionToWasm` as a starting
+point — a value is await-crossing iff (a) defined before some await
+and (b) used after that same await in the dominator order. A
+conservative implementation that promotes every cross-block value to
+the frame is OK for Slice 2 (extra frame fields, no correctness
+issue). Pure intra-state values stay as Wasm locals.
 
-For the **scaffolding-only first slice** (this PR's recommended
-scope), `supportsAsyncIr` is hardcoded `false` — selector stays
-deferred, no async function actually flows through IR yet. Phase 1C-B
-+ scheduler queue can land independently. Once both are green, a
-single-line change in `isAsyncIrReady(ctx)` flips the gate on.
+#### 2.3 State splitter
 
-### File-by-file implementation map
+**File: `src/ir/lower.ts`** — new top-level pass `splitAsyncIntoStates`
+running BEFORE `lowerIrFunctionToWasm` (called from
+`compileIrPathFunctions` in `src/ir/integration.ts:582` immediately
+before the per-fn `lowerIrFunctionToWasm` call when
+`func.funcKind === "async"`).
 
-1. **`src/ir/from-ast.ts`** — wire `ts.AwaitExpression` → `IrInstrAwait`
-   emission, async-function `return <v>` → `IrInstrAsyncReturn` (replacing
-   the standard `IrTerminatorReturn`), uncaught `ts.ThrowStatement` inside
-   async body → `IrInstrAsyncThrow`. ~80 LoC.
+Output: an array of `IrFunction`s — one entry fn + N+1 state fns,
+each a normal IrFunction (so they flow through the rest of the
+lowering / hygiene / inline pipeline unchanged after split). State
+fns have:
+- `funcKind: "async-state"` (new variant added to `IrFunction.funcKind`
+  in `src/ir/nodes.ts:1900`).
+- Params: `[capsAsExtern: externref, resolvedOrRejected: externref]`.
+- Result type: `[]` (void — they enqueue continuations or settle the
+  outer promise; they never return a value to a wasm caller).
+- A synthesised prologue that:
+  1. `local.get $capsAsExtern; any.convert_extern; ref.cast $<fn>__frame; local.set $frame`.
+  2. For each frame slot used in this state: `local.get $frame; struct.get $<fn>__frame.$slot; local.set $local_<n>`.
 
-2. **`src/ir/lower.ts`** — replace the throwing stubs at lines
-   1773-1778 with the full CPS transform described above. Add a new
-   helper `synthesiseContinuationClosure(ctx, fctx, postAwaitBlocks,
-   captures): { closureTypeIdx, contFuncIdx, structFields }` that:
-   - Registers the per-call closure struct type
-   - Emits the continuation function (per-callsite naming)
-   - Returns the indices needed by the call site
-   ~250-400 LoC.
+#### 2.4 Per-state body emission
 
-3. **`src/codegen/async-scheduler.ts`** — add two new helpers:
-   - `emitStandalonePromiseSettleResolve(ctx, fctx, promiseLocal,
-     valueInstrs)` — mutate existing pending Promise → FULFILLED, fire
-     stored callbacks via the microtask queue. ~30 LoC.
-   - `emitStandalonePromiseSettleReject` — symmetric for REJECTED.
-     ~30 LoC.
-   Both are blocked on #1326c Phase 1C-B's `emitStandalonePromiseThen`
-   implementation landing.
+For state `i` (where i < N):
 
-4. **`src/ir/select.ts`** — flip `"async-function"` bucket from
-   always-deferred to conditionally-claimed via `isAsyncIrReady(ctx)`.
-   One new helper, ~20 LoC.
+```wasm
+;; ... state i body (regular IR instrs translated as usual,
+;;     with frame slot loads at top and stores before suspend) ...
 
-5. **`src/codegen/context/types.ts`** — add `supportsAsyncIr: boolean`
-   to `CodegenContext`. Initialised `false` in `create-context.ts`.
-   ~5 LoC.
+;; AT THE AWAIT POINT:
+;; 1. Evaluate awaited expr → externref Promise on stack.
+emitValue(await.operand, out);
 
-6. **`tests/ir/issue-1373b.test.ts`** — comprehensive coverage. Test
-   shapes:
-   - Zero-await async function (FULFILLED fast path only)
-   - Single-await with FULFILLED Promise.resolve operand
-   - Single-await with REJECTED Promise.reject operand
-   - Single-await with PENDING operand (requires drain)
-   - Chained `await await` (nested CPS)
-   - Captures: locals defined before await read after
-   - Mutated captures (let, not const, written in continuation)
+;; 2. Save locals that cross THIS await back into the frame.
+for slot in liveAcrossThisAwait:
+  out.push({ op: "local.get", index: frameLocalIdx });
+  out.push({ op: "local.get", index: slot.localIdx });
+  out.push({ op: "struct.set", typeIdx: frameTypeIdx, fieldIdx: slot.fieldIdx });
 
-### Splitting strategy (revisit from original plan)
+;; 3. Set state = i+1.
+out.push({ op: "local.get", index: frameLocalIdx });
+out.push({ op: "i32.const", value: i + 1 });
+out.push({ op: "struct.set", typeIdx: frameTypeIdx, fieldIdx: 0 });
 
-The original split (1373b-prep / 1373b-lower / 1373b-claim) remains
-valid. Concretely:
+;; 4. Push the next-state funcref + frame-as-extern + call __promise_then
+;;    which enqueues a microtask of (funcref, frameAsExtern, awaitedValue).
+;;    awaitedValue is consumed by .then's internal subscribe path.
+out.push({ op: "ref.func", funcIdx: state_i_plus_1_funcIdx });
+out.push({ op: "local.get", index: frameLocalIdx });
+out.push({ op: "extern.convert_any" });
+;; Stack: [awaitedPromise, contFuncref, frameAsExtern]
+emitStandalonePromiseThen(ctx, fctx, /* promise on stack */ [], /* fn on stack */ []);
+;; emitStandalonePromiseThen consumes 3 values and pushes a NEW pending
+;; promise representing the chained result. We DROP it — the caller of
+;; this async fn already has the outer promise; the chained Promise
+;; from .then is the chained-resolution machinery's internal book-
+;; keeping that doesn't escape.
+out.push({ op: "drop" });
 
-**Slice 1 — `1373b-scaffolding` (this PR, ~400 LoC)**:
-- Files 4, 5, 6 above + the FULFILLED/REJECTED fast paths in file 2
-- PENDING path: emit a clear "needs 1C-B" runtime throw stub
-- Gate hardcoded `false` (no async function flows yet)
-- Tests: zero-await + FULFILLED-only + REJECTED-only cases
-- Ships independent of #1326c Phase 1C-B status
+;; 5. Return from the state func (void).
+out.push({ op: "return" });
+```
 
-**Slice 2 — `1373b-pending-path` (~250 LoC, blocked on 1326c Phase 1C-B)**:
-- Replace the "needs 1C-B" stub with the real CPS continuation
-  synthesis in file 2
-- Add helpers in file 3 (settle helpers)
-- Tests: single-await PENDING + capture + mutated capture cases
+For the final state N (no more awaits — just a tail):
 
-**Slice 3 — `1373b-claim-gate` (~10 LoC, blocked on Slices 1-2 green)**:
-- Flip `isAsyncIrReady(ctx)` to true when context says so
-- Add a config flag (default off; flip after CI green)
-- Tests: existing async equivalence test suite continues to pass with
-  the IR claim active
+```wasm
+;; ... tail computation, result on stack as externref ...
 
-**Slice 4 (out-of-scope follow-up): try/catch handler routing**, async
-generators (`async function*`), top-level await — separate issues.
+;; Settle the outer promise: state := FULFILLED, value := result.
+out.push({ op: "local.get", index: frameLocalIdx });
+out.push({ op: "struct.get", typeIdx: frameTypeIdx, fieldIdx: 1 }); ;; outer: ref $Promise
+out.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+out.push({ op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 0 });
+out.push({ op: "local.get", index: frameLocalIdx });
+out.push({ op: "struct.get", typeIdx: frameTypeIdx, fieldIdx: 1 });
+;; <result> already on stack — swap pattern not needed; result was
+;; computed first. Reorder: stash result in a local before reading outer.
+;;   (out: local.tee resultLocal; pop outer onto stack; local.get resultLocal)
+out.push({ op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 1 });
+
+;; Fire any pending callbacks attached to outer.callbacks (Phase 1C-B
+;; helper `__promise_settle_callbacks` — see #1326c §1j).
+out.push({ op: "local.get", index: frameLocalIdx });
+out.push({ op: "struct.get", typeIdx: frameTypeIdx, fieldIdx: 1 });
+out.push({ op: "call", funcIdx: settleCallbacksFuncIdx });
+
+out.push({ op: "return" });
+```
+
+#### 2.5 Async-throw and rejection routing
+
+When the body executes a synchronous `throw` (an `async.throw` IR
+instr, or any IR instr that triggers `__exn`), the surrounding state
+function catches via Wasm `try…catch_all` synthesised at the top of
+each state body:
+
+```wasm
+(func $<fn>__state_i (param $caps externref) (param $value externref)
+  (local $frame (ref $<fn>__frame))
+  (local $result externref)
+  ;; ... prologue: cast caps → $frame, hoist slots into locals ...
+  (try
+    (do
+      ;; ... state body — may push to $result ...
+      ;; (normal flow: continues to next state or settles outer)
+    )
+    (catch $__exn
+      ;; Pop the exception payload (externref) — reject the outer Promise.
+      local.get $frame
+      struct.get $<fn>__frame $outer
+      i32.const 2                      ;; REJECTED
+      struct.set $Promise $state
+      local.get $frame
+      struct.get $<fn>__frame $outer
+      ;; rotate exception payload above the outer ref, then struct.set $value
+      ;; (use a scratch local — same pattern as Slice 1 awaitScratchPromise)
+      struct.set $Promise $value
+      ;; fire pending callbacks
+      local.get $frame
+      struct.get $<fn>__frame $outer
+      call $__promise_settle_callbacks
+    )
+  )
+)
+```
+
+This means every Slice 2 state function is wrapped in `try/catch_all`,
+and an async function's "sync throw" semantics fall out for free:
+`throw new Error("x")` inside the async body → caught by the state
+function's catch_all → reject the outer Promise. No special handling
+of `async.throw` IR instrs is needed beyond Slice 1's wrap (which is
+still used in the *non-state-machine* case — synchronous-only async
+fns with no awaits at all, where Slice 1's FULFILLED/REJECTED fast
+paths emit directly).
+
+Catch handlers that wrap an await (`try { await p } catch (e) { … }`)
+are out of scope for Slice 2 — Slice 1b explicitly defers them via the
+`whyNotIrClaimable` body-shape check below.
+
+#### 2.6 Entry-function rewrite
+
+The original `async function f(p1, p2)` keeps its Wasm funcIdx and
+typeIdx (callers already emitted `call $f` with that signature). The
+entry's body is replaced with:
+
+```wasm
+(func $f (param $p1 ...) (param $p2 ...) (result externref)
+  (local $frame (ref $f__frame))
+  ;; Allocate frame.
+  struct.new $f__frame    ;; (state=0, outer=ref.null + initialised below, params, locals)
+  local.set $frame
+
+  ;; Init state = 0, outer = new pending $Promise.
+  local.get $frame
+  i32.const 0
+  struct.set $f__frame $state
+
+  local.get $frame
+  i32.const 0                  ;; PENDING
+  ref.null extern              ;; value
+  ref.null extern              ;; callbacks
+  struct.new $Promise
+  struct.set $f__frame $outer
+
+  ;; Copy params into frame.
+  local.get $frame; local.get $p1; struct.set $f__frame $p1
+  local.get $frame; local.get $p2; struct.set $f__frame $p2
+
+  ;; Schedule state 0 to run in the next microtask.
+  ;; Stack: [funcref, capsAsExtern, valueArg]
+  ref.func $f__state_0
+  local.get $frame; extern.convert_any
+  ref.null extern              ;; no resolved value yet — state 0 ignores it
+  call $__microtask_enqueue
+
+  ;; Return the outer promise as externref.
+  local.get $frame
+  struct.get $f__frame $outer
+  extern.convert_any
+)
+```
+
+This is the **only** Wasm body that survives at `$f`'s funcIdx; the
+state functions are appended after `$f` in `ctx.mod.functions` and
+have synthesised names `$f__state_0`, `$f__state_1`, …
+
+#### 2.7 Liveness across awaits — implementation budget
+
+A complete liveness analysis is ~150 LoC and uses standard SSA
+dominator-tree machinery. For Slice 2 v1 a **conservative**
+approximation is sufficient: any IR local that's read in any block
+strictly later than its defining block AND that block contains an
+`await` between def and use → promote to frame. Use
+`crossBlock: Set<IrValueId>` already computed by `lowerIrFunctionToWasm`
+as the starting set, then walk the CFG to filter.
+
+Conservative wins extra frame fields (a few words per async fn) at
+zero correctness cost.
+
+#### 2.8 Slice 2 file:line targets
+
+| File | Function | Line | Change |
+|------|----------|------|--------|
+| `src/codegen/async-scheduler.ts` | (new) `getOrRegisterAsyncFrameType` | end of file | +60 LoC — frame struct registry. Mirror `getOrRegisterPromiseType` pattern. |
+| `src/codegen/async-scheduler.ts` | (new) `__promise_settle_callbacks` | end of file | +40 LoC — drain a Promise's pending `.then` callbacks. Calls `__microtask_enqueue` per entry. (May already exist as part of #1326c §1j.) |
+| `src/ir/nodes.ts` | `IrFunction.funcKind` | line 1900 | Add `"async-state"` variant. |
+| `src/ir/select.ts` | `isAsyncIrReady` | line 190 | Slice 2 keeps gate closed. Slice 3 flips. |
+| `src/ir/lower.ts` | `lowerIrFunctionToWasm` `case "await"` | line ~1850 | Detect when `funcKind === "async-state"` — emit the state-emission pattern above. The non-state-machine `funcKind === "async"` path keeps Slice 1's FULFILLED/REJECTED inline branches as the fast path for await-on-already-settled promises; the new PENDING branch now calls `emitStandalonePromiseThen` + returns. |
+| `src/ir/lower.ts` | (new) `splitAsyncIntoStates` | new section | +200 LoC — pre-lowering pass producing N+1 IrFunctions. Runs only when `func.funcKind === "async"`. |
+| `src/ir/lower.ts` | (new) `collectAsyncFrameSlots` | new section | +80 LoC — liveness sweep. |
+| `src/ir/integration.ts` | `compileIrPathFunctions` Phase 1 build | line ~178 | When the built IrFunction has `funcKind === "async"`, call `splitAsyncIntoStates(fn)` and push every output IrFunction to `built` (entry as the original, state fns as `synthesized: true`). |
+| `tests/ir/issue-1373b.test.ts` | Slice 2 cases | append | Add direct-IR tests: (a) `async function f() { return await Promise.resolve(42); }` produces 42 after drain; (b) `async function f() { return await p1; await p2; return 1; }` chains correctly; (c) `async function f() { throw new Error("x"); }` rejects (already covered by Slice 1 — keep). |
+
+Estimate: **~600 LoC** in `src/ir/lower.ts` + helpers, ~200 LoC tests.
+
+#### 2.9 Regression gate (test262 dirs to check)
+
+Slice 2 keeps the gate closed, so test262 regression risk is **zero**.
+Smoke validation via `tests/ir/issue-1373b.test.ts` only.
+
+When Slice 3 flips the gate, watch these directories:
+- `test/language/expressions/await/`
+- `test/language/statements/async-function/`
+- `test/built-ins/Promise/resolve/`
+- `test/built-ins/Promise/then/`
+- `test/built-ins/Promise/reject/`
+- `test/language/expressions/async-arrow-function/`
+
+CI bucket-by-path analysis will surface any cluster ≥5 — escalate
+those before Slice 3 self-merges.
+
+---
+
+### Slice 1b — from-ast wiring (no gate flip)
+
+**Goal**: make the IR builder actually emit `IrInstrAwait` /
+`IrInstrAsyncReturn` / `IrInstrAsyncThrow` from AST nodes, so the
+Slice 2 lowering is reachable end-to-end through compile (not just
+synthesised in tests). Gate STILL hardcoded `false`, so this is dead
+code at runtime — but it eliminates the integration risk for Slice 3.
+
+**Why this is a separate slice**: it touches a different file
+(`src/ir/from-ast.ts`) and a different reviewer mental-model (AST
+shape recognition vs Wasm IR emission). Easier to review separately.
+
+#### 1b.1 from-ast emission
+
+**File: `src/ir/from-ast.ts`**
+
+- `lowerFunctionAstToIr` (line ~366): when the decl has the
+  `AsyncKeyword` modifier, set `funcKind: "async"` (currently always
+  `"regular"` or `"generator"`).
+- `lowerExpression` for `ts.AwaitExpression`: emit `IrInstrAwait`
+  carrying the lowered operand IrValueId. Result IrType = the operand
+  type unwrapped from `Promise<T>` (use TS checker's
+  `getAwaitedType` — same as legacy `unwrapPromiseType` at
+  `function-body.ts:569`).
+- `lowerTail` for `ts.ReturnStatement` inside an async fn: emit
+  `IrInstrAsyncReturn` (NOT the regular `IrTerminatorReturn`).
+- `lowerStatement` for `ts.ThrowStatement` inside an async fn: emit
+  `IrInstrAsyncThrow` (NOT `IrInstrThrow`).
+
+#### 1b.2 selector body-shape check
+
+**File: `src/ir/select.ts`**
+
+- `isAsyncIrReady` (line 190): replace the inline `return false;` with
+  a real body-shape check. Reject when:
+  - The body contains a `try` statement that wraps an `await` in its
+    `tryBlock`. (Catch-on-await is Slice 4 — out of scope.)
+  - The body contains a `for await` loop. (Async iteration is also out
+    of scope; routes to `async-generator` bucket.)
+- Once the check passes, still return `false` (gate flip is Slice 3).
+- Keep the `if (!options?.supportsAsyncIr) return false;` short-circuit
+  at the top — every gate decision flows through one switch.
+
+#### 1b.3 file:line targets
+
+| File | Function | Line | Change |
+|------|----------|------|--------|
+| `src/ir/from-ast.ts` | `lowerFunctionAstToIr` | 366 | Set `funcKind: "async"` when the decl has `AsyncKeyword`. |
+| `src/ir/from-ast.ts` | `lowerExpression` | new arm | Recognise `ts.AwaitExpression` → `IrInstrAwait`. |
+| `src/ir/from-ast.ts` | `lowerTail` | existing return arm | Branch on `cx.funcKind === "async"` → emit `IrInstrAsyncReturn`. |
+| `src/ir/from-ast.ts` | `lowerStatement` | existing throw arm | Branch on `cx.funcKind === "async"` → emit `IrInstrAsyncThrow`. |
+| `src/ir/select.ts` | `isAsyncIrReady` | 190 | Real body-shape gate (still returns `false` at the end). |
+| `tests/ir/issue-1373b.test.ts` | append | append | Test that the selector still rejects (`supportsAsyncIr: false`), and that with `supportsAsyncIr: true` an `async function f() { return await p; }` produces an IR with `kind: "await"` + `kind: "async.return"` instrs visible via the verifier. |
+
+Estimate: **~150 LoC** + ~80 LoC tests.
+
+#### 1b.4 Regression gate
+
+Gate still closed → zero test262 risk. Verify the IR fallback budget
+in `scripts/ir-fallback-baseline.json` (#1376) stays unchanged: the
+`async-function` bucket count must not move, since the selector still
+rejects every async fn.
+
+---
+
+### Slice 3 — Gate flip
+
+**Goal**: flip `isAsyncIrReady`'s final return from `false` to `true`.
+Async functions whose body shape is accepted now flow through the IR's
+CPS lowering.
+
+**Pre-conditions**:
+- Slice 1, 1b, 2 all on main.
+- #1326c Phase 1C-B / 1D fully landed (microtask drain works in WASI
+  smoke test).
+- Local smoke test passes: `async function main() { return await Promise.resolve(42); }`
+  returns 42 in standalone mode after `__drain_microtasks()`.
+
+**Change**: one line in `src/ir/select.ts:194`:
+
+```diff
+-  return false;
++  return true;
+```
+
+Plus: thread `supportsAsyncIr: ctx.supportsAsyncIr` through
+`compileIrPathFunctions`'s `planIrCompilation` call in
+`src/ir/integration.ts:92` (currently `{ experimentalIR: true }` — add
+`supportsAsyncIr: ctx.supportsAsyncIr`).
+
+Plus: flip the context default in
+`src/codegen/context/create-context.ts:130` from `false` to `true`
+**after** local smoke tests pass — this is the actual "ship it" line.
+
+#### 3.1 Regression gate
+
+This is the slice that exposes the IR async path to test262. Watch
+the dirs listed in §2.9. Expectation:
+- `await/`: ~50–100 tests flip pass→pass (no change — these test
+  semantic surface that doesn't depend on the lowering strategy).
+- `async-function/`: a few may flip pass→fail if liveness sweep
+  misses a corner case. The CI bucket cap (50/bucket) catches this
+  cleanly; revert by setting the gate back to `false` in select.ts —
+  no other code paths change, so the revert is one-line.
+- Net regressions must be ≤ +10 for self-merge per the standing PR
+  protocol. Otherwise escalate to tech lead.
+
+Estimate: **~10 LoC** code, **~40 LoC** tests (covering the gate-on
+path end-to-end).
+
+---
+
+### Cross-slice sequencing
+
+```
+                  #1326c Phase 1C-B    (microtask + Promise.then real bodies)
+                          │
+                          ▼
+   ┌──────────────────────┴──────────────────────┐
+   │                                             │
+Slice 2 (PENDING-path CPS)              Slice 1b (from-ast wiring)
+   │                                             │
+   └──────────────────────┬──────────────────────┘
+                          ▼
+                  Slice 3 (gate flip)
+                          │
+                          ▼
+                #1042 acceptance criteria
+```
+
+Slice 1b and Slice 2 are mutually independent and can ship in either
+order or in parallel. Slice 3 requires both. Doing Slice 1b first
+gives a fully wired but dormant path, which is the safer review
+posture; doing Slice 2 first lets devs write direct-IR unit tests
+without touching `from-ast.ts`. The dispatcher can take either path.
+
+### Acceptance criteria (joint with #1042 and #1373)
+
+After Slice 3 lands and the gate is flipped:
+
+1. **#1042 AC #2**: `async function f() { return await Promise.resolve(42); }`
+   returns 42 after a real microtask yield. Verified via WASI smoke
+   test invoking `__drain_microtasks()` between fn-call and result
+   inspection.
+2. **#1042 AC #3**: try/catch around await propagates host rejections
+   correctly. Verified by Slice 4 (separate issue — file as #1373c
+   when Slice 3 lands).
+3. **#1042 AC #4**: `Promise.all([p1, p2])` serializes through two
+   real microtask boundaries. Verified by counting `__drain_microtasks`
+   iterations needed.
+4. **#1042 AC #5**: axios Tier 4 smoke test passes (real GET from
+   httpbin.org). This requires JS host mode (microtask queue is empty
+   between host I/O ticks); validated by the existing #1032 fixture.
+5. **#1373b AC #1–5**: all 5 acceptance criteria above pass.
+6. **#1373** is already done — Slice 3 is the final piece that retires
+   the `async-function` fallback bucket from `ir-fallback-baseline.json`.
 
 ### Risks and mitigations
 
 | Risk | Mitigation |
-|------|-----------|
-| Closure-funcref interaction harder than expected (per #1326c notes) | Uniform-arity continuation signature avoids per-site function-table dispatch. Tests cover capture/restore. |
-| CPS transform regresses legacy async tests | Slice 1 + 2 keep gate closed; Slice 3 ships only after equivalence tests pass on a feature-flag-on run. |
-| `outerPromise` allocation cost dominates microbenchmarks | The standalone `$Promise` struct.new is 3 stack values + struct.new, cheaper than the host import. JS-host mode unchanged. |
-| Tail-call optimisation accidentally re-applied to async bodies | Selector sets a "skip tail-call" flag on async functions; `peephole.ts` reads it. |
-| Drain-after-_start ordering in WASI | Already handled by #1326c Phase 1C-A's `getDrainFuncIdxForWasiStart` wire-up. |
-
-### Acceptance criteria mapping (from existing § above)
-
-| # | Original criterion | Slice that delivers |
-|---|--------------------|---------------------|
-| 1 | `async function f() { return await g(42); }` works | Slice 2 (PENDING path) |
-| 2 | `.then` chaining via await | Slice 2 + 1326c Phase 1C-B |
-| 3 | Rejection: `async function f() { throw … }` | Slice 1 (REJECTED fast path) |
-| 4 | Legacy equivalence tests pass | Slice 3 (gate-flip + CI sweep) |
-| 5 | WASI standalone `async main()` returns 42 | Slice 1 (zero-await + Promise.resolve fast path) + Slice 2 (drain) |
-
-### Implementation notes for the developer
-
-- Write the FULFILLED fast path FIRST and ship Slice 1 standalone.
-  Validating that path against existing equivalence tests will catch
-  ~80% of the integration bugs before the harder PENDING path lands.
-- Reuse the existing closure infrastructure
-  (`src/codegen/closures.ts`'s `lowerClosureCapture` + `closureStructTypeIdx`
-  pattern). The continuation closure struct is conceptually identical to
-  a user-level closure — no new lifting machinery needed.
-- Reject async functions inside the IR selector for now whenever the
-  body contains `ts.SyntaxKind.TryStatement` whose `tryBlock` (or any
-  nested block) contains an `await`. Single regex-like AST walk.
-- The `outerPromise` captured-in-closure pattern is identical to how
-  generators capture their `IteratorResult` slot — see #1323 for
-  prior art.
+|------|------------|
+| Liveness sweep miscompiles a value that crosses an await | Conservative over-promotion to frame fields. Cost: extra struct slots. Correctness: guaranteed. |
+| `try/catch_all` wrapper around every state body adds overhead even for fns that never throw | Acceptable — Wasm engines fast-path the no-exception path. Optional Slice 5: skip the wrapper when liveness proves the body can't throw (e.g. only awaits + arithmetic). |
+| Funcref typeIdx mismatch between continuation and microtask queue | All continuations share one signature `(externref, externref) -> void` — drained via single typeIdx. Verified at IR build by the existing IR verifier (`verify.ts`). |
+| `addFuncType` interning shifts funcIdx mid-emission | All state fns added in Phase 1 of `compileIrPathFunctions` before Phase 3 lowering — same pattern as monomorphize clones (line 434–452). |
+| Async fn called from a non-IR (legacy) caller has signature mismatch | The entry fn's signature is unchanged: `(params...) -> externref` (the Promise). Callers' `call $f` ops keep working. |
+| Slice 2 breaks `tests/ir/issue-1373b.test.ts` Slice 1 tests | Slice 2 must NOT modify Slice 1's FULFILLED/REJECTED inline branches — those remain the fast path for `await` on an already-settled Promise. The new PENDING branch is additive. |
