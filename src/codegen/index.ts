@@ -4211,6 +4211,14 @@ export const KNOWN_CONSTRUCTORS = new Set([
   "URIError",
   "EvalError",
   "ReferenceError",
+  // (#1467) AggregateError gets its own 3-param `__new_AggregateError` host
+  // import registered by new-super.ts (errors + message + options). The
+  // generic unknown-constructor pre-pass would register it with a 2-param
+  // signature (errors + message only), which then collides with new-super.ts's
+  // 3-param call site and silently drops the `options` argument. Keep this
+  // entry in `KNOWN_CONSTRUCTORS` so the pre-pass skips it and lets
+  // new-super.ts register the canonical signature.
+  "AggregateError",
   "Test262Error",
   "Object",
   "Function",

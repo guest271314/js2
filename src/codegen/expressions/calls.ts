@@ -1220,6 +1220,64 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return compileSuperMethodCall(ctx, fctx, expr);
   }
 
+  // (#1467) AggregateError(errors, message, options?) — called WITHOUT `new`.
+  // Per ES §20.5.7.1, AggregateError called as a function must construct
+  // normally (same effective semantics as `new`). Mirror the codegen in
+  // new-super.ts so the without-new and with-new failures resolve together.
+  // Must run BEFORE the property-access dispatch since the expression is a
+  // bare identifier, and BEFORE the BUILTIN_CLASS_NAMES generic path which
+  // would otherwise emit a host-method call without spec coercion.
+  // Unwrap parenthesized expressions and as/satisfies casts so
+  // `(AggregateError as any)([], 'msg')` also reaches this dispatch.
+  let _aggCallee: ts.Expression = expr.expression;
+  while (
+    ts.isParenthesizedExpression(_aggCallee) ||
+    ts.isAsExpression(_aggCallee) ||
+    ts.isTypeAssertionExpression(_aggCallee) ||
+    ts.isSatisfiesExpression(_aggCallee) ||
+    ts.isNonNullExpression(_aggCallee)
+  ) {
+    _aggCallee = (_aggCallee as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(_aggCallee) && _aggCallee.text === "AggregateError") {
+    const args = expr.arguments ?? [];
+    if (args.length >= 1) {
+      const errorsType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+      if (errorsType && errorsType.kind !== "externref") {
+        coerceType(ctx, fctx, errorsType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    if (args.length >= 2) {
+      const msgType = compileExpression(ctx, fctx, args[1]!, { kind: "externref" });
+      if (msgType && msgType.kind !== "externref") {
+        coerceType(ctx, fctx, msgType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    if (args.length >= 3) {
+      const optsType = compileExpression(ctx, fctx, args[2]!, { kind: "externref" });
+      if (optsType && optsType.kind !== "externref") {
+        coerceType(ctx, fctx, optsType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_AggregateError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
@@ -1837,6 +1895,35 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "f64" };
         }
+      }
+    }
+
+    // (#1467) Error.isError(v) — ES2025 static method.
+    // Returns true for any value with an [[ErrorData]] internal slot. Host
+    // import returns i32 (0/1); coerce to f64 / leave as i32 depending on
+    // caller context — we return i32 so callers can use it as a boolean.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Error" &&
+      propAccess.name.text === "isError" &&
+      expr.arguments.length >= 1
+    ) {
+      const isErrorIdx = ensureLateImport(ctx, "__error_isError", [{ kind: "externref" }], [{ kind: "i32" }]);
+      if (isErrorIdx !== undefined) {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") {
+          if (argType.kind === "ref" || argType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          } else {
+            // Numbers, bools, etc. aren't errors — drop and push 0.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            return { kind: "i32" };
+          }
+        }
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: isErrorIdx });
+        return { kind: "i32" };
       }
     }
 
