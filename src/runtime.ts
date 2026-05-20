@@ -2708,7 +2708,13 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter")
+      if (name === "__array_from_iter") {
+        // Cache the original Array.prototype[Symbol.iterator] so we can
+        // detect when user code (e.g. test262 iter-get-err-array-prototype)
+        // has overridden it. When overridden, we must invoke the protocol
+        // rather than fast-pathing the array — otherwise a throwing custom
+        // @@iterator on Array.prototype is silently swallowed (#1454).
+        const _origArrayIter: any = (Array.prototype as any)[Symbol.iterator];
         return (obj: any): any => {
           // Materialize an iterable/array-like to a real JS array so downstream
           // destructuring can walk it via .length + indexed access. For proper
@@ -2716,7 +2722,21 @@ assert._isSameValue = isSameValue;
           // propagates any throws from .next() — needed for spec-compliant
           // destructuring of throwing iterators (#1150).
           if (obj == null) return [];
-          if (Array.isArray(obj)) return obj;
+          if (Array.isArray(obj)) {
+            // #1454: Real arrays normally take a fast path, but if the user has
+            // overridden Array.prototype[Symbol.iterator] (or installed an own
+            // @@iterator on the array), spec §22.1.5 requires going through
+            // the iterator protocol so a throwing getter / non-default iterator
+            // is observable. Read the @@iterator descriptor first (this fires
+            // any accessor) — a throw here propagates as iter-get-err.
+            const ownIter = (obj as any)[Symbol.iterator];
+            if (ownIter !== _origArrayIter) {
+              // Non-default iterator: fall through to the protocol path below
+              // by treating the array as a generic iterable.
+              return Array.from(obj);
+            }
+            return obj;
+          }
           // Compiled sources that do `iter[Symbol.iterator] = fn` often land the
           // function under a stringified "Symbol(Symbol.iterator)" key rather
           // than the real well-known symbol. Array.from would then reject on
@@ -2853,6 +2873,7 @@ assert._isSameValue = isSameValue;
           }
           return Array.from(obj);
         };
+      }
       if (name === "__extern_slice")
         return (arr: any, start: number) => {
           if (Array.isArray(arr)) return arr.slice(start);

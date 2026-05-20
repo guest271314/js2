@@ -2,7 +2,7 @@
 id: 1454
 sprint: 52
 title: "spec gap: iterator protocol — error propagation and IteratorClose during destructuring"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -139,3 +139,72 @@ iterator record threaded through) will simplify the implementation.
   area).
 - `for-await-of` IteratorClose with async iterators — covered by
   #1373.
+
+## Test Results (in-progress)
+
+This PR addresses **iter-get-err** (~77) and **iter-step-err** (~57)
+failures — the bulk of the ~160 documented in the problem statement.
+The `iter-thrw-close` / `iter-rtrn-close` cases (~26 total) require a
+deeper architectural change (threading the IteratorRecord through
+destructuring so `iterator.return()` can be called when an inner default
+initializer throws). That remains an open follow-up.
+
+### Implementation summary
+
+1. **`src/codegen/statements/destructuring.ts`** — in
+   `compileExternrefArrayDestructuringDecl` (used for `var [x] = obj`,
+   `const [x] = obj`, and nested binding patterns over externref
+   sources), materialize the source via `__array_from_iter(obj)` before
+   reading indices. This invokes the iterator protocol (fires
+   `@@iterator` getter, calls `.next()`) so throws propagate per
+   §13.15.5.2.
+
+2. **`src/codegen/expressions/assignment.ts`** — same change in
+   `compileExternrefArrayDestructuringAssignment` (used for `[x] =
+   obj`). Both paths previously read via
+   `__extern_get(obj, box(i))`, which bypassed `@@iterator` entirely.
+
+3. **`src/runtime.ts`** — `__array_from_iter` now caches
+   `Array.prototype[Symbol.iterator]` at registration time. When called
+   on a real Array whose `@@iterator` is no longer the cached original
+   (the test262 `iter-get-err-array-prototype` pattern), it routes
+   through `Array.from(obj)` so the iterator protocol fires. Plain
+   arrays with the default iterator continue to take the no-copy fast
+   path (returns `obj` unchanged).
+
+### Local verification
+
+`tests/equivalence/issue-1454.test.ts` — 11 passing, 1 todo
+(`iter-thrw-close` documented as out-of-scope follow-up).
+
+| scenario | before | after |
+|----------|--------|-------|
+| `const [x] = iter` w/ throwing `@@iterator` | silently swallowed | throws ✓ |
+| `const [x] = iter` w/ throwing `.next()` | silently swallowed | throws ✓ |
+| `[x] = iter` w/ throwing `@@iterator` | silently swallowed | throws ✓ |
+| `[x] = iter` w/ throwing `.next()` | silently swallowed | throws ✓ |
+| `[x] = [...]` w/ overridden `Array.prototype[Symbol.iterator]` | bypassed | observed ✓ |
+| plain array destructure | works | works (no regression) |
+| generator destructure | works | works (no regression) |
+| Map destructure | works | works (no regression) |
+| null/undefined source | throws TypeError | throws TypeError (no regression) |
+| rest element | works | works (no regression) |
+
+### Out of scope (follow-up)
+
+- **`iter-thrw-close` / `iter-rtrn-close`** (~26 fails): when a default
+  initializer inside the binding pattern throws, the spec requires
+  calling `iterator.return()` on the still-running iterator. The
+  current architecture materialises via `Array.from` (eager), so the
+  iterator is already exhausted by the time the inner throw fires.
+  Fixing this needs an iterator-record-aware destructure (similar to
+  `compileForOfIterator` in `src/codegen/statements/loops.ts`) that
+  threads the iterator + a done flag through the binding emission and
+  wraps the destructure in `try/catch_all` to call
+  `__iterator_return` on exception.
+
+- **Parameter destructuring** for the same close-on-throw case: the
+  same architectural limitation applies. `destructureParamArray`
+  already calls `__array_from_iter` in its fallback path, so
+  iter-get-err and iter-step-err already propagate there. Close-on-
+  inner-init-throw remains the same follow-up.

@@ -1333,6 +1333,23 @@ function compileExternrefArrayDestructuringAssignment(
     });
   }
 
+  // #1454: Spec §13.15.5.2 ArrayAssignmentPattern requires GetIterator(value)
+  // before reading binding elements. The previous `tmpLocal[i]` via
+  // __extern_get path bypassed the @@iterator getter and .next() calls,
+  // so a throwing @@iterator (iter-get-err) or throwing .next() (iter-step-err)
+  // was silently swallowed. Materialize the source via __array_from_iter
+  // first — it invokes @@iterator + .next() and propagates throws.
+  // Plain arrays with the default @@iterator take the fast path.
+  if (resultType.kind === "externref" && target.elements.length > 0) {
+    const matIterIdx = ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (matIterIdx !== undefined) {
+      fctx.body.push({ op: "local.get", index: tmpLocal });
+      fctx.body.push({ op: "call", funcIdx: matIterIdx });
+      fctx.body.push({ op: "local.set", index: tmpLocal });
+    }
+  }
+
   // Ensure __extern_get is available
   let getIdx = ctx.funcMap.get("__extern_get");
   if (getIdx === undefined) {
