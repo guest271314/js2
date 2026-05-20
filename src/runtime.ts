@@ -4480,6 +4480,33 @@ assert._isSameValue = isSameValue;
       if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(String(s));
       if (name === "encodeURI") return (s: any) => encodeURI(String(s));
       if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(String(s));
+      // #1500 — `fetch` host import: bridge to globalThis.fetch when available.
+      // The compiler routes bare `fetch(url, init?)` identifier calls through
+      // this builtin; the host call returns a real JS `Promise<Response>` that
+      // the existing `__await` machinery unwraps. `.json()` / `.text()` /
+      // `.status` / `.ok` on the Response reach JS via the existing
+      // `extern_class` dispatch for class `Response` (duck-typed) and the
+      // `extern_get` path (primitive properties).
+      //
+      // Standalone-mode fallback per CLAUDE.md Architecture Principles: throw a
+      // descriptive error when no host `fetch` exists (WASI / pure standalone).
+      // A WASI HTTP wiring is out of scope for this issue.
+      if (name === "fetch")
+        return (url: any, init: any) => {
+          const hostFetch = (globalThis as any).fetch;
+          if (typeof hostFetch !== "function") {
+            throw new Error(
+              "js2wasm: fetch is not available in this environment (compile with a JS host or polyfill globalThis.fetch)",
+            );
+          }
+          // Convert WasmGC struct init bag → plain JS so the host can read
+          // .method / .headers / .body. Pass `undefined` rather than `null`
+          // when init is absent so the host fetch sees the same default-arg
+          // behavior as ordinary JS `fetch(url)`.
+          const exports = callbackState?.getExports();
+          const plainInit = init == null ? undefined : _isWasmStruct(init) ? _wasmToPlain(init, exports) : init;
+          return hostFetch(url, plainInit);
+        };
       // String.fromCharCode / String.fromCodePoint host imports
       if (name === "String_fromCharCode") return (code: number) => String.fromCharCode(code);
       if (name === "String_fromCodePoint") return (code: number) => String.fromCodePoint(code);
