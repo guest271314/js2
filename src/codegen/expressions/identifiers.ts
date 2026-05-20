@@ -6,6 +6,7 @@ import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isHeterogeneousUnion, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitFuncRefAsClosure } from "../closures.js";
+import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
@@ -448,6 +449,41 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     return globalInfo.type;
   }
 
+  // (#1395) Class identifier as a value — emit lazy-initialized class-object
+  // singleton, registering static-method names with the runtime's
+  // `_staticMethodNames` allowlist so `Object.getOwnPropertyDescriptor(C, "m")`
+  // returns the spec-correct descriptor for static methods. Without this,
+  // bare `C` falls through to the `ref.null.extern` graceful-default below
+  // and `getOwnPropertyDescriptor(null, "m")` returns null, breaking
+  // verifyProperty-style static-method tests under
+  // `language/{statements,expressions}/class/elements/`.
+  //
+  // For class expressions (`var C = class { ... }`), `classExprNameMap` maps
+  // the user-visible name "C" to the synthetic internal name (e.g.
+  // `__anonClass_0`). All static-prop / static-method storage is keyed on the
+  // synthetic name, so `C.f` (via property-access) reads from
+  // `__static___anonClass_0_f`. Resolving the bare `C` identifier must go
+  // through the same alias so the LHS of `C.f() === C` and the RHS read the
+  // SAME `__class_<Name>` singleton; otherwise the comparison ends up with
+  // `__class___anonClass_0` on the LHS (returned by the arrow body via the
+  // synthetic-name `enclosingClassName`) and `__class_C` on the RHS, which
+  // are distinct singletons and break identity. (#1395 Phase 1 follow-up.)
+  //
+  // Order matters: this is AFTER `localMap`, `capturedGlobals`,
+  // `moduleGlobals`, and `declaredGlobals` so user shadowing
+  // (`var C = ...; class C {}` — though unusual) takes precedence.
+  // It is BEFORE the funcMap-funcref path so a class never gets re-wrapped
+  // as a closure, and BEFORE the `ref.null.extern` fallback so we beat the
+  // null result.
+  {
+    const resolvedClassName = ctx.classExprNameMap.get(name) ?? name;
+    if (ctx.classObjectGlobals?.has(resolvedClassName)) {
+      if (emitLazyClassObjectGet(ctx, fctx, resolvedClassName)) {
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // globalThis — return the JS global object via host import
   if (name === "globalThis") {
     let funcIdx = ctx.funcMap.get("__get_globalThis");
@@ -500,15 +536,32 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   }
 
   // Check if this is a truly undeclared variable (no TS symbol).
-  // Accessing an undeclared variable should throw ReferenceError per JS strict mode.
+  // Accessing an undeclared variable should throw ReferenceError per JS strict mode
+  // (spec §13.10.1 / §13.11.4 — operand evaluation precedes ToPrimitive in `==`).
   // However, known globals (Symbol, Object, Reflect, etc.) have TS symbols from
   // lib.d.ts and should use the fallback default instead.
   const sym = ctx.checker.getSymbolAtLocation(id);
   if (!sym) {
-    // Truly undeclared variable — throw ReferenceError at runtime
-    const tagIdx = ensureExnTag(ctx);
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "throw", tagIdx } as unknown as Instr);
+    // Truly undeclared variable — throw a proper ReferenceError instance
+    // via the `__throw_reference_error` host import. The previous emission
+    // was a raw `throw ref.null.extern`, which surfaced to JS as `null` so
+    // `e instanceof ReferenceError` was false (#1380, S11.9.1_A2.1_T3).
+    const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+    if (throwRefErrIdx !== undefined) {
+      const msg = `${name} is not defined`;
+      addStringConstantGlobal(ctx, msg);
+      const strIdx = ctx.stringGlobalMap.get(msg)!;
+      fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
+      fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    } else {
+      // Standalone/WASI mode without `__throw_reference_error`: fall back to
+      // the raw exception-tag throw (no JS host to construct a ReferenceError).
+      const tagIdx = ensureExnTag(ctx);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "throw", tagIdx } as unknown as Instr);
+    }
     return { kind: "externref" };
   }
 
@@ -622,6 +675,14 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
   const lhsSymbolName = leftTsType.getSymbol()?.name;
   if (lhsSymbolName !== undefined) {
     if (ctx.classTagMap.has(lhsSymbolName)) {
+      // (#1366a) Externref-backed subclass (e.g. `class MyError extends Error`)
+      // — the runtime instance IS a real JS instance of its built-in parent
+      // (and any super-builtin). Walk the recorded built-in parent name
+      // through the BUILTIN_PARENT chain to decide.
+      const builtinParent = ctx.classBuiltinParentMap?.get(lhsSymbolName);
+      if (builtinParent !== undefined) {
+        return isBuiltinSubtype(builtinParent, ctorName);
+      }
       return false;
     }
     // 2. LHS is itself a built-in (or matches the constructor's instance-type

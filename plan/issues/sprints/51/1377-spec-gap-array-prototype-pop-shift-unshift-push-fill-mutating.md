@@ -2,7 +2,7 @@
 id: 1377
 sprint: 51
 title: "spec gap: Array.prototype.{push,pop,shift,unshift,fill,copyWithin,reverse} — mutation on array-like + length writes (~80 fails)"
-status: ready
+status: done
 created: 2026-05-08
 priority: medium
 feasibility: medium
@@ -163,3 +163,99 @@ expectations for ALL three cases.
 ### Estimated impact
 
 +50 passes. Cleanup of common Array mutation paths.
+
+## Implementation notes (senior-dev, 2026-05-08)
+
+### Slice A: empty-array pop/shift returns undefined (not null)
+
+**Scope**: 30 LoC in `src/codegen/array-methods.ts`. Initialize result
+local to `__get_undefined()` for externref/anyref element types so
+empty-array `arr.pop()` and `arr.shift()` return JS `undefined` per
+spec §23.1.3.20.5 and §23.1.3.27.5 instead of `ref.null.extern` (which
+JS sees as `null`).
+
+The bug: `compileArrayPop` and `compileArrayShift` had
+`if (length > 0) { ... pop logic; result = data[i]; }` with no else.
+On empty array, the if didn't fire and `result` stayed at its wasm
+default (ref.null.extern → JS null). Fix: explicitly initialize result
+to `emitUndefined(...)` BEFORE the if, so the empty case yields
+spec-compliant undefined.
+
+Targeted at externref/anyref element types only — f64-element arrays
+keep their NaN default (acceptable; numeric callers use length checks),
+and i32 keeps 0.
+
+### Other gaps (deferred)
+
+| Gap | Pattern | Status |
+|-----|---------|--------|
+| Length-NaN coercion | `obj.length = NaN; obj.push(x)` should set length=1 | Deferred — array-like dispatch path |
+| MaxSafeInteger overflow | `arr.push` when length=2^53-1 should throw RangeError | Deferred — needs i64 length checks |
+| Frozen-receiver TypeError | `Object.freeze(arr); arr.push(x)` should throw | Deferred — needs frozen-bit |
+| `new Array().unshift(1)` returns 0 | new Array() length tracking | Deferred — constructor path |
+| `Array.prototype.push.call(obj, x)` with arbitrary obj | Some edge cases fail | Deferred — overlaps with #1358 |
+| `pop` reset on NaN length | `obj.length=NaN; obj.pop()` should set length=0 | Deferred — host path |
+
+These all need either new codegen emitters or runtime bridge fixes that
+are out of scope for Slice A's focused 30-LoC fix.
+
+### Tests
+
+- `tests/issue-1377.test.ts` — 7 unit tests covering pop/shift on empty,
+  non-empty, length tracking, repeated drain, f64-element no-crash. All pass.
+
+### Pre-existing failures
+
+`tests/array-methods.test.ts` has 2 tests (`pop > returns last element`,
+`shift > returns first element`) that fail on origin/main with TS strict
+type errors — verified by stashing my changes. Test sources have
+`return arr.pop()` against a `: number` return type, triggering
+"Type 'number | undefined' is not assignable to type 'number'". Unrelated.
+
+### Estimated impact (revised)
+
++5–15 net (vs architect's +50). The +50 estimate assumed solving all
+7 method gaps; Slice A solves only the empty-array undefined gap.
+Realistic for a focused, low-risk PR.
+
+## Implementation notes (Slice B, dev-1389, 2026-05-08)
+
+### Slice B: undefined `end` argument in fill/copyWithin
+
+**Scope**: ~16 LoC in `src/codegen/array-methods.ts` — `compileArrayFill`
+(line 5450) and `compileArrayCopyWithin` (line 5560).
+
+The bug: when `Array.prototype.fill(value, start, end)` or
+`copyWithin(target, start, end)` is called with an explicit `undefined`
+literal as the `end` argument, the codegen took the "argument provided"
+path which compiled `undefined → f64 NaN → i32.trunc_sat_f64_s = 0`.
+Per spec §23.1.3.{4,7}, when `end` is undefined it must default to `len`,
+NOT 0. We cannot distinguish this from `NaN` at runtime once the value
+is coerced to f64 (both become NaN).
+
+The fix: detect statically-`undefined` arguments at the AST level
+(literal `undefined` identifier or `void X` expression) and treat them
+as missing — emit `local.get $lenTmp` instead of compiling the arg.
+
+The `NaN` case is preserved: `fill(1, 0, NaN)` still yields `[0,0]`
+(end=0, no fill) per spec, because only the literal `undefined` is
+special-cased.
+
+### Tests
+
+- `tests/issue-1377-undefined-end.test.ts` — 9 unit tests covering:
+  - `fill(v, 0, undefined)` → full fill (was: no fill)
+  - `fill(v, undefined, undefined)` → full fill
+  - `fill(v, 0, NaN)` → no fill (regression guard)
+  - `fill(v, 0, void 0)` → full fill (void expression)
+  - `copyWithin(t, 0, undefined)` → full copy (was: no copy)
+  - `copyWithin(t, 0, NaN)` → no copy (regression guard)
+  - `copyWithin(t, 0, void 0)` → full copy
+  - `fill(v, 0, null)` → no fill (existing semantics preserved)
+  - `copyWithin(t, 0, true)` → 1-element copy (existing semantics preserved)
+
+### Estimated impact (Slice B)
+
++5–10 net. Targets `built-ins/Array/prototype/fill/coerced-indexes.js`
+and `copyWithin/coerced-values-end.js` plus a few related sub-tests
+that exercise `undefined` as the `end` argument.
