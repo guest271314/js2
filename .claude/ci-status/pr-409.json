@@ -1,10 +1,11 @@
 {
   "pr": 409,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1382-wasm-closures-bridge",
-  "head_sha": "112f3652f8cacefa19e5ddc2a8dfbba1e9ed7624",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26151234257",
-  "timestamp": "2026-05-20T11:18:08Z",
+  "head_sha": "255837ec724e61586333c02c88d76557b69c41bf",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/409",
+  "timestamp": "2026-05-20T20:38:12Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
