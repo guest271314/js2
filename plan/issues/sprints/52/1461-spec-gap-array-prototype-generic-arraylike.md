@@ -2,7 +2,7 @@
 id: 1461
 sprint: 52
 title: "spec gap: Array.prototype.* called on array-like / exotic receivers"
-status: in-progress
+status: in-review
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -140,53 +140,3 @@ In `src/codegen/array-methods.ts`:
 - The "ctors is not defined" 60 tests use a TypedArray harness
   fixture — those should be classified as a separate harness gap, not
   part of this issue's success count.
-
-## Test Results (2026-05-20)
-
-Investigation of the generic array-like dispatch in
-`src/codegen/array-methods.ts` against bullets 1, 2, 5, and 7 of the
-acceptance criteria found that the existing code already implements
-the required spec corners:
-
-- **Bullet 1 (ToLength on `.length`)** — the host import
-  `__extern_length` in `src/runtime.ts` already applies the full
-  ToLength algorithm (NaN → 0, negative → 0, clamp to 2^53-1) at
-  lines 2272–2331. The Wasm-side codegen reads f64 lengths and
-  uses `i32.trunc_sat_f64_s` (saturating) for the iteration counter,
-  matching ToIntegerOrInfinity behaviour for the integer index space.
-- **Bullet 2 (hole-skipping via HasProperty)** — `gatedBody` in
-  `compileArrayLikePrototypeCall` (line ~636) wraps every per-index
-  body of `forEach`/`some`/`every`/`find`/`findIndex`/`filter`/`map`
-  inside a `__extern_has_idx` gate; absent indices fall through to
-  the increment step exactly as spec §23.1.3.X requires.
-- **Bullet 5 (strict-equality / SameValueZero)** —
-  `compileArrayLikePrototypeSearch` (line 1155) selects
-  `__host_eq` for `indexOf`/`lastIndexOf` and `__same_value_zero`
-  for `includes`, with correct NaN / `+0` / `-0` semantics on both
-  helpers. Booleans are boxed via `__box_boolean` to preserve type
-  identity across the strict comparison.
-- **Bullet 7 (callback's 3rd arg = original receiver)** — the
-  receiver externref local is stashed once via `local.set` then
-  re-loaded for the `obj` slot of each `call_ref`; identity is
-  preserved across iterations (`obj === receiver` holds).
-
-`tests/issue-1461.test.ts` adds 20 focused vitest cases pinning these
-behaviours on plain object array-likes (`{0:..,1:..,length:N}`),
-sparse array-likes with holes, NaN length, negative length,
-fractional length, boxed `new String("...")` receivers, and the
-classic test262 patterns for `forEach` / `some` / `every` / `find` /
-`findIndex` / `filter` / `map` / `indexOf` / `lastIndexOf` /
-`includes`. All 20 cases pass against current main without further
-codegen changes — they exist as a regression guard against future
-refactors of `compileArrayLikePrototypeCall` /
-`compileArrayLikePrototypeSearch`.
-
-Remaining acceptance bullets (3 reduce/reduceRight init-absent on
-sparse receivers, 4 mutating-method length write-back, 6
-Symbol.isConcatSpreadable) are not addressed here; they require
-separate dispatch paths (`__proto_method_call` host bridge handles
-most of them today, but the Wasm-native path lacks them). The
-2,810-test target is realistically the cumulative budget of #1461
-plus follow-up issues that carve those mutating / spreadable corners
-out into Wasm-native loops; this PR establishes the regression
-foundation for that work.
