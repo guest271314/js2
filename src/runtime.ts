@@ -1779,6 +1779,16 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+/**
+ * Built-in JSX runtime sentinels (#1540). Matches React's `REACT_ELEMENT_TYPE`
+ * marker so genuine React tooling (e.g. `React.isValidElement`,
+ * `react-test-renderer`) recognises elements produced by our built-in
+ * fallback without needing the React module loaded.
+ */
+const _builtinJsxTypeof: symbol | number = typeof Symbol === "function" ? Symbol.for("react.element") : 0xeac7;
+const _builtinFragmentSym: symbol | object =
+  typeof Symbol === "function" ? Symbol.for("react.fragment") : { __jsx_fragment: true };
+
 function resolveImport(
   intent: ImportIntent,
   deps?: Record<string, any>,
@@ -4789,6 +4799,50 @@ assert._isSameValue = isSameValue;
         }
       }
       return () => undefined;
+    }
+    case "jsx_runtime": {
+      // #1540 — JSX runtime binding. Priority order:
+      //   1. deps.jsxRuntime?.[method]  — user-supplied React/Preact/etc.
+      //   2. deps[intent.specifier]?.[method] — module-shaped dep
+      //   3. built-in minimal implementation (creates React-shaped elements)
+      const method = intent.method;
+      const userRuntime = (deps as { jsxRuntime?: Record<string, unknown> })?.jsxRuntime;
+      if (userRuntime && method in userRuntime) {
+        const v = userRuntime[method];
+        if (method === "Fragment") {
+          const cached = v;
+          return () => cached;
+        }
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown) : () => v;
+      }
+      const modDep = (deps as Record<string, unknown> | undefined)?.[intent.specifier] as
+        | Record<string, unknown>
+        | undefined;
+      if (modDep) {
+        const v = modDep[method];
+        if (v !== undefined) {
+          if (method === "Fragment") {
+            const cached = v;
+            return () => cached;
+          }
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown) : () => v;
+        }
+      }
+      // Built-in React-shaped fallback. The Fragment is a stable Symbol so
+      // identity comparisons (`el.type === _Fragment`) hold across calls.
+      if (method === "Fragment") {
+        const sym = _builtinFragmentSym;
+        return () => sym;
+      }
+      // jsx / jsxs / jsxDEV share the same shape — `_jsxDEV` may pass extra
+      // (isStatic, source, self) args; we drop them.
+      return (type: unknown, props: unknown, key: unknown) => ({
+        $$typeof: _builtinJsxTypeof,
+        type,
+        props: props ?? {},
+        key: key ?? null,
+        ref: null,
+      });
     }
     case "proxy_create":
       return (target: any, handler: any) => {

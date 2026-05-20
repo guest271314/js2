@@ -695,6 +695,12 @@ export function generateModule(
       registerNodeBuiltinImports(ctx, options.nodeBuiltins);
     }
 
+    // #1540 — Register JSX runtime imports (jsx/jsxs/Fragment) so codegen
+    // call/identifier resolution can route them to the right host imports.
+    if (options?.jsxRuntime) {
+      registerJsxRuntimeImports(ctx, options.jsxRuntime);
+    }
+
     // Pre-pass: detect empty object literals that get properties assigned later
     // Must run before import collectors so that widened types are known
     collectEmptyObjectWidening(ctx, ast.checker, ast.sourceFile);
@@ -7470,6 +7476,67 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // Register as a declared global so identifier resolution picks it up
       ctx.declaredGlobals.set(builtin.localName, { type: { kind: "externref" }, funcIdx });
       ctx.nodeBuiltinGlobals.set(builtin.localName, funcIdx);
+    }
+  }
+}
+
+/**
+ * Register JSX runtime imports detected by preprocessImports (#1540).
+ *
+ * Wires three host-import shapes:
+ *   - `__jsx_runtime_jsx` / `__jsx_runtime_jsxs`: `(externref, externref,
+ *     externref) -> externref` — called by the JSX call-site intercept in
+ *     `expressions/calls.ts`.
+ *   - `__jsx_runtime_Fragment`: `() -> externref` — exposed as a declared
+ *     global under the user's `localFragment` name, so identifier
+ *     resolution sees it like a normal externref.
+ *   - `__jsx_runtime_jsxDEV` (when present): same shape as `jsx`/`jsxs`
+ *     with three extra throwaway args we ignore in v1.
+ *
+ * In WASI mode we still register the imports (the standalone-target
+ * Wasm-native VDOM path is a follow-up); the user is expected to provide
+ * `deps.jsxRuntime` or accept the built-in React-shaped fallback.
+ *
+ * `ctx.mod.jsxImportSource` is set so the import-manifest classifier can
+ * carry the specifier through to `resolveImport`.
+ */
+function registerJsxRuntimeImports(
+  ctx: CodegenContext,
+  jsxRuntime: import("../import-resolver.js").JsxRuntimeImport,
+): void {
+  ctx.mod.jsxImportSource = jsxRuntime.specifier;
+  ctx.jsxRuntime = jsxRuntime;
+  const ext: ValType = { kind: "externref" };
+
+  const callableShapes: { method: "jsx" | "jsxs" | "jsxDEV"; local: string | undefined; arity: number }[] = [
+    { method: "jsx", local: jsxRuntime.localJsx, arity: 3 },
+    { method: "jsxs", local: jsxRuntime.localJsxs, arity: 3 },
+    // jsxDEV takes extra (isStatic, source, self) args. We accept up to 6
+    // and ignore the trailing three at the host binding side.
+    { method: "jsxDEV", local: jsxRuntime.localJsxDev, arity: 6 },
+  ];
+  for (const { method, local, arity } of callableShapes) {
+    if (!local) continue;
+    const importName = `__jsx_runtime_${method}`;
+    if (ctx.funcMap.has(importName)) continue;
+    const params: ValType[] = Array.from({ length: arity }, () => ext);
+    const typeIdx = addFuncType(ctx, params, [ext]);
+    addImport(ctx, "env", importName, { kind: "func", typeIdx });
+  }
+
+  // Fragment is an externref-returning thunk so identity comparisons work
+  // (the host binding caches a single Symbol). Surface it as a declared
+  // global so identifier resolution picks it up.
+  if (jsxRuntime.localFragment) {
+    const importName = `__jsx_runtime_Fragment`;
+    if (!ctx.funcMap.has(importName)) {
+      const typeIdx = addFuncType(ctx, [], [ext]);
+      addImport(ctx, "env", importName, { kind: "func", typeIdx });
+    }
+    const funcIdx = ctx.funcMap.get(importName);
+    if (funcIdx !== undefined) {
+      ctx.declaredGlobals.set(jsxRuntime.localFragment, { type: { kind: "externref" }, funcIdx });
+      ctx.nodeBuiltinGlobals.set(jsxRuntime.localFragment, funcIdx);
     }
   }
 }
