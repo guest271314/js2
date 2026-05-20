@@ -968,6 +968,21 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // #1481: readStdin() builtin under --target wasi → call __wasi_read_stdin_all
+  if (
+    ctx.wasi &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "readStdin" &&
+    ctx.wasiFdReadIdx !== undefined &&
+    ctx.wasiFdReadIdx >= 0
+  ) {
+    const helperIdx = ctx.funcMap.get("__wasi_read_stdin_all");
+    if (helperIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
+      return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
+    }
+  }
+
   // RegExp(pattern, flags) called without `new` — per spec, equivalent to
   // `new RegExp(pattern, flags)` (unless pattern is already a RegExp with
   // flags undefined, an edge case we accept). Emit the RegExp_new host call
