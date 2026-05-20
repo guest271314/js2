@@ -41,6 +41,12 @@ Options:
   --wit             Generate WIT interface file for Component Model
   -O, --optimize    Run Binaryen wasm-opt optimizer (default: -O3)
   -O1..-O4          Set optimization level (1-4)
+  --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
+                    the allowlist (#1524). Implied by --target wasi.
+  --allow-host-imports
+                    Escape hatch: disable strict dual-mode for a WASI build
+                    (debug-only). Useful when temporarily mixing host + WASI
+                    imports while migrating to standalone mode.
   --define K=V      Substitute identifier path K with literal V before parsing.
                     Repeatable. Example:
                       --define process.env.NODE_ENV='"production"'
@@ -73,6 +79,10 @@ let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | undefined;
 let emitWit = false;
 let allowFs = false;
+// #1524 — dual-mode strict gate. `undefined` = let the compiler use its
+// default (strict-on under `--target wasi`); `true` / `false` = explicit
+// override from `--no-host-imports` / `--allow-host-imports`.
+let strictNoHostImports: boolean | undefined;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
@@ -97,6 +107,10 @@ for (let i = 0; i < args.length; i++) {
     emitWit = true;
   } else if (arg === "--allow-fs") {
     allowFs = true;
+  } else if (arg === "--no-host-imports") {
+    strictNoHostImports = true;
+  } else if (arg === "--allow-host-imports") {
+    strictNoHostImports = false;
   } else if (arg === "-O" || arg === "--optimize") {
     optimize = true;
   } else if (/^-O[1-4]$/.test(arg)) {
@@ -154,6 +168,7 @@ const result = compile(source, {
   ...(target ? { target } : {}),
   ...(emitWit ? { wit: true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
+  ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
 });
 

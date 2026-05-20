@@ -58,6 +58,15 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Host-import allowlist + strict-mode gate (#1524)
+        env:
+          # PRs that intentionally grow the allowlist must include
+          # `[allowlist-grow]` in the PR description. We forward the flag to
+          # the budget test so the ratchet check accepts the growth.
+          ALLOWLIST_GROW: ${{ contains(github.event.pull_request.body, '[allowlist-grow]') && '1' || '' }}
+        run: |
+          pnpm test -- tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
+
       - name: Fetch runs/index.json from baselines repo
         if: github.event_name == 'push'
         continue-on-error: true

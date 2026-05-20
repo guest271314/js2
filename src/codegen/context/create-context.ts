@@ -15,6 +15,13 @@ export function createCodegenContext(
   checker: ts.TypeChecker,
   options?: CodegenOptions,
 ): CodegenContext {
+  // #1524 — strict-mode default policy. WASI builds enforce the dual-mode
+  // architectural principle by default (`CLAUDE.md` → "JS host optional");
+  // pass `strictNoHostImports: false` to opt out (the CLI's
+  // `--allow-host-imports` does this). Strict mode also implies
+  // `nativeStrings` so the wasm:js-string namespace is not requested.
+  const strictNoHostImports = options?.strictNoHostImports ?? options?.wasi ?? false;
+  const nativeStrings = options?.nativeStrings ?? options?.fast ?? options?.wasi ?? strictNoHostImports;
   const ctx: CodegenContext = {
     mod,
     checker,
@@ -86,7 +93,7 @@ export function createCodegenContext(
     sourceMap: options?.sourceMap ?? false,
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
-    nativeStrings: options?.nativeStrings ?? options?.fast ?? options?.wasi ?? false,
+    nativeStrings,
     testRuntime: options?.testRuntime ?? false,
     nativeStrDataTypeIdx: -1,
     anyStrTypeIdx: -1,
@@ -137,6 +144,7 @@ export function createCodegenContext(
     wasiBumpPtrGlobalIdx: -1,
     wasiNodeFsFuncs: options?.wasiNodeFsFuncs ?? new Set(),
     allowFs: options?.allowFs ?? false,
+    strictNoHostImports,
     tdzGlobals: new Map(),
     tdzLetConstNames: new Set(),
     definedPropertyFlags: new Map(),
