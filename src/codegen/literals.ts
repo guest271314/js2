@@ -244,8 +244,8 @@ function compileObjectLiteralWithAccessors(
   for (let i = 0; i < expr.properties.length; i++) {
     const p = expr.properties[i]!;
     if (!ts.isGetAccessorDeclaration(p) && !ts.isSetAccessorDeclaration(p)) continue;
-    if (!ts.isIdentifier(p.name) && !ts.isStringLiteral(p.name)) continue; // computed: out of scope
-    const propName = (p.name as ts.Identifier | ts.StringLiteral).text;
+    const propName = resolveAccessorPropName(ctx, p.name); // (#820b) handles ComputedPropertyName
+    if (propName === undefined) continue; // arbitrary computed key: out of scope
     let pair = accessorPairs.get(propName);
     if (!pair) {
       pair = { firstIdx: i, name: propName };
@@ -357,8 +357,8 @@ function compileObjectLiteralWithAccessors(
       // of the FIRST get/set declaration on this name. Subsequent siblings
       // for the same name are skipped (their info was merged into the pair
       // during the pre-pass).
-      if (!ts.isIdentifier(prop.name) && !ts.isStringLiteral(prop.name)) continue;
-      const propName = (prop.name as ts.Identifier | ts.StringLiteral).text;
+      const propName = resolveAccessorPropName(ctx, prop.name); // (#820b)
+      if (propName === undefined) continue;
       const pair = accessorPairs.get(propName);
       if (!pair) continue;
       if (emittedAccessors.has(propName)) continue;
