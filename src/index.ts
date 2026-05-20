@@ -30,7 +30,9 @@ export type ImportIntent =
   | { type: "same_value_zero" }
   | { type: "dynamic_import" }
   | { type: "proxy_create" }
-  | { type: "node_builtin"; moduleName: string };
+  | { type: "node_builtin"; moduleName: string }
+  | { type: "timer_set"; mode: "timeout" | "interval" }
+  | { type: "timer_clear"; mode: "timeout" | "interval" };
 
 export interface ImportDescriptor {
   module: "env" | "wasm:js-string" | "string_constants";

@@ -131,6 +131,12 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Node builtin modules (#1044)
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
+  // #1501 — Timer host imports.
+  if (name === "__timer_set_timeout") return { type: "timer_set", mode: "timeout" };
+  if (name === "__timer_set_interval") return { type: "timer_set", mode: "interval" };
+  if (name === "__timer_clear_timeout") return { type: "timer_clear", mode: "timeout" };
+  if (name === "__timer_clear_interval") return { type: "timer_clear", mode: "interval" };
+
   // Declared globals (like `declare const document: Document`)
   if (name.startsWith("global_")) return { type: "declared_global", name: name.slice(7) };
 

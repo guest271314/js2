@@ -1760,6 +1760,18 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+let _warnedTimerCallbackUnresolvable = false;
+function _warnTimerCallbackUnresolvable(mode: "timeout" | "interval"): void {
+  if (_warnedTimerCallbackUnresolvable) return;
+  _warnedTimerCallbackUnresolvable = true;
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[js2wasm] ${mode === "interval" ? "setInterval" : "setTimeout"} callback could not be wrapped as a JS function ` +
+      `(WasmGC closure bridge unavailable — likely missing __call_fn_0 export, see #1382). ` +
+      `The call is being dropped to avoid a host coercion error. Provide a real JS function via deps to test in the meantime.`,
+  );
+}
+
 function resolveImport(
   intent: ImportIntent,
   deps?: Record<string, any>,
@@ -4675,6 +4687,46 @@ assert._isSameValue = isSameValue;
         }
       }
       return () => {};
+    }
+    case "timer_set": {
+      // #1501 — Bind setTimeout / setInterval as host imports.
+      //
+      // Callback may be a real JS function (e.g. host-injected via deps) or
+      // a WasmGC closure struct (compiled code captures + passes a lambda).
+      // For the closure case, `_wrapWasmClosure` materialises a JS callable
+      // that dispatches through the module's `__call_fn_0` export. When the
+      // bridge is not yet available (e.g. exports not wired, see #1382),
+      // the call is logged once and dropped — no throw, no silent
+      // "[object Object]" coerce — so a compiled program calling
+      // `setTimeout(cb, ms)` doesn't crash the host.
+      const host = intent.mode === "interval" ? setInterval : setTimeout;
+      const intentMode = intent.mode;
+      return (cb: any, ms: any) => {
+        let fn: ((...args: any[]) => any) | null = typeof cb === "function" ? cb : null;
+        if (!fn) {
+          fn = _wrapWasmClosure(cb, 0, callbackState);
+        }
+        if (!fn) {
+          _warnTimerCallbackUnresolvable(intentMode);
+          return 0;
+        }
+        return host(fn, Number(ms));
+      };
+    }
+    case "timer_clear": {
+      // #1501 — Bind clearTimeout / clearInterval. Pass the externref handle
+      // straight through; the host accepts numbers (browser) and Timeout
+      // objects (Node 18+) interchangeably.
+      const host = intent.mode === "interval" ? clearInterval : clearTimeout;
+      return (h: any) => {
+        try {
+          host(h);
+        } catch {
+          // Defensive: invalid handle (e.g. undefined from a failed
+          // setTimeout where the closure bridge wasn't available). The
+          // browser also silently ignores invalid handles.
+        }
+      };
     }
     case "proxy_create":
       return (target: any, handler: any) => {
