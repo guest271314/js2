@@ -33,6 +33,7 @@ import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
   emitThrowString,
+  emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
@@ -1262,7 +1263,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       unwrappedNew = unwrappedNew.expression;
     }
     if (ts.isArrowFunction(unwrappedNew)) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: throw a real TypeError instance so `assert.throws(TypeError, …)`
+      // catches it (the bare-string throw is only `instanceof Error`/string).
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
@@ -1312,7 +1315,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (ts.isPropertyAccessExpression(expr.expression)) {
       const obj = expr.expression.expression; // e.g. Array.prototype
       if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") {
-        emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+        // #1528: real TypeError instance so test262 `assert.throws(TypeError, …)`
+        // catches it (prototype methods are not constructors per spec §9.2.2).
+        emitThrowTypeError(ctx, fctx, "is not a constructor");
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
@@ -1324,7 +1329,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
     if (callSigs.length > 0 && constructSigs.length === 0) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: real TypeError instance — spec requires `Construct(F)` to throw
+      // `TypeError("F is not a constructor")` when F has no [[Construct]].
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
