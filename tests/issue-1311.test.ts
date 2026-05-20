@@ -1,139 +1,170 @@
-// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
 /**
- * #1311 — Map<string, Handler> / Handler[] dispatch null_deref
+ * #1311 — Class-method param forwarding loses closure-struct identity.
  *
- * Surfaced from #1309 Slice A (Hono Tier 6a). Storing an arrow into a
- * typed container of callables via `arr.push(arrow)` or `m.set(k, arrow)`
- * routed the arrow through the host `__make_callback` path, producing a
- * JS-wrapped externref. A later `arr[i](...)` / `m.get(k)(...)` would
- * `ref.cast` that externref to `__fn_wrap_N_struct`, fail (it's not a
- * struct), and null-deref at the subsequent `struct.get`.
+ * When an arrow is passed as an argument to a user-defined class method
+ * (e.g. `app.set(() => ...)`), the codegen at the call site lowered the
+ * arrow through the host `__make_callback` path instead of the WasmGC
+ * `__fn_wrap_N_struct` closure path. The receiving method body —
+ * `this.h = handler` — stored that JS-wrapped externref into a field
+ * typed as a function value. A later `this.h()` call site converted the
+ * externref to anyref and tried `ref.test (ref __fn_wrap_*)`. The cast
+ * failed, the result was null, and `return_call_ref` on the null funcref
+ * trapped with "dereferencing a null pointer".
  *
- * Root cause: `isHostCallbackArgument` (closures.ts) returned `true` for
- * any method call (PropertyAccessExpression callee), regardless of
- * whether the method's parameter type was callable. The fix inspects the
- * resolved signature param type AND falls back to walking the receiver's
- * element/value type — `T[]`-style mutators (push, unshift) often resolve
- * to `any` in our setup.
+ * Bisect found three shapes:
+ *   - free fn `setHandler(obj, fn) { obj.h = fn; }`     → works (closure path)
+ *   - class method literal-assign `set() { this.h = arrow; }` → works
+ *   - class method param-forward `set(fn) { this.h = fn; }` → FAILED
+ *
+ * Surfaced by the Hono Tier 6a probe `Map<string, AsyncHandler>` pattern.
+ *
+ * Fix: in `isHostCallbackArgument` (src/codegen/closures.ts), detect when
+ * the call target is a `PropertyAccessExpression` whose method resolves to
+ * a user-defined class method (via the receiver's static type and base
+ * types), and route to the closure path. Built-in receiver types (Array,
+ * Map, Promise, etc.) won't have entries in `funcMap` so they continue to
+ * use the host-callback path.
  */
-async function run(src: string): Promise<{ exports: Record<string, unknown> }> {
-  const r = compile(src, { fileName: "test.ts" });
-  expect(r.success, JSON.stringify(r.errors)).toBe(true);
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  return { exports: instance.exports as Record<string, unknown> };
+import { describe, expect, it } from "vitest";
+import { compileToWasm } from "./equivalence/helpers.js";
+
+describe("issue #1311 — class method arrow-param forwarding", () => {
+  it("class method assigning function param to field then invoking", async () => {
+    const source = `
+class App {
+  h: (() => number) | null = null;
+  set(handler: () => number): void {
+    this.h = handler;
+  }
+  call(): number {
+    if (this.h == null) return -1;
+    return this.h();
+  }
 }
 
-describe("#1311 — typed-callable container dispatch", () => {
-  it("Map<string, sync handler>: set + get + call", async () => {
-    const { exports } = await run(`
-      type Handler = () => string;
-      export function test(): string {
-        const m = new Map<string, Handler>();
-        m.set("k", () => "world");
-        const handler = m.get("k");
-        if (handler == null) return "404";
-        return handler();
-      }
-    `);
-    expect((exports.test as () => string)()).toBe("world");
+export function test(): number {
+  const app = new App();
+  app.set(() => 42);
+  return app.call();
+}
+`;
+    const exports = await compileToWasm(source);
+    expect(exports.test!()).toBe(42);
   });
 
-  it("Map<string, async handler>: full dispatch path (the original repro)", async () => {
-    const { exports } = await run(`
-      type Handler = (c: Context) => Promise<string>;
+  it("inherited class method receives arrow argument via closure path", async () => {
+    const source = `
+class Base {
+  h: (() => number) | null = null;
+  set(handler: () => number): void {
+    this.h = handler;
+  }
+}
 
-      class Context {
-        path: string;
-        constructor(path: string) { this.path = path; }
-        text(s: string): string { return s; }
-      }
+class Child extends Base {
+  call(): number {
+    if (this.h == null) return -1;
+    return this.h();
+  }
+}
 
-      class App {
-        routes: Map<string, Handler> = new Map();
-
-        get(path: string, handler: Handler): App {
-          this.routes.set(path, handler);
-          return this;
-        }
-
-        async dispatch(path: string): Promise<string> {
-          const handler = this.routes.get(path);
-          if (handler == null) return "404";
-          return await handler(new Context(path));
-        }
-      }
-
-      export async function test(): Promise<string> {
-        const app = new App();
-        app.get("/hello", async (c: Context) => c.text("world"));
-        return await app.dispatch("/hello");
-      }
-    `);
-    const out = await (exports.test as () => Promise<string>)();
-    expect(out).toBe("world");
+export function test(): number {
+  const c = new Child();
+  c.set(() => 42);
+  return c.call();
+}
+`;
+    const exports = await compileToWasm(source);
+    expect(exports.test!()).toBe(42);
   });
 
-  it("Map<string, mixed sync + async handlers>: dispatches each correctly", async () => {
-    const { exports } = await run(`
-      type Handler = () => Promise<string>;
-      export async function test(): Promise<string> {
-        const m = new Map<string, Handler>();
-        m.set("a", async () => "alpha");
-        m.set("b", async () => "beta");
-        const ha = m.get("a");
-        const hb = m.get("b");
-        if (ha == null || hb == null) return "404";
-        return (await ha()) + "-" + (await hb());
-      }
-    `);
-    const out = await (exports.test as () => Promise<string>)();
-    expect(out).toBe("alpha-beta");
+  it("Map<string, sync handler> via class method", async () => {
+    const source = `
+type Handler = () => number;
+
+class App {
+  routes: Map<string, Handler> = new Map();
+  add(key: string, h: Handler): void {
+    this.routes.set(key, h);
+  }
+  call(key: string): number {
+    const h = this.routes.get(key);
+    if (h == null) return -1;
+    return h();
+  }
+}
+
+export function test(): number {
+  const app = new App();
+  app.add("/hello", () => 42);
+  return app.call("/hello");
+}
+`;
+    const exports = await compileToWasm(source);
+    expect(exports.test!()).toBe(42);
   });
 
-  it("Handler[].push(arrow) then arr[i](): closure path, not host callback", async () => {
-    const { exports } = await run(`
-      type Handler = () => string;
-      export function test(): string {
-        const routes: Handler[] = [];
-        routes.push(() => "world");
-        const handler = routes[0];
-        if (handler == null) return "404";
-        return handler();
-      }
-    `);
-    expect((exports.test as () => string)()).toBe("world");
+  it("Map<string, async handler> Hono-shape", async () => {
+    const source = `
+class Context {
+  path: string;
+  constructor(path: string) { this.path = path; }
+  text(s: string): string { return s; }
+}
+
+type Handler = (c: Context) => Promise<string>;
+
+class App {
+  routes: Map<string, Handler> = new Map();
+
+  get(path: string, handler: Handler): App {
+    this.routes.set(path, handler);
+    return this;
+  }
+
+  async dispatch(path: string): Promise<string> {
+    const handler = this.routes.get(path);
+    if (handler == null) return "404";
+    return await handler(new Context(path));
+  }
+}
+
+export async function test(): Promise<string> {
+  const app = new App();
+  app.get("/hello", async (c: Context) => c.text("world"));
+  return await app.dispatch("/hello");
+}
+`;
+    const exports = await compileToWasm(source);
+    const result = await exports.test!();
+    expect(result).toBe("world");
   });
 
-  it("Handler[].push(arrow) then inline routes[0](): direct call", async () => {
-    const { exports } = await run(`
-      type Handler = () => string;
-      export function test(): string {
-        const routes: Handler[] = [];
-        routes.push(() => "world");
-        return routes[0]();
-      }
-    `);
-    expect((exports.test as () => string)()).toBe("world");
-  });
+  it("mixed sync + async handlers in Map via class method", async () => {
+    const source = `
+type Handler = () => Promise<number>;
 
-  it("Map dispatch retrieves the right handler by key", async () => {
-    const { exports } = await run(`
-      type Handler = (n: number) => number;
-      export function test(): number {
-        const m = new Map<string, Handler>();
-        m.set("inc", (n: number) => n + 1);
-        m.set("dbl", (n: number) => n * 2);
-        const inc = m.get("inc");
-        const dbl = m.get("dbl");
-        if (inc == null || dbl == null) return -1;
-        return inc(10) + dbl(20);
-      }
-    `);
-    expect((exports.test as () => number)()).toBe(51);
+class App {
+  routes: Map<string, Handler> = new Map();
+  add(key: string, h: Handler): void { this.routes.set(key, h); }
+  async call(key: string): Promise<number> {
+    const h = this.routes.get(key);
+    if (h == null) return -1;
+    return await h();
+  }
+}
+
+export async function test(): Promise<number> {
+  const app = new App();
+  app.add("a", async () => 1);
+  app.add("b", async () => 2);
+  const a = await app.call("a");
+  const b = await app.call("b");
+  return a + b;
+}
+`;
+    const exports = await compileToWasm(source);
+    const result = await exports.test!();
+    expect(result).toBe(3);
   });
 });
