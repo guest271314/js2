@@ -599,6 +599,7 @@ export interface CodegenContext {
   standalone: boolean;
   /** WASI import indices */
   wasiFdWriteIdx: number;
+  wasiFdReadIdx?: number;
   wasiProcExitIdx: number;
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
