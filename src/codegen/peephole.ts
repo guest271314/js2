@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Peephole optimization pass for Wasm function bodies.
  *
@@ -48,8 +49,16 @@
  *        ref.cast (ref T)  ;; redundant — replace with ref.as_non_null (1 byte)
  *        ...
  *      )
+ *
+ * 6. `i32.const 0; i32.or` — bitwise OR with 0 is identity; the upstream value
+ *    must already be i32 to satisfy Wasm validation, so the pair is always a
+ *    no-op (#1197). Removes the redundant `| 0` coercion that JavaScript code
+ *    typically writes to force ToInt32 (the Wasm IR has already produced i32):
+ *      array.get $__arr_i32   ;; i32 element load
+ *      i32.const 0
+ *      i32.or                 ;; redundant — both removed
  */
-import type { Instr, WasmModule, ValType } from "../ir/types.js";
+import type { Instr, ValType, WasmModule } from "../ir/types.js";
 
 /**
  * Remove redundant ref.as_non_null after ref.cast in a single instruction list.
@@ -137,6 +146,16 @@ function optimizeBody(body: Instr[], localTypes?: ValType[]): number {
       body.splice(i + 4, 1); // remove drop (was i+5, now i+4 after first splice)
       removed += 2;
       // Don't increment i — recheck at same position
+      continue;
+    }
+
+    // Pattern 6: i32.const 0; i32.or — `x | 0` on an i32 is identity (#1197).
+    // Wasm validation requires the value below i32.or to already be i32, so
+    // OR-ing with 0 has no observable effect. Remove both instructions.
+    if (cur.op === "i32.const" && (cur as any).value === 0 && next.op === "i32.or") {
+      body.splice(i, 2);
+      removed += 2;
+      // Don't increment i — recheck at same position (a chain of `| 0` collapses).
       continue;
     }
 

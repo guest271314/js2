@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Relocatable Wasm object file (.o) emitter.
  *
@@ -9,18 +10,18 @@
  * linker can combine multiple .o files into a single executable Wasm module.
  */
 
-import type { WasmModule, WasmFunction, Instr, Import } from "../ir/types.js";
-import { WasmEncoder } from "./encoder.js";
-import { OP, GC, TYPE, SECTION, RELOC, SYM_FLAGS, SYMTAB, LINKING_SUBSECTION } from "./opcodes.js";
+import type { Instr, WasmFunction, WasmModule } from "../ir/types.js";
 import {
-  encodeTypeDef,
-  encodeImport,
-  encodeGlobal,
-  encodeExport,
-  encodeValType,
   encodeBlockType,
+  encodeExport,
+  encodeGlobal,
+  encodeImport,
+  encodeTypeDef,
+  encodeValType,
   groupLocals,
 } from "./binary.js";
+import { WasmEncoder } from "./encoder.js";
+import { GC, LINKING_SUBSECTION, OP, RELOC, SECTION, SYM_FLAGS, SYMTAB, TYPE } from "./opcodes.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -659,6 +660,9 @@ function encodeInstrWithReloc(
       break;
     case "f64.copysign":
       enc.byte(OP.f64_copysign);
+      break;
+    case "i32.wrap_i64":
+      enc.byte(OP.i32_wrap_i64);
       break;
     case "i32.trunc_f64_s":
       enc.byte(OP.i32_trunc_f64_s);

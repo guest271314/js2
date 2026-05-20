@@ -1,108 +1,45 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * new/super/class expression compilation.
  */
-import ts from "typescript";
-import {
-  isExternalDeclaredClass,
-  isHeterogeneousUnion,
-  isNumberType,
-  isStringType,
-  isBooleanType,
-  isVoidType,
-  isGeneratorType,
-  isIteratorResultType,
-  mapTsTypeToWasm,
-} from "../../checker/type-mapper.js";
+import { ts, forEachChild } from "../../ts-api.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
+import { collectReferencedIdentifiers, collectWrittenIdentifiers } from "../closures.js";
+import { reportError } from "../context/errors.js";
+import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
-  addImport,
   addStringConstantGlobal,
-  addStringImports,
-  addUnionImports,
-  ensureAnyHelpers,
   ensureExnTag,
-  ensureI32Condition,
-  ensureStructForType,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
-  isAnyValue,
-  localGlobalIdx,
-  nativeStringType,
   resolveWasmType,
-  hoistLetConstWithTdz,
-  hoistVarDeclarations,
 } from "../index.js";
-import {
-  compileArrayConstructorCall,
-  compileArrayLiteral,
-  compileObjectLiteral,
-  compileSymbolCall,
-  resolveComputedKeyExpression,
-} from "../literals.js";
-import {
-  compileObjectDefineProperty,
-  compileObjectDefineProperties,
-  compileObjectKeysOrValues,
-  compilePropertyIntrospection,
-} from "../object-ops.js";
-import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
-import { popBody, pushBody } from "../context/bodies.js";
-import { reportError, reportErrorNoNode } from "../context/errors.js";
-import type { ClosureInfo, CodegenContext, FunctionContext, RestParamInfo } from "../context/types.js";
-import { compileExpression, coerceType, valTypesMatch, VOID_RESULT, resolveThisStructName } from "../shared.js";
+import { resolveComputedKeyExpression } from "../literals.js";
 import type { InnerResult } from "../shared.js";
-import { compileStatement, hoistFunctionDeclarations } from "../shared.js";
-import { emitTdzCheck } from "../statements/tdz.js";
 import {
-  compileNativeStringMethodCall,
-  compileStringLiteral,
-  compileTaggedTemplateExpression,
-  compileTemplateExpression,
-  emitBoolToString,
-} from "../string-ops.js";
+  coerceType,
+  compileExpression,
+  compileStatement,
+  registerCompileSuperElementAccess,
+  registerCompileSuperPropertyAccess,
+  registerResolveEnclosingClassName,
+} from "../shared.js";
+import { compileStringLiteral } from "../string-ops.js";
+import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
+import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
+import { compileSpreadCallArgs } from "./extern.js";
 import {
-  coerceType as coerceTypeImpl,
-  defaultValueInstrs,
-  emitGuardedRefCast,
-  emitGuardedFuncRefCast,
-  emitSafeExternrefToF64,
-  pushDefaultValue,
-  pushParamSentinel,
-} from "../type-coercion.js";
-import {
-  compileElementAccess,
-  compilePropertyAccess,
-  emitBoundsGuardedArraySet,
-  emitNullCheckThrow,
-  emitNullGuardedStructGet,
-  isProvablyNonNull,
-  typeErrorThrowInstrs,
-} from "../property-access.js";
-import {
-  collectReferencedIdentifiers,
-  collectWrittenIdentifiers,
-  compileArrowFunction,
-  emitFuncRefAsClosure,
-  getOrCreateFuncRefWrapperTypes,
-} from "../closures.js";
-import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices, emitUndefined } from "./late-imports.js";
-import {
+  emitThrowString,
   getFuncParamTypes,
-  wasmFuncReturnsVoid,
-  wasmFuncTypeReturnsVoid,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
-  emitThrowString,
+  wasmFuncReturnsVoid,
 } from "./helpers.js";
-import { compileSpreadCallArgs, findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
-import {
-  registerResolveEnclosingClassName,
-  registerCompileSuperPropertyAccess,
-  registerCompileSuperElementAccess,
-} from "../shared.js";
-import { ensureDateStruct, ensureDateDaysFromCivilHelper } from "./builtins.js";
+import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 
 function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   if (fctx.enclosingClassName) return fctx.enclosingClassName;
@@ -649,7 +586,7 @@ function inferArrayElementType(ctx: CodegenContext, expr: ts.NewExpression): ts.
       }
     }
 
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(scope);
@@ -667,7 +604,7 @@ function usesArguments(node: ts.Node): boolean {
   if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) {
     return false;
   }
-  return ts.forEachChild(node, usesArguments) ?? false;
+  return forEachChild(node, usesArguments) ?? false;
 }
 
 /**
@@ -964,6 +901,8 @@ function compileNewFunctionExpression(
     type: ValType;
     localIdx: number;
     mutable: boolean;
+    alreadyBoxed: boolean;
+    valType?: ValType;
   }[] = [];
   for (const name of referencedNames) {
     const localIdx = fctx.localMap.get(name);
@@ -977,7 +916,9 @@ function compileNewFunctionExpression(
         ? fctx.params[localIdx]!.type
         : (fctx.locals[localIdx - fctx.params.length]?.type ?? { kind: "f64" });
     const isMutable = writtenInClosure.has(name);
-    captures.push({ name, type, localIdx, mutable: isMutable });
+    const alreadyBoxed = !!fctx.boxedCaptures?.has(name);
+    const valType = alreadyBoxed ? fctx.boxedCaptures!.get(name)!.valType : undefined;
+    captures.push({ name, type, localIdx, mutable: isMutable, alreadyBoxed, valType });
   }
 
   // 4. Build the closure struct type
@@ -985,6 +926,12 @@ function compileNewFunctionExpression(
     { name: "func", type: { kind: "funcref" as const }, mutable: false },
     ...captures.map((c) => {
       if (c.mutable) {
+        if (c.alreadyBoxed) {
+          // Local already holds a ref cell — reuse the existing ref-cell type
+          // (the local's type IS the ref cell type). Avoids double-wrapping
+          // when the variable was pre-boxed at function entry (#996).
+          return { name: c.name, type: c.type, mutable: false };
+        }
         const refCellTypeIdx = getOrRegisterRefCellType(ctx, c.type);
         return {
           name: c.name,
@@ -1049,7 +996,20 @@ function compileNewFunctionExpression(
   for (let i = 0; i < captures.length; i++) {
     const cap = captures[i]!;
     if (cap.mutable) {
-      const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
+      // If the outer scope already had this variable boxed (pre-box from #996
+      // or a previous closure that boxed it), the struct field IS the ref cell
+      // — extract the existing ref-cell type index and reuse the original
+      // value type so the inner code reads/writes through the SAME cell as
+      // the outer scope.
+      let refCellTypeIdx: number;
+      let valType: ValType;
+      if (cap.alreadyBoxed && (cap.type.kind === "ref" || cap.type.kind === "ref_null")) {
+        refCellTypeIdx = (cap.type as { typeIdx: number }).typeIdx;
+        valType = cap.valType ?? { kind: "f64" };
+      } else {
+        refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
+        valType = cap.type;
+      }
       const refCellType: ValType = {
         kind: "ref_null",
         typeIdx: refCellTypeIdx,
@@ -1065,7 +1025,7 @@ function compileNewFunctionExpression(
       if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
       liftedFctx.boxedCaptures.set(cap.name, {
         refCellTypeIdx,
-        valType: cap.type,
+        valType,
       });
     } else {
       // Check if this capture is an already-boxed ref cell from the outer scope
@@ -1477,8 +1437,20 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // No message — push null externref (undefined message)
         fctx.body.push({ op: "ref.null.extern" });
       }
-      // Use host import to create a real Error object with correct .name/.message/.stack
+      // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
+      // use a Wasm-native `__new_<Name>` function that builds a `$Error_struct`
+      // instead of a `env.__new_<Name>` host import that would leave the
+      // module unsatisfiable at instantiation time. JS-host mode is unchanged.
       const importName = `__new_${ctorName}`;
+      if (ctx.wasi && isWasiErrorName(ctorName)) {
+        emitWasiErrorConstructor(ctx, ctorName, 1);
+        const internalFuncIdx = ctx.funcMap.get(importName);
+        if (internalFuncIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: internalFuncIdx });
+        }
+        return { kind: "externref" };
+      }
+      // Use host import to create a real Error object with correct .name/.message/.stack
       const funcIdx = ensureLateImport(
         ctx,
         importName,
@@ -1538,11 +1510,25 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Object()` — create an empty struct (equivalent to {})
+  // Handle `new Object()` — create an empty object (equivalent to `{}`).
+  // (#1343) Previously this emitted `ref.null.extern`, but JS spec treats
+  // `new Object()` as a real object: `Boolean(new Object()) === true`,
+  // `(new Object()).hasOwnProperty(...) === false`, etc. Returning null
+  // externref made the receiver fall through every host-import branch
+  // expecting a real object, e.g. `Boolean(new Object())` returned `false`
+  // because `__to_boolean(null) === 0`.
+  //
+  // Use `__object_create(null)` host import to produce a fresh empty
+  // object. Falls back to `ref.null.extern` only if the import can't be
+  // registered (preserving the legacy shape so we never regress further).
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    // Look for an empty struct type, or create an externref null as empty object
-    // In non-fast mode, an empty object is just an externref null
-    // In fast mode or when we have struct types, emit a minimal struct
+    const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (createIdx !== undefined) {
+      fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "call", funcIdx: createIdx });
+      return { kind: "externref" };
+    }
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
@@ -1634,9 +1620,25 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
 
     if (args.length === 1) {
-      // new Date(ms) — millisecond timestamp
+      // new Date(ms) — millisecond timestamp.
+      //
+      // (#1344) Detect NaN input and store a sentinel i64 so subsequent getter
+      // calls (getDay, getHours, getTime, …) can return NaN per spec
+      // (`new Date(NaN).getTime() → NaN`). Without this, `i64.trunc_sat_f64_s`
+      // saturates NaN to 0 and the Date silently behaves like the epoch.
       compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
-      fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+      const msLocal = allocTempLocal(fctx, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: msLocal } as Instr);
+      // ms != ms is true iff ms is NaN
+      fctx.body.push({ op: "local.get", index: msLocal } as Instr);
+      fctx.body.push({ op: "f64.ne" } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i64" } },
+        then: [{ op: "i64.const", value: -9223372036854775808n } as unknown as Instr],
+        else: [{ op: "local.get", index: msLocal } as Instr, { op: "i64.trunc_sat_f64_s" } as Instr],
+      } as unknown as Instr);
+      releaseTempLocal(fctx, msLocal);
       fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
       return { kind: "ref", typeIdx: dateTypeIdx };
     }
@@ -2227,6 +2229,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // which shifts defined-function indices, making the earlier lookup stale.
     const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
+    // (#1366a) Externref-backed subclass instances (extends Error / TypeError
+    // / ...) bubble up as externref, NOT as (ref $struct).
+    if (ctx.classExternrefBackedSet.has(className)) {
+      return { kind: "externref" };
+    }
     const structTypeIdx = ctx.structMap.get(className)!;
     return { kind: "ref", typeIdx: structTypeIdx };
   }
@@ -2355,21 +2362,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (args.length >= 1) {
       // Compile buffer arg first
       const resultType = compileExpression(ctx, fctx, args[0]!);
+      const isStructBuf = resultType !== null && (resultType.kind === "ref" || resultType.kind === "ref_null");
 
-      // Validate byteOffset (2nd arg) if provided
+      // Always stash the buffer in a local so we can validate, register the
+      // view window via __dv_register_view (#1064), and restore it on stack.
+      const bufLocalType: ValType = isStructBuf ? resultType! : { kind: "externref" };
+      const bufLocal = allocLocal(fctx, `__dv_buf_${fctx.locals.length}`, bufLocalType);
+      fctx.body.push({ op: "local.set", index: bufLocal });
+
+      // Offset and length f64 locals (used for validation AND view-metadata
+      // registration). Defaults: offset=0, length=bufferByteLength-offset.
+      const offsetF64 = allocLocal(fctx, `__dv_offset_f64_${fctx.locals.length}`, { kind: "f64" });
+      const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, { kind: "f64" });
+
       if (args.length >= 2) {
-        // Store buffer in local so we can access its length for validation
-        const bufLocal = allocLocal(
-          fctx,
-          `__dv_buf_${fctx.locals.length}`,
-          resultType && (resultType.kind === "ref" || resultType.kind === "ref_null")
-            ? resultType
-            : { kind: "externref" },
-        );
-        fctx.body.push({ op: "local.set", index: bufLocal });
-
+        // Validate byteOffset
         compileExpression(ctx, fctx, args[1]!, { kind: "f64" });
-        const offsetF64 = allocLocal(fctx, `__dv_offset_f64_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: offsetF64 });
         // Check: offset < 0
         fctx.body.push({ op: "f64.const", value: 0 });
@@ -2382,7 +2390,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "i32.or" });
 
         // If buffer is a vec struct, also check offset > bufferByteLength
-        if (resultType && (resultType.kind === "ref" || resultType.kind === "ref_null")) {
+        if (isStructBuf) {
           fctx.body.push({ op: "local.get", index: offsetF64 });
           fctx.body.push({ op: "local.get", index: bufLocal });
           fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // buffer length
@@ -2403,61 +2411,93 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             else: [],
           });
         }
+      } else {
+        // No explicit byteOffset — default to 0
+        fctx.body.push({ op: "f64.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: offsetF64 });
+      }
 
-        // Validate byteLength (3rd arg) if provided
-        if (args.length >= 3) {
-          compileExpression(ctx, fctx, args[2]!, { kind: "f64" });
-          const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, { kind: "f64" });
-          fctx.body.push({ op: "local.tee", index: lenF64 });
-          // Check: len < 0
-          fctx.body.push({ op: "f64.const", value: 0 });
-          fctx.body.push({ op: "f64.lt" });
-          // Check: len != floor(len) (NaN/non-integer)
+      if (args.length >= 3) {
+        // Validate byteLength
+        compileExpression(ctx, fctx, args[2]!, { kind: "f64" });
+        fctx.body.push({ op: "local.tee", index: lenF64 });
+        // Check: len < 0
+        fctx.body.push({ op: "f64.const", value: 0 });
+        fctx.body.push({ op: "f64.lt" });
+        // Check: len != floor(len) (NaN/non-integer)
+        fctx.body.push({ op: "local.get", index: lenF64 });
+        fctx.body.push({ op: "local.get", index: lenF64 });
+        fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+        fctx.body.push({ op: "f64.ne" });
+        fctx.body.push({ op: "i32.or" });
+
+        // Check: offset + length > bufferByteLength
+        if (isStructBuf) {
+          fctx.body.push({ op: "local.get", index: offsetF64 });
           fctx.body.push({ op: "local.get", index: lenF64 });
-          fctx.body.push({ op: "local.get", index: lenF64 });
-          fctx.body.push({ op: "f64.floor" } as unknown as Instr);
-          fctx.body.push({ op: "f64.ne" });
+          fctx.body.push({ op: "f64.add" });
+          fctx.body.push({ op: "local.get", index: bufLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+          fctx.body.push({ op: "f64.convert_i32_s" });
+          fctx.body.push({ op: "f64.gt" });
           fctx.body.push({ op: "i32.or" });
-
-          // Check: offset + length > bufferByteLength
-          if (resultType && (resultType.kind === "ref" || resultType.kind === "ref_null")) {
-            fctx.body.push({ op: "local.get", index: offsetF64 });
-            fctx.body.push({ op: "local.get", index: lenF64 });
-            fctx.body.push({ op: "f64.add" });
-            fctx.body.push({ op: "local.get", index: bufLocal });
-            fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
-            fctx.body.push({ op: "f64.convert_i32_s" });
-            fctx.body.push({ op: "f64.gt" });
-            fctx.body.push({ op: "i32.or" });
-          }
-
-          {
-            const rangeErrMsg = "RangeError: Invalid DataView length";
-            addStringConstantGlobal(ctx, rangeErrMsg);
-            const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
-            const tagIdx = ensureExnTag(ctx);
-            fctx.body.push({
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
-              else: [],
-            });
-          }
         }
 
-        // Restore buffer on stack
+        {
+          const rangeErrMsg = "RangeError: Invalid DataView length";
+          addStringConstantGlobal(ctx, rangeErrMsg);
+          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
+          const tagIdx = ensureExnTag(ctx);
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            else: [],
+          });
+        }
+      } else if (isStructBuf) {
+        // Default byteLength = bufferByteLength - offset
         fctx.body.push({ op: "local.get", index: bufLocal });
-        if (resultType && (resultType.kind === "ref" || resultType.kind === "ref_null")) {
-          return resultType;
-        }
-        if (resultType) return resultType;
-        return { kind: "ref_null", typeIdx: vecTypeIdx };
+        fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        fctx.body.push({ op: "local.get", index: offsetF64 });
+        fctx.body.push({ op: "f64.sub" });
+        fctx.body.push({ op: "local.set", index: lenF64 });
+      } else {
+        // externref buffer — we can't read length at compile time. Use a
+        // NaN sentinel; the runtime __dv_register_view handler treats NaN as
+        // "compute from __dv_byte_len(buf) - offset" at dispatch time.
+        fctx.body.push({ op: "f64.const", value: NaN });
+        fctx.body.push({ op: "local.set", index: lenF64 });
       }
 
-      // No offset/length args — just return buffer as-is
-      if (resultType && (resultType.kind === "ref" || resultType.kind === "ref_null")) {
-        return resultType;
+      // #1064: register view metadata with host so the runtime bridge can
+      // reconstruct a correctly-windowed native DataView on method dispatch.
+      // Always register, even for externref buffers — ArrayBuffer variables
+      // in user code are lowered to externref (see checker/type-mapper.ts),
+      // but the actual wasmGC struct is what the bridge dispatches on.
+      {
+        const regIdx = ensureLateImport(
+          ctx,
+          "__dv_register_view",
+          [{ kind: "externref" }, { kind: "f64" }, { kind: "f64" }],
+          [],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (regIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: bufLocal });
+          if (isStructBuf) {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          fctx.body.push({ op: "local.get", index: offsetF64 });
+          fctx.body.push({ op: "local.get", index: lenF64 });
+          fctx.body.push({ op: "call", funcIdx: regIdx });
+        }
       }
+
+      // Restore buffer on stack
+      fctx.body.push({ op: "local.get", index: bufLocal });
+      if (isStructBuf) return resultType!;
       if (resultType) return resultType;
       return { kind: "ref_null", typeIdx: vecTypeIdx };
     } else {
@@ -2509,6 +2549,19 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const typeArgs = ctx.checker.getTypeArguments(exprType as ts.TypeReference);
       const elemTsType = typeArgs?.[0];
       elemWasm = elemTsType ? resolveWasmType(ctx, elemTsType) : { kind: "f64" };
+    }
+
+    // #1197: i32-specialized number[] override — caller (variable-declaration
+    // codegen) flagged this `new Array(...)` as belonging to an i32-specialized
+    // local. Override the element kind from f64 to i32. We must also re-resolve
+    // vecTypeIdx/arrTypeIdx through the i32 registration.
+    if (
+      elemWasm.kind === "f64" &&
+      (ctx as unknown as { _i32ElemArrayOverride?: boolean })._i32ElemArrayOverride === true
+    ) {
+      elemWasm = { kind: "i32" };
+      vecTypeIdx = getOrRegisterVecType(ctx, "i32", { kind: "i32" });
+      arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     }
 
     if (arrTypeIdx < 0) {
@@ -2608,10 +2661,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 }
 
 export {
-  compileSuperMethodCall,
-  compileSuperElementMethodCall,
-  compileNewExpression,
   compileClassExpression,
+  compileNewExpression,
+  compileSuperElementMethodCall,
+  compileSuperMethodCall,
   resolveEnclosingClassName,
 };
 

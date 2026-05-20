@@ -1,7 +1,8 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Source position helpers for debug/source-map aware code emission.
  */
-import ts from "typescript";
+import { ts } from "../../ts-api.js";
 import type { Instr } from "../../ir/types.js";
 import type { CodegenContext, SourcePos } from "./types.js";
 

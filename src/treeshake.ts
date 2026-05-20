@@ -1,4 +1,5 @@
-import ts from "typescript";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { ts, forEachChild } from "./ts-api.js";
 
 /**
  * Perform tree-shaking: given entry exports and a set of source files,
@@ -142,7 +143,7 @@ function walkReferences(
       }
     }
 
-    ts.forEachChild(n, visit);
+    forEachChild(n, visit);
   }
 
   visit(node);

@@ -1,6 +1,7 @@
-import ts from "typescript";
-import type { CompileError, ImportDescriptor, ImportIntent } from "../index.js";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { ts, forEachChild } from "../ts-api.js";
 import type { TypedAST } from "../checker/index.js";
+import type { CompileError, ImportDescriptor, ImportIntent } from "../index.js";
 import type { WasmModule } from "../ir/types.js";
 import { hasExportModifier } from "./validation.js";
 
@@ -45,16 +46,36 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Extern classes — check mod.externClasses
   for (const ec of mod.externClasses) {
     const prefix = ec.importPrefix;
-    if (name === `${prefix}_new`) return { type: "extern_class", className: ec.className, action: "new" };
+    const nsPath = ec.namespacePath.length > 0 ? ec.namespacePath : undefined;
+    if (name === `${prefix}_new`)
+      return { type: "extern_class", className: ec.className, action: "new", namespacePath: nsPath };
     for (const [methodName] of ec.methods) {
       if (name === `${prefix}_${methodName}`)
-        return { type: "extern_class", className: ec.className, action: "method", member: methodName };
+        return {
+          type: "extern_class",
+          className: ec.className,
+          action: "method",
+          member: methodName,
+          namespacePath: nsPath,
+        };
     }
     for (const [propName] of ec.properties) {
       if (name === `${prefix}_get_${propName}`)
-        return { type: "extern_class", className: ec.className, action: "get", member: propName };
+        return {
+          type: "extern_class",
+          className: ec.className,
+          action: "get",
+          member: propName,
+          namespacePath: nsPath,
+        };
       if (name === `${prefix}_set_${propName}`)
-        return { type: "extern_class", className: ec.className, action: "set", member: propName };
+        return {
+          type: "extern_class",
+          className: ec.className,
+          action: "set",
+          member: propName,
+          namespacePath: nsPath,
+        };
     }
   }
 
@@ -94,6 +115,21 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Extern get/set
   if (name === "__extern_get") return { type: "extern_get" };
   if (name === "__extern_set") return { type: "extern_set" };
+
+  // Host strict-equality for two externref operands that are not WasmGC eqrefs
+  // (e.g. host functions like `Array === Array`). (#1065)
+  if (name === "__host_eq") return { type: "host_eq" };
+
+  // Host loose-equality for two externref operands (§7.2.15 Abstract Equality).
+  // Used for `any`-typed loose equality where null == undefined must be true. (#1134)
+  if (name === "__host_loose_eq") return { type: "host_loose_eq" };
+
+  // SameValueZero comparison (§7.2.11) — like === except NaN equals NaN.
+  // Used by Array.prototype.includes on array-like receivers (#1360).
+  if (name === "__same_value_zero") return { type: "same_value_zero" };
+
+  // Node builtin modules (#1044)
+  if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
   // Declared globals (like `declare const document: Document`)
   if (name.startsWith("global_")) return { type: "declared_global", name: name.slice(7) };
@@ -186,7 +222,7 @@ function checkJsTypeCoverage(ast: TypedAST): CompileError[] {
         }
       }
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit);
   }
 
   visit(sf);
@@ -197,8 +233,6 @@ function checkJsTypeCoverage(ast: TypedAST): CompileError[] {
 // downgrade from error to warning so they don't block compilation.
 const DOWNGRADE_DIAG_CODES = new Set([
   2304, // "Cannot find name 'X'" — unknown identifiers compiled as externref/unreachable
-  2345, // "Argument of type 'X' is not assignable to parameter of type 'Y'"
-  2322, // "Type 'X' is not assignable to type 'Y'"
   2339, // "Property 'X' does not exist on type 'Y'" — dynamic property access
   2551, // "Property 'X' does not exist on type 'Y'. Did you mean 'Z'?" — variant of 2339 with suggestion (#613)
   2454, // "Variable 'X' is used before being assigned"
@@ -345,4 +379,4 @@ const DOWNGRADE_DIAG_CODES = new Set([
   1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
 ]);
 
-export { DOWNGRADE_DIAG_CODES, looksLikeTsSyntaxOnJs, checkJsTypeCoverage, classifyImport, buildImportManifest };
+export { buildImportManifest, checkJsTypeCoverage, classifyImport, DOWNGRADE_DIAG_CODES, looksLikeTsSyntaxOnJs };

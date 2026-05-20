@@ -1,91 +1,66 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Unary operator compilation: prefix/postfix unary, increment/decrement.
  */
-import ts from "typescript";
+import { ts } from "../../ts-api.js";
+import type { Instr, ValType } from "../../ir/types.js";
+import { emitBoundsCheckedArrayGet } from "../array-methods.js";
+import { emitToInt32 } from "../binary-ops.js";
+import { reportError } from "../context/errors.js";
+import { allocLocal, getLocalType } from "../context/locals.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
-  isExternalDeclaredClass,
-  isHeterogeneousUnion,
-  isNumberType,
-  isStringType,
-  isBooleanType,
-  isVoidType,
-} from "../../checker/type-mapper.js";
-import type { FieldDef, Instr, ValType } from "../../ir/types.js";
-import {
-  addFuncType,
-  addImport,
-  addStringConstantGlobal,
-  addStringImports,
   addUnionImports,
   ensureAnyHelpers,
-  ensureExnTag,
   ensureI32Condition,
   ensureStructForType,
   getArrTypeIdxFromVec,
-  getOrRegisterRefCellType,
-  getOrRegisterVecType,
   isAnyValue,
   localGlobalIdx,
-  nativeStringType,
-  resolveWasmType,
 } from "../index.js";
-import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
-import { popBody, pushBody } from "../context/bodies.js";
-import { reportError } from "../context/errors.js";
-import type { ClosureInfo, CodegenContext, FunctionContext, RestParamInfo } from "../context/types.js";
-import { compileExpression, coerceType, valTypesMatch, VOID_RESULT, resolveThisStructName } from "../shared.js";
-import type { InnerResult } from "../shared.js";
-import {
-  defaultValueInstrs,
-  emitGuardedRefCast,
-  emitGuardedFuncRefCast,
-  emitSafeExternrefToF64,
-  pushDefaultValue,
-  pushParamSentinel,
-} from "../type-coercion.js";
-import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices, emitUndefined } from "./late-imports.js";
-import {
-  compileNativeStringMethodCall,
-  compileStringLiteral,
-  compileTaggedTemplateExpression,
-  compileTemplateExpression,
-  emitBoolToString,
-} from "../string-ops.js";
-import { compileBinaryExpression, emitModulo, emitToInt32 } from "../binary-ops.js";
-import {
-  compileElementAccess,
-  compilePropertyAccess,
-  emitBoundsGuardedArraySet,
-  emitNullCheckThrow,
-  emitNullGuardedStructGet,
-  isProvablyNonNull,
-  typeErrorThrowInstrs,
-} from "../property-access.js";
-import {
-  compileObjectDefineProperty,
-  compileObjectDefineProperties,
-  compileObjectKeysOrValues,
-  compilePropertyIntrospection,
-} from "../object-ops.js";
-import {
-  compileArrayConstructorCall,
-  compileArrayLiteral,
-  compileObjectLiteral,
-  compileSymbolCall,
-  resolveComputedKeyExpression,
-} from "../literals.js";
-import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { emitBoundsGuardedArraySet } from "../property-access.js";
+import { coerceType, compileExpression } from "../shared.js";
+import { defaultValueInstrs } from "../type-coercion.js";
 import { emitThrowString, getFuncParamTypes } from "./helpers.js";
-import { compilePropertyAssignment, compileElementAssignment, compileExternSetFallback } from "./assignment.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
 import { resolveStructName, tryStaticToNumber } from "./misc.js";
-import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 
 function unwrapParens(node: ts.Expression): ts.Expression {
   while (ts.isParenthesizedExpression(node)) {
     node = node.expression;
   }
   return node;
+}
+
+/**
+ * Emit a ToNumeric coercion for an externref operand of `++`/`--` (#1379).
+ *
+ * UpdateExpressions (ECMA-262 §13.4) call ToNumeric on the operand before
+ * the +1/-1 step. ToNumeric calls ToPrimitive(NUMBER_HINT) then ToNumber
+ * (BigInt is split out — see #1349). For ++/-- the routing is:
+ *   - null      → 0
+ *   - undefined → NaN
+ *   - true/false→ 1/0
+ *   - "1"       → 1     (whitespace-trimmed numeric string parse)
+ *   - ""        → 0
+ *   - "abc"     → NaN
+ *   - {valueOf:()=>"5"} → 5    (valueOf → ToNumber chain)
+ *   - {} / fn   → NaN          ([object Object]/function source → NaN)
+ *
+ * The host import `__unbox_number` (registered by `addUnionImports`) maps
+ * to the runtime "unbox/number" intent which performs exactly this
+ * ToPrimitive→Number chain via `_toPrimitive` + `_hostToPrimitive` (#1319),
+ * so a direct call is correct here. The previous implementation used
+ * `emitSafeExternrefToF64` which short-circuited any non-`typeof===number`
+ * value to NaN — that was a defensive path from before the WasmGC
+ * struct ToPrimitive support landed.
+ *
+ * Expects one externref on the stack; leaves one f64.
+ */
+function emitToNumericForUpdate(ctx: CodegenContext, fctx: FunctionContext): void {
+  addUnionImports(ctx);
+  const unboxIdx = ctx.funcMap.get("__unbox_number")!;
+  fctx.body.push({ op: "call", funcIdx: unboxIdx });
 }
 
 /**
@@ -485,20 +460,21 @@ function compilePrefixUnary(
       }
       const operandType = compileExpression(ctx, fctx, expr.operand);
       if (operandType?.kind === "externref") {
-        // String → number: use __unbox_number (Number() semantics, not parseFloat)
-        // Number("") = 0, Number("123") = 123, Number("abc") = NaN
-        // parseFloat("") = NaN which is wrong for unary +
-        const unboxIdx = ctx.funcMap.get("__unbox_number");
-        if (unboxIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxIdx });
-          return { kind: "f64" };
-        }
-        // Fallback to parseFloat if __unbox_number not available
-        const pfIdx = ctx.funcMap.get("parseFloat");
-        if (pfIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: pfIdx });
-          return { kind: "f64" };
-        }
+        // ToNumber (ECMA-262 §7.1.4): route through `__unbox_number` (#1434).
+        // This is the centralized ToNumber funnel — it implements
+        // ToPrimitive → Number for objects (including WasmGC struct
+        // valueOf/toString/@@toPrimitive via _toPrimitive #1319) and
+        // delegates to `Number(v)` for primitives. Critically, `Number()`
+        // throws TypeError on Symbol and BigInt operands per spec, and
+        // since #1434 the runtime no longer swallows that exception.
+        //
+        // The previous fallback to `parseFloat` was incorrect:
+        //   parseFloat("")  = NaN  (spec: Number("")  = 0)
+        //   parseFloat(Symbol()) ≠ throw (spec: TypeError)
+        // Use coerceType which auto-registers the import via
+        // addUnionImports if it wasn't already loaded.
+        coerceType(ctx, fctx, operandType, { kind: "f64" });
+        return { kind: "f64" };
       }
       // Struct ref → f64: coerce via valueOf (JS ToNumber semantics)
       if (operandType && (operandType.kind === "ref" || operandType.kind === "ref_null")) {
@@ -532,28 +508,11 @@ function compilePrefixUnary(
         }
       }
       if (ctx.fast && operandType?.kind === "i32") {
-        // Check if operand is literal 0 — must produce -0 (IEEE 754 negative zero)
-        // Integer subtraction (0 - 0) gives 0, not -0, so use f64 path
-        // Unwrap parenthesized expressions to handle -(0)
-        let innerOperand: ts.Expression = expr.operand;
-        while (ts.isParenthesizedExpression(innerOperand)) {
-          innerOperand = innerOperand.expression;
-        }
-        if (ts.isNumericLiteral(innerOperand) && Number(innerOperand.text) === 0) {
-          // Pop the i32.const 0 already on stack, push f64.const -0 directly
-          fctx.body.pop();
-          fctx.body.push({ op: "f64.const", value: -0 });
-          return { kind: "f64" };
-        }
-        // For non-zero i32 values, integer negation is fine (no -0 concern)
-        const tmp = allocLocal(fctx, `__neg_${fctx.locals.length}`, {
-          kind: "i32",
-        });
-        fctx.body.push({ op: "local.set", index: tmp });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "i32.sub" });
-        return { kind: "i32" };
+        // i32 can't represent -0, so convert to f64 and use f64.neg.
+        // This ensures -(0) correctly produces IEEE 754 negative zero.
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        fctx.body.push({ op: "f64.neg" });
+        return { kind: "f64" };
       }
       if (operandType?.kind === "i64") {
         // i64 negate: 0 - x
@@ -696,7 +655,7 @@ function compilePrefixUnary(
           }
           if (localType?.kind === "externref") {
             fctx.body.push({ op: "local.get", index: idx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: "f64.add" });
             addUnionImports(ctx);
@@ -737,7 +696,7 @@ function compilePrefixUnary(
           if (ppModGlobalDef?.type.kind === "externref") {
             // externref global: safe unbox to f64, add 1, box back
             fctx.body.push({ op: "global.get", index: ppModIdx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: "f64.add" });
             addUnionImports(ctx);
@@ -774,7 +733,7 @@ function compilePrefixUnary(
           const ppCapGlobalDef = ctx.mod.globals[localGlobalIdx(ctx, ppCapIdx)];
           if (ppCapGlobalDef?.type.kind === "externref") {
             fctx.body.push({ op: "global.get", index: ppCapIdx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: "f64.add" });
             addUnionImports(ctx);
@@ -907,7 +866,7 @@ function compilePrefixUnary(
           }
           if (localType?.kind === "externref") {
             fctx.body.push({ op: "local.get", index: idx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: arithOp });
             addUnionImports(ctx);
@@ -947,7 +906,7 @@ function compilePrefixUnary(
           const mmModGlobalDef = ctx.mod.globals[localGlobalIdx(ctx, mmModIdx)];
           if (mmModGlobalDef?.type.kind === "externref") {
             fctx.body.push({ op: "global.get", index: mmModIdx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: arithOp });
             addUnionImports(ctx);
@@ -983,7 +942,7 @@ function compilePrefixUnary(
           const mmCapGlobalDef = ctx.mod.globals[localGlobalIdx(ctx, mmCapIdx)];
           if (mmCapGlobalDef?.type.kind === "externref") {
             fctx.body.push({ op: "global.get", index: mmCapIdx });
-            emitSafeExternrefToF64(ctx, fctx);
+            emitToNumericForUpdate(ctx, fctx);
             fctx.body.push({ op: "f64.const", value: 1 });
             fctx.body.push({ op: arithOp });
             addUnionImports(ctx);
@@ -1057,7 +1016,7 @@ function compilePostfixUnary(
         if (postModGlobalDef?.type.kind === "externref") {
           // externref global: safe unbox old value, compute new, box and store back
           fctx.body.push({ op: "global.get", index: postModIdx });
-          emitSafeExternrefToF64(ctx, fctx);
+          emitToNumericForUpdate(ctx, fctx);
           const postOldTmp = allocLocal(fctx, `__post_old_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: postOldTmp });
           fctx.body.push({ op: "f64.const", value: 1 });
@@ -1091,7 +1050,7 @@ function compilePostfixUnary(
         const postCapGlobalDef = ctx.mod.globals[localGlobalIdx(ctx, postCapIdx)];
         if (postCapGlobalDef?.type.kind === "externref") {
           fctx.body.push({ op: "global.get", index: postCapIdx });
-          emitSafeExternrefToF64(ctx, fctx);
+          emitToNumericForUpdate(ctx, fctx);
           const postCapOldTmp = allocLocal(fctx, `__post_cap_old_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: postCapOldTmp });
           fctx.body.push({ op: "f64.const", value: 1 });
@@ -1216,7 +1175,7 @@ function compilePostfixUnary(
 
     if (localType?.kind === "externref") {
       fctx.body.push({ op: "local.get", index: idx });
-      emitSafeExternrefToF64(ctx, fctx);
+      emitToNumericForUpdate(ctx, fctx);
       const tmpOld = allocLocal(fctx, `__postfix_old_${fctx.locals.length}`, {
         kind: "f64",
       });
@@ -1681,4 +1640,4 @@ function compilePostfixIncrementElement(
 
 /** Look up parameter types for a function by its index */
 
-export { compilePrefixUnary, compilePostfixUnary, compileMemberIncDec };
+export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary };
