@@ -951,7 +951,9 @@ class PerfBenchmarkChart extends HTMLElement {
           ? d.customLabel
           : curRatio >= 10
             ? `${Math.round(curRatio)}x`
-            : `${curRatio.toFixed(1)}x`;
+            : curRatio < 0.1
+              ? `${curRatio.toFixed(2)}x`
+              : `${curRatio.toFixed(1)}x`;
 
         const curEdgeOp = (0.1 + t * (parseFloat(d.edgeOpacity) - 0.1)).toFixed(2);
         const curTextOp = (t * parseFloat(d.textOpacity)).toFixed(2);
