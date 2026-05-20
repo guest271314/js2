@@ -588,6 +588,20 @@ export interface CodegenContext {
   methodClosureGlobals: Map<string, number>;
   /** Whether targeting WASI */
   wasi: boolean;
+  /**
+   * (#1373b) When true, async functions flow through the IR's CPS lowering
+   * (Phase C). When false (default), the IR selector buckets async functions
+   * into the `"async-function"` fallback reason and they take the legacy
+   * direct-codegen path. The first scaffolding slice (#1373b Slice 1)
+   * keeps this hardcoded `false`; subsequent slices (Slice 2: PENDING-path
+   * CPS continuations, Slice 3: gate-flip) wire it on incrementally once
+   * the lowering is parity-tested against the legacy path.
+   *
+   * Read by `src/ir/select.ts`'s `isAsyncIrReady(ctx)` helper; threaded
+   * through `src/ir/integration.ts` into the selector via the
+   * `IrPlanOptions.supportsAsyncIr` field.
+   */
+  supportsAsyncIr: boolean;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;
