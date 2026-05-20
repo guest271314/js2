@@ -1,7 +1,7 @@
 ---
 id: 1521
 title: "test262 CI speedup: cross-PR cache sharing + path-scoped test selection"
-status: ready
+status: in-review
 priority: high
 reasoning_effort: medium
 feasibility: medium
