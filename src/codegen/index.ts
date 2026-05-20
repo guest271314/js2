@@ -6092,10 +6092,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     }
   }
 
-  // Handle unions (T | undefined) — resolve inner type
+  // Handle unions (T | undefined | void) — resolve inner type.
+  // (#1550) Filter Void alongside Null/Undefined — TS treats counter()'s `void`
+  // return as a distinct type, but at runtime it's just `undefined`. Without
+  // this, `void | null` (e.g. binding `w` in `function f({w = counter()} = {w: null})`)
+  // collapses to `void` → i32 and the destructured null is erased.
   if (tsType.isUnion()) {
     const nonNullish = tsType.types.filter(
-      (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined),
+      (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined) && !(t.flags & ts.TypeFlags.Void),
     );
     if (nonNullish.length === 1 && tsType.types.length === 2) {
       const inner = resolveWasmType(ctx, nonNullish[0]!, _depth + 1, _visited);
