@@ -1,14 +1,93 @@
 ---
 id: 1542
 title: "Class method destructured-pattern param default not applied; throws \"Cannot destructure null\" instead"
-status: ready
+status: needs-architect-respec
 created: 2026-05-20
+updated: 2026-05-20
 parent: 820
 priority: high
-feasibility: medium
+feasibility: hard
+reasoning_effort: max
 goal: test262-conformance
 test262_fail: 134
 ---
+
+## Updated findings (2026-05-20, senior-dev-conflicts) — supersede earlier hypothesis
+
+After substantial investigation, I have concrete reproductions that contradict
+parts of the original architect's spec below. The bug shape on current main is
+**not** "default silently coerced to null"; it is **spec-incorrect iteration**
+via `__array_from_iter` exhausting stateful iterators in elision patterns.
+
+### Repro that fails on current main (commit d8caee404)
+
+```ts
+let first = 0;
+let second = 0;
+function* g(): any { first += 1; yield; second += 1; }
+class C {
+  method([,] = g()): void {}
+}
+// Expected (per ES §13.3.3.6 + §12.14.5.3): first=1, second=0
+//   (`[,]` is one Elision → ONE IteratorStep → yield reached, body suspended)
+// Actual on main: first=1, second=1
+//   (generator fully exhausted because __array_from_iter materialises it)
+```
+
+Captured as `tests/issue-1542-repro.test.ts` (3 pass, 2 fail). The failing
+tests are the spec-correct side-effect-observing ones; the no-side-effect
+variants pass and were what fooled prior investigations.
+
+### Root cause (actual)
+
+`src/codegen/destructuring-params.ts:667` — when `paramType.kind === "externref"`
+and the pattern is non-empty, it materialises the iterable end-to-end via
+`__array_from_iter`. For elision patterns (`[,]`, `[, ,]`, `[[,] = g()]`, …)
+this exhausts a generator default that the spec says should advance by only
+`IteratorStep`-many positions.
+
+`isPatternEmptyOnly` (line 55) was deliberately narrowed in #1432 to only the
+truly-empty `[]`, leaving elision-only patterns routed through
+`__array_from_iter` — observably wrong for stateful iterators.
+
+### Why the original architect spec doesn't apply
+
+The original spec (Fix #1) proposes adding an `externref → vec` branch in
+`coerceType` to materialise via `__array_from_iter`. That branch **already
+exists** in current main at `src/codegen/type-coercion.ts:1335-1378` — it
+calls `buildVecFromExternref` which routes through `__array_from_iter`. So
+the proposed Fix #1 either is already implemented, or would only deepen the
+materialisation problem.
+
+The architect's "Cannot destructure 'null' or 'undefined'" error message
+(L8:5 from test262) likely comes from a *different* code path than the one I
+reproduced. I could not isolate it via minimal hand-crafted repros — which is
+why the prior dev (dev-equiv-tests) also suspended this issue.
+
+### Recommended next steps (handoff)
+
+This is significantly larger than the original `feasibility: hard` estimate
+suggested. The fix likely requires:
+
+1. **Replace `__array_from_iter` materialisation with per-element
+   `IteratorStep` emission** for binding patterns. Re-architect
+   `destructureParamArray` to use a streaming iterator-record local instead
+   of materialised array. Spec-perfect but non-trivial — touches every
+   nested destructure path.
+2. **OR**: Detect "elision-only" subpatterns and emit a bounded number of
+   `__iter_step` calls (skip-N-elements) without materialising the rest.
+   Narrower change but still architecturally invasive.
+
+The fix interacts with:
+- `src/codegen/destructuring-params.ts` (main destructure pipeline, ~1300
+  lines — multiple sites)
+- `src/codegen/class-bodies.ts:1303-1311` (the entry call)
+- `src/codegen/type-coercion.ts:1335-1378` (externref → vec materialisation)
+- Possibly the `__array_from_iter` host import contract itself
+
+**Recommendation**: re-route through architect for a fresh spec that covers
+the streaming-iterator approach. Status changed to `needs-architect-respec`.
+Repro tests committed as regression cases.
 
 # #1542 — Class method destructured-pattern param default not applied
 
