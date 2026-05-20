@@ -3474,7 +3474,14 @@ assert._isSameValue = isSameValue;
                   const realDv = new DataView(bytes.buffer, viewOffset, viewLength);
                   const nativeFn = (realDv as any)[method];
                   if (typeof nativeFn === "function") {
-                    const result = nativeFn.apply(realDv, args ?? []);
+                    // #1525 — args may include wasmGC structs whose `valueOf` /
+                    // `toString` live in opaque struct fields. V8's native
+                    // DataView setter runs ToIndex/ToNumber on the args, which
+                    // calls ToPrimitive. Pass `wrappedArgs` (built above) so
+                    // the proxy `get` trap exposes those methods as callable
+                    // JS functions; otherwise V8 throws "Cannot convert object
+                    // to primitive value" before walking valueOf/toString.
+                    const result = nativeFn.apply(realDv, wrappedArgs ?? []);
                     if (dvMatch[1] === "set" && typeof dvSet === "function") {
                       const endByte = viewOffset + viewLength;
                       for (let i = viewOffset; i < endByte; i++) dvSet(obj, i, bytes[i]!);

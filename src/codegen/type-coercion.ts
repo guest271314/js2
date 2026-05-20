@@ -1418,17 +1418,24 @@ export function coerceType(
     fctx.body.push({ op: "ref.null.extern" });
     return;
   }
-  // ref/ref_null → externref: check @@toPrimitive("string") first, then toString(), else extern.convert_any
+  // ref/ref_null → externref:
+  // - With explicit toPrimitiveHint (e.g. template literal span, String() call):
+  //   walk @@toPrimitive("string") → toString() per §7.1.1 OrdinaryToPrimitive.
+  // - Without a hint (plain `any`/externref typing): just `extern.convert_any`.
+  //   #1525: previously this path eagerly called `${name}_toString` whenever a
+  //   matching standalone method existed, so `const obj: any = { toString(){...} }`
+  //   would store the toString result as obj instead of the struct itself —
+  //   breaking `typeof obj === "object"`, downstream `obj + n`, `obj != 0`, and
+  //   any host method that runs its own ToPrimitive on the wasmGC arg.
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "externref") {
     const typeIdx = (from as { typeIdx: number }).typeIdx;
     const name = ctx.typeIdxToStructName.get(typeIdx);
-    if (name !== undefined) {
+    if (name !== undefined && toPrimitiveHint !== undefined) {
       // Check for [Symbol.toPrimitive] method first
       const toPrimFuncIdx = ctx.funcMap.get(`${name}_@@toPrimitive`);
       if (toPrimFuncIdx !== undefined) {
         // Call ClassName_@@toPrimitive(self, hint)
-        // Use provided hint, or default to "string" for externref target
-        const hint = toPrimitiveHint ?? "string";
+        const hint = toPrimitiveHint;
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to externref if needed
@@ -1457,7 +1464,8 @@ export function coerceType(
       }
       const toStringFuncIdx = ctx.funcMap.get(`${name}_toString`);
       if (toStringFuncIdx !== undefined) {
-        // Call ClassName_toString(self) — self is already on stack
+        // Call ClassName_toString(self) — self is already on stack.
+        // Only fire when ToPrimitive("string") was explicitly requested.
         fctx.body.push({ op: "call", funcIdx: toStringFuncIdx });
         return;
       }
