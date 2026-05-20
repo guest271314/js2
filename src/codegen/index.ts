@@ -2949,6 +2949,16 @@ export function generateMultiModule(
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
+
+    // Late fixup: repair extern.convert_any applied to non-anyref values.
+    // Must run after stackBalance since fixCallArgTypesInBody can insert
+    // duplicate/redundant extern.convert_any when walking back through
+    // already-converted producers (#1400). Without this, ESLint's Config_new
+    // and similar multi-arg __extern_set call sites emit 2–4 consecutive
+    // extern.convert_any ops, the second of which fails validation
+    // ("found extern.convert_any of type externref" — externref is NOT a
+    // subtype of anyref). Mirror the single-module pipeline at line 1053.
+    fixupExternConvertAny(ctx);
   } catch (e) {
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
