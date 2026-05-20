@@ -142,12 +142,17 @@ If `regressions` is `null` in the feed (older CI format without per-test trackin
 
 ## Step 4 — bucket regressions (only if regressions > 0)
 
-Download the merged report artifact:
+Download the merged report artifact and ensure the baseline JSONL is cached
+locally (#1528 — the baseline is no longer committed to the repo; it's
+fetched on demand from `loopdive/js2wasm-baselines`):
 
 ```bash
 run_id=$(jq -r '.run_url' .claude/ci-status/pr-<N>.json | grep -oE 'runs/[0-9]+' | cut -d/ -f2)
 mkdir -p output/sm-<N>
 gh run download "$run_id" -n test262-merged-report -D output/sm-<N>
+
+# Fetch the baseline JSONL to .test262-cache/ if not already present.
+node scripts/fetch-baseline-jsonl.mjs
 ```
 
 Bucket by path prefix:
@@ -158,7 +163,7 @@ import json
 from collections import Counter
 
 base = {}
-with open('benchmarks/results/test262-current.jsonl') as f:
+with open('.test262-cache/test262-current.jsonl') as f:
     for line in f:
         try: d = json.loads(line); base[d['file']] = d['status']
         except: pass

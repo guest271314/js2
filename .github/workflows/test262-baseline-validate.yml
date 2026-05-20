@@ -3,16 +3,20 @@ name: Test262 baseline validate
 # Spot-check 50 random `pass` entries from the LIVE baseline in
 # `loopdive/js2wasm-baselines` against current PR HEAD on every PR.
 #
-# Why: the committed JSONL lags behind main during rapid-merge windows
-# (refresh-committed-baseline.yml needs a full ~20 min sharded run to
-# complete). Using the baselines repo directly eliminates false-positive
-# failures caused by stale committed data (#1218 follow-up).
+# Why: the baseline JSONL is what `dev-self-merge` Step 4 reads for
+# bucket-by-path regression analysis. Sampling 50 random "pass" entries on
+# every PR is a 0.1% spot check; any miss strongly suggests the baseline is
+# stale or corrupt and the dev-self-merge gate is no longer reliable.
 #
 # The baselines repo is updated by `promote-baseline` in test262-sharded.yml
 # after every successful push-to-main run — always at most one sharded-run
 # behind main, never behind a PR's own changes.
 #
-# Cost: ~1 minute per run (50 tests × ~1s). See #1218.
+# As of #1528, the validator script calls `scripts/fetch-baseline-jsonl.mjs`
+# directly to populate `.test262-cache/test262-current.jsonl`, so no
+# pre-fetch step is required here.
+#
+# Cost: ~1 minute per run (50 tests × ~1s). See #1218 / #1528.
 
 on:
   pull_request:
@@ -50,19 +54,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Fetch fresh baseline from baselines repo
-        run: |
-          git clone --depth=1 https://github.com/loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines 2>/dev/null || true
-          if [ -f /tmp/js2wasm-baselines/test262-current.jsonl ]; then
-            cp /tmp/js2wasm-baselines/test262-current.jsonl benchmarks/results/test262-current.jsonl
-            echo "Baseline fetched from js2wasm-baselines ($(wc -l < benchmarks/results/test262-current.jsonl) entries)."
-          else
-            echo "Warning: baselines repo unavailable — falling back to committed JSONL."
-          fi
-
       - name: Validate baseline
         env:
           # Deterministic seed derived from the PR number — same PR re-runs
           # always sample the same 50 tests.
           PR_NUMBER: ${{ github.event.pull_request.number || github.run_number }}
+        # The validator self-fetches the baseline JSONL from
+        # loopdive/js2wasm-baselines via scripts/fetch-baseline-jsonl.mjs
+        # (#1528). No pre-fetch step needed.
         run: npx tsx scripts/validate-test262-baseline.ts
