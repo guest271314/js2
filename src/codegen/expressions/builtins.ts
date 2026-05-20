@@ -1028,61 +1028,75 @@ function compileDateMethodCall(
   return { kind: "f64" };
 }
 
-/** WASI mode: compile console.log/warn/error by writing UTF-8 via fd_write.
- *  console.error and console.warn route to fd=2 (stderr); everything else to fd=1 (stdout). */
+/**
+ * WASI mode: compile console.log/warn/error by writing UTF-8 via fd_write.
+ *
+ * #1493: warn/error route to fd=2 (stderr) via __wasi_write_string_stderr.
+ * log/info/debug stay on fd=1 (stdout) via __wasi_write_string. This makes
+ * `command > out.txt 2> err.txt` and `2>&1` work for js2wasm-compiled binaries
+ * (Unix tooling expectation, matches Node/V8 semantics).
+ */
 function compileConsoleCallWasi(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
   method: string,
 ): InnerResult {
-  const writeStringFdIdx = ctx.funcMap.get("__wasi_write_string_fd");
-  if (writeStringFdIdx === undefined) return VOID_RESULT;
-
-  // Node.js routes console.error/warn to stderr; everything else to stdout.
-  const fd = method === "error" || method === "warn" ? 2 : 1;
-
-  const emitFixedString = (str: string): void => {
-    const data = wasiAllocStringData(ctx, str);
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
-    fctx.body.push({ op: "i32.const", value: data.offset } as Instr);
-    fctx.body.push({ op: "i32.const", value: data.length } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeStringFdIdx });
-  };
+  const useStderr = method === "warn" || method === "error";
+  const helperName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
+  const writeStringIdx = ctx.funcMap.get(helperName);
+  if (writeStringIdx === undefined) return VOID_RESULT;
 
   let first = true;
   for (const arg of expr.arguments) {
     // Add space separator between arguments (like console.log does)
     if (!first) {
-      emitFixedString(" ");
+      const spaceData = wasiAllocStringData(ctx, " ");
+      fctx.body.push({ op: "i32.const", value: spaceData.offset } as Instr);
+      fctx.body.push({ op: "i32.const", value: spaceData.length } as Instr);
+      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
     }
     first = false;
 
     // Check if this is a string literal we can embed directly
     if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
-      emitFixedString(arg.text);
+      const strValue = arg.text;
+      const data = wasiAllocStringData(ctx, strValue);
+      fctx.body.push({ op: "i32.const", value: data.offset } as Instr);
+      fctx.body.push({ op: "i32.const", value: data.length } as Instr);
+      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
     } else if (ts.isTemplateExpression(arg)) {
       // Template literal: handle head + spans
       if (arg.head.text) {
-        emitFixedString(arg.head.text);
+        const headData = wasiAllocStringData(ctx, arg.head.text);
+        fctx.body.push({ op: "i32.const", value: headData.offset } as Instr);
+        fctx.body.push({ op: "i32.const", value: headData.length } as Instr);
+        fctx.body.push({ op: "call", funcIdx: writeStringIdx });
       }
       for (const span of arg.templateSpans) {
         // Compile the expression and convert to string output
         const exprType = compileExpression(ctx, fctx, span.expression);
-        emitWasiValueToFd(ctx, fctx, exprType, span.expression, fd);
+        emitWasiValueToStdout(ctx, fctx, exprType, span.expression, useStderr);
         if (span.literal.text) {
-          emitFixedString(span.literal.text);
+          const litData = wasiAllocStringData(ctx, span.literal.text);
+          fctx.body.push({ op: "i32.const", value: litData.offset } as Instr);
+          fctx.body.push({ op: "i32.const", value: litData.length } as Instr);
+          fctx.body.push({ op: "call", funcIdx: writeStringIdx });
         }
       }
     } else {
       // For non-literal arguments, compile the expression and handle by type
+      const argType = ctx.checker.getTypeAtLocation(arg);
       const exprType = compileExpression(ctx, fctx, arg);
-      emitWasiValueToFd(ctx, fctx, exprType, arg, fd);
+      emitWasiValueToStdout(ctx, fctx, exprType, arg, useStderr);
     }
   }
 
   // Emit newline at the end
-  emitFixedString("\n");
+  const newlineData = wasiAllocStringData(ctx, "\n");
+  fctx.body.push({ op: "i32.const", value: newlineData.offset } as Instr);
+  fctx.body.push({ op: "i32.const", value: newlineData.length } as Instr);
+  fctx.body.push({ op: "call", funcIdx: writeStringIdx });
 
   return VOID_RESULT;
 }
@@ -1104,18 +1118,18 @@ function wasiAllocStringData(ctx: CodegenContext, str: string): { offset: number
   return { offset, length: bytes.length };
 }
 
-/** Emit code to write a compiled value to the given fd (1=stdout, 2=stderr) in WASI mode.
- *  At entry the value sits on the Wasm stack; we push fd before it (using a temp local
- *  for numeric values), then call the appropriate per-fd writer. */
-function emitWasiValueToFd(
+/** Emit code to write a compiled value to stdout in WASI mode */
+function emitWasiValueToStdout(
   ctx: CodegenContext,
   fctx: FunctionContext,
   exprType: InnerResult,
   _node: ts.Node,
-  fd: number,
+  useStderr: boolean = false,
 ): void {
-  const writeStringFdIdx = ctx.funcMap.get("__wasi_write_string_fd");
-  if (writeStringFdIdx === undefined) return;
+  // #1493: pick stdout (fd=1) or stderr (fd=2) helper based on call site.
+  const writeStringName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
+  const writeStringIdx = ctx.funcMap.get(writeStringName);
+  if (writeStringIdx === undefined) return;
 
   if (exprType === VOID_RESULT || exprType === null) {
     // void expression, nothing to write — drop already handled
@@ -1123,68 +1137,65 @@ function emitWasiValueToFd(
   }
 
   if (exprType.kind === "f64") {
-    // Value on stack: f64. Stash it, push fd, then re-push value.
-    const tmp = allocLocal(fctx, `__wasi_print_f64_${fctx.locals.length}`, { kind: "f64" });
-    fctx.body.push({ op: "local.set", index: tmp } as Instr);
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
-    fctx.body.push({ op: "local.get", index: tmp } as Instr);
-    const writeF64Idx = ensureWasiWriteF64Helper(ctx);
+    // Number: use __wasi_write_f64 helper (emit inline if not yet registered)
+    const writeF64Idx = ensureWasiWriteF64Helper(ctx, useStderr);
     if (writeF64Idx >= 0) {
       fctx.body.push({ op: "call", funcIdx: writeF64Idx });
     } else {
       fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "drop" } as Instr); // also drop fd we just pushed
     }
   } else if (exprType.kind === "i32") {
-    // Value on stack: i32. Stash, push fd, re-push value.
-    const tmp = allocLocal(fctx, `__wasi_print_i32_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "local.set", index: tmp } as Instr);
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
-    fctx.body.push({ op: "local.get", index: tmp } as Instr);
-    const writeI32Idx = ensureWasiWriteI32Helper(ctx);
+    // Boolean or i32: write "true"/"false" or the integer
+    const writeI32Idx = ensureWasiWriteI32Helper(ctx, useStderr);
     if (writeI32Idx >= 0) {
       fctx.body.push({ op: "call", funcIdx: writeI32Idx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
       fctx.body.push({ op: "drop" } as Instr);
     }
   } else {
     // For other types (externref, ref, etc.), just drop and write a placeholder
     fctx.body.push({ op: "drop" } as Instr);
     const placeholder = wasiAllocStringData(ctx, "[object]");
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
     fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
     fctx.body.push({ op: "i32.const", value: placeholder.length } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeStringFdIdx });
+    fctx.body.push({ op: "call", funcIdx: writeStringIdx });
   }
 }
 
-/** Ensure the __wasi_write_i32 helper exists and return its function index.
- *  Signature: __wasi_write_i32(fd: i32, value: i32) — writes value to the given fd. */
-function ensureWasiWriteI32Helper(ctx: CodegenContext): number {
-  const existing = ctx.funcMap.get("__wasi_write_i32");
+/**
+ * Ensure the __wasi_write_i32 helper exists and return its function index.
+ *
+ * #1493: when `useStderr` is true, registers/uses a `__wasi_write_i32_stderr`
+ * variant that routes the formatted digits through __wasi_write_string_stderr
+ * (fd=2) instead of __wasi_write_string (fd=1).
+ */
+function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = false): number {
+  const helperName = useStderr ? "__wasi_write_i32_stderr" : "__wasi_write_i32";
+  const writeStringHelperName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
+
+  const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  const writeStringFdIdx = ctx.funcMap.get("__wasi_write_string_fd");
-  if (writeStringFdIdx === undefined) return -1;
+  const writeStringIdx = ctx.funcMap.get(writeStringHelperName);
+  if (writeStringIdx === undefined) return -1;
 
   // Simple i32 to decimal string conversion
   // Uses bump allocator to write digits to linear memory
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], []);
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set("__wasi_write_i32", funcIdx);
+  ctx.funcMap.set(helperName, funcIdx);
 
   // Algorithm: handle negative, then extract digits in reverse, then write forward
-  // Params: 0=fd, 1=value. Locals: 2=buf_start, 3=buf_pos, 4=is_neg, 5=abs_val, 6=tmp
+  // Locals: 0=value, 1=buf_start, 2=buf_pos, 3=is_neg, 4=digit
   const body: Instr[] = [];
 
-  const fdLocal = 0;
-  const valueLocal = 1;
-  const bufStartLocal = 2;
-  const bufPosLocal = 3;
-  const isNegLocal = 4;
-  const absValLocal = 5;
-  const tmpLocal = 6;
+  // For simplicity, handle 0 specially, negatives, and positive integers
+  // We allocate a 12-byte buffer on the bump allocator for the digit string
+  const bufStartLocal = 1; // local index
+  const bufPosLocal = 2;
+  const isNegLocal = 3;
+  const absValLocal = 4;
+  const tmpLocal = 5;
 
   body.push(
     // buf_start = bump_ptr
@@ -1197,26 +1208,25 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext): number {
     { op: "local.set", index: bufPosLocal } as Instr,
 
     // Check if value == 0
-    { op: "local.get", index: valueLocal } as Instr,
+    { op: "local.get", index: 0 } as Instr,
     { op: "i32.eqz" } as Instr,
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        // Write "0" directly to fd
+        // Write "0" directly
         { op: "local.get", index: bufPosLocal } as Instr,
         { op: "i32.const", value: 48 } as Instr, // '0'
         { op: "i32.store8", align: 0, offset: 0 } as Instr,
-        { op: "local.get", index: fdLocal } as Instr,
         { op: "local.get", index: bufPosLocal } as Instr,
         { op: "i32.const", value: 1 } as Instr,
-        { op: "call", funcIdx: writeStringFdIdx } as Instr,
+        { op: "call", funcIdx: writeStringIdx } as Instr,
         { op: "return" } as Instr,
       ],
     },
 
     // Check if negative
-    { op: "local.get", index: valueLocal } as Instr,
+    { op: "local.get", index: 0 } as Instr,
     { op: "i32.const", value: 0 } as Instr,
     { op: "i32.lt_s" } as Instr,
     { op: "local.set", index: isNegLocal } as Instr,
@@ -1228,10 +1238,10 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext): number {
       blockType: { kind: "val", type: { kind: "i32" } },
       then: [
         { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: valueLocal } as Instr,
+        { op: "local.get", index: 0 } as Instr,
         { op: "i32.sub" } as Instr,
       ],
-      else: [{ op: "local.get", index: valueLocal } as Instr],
+      else: [{ op: "local.get", index: 0 } as Instr],
     },
     { op: "local.set", index: absValLocal } as Instr,
 
@@ -1297,19 +1307,18 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext): number {
       ],
     },
 
-    // Call __wasi_write_string_fd(fd, buf_pos, buf_start + 12 - buf_pos)
-    { op: "local.get", index: fdLocal } as Instr,
+    // Call __wasi_write_string(buf_pos, buf_start + 12 - buf_pos)
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "local.get", index: bufStartLocal } as Instr,
     { op: "i32.const", value: 12 } as Instr,
     { op: "i32.add" } as Instr,
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "i32.sub" } as Instr,
-    { op: "call", funcIdx: writeStringFdIdx } as Instr,
+    { op: "call", funcIdx: writeStringIdx } as Instr,
   );
 
   ctx.mod.functions.push({
-    name: "__wasi_write_i32",
+    name: helperName,
     typeIdx: funcTypeIdx,
     locals: [
       { name: "buf_start", type: { kind: "i32" } },
@@ -1325,25 +1334,28 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext): number {
   return funcIdx;
 }
 
-/** Ensure the __wasi_write_f64 helper exists and return its function index.
- *  Signature: __wasi_write_f64(fd: i32, value: f64) — writes value to the given fd. */
-function ensureWasiWriteF64Helper(ctx: CodegenContext): number {
-  const existing = ctx.funcMap.get("__wasi_write_f64");
+/**
+ * Ensure the __wasi_write_f64 helper exists and return its function index.
+ *
+ * #1493: when `useStderr` is true, registers/uses a `__wasi_write_f64_stderr`
+ * variant that routes through the stderr i32/string helpers (fd=2).
+ */
+function ensureWasiWriteF64Helper(ctx: CodegenContext, useStderr: boolean = false): number {
+  const helperName = useStderr ? "__wasi_write_f64_stderr" : "__wasi_write_f64";
+  const writeStringHelperName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
+
+  const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  const writeI32Idx = ensureWasiWriteI32Helper(ctx);
-  const writeStringFdIdx = ctx.funcMap.get("__wasi_write_string_fd");
-  if (writeStringFdIdx === undefined || writeI32Idx < 0) return -1;
+  const writeI32Idx = ensureWasiWriteI32Helper(ctx, useStderr);
+  const writeStringIdx = ctx.funcMap.get(writeStringHelperName);
+  if (writeStringIdx === undefined || writeI32Idx < 0) return -1;
 
   // Simple f64 output: truncate to i32 and print as integer
   // For NaN, Infinity, -Infinity, handle specially
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "f64" }], []);
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "f64" }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set("__wasi_write_f64", funcIdx);
-
-  // Params: 0=fd, 1=value
-  const fdLocal = 0;
-  const valueLocal = 1;
+  ctx.funcMap.set(helperName, funcIdx);
 
   // Allocate data segments for special values
   const nanData = wasiAllocStringData(ctx, "NaN");
@@ -1352,62 +1364,58 @@ function ensureWasiWriteF64Helper(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     // Check NaN: value != value
-    { op: "local.get", index: valueLocal } as Instr,
-    { op: "local.get", index: valueLocal } as Instr,
+    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: 0 } as Instr,
     { op: "f64.ne" } as Instr,
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: fdLocal } as Instr,
         { op: "i32.const", value: nanData.offset } as Instr,
         { op: "i32.const", value: nanData.length } as Instr,
-        { op: "call", funcIdx: writeStringFdIdx } as Instr,
+        { op: "call", funcIdx: writeStringIdx } as Instr,
         { op: "return" } as Instr,
       ],
     },
 
     // Check positive infinity
-    { op: "local.get", index: valueLocal } as Instr,
+    { op: "local.get", index: 0 } as Instr,
     { op: "f64.const", value: Infinity } as Instr,
     { op: "f64.eq" } as Instr,
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: fdLocal } as Instr,
         { op: "i32.const", value: infData.offset } as Instr,
         { op: "i32.const", value: infData.length } as Instr,
-        { op: "call", funcIdx: writeStringFdIdx } as Instr,
+        { op: "call", funcIdx: writeStringIdx } as Instr,
         { op: "return" } as Instr,
       ],
     },
 
     // Check negative infinity
-    { op: "local.get", index: valueLocal } as Instr,
+    { op: "local.get", index: 0 } as Instr,
     { op: "f64.const", value: -Infinity } as Instr,
     { op: "f64.eq" } as Instr,
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: fdLocal } as Instr,
         { op: "i32.const", value: negInfData.offset } as Instr,
         { op: "i32.const", value: negInfData.length } as Instr,
-        { op: "call", funcIdx: writeStringFdIdx } as Instr,
+        { op: "call", funcIdx: writeStringIdx } as Instr,
         { op: "return" } as Instr,
       ],
     },
 
-    // Normal number: truncate to i32 and forward (fd, truncated) to __wasi_write_i32
-    { op: "local.get", index: fdLocal } as Instr,
-    { op: "local.get", index: valueLocal } as Instr,
+    // Normal number: truncate to i32 and print
+    { op: "local.get", index: 0 } as Instr,
     { op: "i32.trunc_sat_f64_s" } as Instr,
     { op: "call", funcIdx: writeI32Idx } as Instr,
   ];
 
   ctx.mod.functions.push({
-    name: "__wasi_write_f64",
+    name: helperName,
     typeIdx: funcTypeIdx,
     locals: [],
     body,
