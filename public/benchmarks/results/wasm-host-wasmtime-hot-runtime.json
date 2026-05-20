@@ -2,19 +2,16 @@
   {
     "name": "AOT compiled",
     "jsUs": 12353.179565201257,
-    "label": "21.7 ms",
     "wasmUs": 21703.391021848496
   },
   {
     "name": "interpreter",
     "jsUs": 12353.179565201257,
-    "label": "272 ms",
     "wasmUs": 272491.071964361
   },
   {
     "name": "engine",
     "jsUs": 12353.179565201257,
-    "label": "297 ms",
     "wasmUs": 296559.5642152104
   }
 ]
