@@ -2,7 +2,7 @@
 id: 1510
 sprint: 52
 title: "spec gap: for-await-of destructuring — await on IteratorStep + binding initialization"
-status: ready
+status: suspended
 created: 2026-05-20
 priority: high
 feasibility: hard
@@ -225,3 +225,48 @@ were verified to fail on `origin/main` HEAD too.
   - rest pattern over an array,
   - rest pattern over a yielded sync iterator,
   - parser-side: `in` keyword inside the initializer.
+
+## Suspended Work
+
+- **PR**: #387 — https://github.com/loopdive/js2wasm/pull/387
+- **Branch**: `issue-1510-for-await-of-dstr`
+- **Worktree**: `/workspace/.claude/worktrees/issue-1510-for-await-of-dstr/`
+- **HEAD SHA**: `ea4919434756a22d7897f5cef805e6dc060cdb9e`
+- **State**: PR pushed and open; suspended while waiting for CI to populate `.claude/ci-status/pr-387.json`.
+
+### What was implemented (Phase 1)
+
+Boxed-capture-with-default-initializer fix for destructure-assignment in
+for-await-of (and incidentally also sync for-of). Three new branches
+added to `src/codegen/statements/loops.ts`:
+
+- `compileForOfAssignDestructuringExternref` — externref element path
+- `compileForOfAssignDestructuring` (vec sub-branch) — typed `T[][]` path
+- `compileForOfIteratorAssignDestructuring` — iterator-protocol path
+
+Each emits `[box-ref, value-via-extract] tee tmp` → undefined-test
+(`__extern_is_undefined` / sNaN sentinel / `ref.is_null`) → `if (val
+valType) <default> else <coerce(tmp)>` → `struct.set <refCellTypeIdx> 0`.
+
+Tests: `tests/issue-1510.test.ts` (5 cases — all pass locally). No
+regressions in `destructuring-extended`, `destructuring-initializer`,
+`for-of-array-destructuring`, `null-destructuring`, `issue-1258`
+(verified the 4 pre-existing failures are identical on origin/main).
+
+### Resume steps
+
+1. Check `.claude/ci-status/pr-387.json` for CI result with `head_sha`
+   matching `ea4919434756a22d7897f5cef805e6dc060cdb9e`.
+2. If `net_per_test > 0`, ratio <10%, no bucket >50: self-merge with
+   `gh pr merge 387 --admin --merge`, then remove worktree.
+3. If regressions: re-enter the worktree at
+   `/workspace/.claude/worktrees/issue-1510-for-await-of-dstr/` and
+   investigate via the bucket analysis in the ci-status file.
+4. Phase 2 (deferred, follow-up issue): per-element iterator-protocol
+   destructuring of yielded iterables (spec §13.5.7) — interacts with
+   #1454's IteratorClose. The key code site is
+   `compileExternrefArrayDestructuringDecl` in
+   `src/codegen/statements/destructuring.ts` (currently uses
+   `__extern_get(obj, i)` indexed access; needs an Array.from-style
+   normalization or a real iterator-step loop for sync iterables
+   yielded by async generators).
