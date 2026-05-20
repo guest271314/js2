@@ -1,7 +1,7 @@
 ---
 id: 1521
 title: "test262 CI speedup: cross-PR cache sharing + path-scoped test selection"
-status: ready
+status: in-review
 priority: high
 reasoning_effort: medium
 feasibility: medium
@@ -119,3 +119,41 @@ even cache lookup is skipped for filtered-out tests.
 - `tests/test262-runner.ts` — bundle hash validation on cache load + TEST262_PATH_FILTER support  
 - `.github/workflows/test262-sharded.yml` — loose restore-keys
 - `.github/workflows/test262-differential.yml` — detect-scope job + loose restore-keys + pass filter
+
+## Implementation notes (2026-05-20)
+
+- `scripts/test262-worker.mjs` — computes `BUNDLE_HASH` once at startup
+  (sha256 of `scripts/compiler-bundle.mjs`, or `TEST262_BUNDLE_HASH` env
+  var when CI prefers a different digest). Every meta JSON written to
+  `.test262-cache/{hash}.json` now carries a `bundle_hash` field.
+- `scripts/precompile-tests.ts` — on cache hit, validates the entry's
+  `bundle_hash` against the current bundle hash; mismatched entries are
+  treated as misses and recompiled. Also early-skips tests excluded by
+  `TEST262_PATH_FILTER` so narrow PRs avoid I/O entirely.
+- `tests/test262-runner.ts` — exports `matchesPathFilter(relPath)`. The
+  filter parses `TEST262_PATH_FILTER` as pipe-separated substrings;
+  empty / unset means "run all tests" (safe fallback for core-file
+  PRs and `workflow_dispatch`).
+- `tests/test262-shared.ts` — every `it()` block calls
+  `matchesPathFilter(relPath)` first and returns early when the test is
+  filtered out (no source read, no parse, no compile, no cache lookup,
+  no JSONL row). This is where the ~14x wall-clock saving comes from.
+- `tests/test262-path-filter.test.ts` — 5 unit tests covering unset
+  filter, empty-string filter, single pattern, multiple patterns, and
+  empty-segment robustness.
+- `.github/workflows/test262-sharded.yml` — added a second `restore-keys`
+  entry `test262-cache-v2-` for cross-PR cache reuse.
+- `.github/workflows/test262-differential.yml`:
+  - new `detect-scope` job runs `gh pr diff` to compute
+    `test_filter` / `scope_desc` outputs; core files
+    (expressions.ts, index.ts, statements.ts, type-coercion.ts) and
+    target-specific (wasi/node/browser) changes force an empty filter
+    ("run all tests").
+  - the **branch** shards consume `TEST262_PATH_FILTER`; the **main**
+    shards do NOT (so the main results cache stays a full result set
+    reusable across PRs with different filters).
+  - the diff step intersects the main JSONL by the branch JSONL's
+    `file` set when a filter is active, preventing
+    "pass → absent" false regressions for the tests the branch
+    deliberately skipped.
+  - permissions: added `pull-requests: read` for `gh pr diff`.
