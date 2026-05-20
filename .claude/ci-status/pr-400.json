@@ -1,10 +1,11 @@
 {
   "pr": 400,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1481-wasi-stdin",
-  "head_sha": "f2879c74f593a619f742a45704cf3a7ec0911dba",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26151212188",
-  "timestamp": "2026-05-20T11:34:20Z",
+  "head_sha": "04ade449ed5d31390ec7347a8d9c75115e2b3968",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/400",
+  "timestamp": "2026-05-20T13:16:44Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
