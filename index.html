@@ -3096,10 +3096,12 @@ match (value) {
             >
               <perf-benchmark-chart
                 src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
-                mode="perf"
+                mode="absolute-lower-better"
                 title="Speed vs JS in V8"
                 baseline-label="JS in V8"
-                legend="Speedup relative to JS baseline in V8. 2x = twice as fast. 0.8x = 20% slower. Geometric mean of repeated calls inside one fresh process after module load."
+                show-delta
+                delta-kind="factor"
+                legend="Execution time relative to JS in V8. 1x = same speed. 2x = twice as long. Geometric mean of repeated calls inside one fresh process after module load."
               ></perf-benchmark-chart>
             </div>
             <div
