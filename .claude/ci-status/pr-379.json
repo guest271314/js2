@@ -1,10 +1,11 @@
 {
   "pr": 379,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1465-promise-combinators",
-  "head_sha": "8718a08ba853c2d65887e26be33cc3069490112f",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26151082121",
-  "timestamp": "2026-05-20T10:33:20Z",
+  "head_sha": "13786c8079d0a4fa7d1079afef21cfccc090b549",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/379",
+  "timestamp": "2026-05-20T16:22:49Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
