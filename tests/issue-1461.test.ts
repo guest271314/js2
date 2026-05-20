@@ -269,6 +269,54 @@ describe("#1461 — Array.prototype.* on array-like / exotic receivers", () => {
     });
   });
 
+  describe("Acceptance bullet 3: reduce / reduceRight initial-value-absent hole scan", () => {
+    // Spec §23.1.3.21 / §23.1.3.22 step 6/7: when `initialValue` is omitted,
+    // the accumulator MUST be the first present element (scanned via
+    // HasProperty), not blindly `receiver[0]` / `receiver[len-1]`.
+    it("reduce no-initial scans past hole at index 0", async () => {
+      // {1: 10, 2: 20, length: 3} — acc starts at index 1 (=10), then 10+20=30.
+      expect(
+        await runWasm(`
+          export function test(): number {
+            function add(a: any, b: any): number { return a + b; }
+            const obj: any = { 1: 10, 2: 20, length: 3 };
+            return Array.prototype.reduce.call(obj, add) as number;
+          }
+        `),
+      ).toBe(30);
+    });
+
+    it("reduceRight no-initial scans past hole at last index", async () => {
+      // {0: 10, 1: 20, length: 3} — acc starts at index 1 (=20), then 20+10=30.
+      expect(
+        await runWasm(`
+          export function test(): number {
+            function add(a: any, b: any): number { return a + b; }
+            const obj: any = { 0: 10, 1: 20, length: 3 };
+            return Array.prototype.reduceRight.call(obj, add) as number;
+          }
+        `),
+      ).toBe(30);
+    });
+
+    it("reduce no-initial on all-holes throws TypeError", async () => {
+      // {length: 3} with no present indices — spec: throw TypeError.
+      let threw = false;
+      try {
+        await runWasm(`
+          export function test(): number {
+            function add(a: any, b: any): number { return 0; }
+            const obj: any = { length: 3 };
+            return Array.prototype.reduce.call(obj, add) as number;
+          }
+        `);
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+    });
+  });
+
   describe("Boxed String wrapper as receiver", () => {
     // Array.prototype.METHOD.call(new String("..."), cb): per spec the String
     // wrapper exposes integer-indexed accessors and a `length` property, so
