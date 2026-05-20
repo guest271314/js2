@@ -157,9 +157,9 @@ free_bar() {
   }'
 }
 
-# Agent summary (only on main workspace — state counts from agent-status/*.json)
+# Agent summary (only on tech-lead/main — state counts from agent-status/*.json)
 # Shows: Nactive Mci-wait, colored by freshness via last_seen heartbeat where available.
-if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
+if [ -z "$in_worktree" ] && [ "$branch" = "main" ] && [ -d "/workspace/.claude/agent-status" ]; then
   _now=$(date +%s)
   _n_active=0; _n_ciwait=0; _n_stale=0
   for _f in /workspace/.claude/agent-status/*.json; do
@@ -194,8 +194,8 @@ if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
   fi
 fi
 
-# Sprint progress bar (only on main workspace, not in worktrees)
-if [ -z "$in_worktree" ]; then
+# Sprint progress bar, idle indicator, days bar (only on tech-lead/main)
+if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
   sprint_n=""
   sprint_done=0
   sprint_total=0
@@ -260,43 +260,6 @@ if [ -z "$in_worktree" ]; then
           printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
         }
       }' /dev/null)
-    fi
-  fi
-  # Agent idle indicator (⏹): hidden when all busy; yellow ≤50% idle, red >50%
-  # Stale agents (no heartbeat >10min) always count as idle, not busy.
-  agent_status_dir="/workspace/.claude/agent-status"
-  if [ -d "$agent_status_dir" ]; then
-    now_sec=$(date +%s)
-    total_agents=0
-    busy_agents=0
-    for f in "$agent_status_dir"/*.json; do
-      [ -f "$f" ] || continue
-      [ "$(basename "$f")" = "tech-lead.json" ] && continue
-      state=$(jq -r '.state // empty' "$f" 2>/dev/null)
-      [ -z "$state" ] && continue
-      last_seen=$(jq -r '.last_seen // empty' "$f" 2>/dev/null)
-      if [ -n "$last_seen" ]; then
-        file_age=$((now_sec - last_seen))
-      else
-        since=$(jq -r '.since // 0' "$f" 2>/dev/null)
-        case "$since" in
-          *T*Z) since=$(date -d "$since" +%s 2>/dev/null || echo 0) ;;
-          ''|null) since=0 ;;
-        esac
-        file_age=$((now_sec - since))
-      fi
-      [ "$file_age" -gt 10800 ] && continue  # skip very old files (>3h)
-      [ "$file_age" -ge 600 ] && continue   # skip stale — shown separately as ✕
-      total_agents=$((total_agents + 1))
-      [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
-    done
-    idle_agents=$((total_agents - busy_agents))
-    if [ "$idle_agents" -gt 0 ] && [ "$total_agents" -gt 0 ]; then
-      awk -v idle="$idle_agents" -v total="$total_agents" 'BEGIN {
-        pct = idle * 100 / total
-        color = (pct > 50) ? "00;31" : "00;33"
-        printf " \033[%sm%d⏹\033[00m", color, idle
-      }' /dev/null
     fi
   fi
   if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
