@@ -281,6 +281,10 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 2. Update `plan/log/dependency-graph.md` — remove/strikethrough completed issue
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
+<!-- AUTO:conformance-start -->
+**test262 conformance**: 28,171 / 43,160 (65.3 %) — baseline 42063125, 2026-05-20T16:08:49Z
+<!-- AUTO:conformance-end -->
+
 ### Sprint History
 - **Sprint 1**: 550 → 1,509 pass (+174%), 167 fail, 5,700 CE. Issues #138-#173.
 - **Sprint 2**: 12 branches, 18 issues (#207-#224). Key: destructuring hoisting (~1200 CE), string comparison, .call(), member increment/decrement, labeled break. Equivalence tests: 86 → 170.

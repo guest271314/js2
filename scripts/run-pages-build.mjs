@@ -19,6 +19,13 @@ const hasPlanningArtifacts =
   existsSync(resolve(ROOT, "scripts", "sprint-stats.ts")) &&
   existsSync(resolve(ROOT, "scripts", "build-planning-artifacts.mjs"));
 
+// Refresh conformance numbers (#1522) before any step that reads ROADMAP.md,
+// plan/goals/goal-graph.md, README.md, or CLAUDE.md. Idempotent — only writes
+// when test262-current.json moved.
+if (existsSync(resolve(ROOT, "benchmarks", "results", "test262-current.json"))) {
+  run("node", ["scripts/sync-conformance-numbers.mjs"]);
+}
+
 if (hasPlanningArtifacts) {
   run(process.execPath, ["--experimental-strip-types", "scripts/sprint-stats.ts"]);
   run("node", ["scripts/build-planning-artifacts.mjs"]);
