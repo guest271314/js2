@@ -1,0 +1,23 @@
+{
+  "pr": 410,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1394-method-closure-caching",
+  "head_sha": "7392aa7802933a5db7bb088f07931484c042711f",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/410",
+  "timestamp": "2026-05-20T13:23:47Z",
+  "pass": null,
+  "fail": null,
+  "compile_error": null,
+  "snapshot_delta": null,
+  "net_per_test": null,
+  "regressions": null,
+  "regressions_real": null,
+  "regressions_wasm_change": null,
+  "wasm_identical_noise": null,
+  "compile_timeouts": null,
+  "improvements": null,
+  "baseline_sha": null,
+  "baseline_staleness_commits": null,
+  "baseline_stale": false
+}
