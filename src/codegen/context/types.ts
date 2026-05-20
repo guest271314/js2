@@ -591,6 +591,14 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiBumpPtrGlobalIdx: number;
+  /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
+  wasiClockTimeGetIdx?: number;
+  /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */
+  wasiPendingFdWriteHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_write_file_sync` after lib-globals scan. */
+  wasiPendingPathOpenHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
+  wasiClockHelpersPending?: boolean;
   /** Set of node:fs functions used in WASI mode */
   wasiNodeFsFuncs: Set<string>;
   /** Map from let/const module global variable name → TDZ flag global index */
