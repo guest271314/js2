@@ -616,6 +616,10 @@ class PerfBenchmarkChart extends HTMLElement {
     const baselineValue = Number(baseline);
     if (!Number.isFinite(metricValue) || !Number.isFinite(baselineValue) || baselineValue <= 0) return "";
     if (metricValue <= 0) return "";
+    if (kind === "factor") {
+      const ratio = metricValue / baselineValue;
+      return ratio >= 10 ? `${Math.round(ratio)}x` : `${ratio.toFixed(1)}x`;
+    }
     if (Math.abs(metricValue - baselineValue) <= Math.max(0.0001, baselineValue * 0.0005)) {
       return "0%";
     }
@@ -947,7 +951,9 @@ class PerfBenchmarkChart extends HTMLElement {
           ? d.customLabel
           : curRatio >= 10
             ? `${Math.round(curRatio)}x`
-            : `${curRatio.toFixed(1)}x`;
+            : curRatio < 0.1
+              ? `${curRatio.toFixed(2)}x`
+              : `${curRatio.toFixed(1)}x`;
 
         const curEdgeOp = (0.1 + t * (parseFloat(d.edgeOpacity) - 0.1)).toFixed(2);
         const curTextOp = (t * parseFloat(d.textOpacity)).toFixed(2);
