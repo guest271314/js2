@@ -257,7 +257,7 @@ if [ -z "$in_worktree" ]; then
       }' /dev/null)
     fi
   fi
-  # Agent activity bar: busy (active) vs total agents
+  # Agent idle indicator: hidden when all busy; yellow ≤50% idle, red >50%
   agent_status_dir="/workspace/.claude/agent-status"
   if [ -d "$agent_status_dir" ]; then
     now_sec=$(date +%s)
@@ -267,7 +267,6 @@ if [ -z "$in_worktree" ]; then
       [ -f "$f" ] || continue
       since=$(jq -r '.since // 0' "$f" 2>/dev/null)
       state=$(jq -r '.state // empty' "$f" 2>/dev/null)
-      # since may be an ISO string in some files; convert to epoch or default to 0
       case "$since" in
         *T*Z) since=$(date -d "$since" +%s 2>/dev/null || echo 0) ;;
         ''|null) since=0 ;;
@@ -277,21 +276,12 @@ if [ -z "$in_worktree" ]; then
       total_agents=$((total_agents + 1))
       [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
     done
-    if [ "$total_agents" -gt 0 ]; then
-      awk -v busy="$busy_agents" -v total="$total_agents" 'BEGIN {
-        pct = busy * 100 / total
-        if (pct >= 67)      { fill=42;         fg=30 }
-        else if (pct >= 33) { fill=43;         fg=30 }
-        else                { fill="48;5;196"; fg=37 }
-        width = 10
-        filled = int(pct * width / 100)
-        label = sprintf(" %d/%d busy", busy, total)
-        bar = ""
-        for (i = 0; i < width; i++) bar = bar " "
-        bar = label substr(bar, length(label) + 1)
-        filled_part = substr(bar, 1, filled)
-        empty_part  = substr(bar, filled + 1)
-        printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
+    idle_agents=$((total_agents - busy_agents))
+    if [ "$idle_agents" -gt 0 ] && [ "$total_agents" -gt 0 ]; then
+      awk -v idle="$idle_agents" -v total="$total_agents" 'BEGIN {
+        pct = idle * 100 / total
+        color = (pct > 50) ? "00;31" : "00;33"
+        printf " \033[%sm%d idle\033[00m", color, idle
       }' /dev/null
     fi
   fi
