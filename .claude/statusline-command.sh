@@ -167,8 +167,12 @@ if [ -z "$in_worktree" ] && [ -d "/workspace/.claude/agent-status" ]; then
     [ "$(basename "$_f")" = "tech-lead.json" ] && continue
     _state=$(jq -r '.state // empty' "$_f" 2>/dev/null)
     [ -z "$_state" ] && continue
-    # Freshness: prefer last_seen heartbeat; fall back to "not stale" if no heartbeat yet
+    # Freshness: prefer last_seen heartbeat; fall back to since if no heartbeat written yet
     _ls=$(jq -r '.last_seen // empty' "$_f" 2>/dev/null)
+    if [ -z "$_ls" ]; then
+      _ls=$(jq -r '.since // empty' "$_f" 2>/dev/null)
+      case "$_ls" in *T*Z) _ls=$(date -d "$_ls" +%s 2>/dev/null || echo "") ;; esac
+    fi
     _fresh=1
     if [ -n "$_ls" ]; then
       _age=$(( _now - _ls ))
