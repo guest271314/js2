@@ -1,1 +1,23 @@
-{ "head_sha": "5b218e619", "conclusion": "pending", "net_per_test": null, "timestamp": "2026-05-20T16:52:00Z" }
+{
+  "pr": 401,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1392-refresh-benchmarks-hang",
+  "head_sha": "6841b76ef1f7ba19efd60fbe200b93c645a74039",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/401",
+  "timestamp": "2026-05-20T14:49:41Z",
+  "pass": null,
+  "fail": null,
+  "compile_error": null,
+  "snapshot_delta": null,
+  "net_per_test": null,
+  "regressions": null,
+  "regressions_real": null,
+  "regressions_wasm_change": null,
+  "wasm_identical_noise": null,
+  "compile_timeouts": null,
+  "improvements": null,
+  "baseline_sha": null,
+  "baseline_staleness_commits": null,
+  "baseline_stale": false
+}
