@@ -2,7 +2,7 @@
 id: 1394
 sprint: 52
 title: "class method-closure caching: C.prototype.method returns stable singleton closure"
-status: in-review
+status: done
 created: 2026-05-09
 priority: high
 feasibility: hard
