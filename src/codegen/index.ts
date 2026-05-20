@@ -3053,6 +3053,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
 
   // Check if source uses console.log/warn/error, process.exit, or node:fs functions
   let needsFdWrite = false;
+  let needsConsoleStderr = false;
   let needsProcExit = false;
   let needsRandomGet = false;
 
@@ -3069,6 +3070,10 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         ["log", "warn", "error"].includes(propAccess.name.text)
       ) {
         needsFdWrite = true;
+        // #1493: console.warn/error must route to fd=2 (stderr), not fd=1 (stdout).
+        if (propAccess.name.text === "warn" || propAccess.name.text === "error") {
+          needsConsoleStderr = true;
+        }
       }
       if (
         ts.isIdentifier(propAccess.expression) &&
@@ -3153,6 +3158,10 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // This writes to stdout (fd=1) using fd_write
   if (needsFdWrite) {
     emitWasiWriteStringHelper(ctx);
+    // #1493: also register __wasi_write_string_stderr (fd=2) for console.warn/error.
+    if (needsConsoleStderr) {
+      emitWasiWriteStringStderrHelper(ctx);
+    }
   }
 
   // Register __wasi_write_file_sync(pathPtr, pathLen, dataPtr, dataLen) helper
@@ -3190,6 +3199,46 @@ function emitWasiWriteStringHelper(ctx: CodegenContext): void {
 
   ctx.mod.functions.push({
     name: "__wasi_write_string",
+    typeIdx: funcTypeIdx,
+    locals: [],
+    body,
+    exported: false,
+  });
+}
+
+/**
+ * #1493: Emit __wasi_write_string_stderr(ptr: i32, len: i32) helper that calls
+ * fd_write(2, iov, 1, nwritten). Used by console.warn / console.error so their
+ * output lands on stderr (matching Node/V8 semantics and enabling `2>&1` / `2>err`).
+ */
+function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__wasi_write_string_stderr", funcIdx);
+
+  // Parameters: 0=ptr, 1=len
+  // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
+  // nwritten at memory[8]
+  const body: Instr[] = [
+    // Store ptr at memory[0] (iovec.buf)
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.get", index: 0 } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // Store len at memory[4] (iovec.buf_len)
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: 1 } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: 2 } as Instr, // fd = stderr
+    { op: "i32.const", value: 0 } as Instr, // iovs pointer
+    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
+    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr, // drop the return value (errno)
+  ];
+
+  ctx.mod.functions.push({
+    name: "__wasi_write_string_stderr",
     typeIdx: funcTypeIdx,
     locals: [],
     body,
