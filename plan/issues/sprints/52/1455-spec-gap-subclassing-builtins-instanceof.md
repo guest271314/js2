@@ -2,7 +2,7 @@
 id: 1455
 sprint: 52
 title: "spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …)"
-status: in-progress
+status: suspended
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -211,3 +211,54 @@ AC6 (instance method dispatch), and AC7 (≥40 fewer fails — closer to
 ~50 fewer based on the sweep). AC3 (WeakRef) and AC4 (DataView) hit
 upstream argument-passing issues that are out of scope for the
 prototype-chain fix.
+
+## Suspended Work
+
+- **PR**: https://github.com/loopdive/js2wasm/pull/384
+- **Branch**: `issue-1455-builtin-subclass`
+- **Worktree**: `/workspace/.claude/worktrees/issue-1455-builtin-subclass/`
+- **HEAD SHA**: `96c1b16b0bd5cd9e3fd23538c0588f0c4f7182ac`
+- **State**: PR open, branch merged with origin/main, pushed. Waiting on
+  CI Test262 Sharded gate (`.claude/ci-status/pr-384.json`).
+
+### What was implemented
+
+Three coordinated changes (full detail in `## Implementation` above):
+
+1. `src/runtime.ts` — new `__set_subclass_proto` host import; bucketed
+   `_subclassCtors` registry; updated `__instanceof` to consult registry
+   before `globalThis`; added Date / TypedArrays / SharedArrayBuffer to
+   `builtinCtors`.
+2. `src/codegen/class-bodies.ts` — new `emitSetSubclassProto` helper
+   wired into both implicit-super and explicit-super paths.
+3. `src/codegen/builtin-tags.ts` —
+   `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE` extended with WeakRef, DataView,
+   SharedArrayBuffer, every TypedArray, plus Boolean/Number/String/Date.
+   `BUILTIN_TYPE_TAGS` extended with WeakRef + TypedArrays + wrappers.
+4. `src/codegen/expressions.ts` + `src/codegen/expressions/identifiers.ts`
+   — instanceof dispatch falls through to host call when LHS is
+   unresolvable; `compileHostInstanceOf` maps RHS through
+   `classExprNameMap` for class-expression alias support.
+
+### Test status (local)
+
+- `tests/issue-1455.test.ts`: 10 tests pass.
+- `tests/issue-1366a.test.ts` + `tests/issue-1366b.test.ts`: green (no
+  regression in existing Error / Array / Map / Set / Promise / WeakMap
+  subclass paths).
+- test262 sweep over `language/{statements,expressions}/class/subclass-builtins/`:
+  **60/64** pass. Remaining 4: AggregateError (needs iterable arg),
+  DataView (needs real ArrayBuffer externref — out of scope), WeakRef
+  (implicit super passes null target).
+
+### Resume steps
+
+1. Check CI status: `cat /workspace/.claude/ci-status/pr-384.json` (SHA
+   must match `96c1b16b0bd5cd9e3fd23538c0588f0c4f7182ac`).
+2. If CI green and gates pass (`net_per_test > 0`, ratio <10%, no bucket
+   >50): `gh pr merge 384 --merge --admin`.
+3. If gates fail or regression: read `.claude/ci-status/pr-384.json`,
+   run `/dev-self-merge 384`, follow ESCALATE protocol.
+4. Post-merge: remove worktree
+   (`git worktree remove /workspace/.claude/worktrees/issue-1455-builtin-subclass`)
+   and mark task #17 (`#1455`) completed.
