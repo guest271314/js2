@@ -2,7 +2,7 @@
 id: 1481
 sprint: 52
 title: "wasi: support reading stdin via fd_read"
-status: in-review
+status: done
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -116,8 +116,8 @@ program read `"hello\n"` as a string.
 - **PR**: https://github.com/loopdive/js2wasm/pull/400
 - **Branch**: `issue-1481-wasi-stdin`
 - **Worktree**: `/workspace/.claude/worktrees/issue-1481-wasi-stdin`
-- **HEAD SHA**: `f2879c74f593a619f742a45704cf3a7ec0911dba`
-- **Status when suspended**: in CI-wait — background wait loop submitted
+- **HEAD SHA**: `04ade449ed5d31390ec7347a8d9c75115e2b3968`
+- **Status when suspended**: in CI-wait — re-merged main after quality check rejected stale branch
 
 ### What's implemented
 - `wasiFdReadIdx?: number` added to `CodegenContext`.
