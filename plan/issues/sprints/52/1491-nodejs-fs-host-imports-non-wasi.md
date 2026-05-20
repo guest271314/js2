@@ -2,7 +2,7 @@
 id: 1491
 sprint: 52
 title: "nodejs: fs.readFileSync/writeFileSync as JS-host imports (non-WASI)"
-status: in-review
+status: done
 created: 2026-05-20
 priority: medium
 feasibility: medium

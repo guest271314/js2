@@ -1,10 +1,11 @@
 {
   "pr": 408,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1470-no-js-host-string-ops",
-  "head_sha": "572dae3d7c7a172788c9b73c757b04d66f2283dc",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26150186618",
-  "timestamp": "2026-05-20T08:44:18Z",
+  "head_sha": "a807a84a6a49054513fb4959d31cfbdb59d7e14f",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/408",
+  "timestamp": "2026-05-20T17:50:17Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
