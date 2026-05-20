@@ -6802,7 +6802,10 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
     // In WASI mode, skip node:fs functions — they're handled by WASI syscall helpers.
     if (ts.isFunctionDeclaration(stmt) && stmt.name && hasDeclareModifier(stmt) && !stmt.body) {
       const name = stmt.name.text;
-      if (ctx.wasi && ctx.wasiNodeFsFuncs.has(name)) continue;
+      // Skip node:fs functions — they're handled by dedicated dispatch:
+      //   • WASI target → __wasi_*  syscall helpers (#1035)
+      //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
+      if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
       // #1481: in WASI mode, readStdin() is a built-in routed to __wasi_read_stdin_all,
       // not a host import — skip the env.readStdin stub so the codegen path in
       // compileCallExpression takes over.
