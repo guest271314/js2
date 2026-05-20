@@ -439,12 +439,14 @@ export function compileObjectLiteral(
   // Empty `{}` used as an externref plain object — only when the TypeScript type
   // context is `any`, `unknown`, or `object` (non-primitive), meaning no specific struct
   // shape is expected.
-  // Do NOT apply to: parameter defaults or binding element defaults where the struct system
-  // expects a concrete typed object for destructuring.
-  // (Too-broad application caused 150+ dstr regressions: parameter defaults like
-  //  `function({ x } = {})` would call __new_plain_object instead of struct.new,
-  //  making the WasmGC ref.test for the struct type fail and null-deref.)
-  if (expr.properties.length === 0 && !ts.isParameter(expr.parent) && !ts.isBindingElement(expr.parent)) {
+  // Do NOT apply to: parameter defaults where the struct system expects a concrete
+  // typed object for destructuring.
+  // Binding element defaults (e.g. `for ([a = {}] of ...)`) are safe to handle here:
+  // destructureParamObject (added in #852) does ref.test before ref.cast and falls
+  // back to per-field __extern_get when the externref doesn't match the struct shape.
+  // The earlier exclusion of binding elements caused #1543/#1544 illegal-cast failures
+  // when async-gen-meth/for-of dstr-default fed externref `{}` into a typed dstr slot.
+  if (expr.properties.length === 0 && !ts.isParameter(expr.parent)) {
     // Check contextual type: only use plain object when context is untyped or the `object` type
     // (TypeScript's `object` = NonPrimitive, used e.g. for Object.defineProperty's first arg).
     // Variable declarations without annotation have no contextual type → isAnyContext = true.
