@@ -1314,7 +1314,10 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         }
       }
     }
-    // Well-known symbol → @@name sidecar fallback
+    // Well-known symbol → @@name sidecar fallback. Object literals like
+    // `{ [Symbol.replace]: fn }` mostly arrive as dynamic property
+    // assignments (`obj[Symbol.replace] = fn`) per ECMA-262 test patterns;
+    // those routes through `_safeSet` which mirrors to the sidecar (#1443).
     if (typeof key === "symbol") {
       const wasmKey = _symbolToWasm.get(key);
       if (wasmKey !== undefined) {
@@ -1798,6 +1801,20 @@ function resolveImport(
     }
     case "string_method": {
       const method = intent.method;
+      // Methods whose first argument participates in Symbol.* protocol
+      // dispatch per ECMA-262 (e.g. String.prototype.replace checks
+      // searchValue[@@replace] before string coercion). For these methods
+      // we must NOT coerce the first arg to a primitive: wrap WasmGC structs
+      // with `_wrapForHost` so the Proxy translates `arg[Symbol.replace]` →
+      // `arg["@@replace"]` and invokes any user-defined method (#1443).
+      const SYMBOL_DISPATCH_METHODS: Set<string> = new Set([
+        "replace",
+        "replaceAll",
+        "match",
+        "matchAll",
+        "search",
+        "split",
+      ]);
       return (s: any, ...a: any[]) => {
         // Coerce wasmGC struct args via ToPrimitive before passing to JS host (#983, #1128)
         const coerce = (v: any): any => {
@@ -1810,7 +1827,21 @@ function resolveImport(
           return v;
         };
         const recv = coerce(s);
-        const args = a.map(coerce);
+        let args: any[];
+        if (SYMBOL_DISPATCH_METHODS.has(method) && a.length > 0) {
+          // Wrap (don't coerce) the first arg so JS's String.prototype.<method>
+          // can dispatch on Symbol.<method> via the wasm-struct proxy.
+          const first = a[0];
+          let wrapped: any;
+          if (first != null && typeof first === "object" && _isWasmStruct(first)) {
+            wrapped = _wrapForHost(first, callbackState?.getExports?.());
+          } else {
+            wrapped = first;
+          }
+          args = [wrapped, ...a.slice(1).map(coerce)];
+        } else {
+          args = a.map(coerce);
+        }
         return (String(recv) as any)[method](...args);
       };
     }

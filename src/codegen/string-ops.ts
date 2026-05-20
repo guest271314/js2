@@ -1675,19 +1675,37 @@ export function compileNativeStringMethodCall(
     return nativeStringType(ctx);
   }
 
-  // For replace/replaceAll/split with RegExp args, skip native handlers and
-  // fall through to the host import path which properly handles RegExp objects.
-  const firstArgIsRegExp =
+  // For replace/replaceAll/split with non-string args (RegExp or custom objects
+  // implementing Symbol.replace/replaceAll/split), skip the native helpers and
+  // fall through to the host import path. The host import dispatches via JS's
+  // String.prototype.* which honours @@replace / @@split / @@match
+  // (#1443). Native helpers are only safe when the search arg is statically a
+  // string-like type — otherwise we'd silently ignore custom Symbol.* methods.
+  const firstArgIsStringLike =
     (method === "replace" || method === "replaceAll" || method === "split") &&
     expr.arguments.length > 0 &&
     (() => {
       const argType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-      const symName = argType.getSymbol()?.getName();
-      return symName === "RegExp";
+      if ((argType.flags & ts.TypeFlags.String) !== 0) return true;
+      if ((argType.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
+      if ((argType.flags & ts.TypeFlags.Object) !== 0 && argType.getSymbol()?.getName() === "String") {
+        return true;
+      }
+      // Union of string-like types
+      if ((argType.flags & ts.TypeFlags.Union) !== 0) {
+        const union = argType as ts.UnionType;
+        return union.types.every(
+          (t) =>
+            (t.flags & ts.TypeFlags.String) !== 0 ||
+            (t.flags & ts.TypeFlags.StringLiteral) !== 0 ||
+            ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String"),
+        );
+      }
+      return false;
     })();
 
   // replace(search, replacement): native helper
-  if (method === "replace" && !firstArgIsRegExp) {
+  if (method === "replace" && firstArgIsStringLike) {
     compileExpression(ctx, fctx, propAccess.expression);
     emitFlatten();
     // search arg
@@ -1715,7 +1733,7 @@ export function compileNativeStringMethodCall(
   }
 
   // replaceAll(search, replacement): native helper
-  if (method === "replaceAll" && !firstArgIsRegExp) {
+  if (method === "replaceAll" && firstArgIsStringLike) {
     compileExpression(ctx, fctx, propAccess.expression);
     emitFlatten();
     // search arg
@@ -1743,7 +1761,7 @@ export function compileNativeStringMethodCall(
   }
 
   // split: native helper, returns native string array
-  if (method === "split" && !firstArgIsRegExp) {
+  if (method === "split" && firstArgIsStringLike) {
     compileExpression(ctx, fctx, propAccess.expression);
     emitFlatten();
     // separator arg
