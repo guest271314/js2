@@ -42,6 +42,7 @@ import {
   emitDefaultValueCheck,
   emitNullGuard,
   ensureAsyncIterator,
+  ensureExternIsUndefined,
   syncDestructuredLocalsToGlobals,
 } from "./destructuring.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
@@ -1444,6 +1445,78 @@ function compileForOfAssignDestructuring(
 
         const targetType = getLocalType(fctx, targetLocal);
 
+        // #1510 — boxed-capture target with default initializer (vec path).
+        // Mirror of the externref-path fix in compileForOfAssignDestructuringExternref.
+        // Without this, `emitDefaultValueCheck` does `local.set` on the captured
+        // param, overwriting the box-ref. The pre-fix symptom is
+        // "dereferencing a null pointer" (when valType is a ref) or silently
+        // lost writes (when valType is f64 → coerce mismatch + drop).
+        const boxedCapVec = fctx.boxedCaptures?.get(targetEl.text);
+        if (boxedCapVec && defaultInit) {
+          const valType = boxedCapVec.valType;
+          // Read elem.data[i] safely (bounds-checked → produces innerElemType or
+          // the type's "undefined" sentinel for OOB). For f64 element types this
+          // returns NaN sentinel; for ref/externref it returns null.
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({ op: "local.get", index: elemLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: 1 });
+          fctx.body.push({ op: "i32.const", value: i });
+          emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
+          // Now stack: [box-ref, value:innerElemType]. Apply default-on-undefined
+          // and coerce to valType before struct.set.
+          // For f64: check sNaN sentinel; for ref/null: check ref.is_null;
+          // for externref: __extern_is_undefined.
+          const tmpVal = allocLocal(fctx, `__forof_dflt_v_${fctx.locals.length}`, innerElemType);
+          fctx.body.push({ op: "local.tee", index: tmpVal });
+          if (innerElemType.kind === "f64") {
+            fctx.body.push({ op: "i64.reinterpret_f64" } as unknown as Instr);
+            fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den } as unknown as Instr);
+            fctx.body.push({ op: "i64.eq" });
+          } else if (innerElemType.kind === "externref") {
+            const undefIdx = ensureExternIsUndefined(ctx, fctx);
+            if (undefIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: undefIdx });
+            } else {
+              fctx.body.push({ op: "ref.is_null" } as Instr);
+            }
+          } else if (innerElemType.kind === "ref" || innerElemType.kind === "ref_null") {
+            fctx.body.push({ op: "ref.is_null" } as Instr);
+          } else {
+            // i32 or other — no reliable undefined sentinel; treat as not-undefined.
+            fctx.body.push({ op: "i32.const", value: 0 });
+          }
+          const thenInstrs = collectInstrs(fctx, () => {
+            compileExpression(ctx, fctx, defaultInit!, valType);
+          });
+          const elseInstrs = collectInstrs(fctx, () => {
+            fctx.body.push({ op: "local.get", index: tmpVal } as Instr);
+            if (!valTypesMatch(innerElemType, valType)) {
+              coerceType(ctx, fctx, innerElemType, valType);
+            }
+          });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: valType },
+            then: thenInstrs,
+            else: elseInstrs,
+          } as unknown as Instr);
+          fctx.body.push({
+            op: "struct.set",
+            typeIdx: boxedCapVec.refCellTypeIdx,
+            fieldIdx: 0,
+          } as unknown as Instr);
+          if (vecSyncGlobalIdx !== undefined) {
+            fctx.body.push({ op: "local.get", index: targetLocal });
+            fctx.body.push({
+              op: "struct.get",
+              typeIdx: boxedCapVec.refCellTypeIdx,
+              fieldIdx: 0,
+            } as unknown as Instr);
+            fctx.body.push({ op: "global.set", index: vecSyncGlobalIdx });
+          }
+          continue;
+        }
+
         if (defaultInit && innerElemType.kind === "externref") {
           // For externref elements with defaults, do explicit bounds check.
           // OOB produces ref.null.extern (Wasm null) which is indistinguishable from JS null.
@@ -1661,6 +1734,76 @@ function compileForOfAssignDestructuringExternref(
       if (boxedCap.valType.kind !== "externref") {
         coerceType(ctx, fctx, { kind: "externref" }, boxedCap.valType);
       }
+      fctx.body.push({
+        op: "struct.set",
+        typeIdx: boxedCap.refCellTypeIdx,
+        fieldIdx: 0,
+      } as unknown as Instr);
+      if (extSyncGlobalIdx !== undefined) {
+        // Re-load through the cell for global sync
+        fctx.body.push({ op: "local.get", index: targetLocal });
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: boxedCap.refCellTypeIdx,
+          fieldIdx: 0,
+        } as unknown as Instr);
+        fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
+      }
+      continue;
+    }
+
+    // #1510 — boxed-capture target WITH default initializer.
+    // The pre-#1510 code fell through to `emitDefaultValueCheck` which
+    // emitted `local.set` directly on the captured param — overwriting
+    // the box-ref instead of writing through the cell. The mutation was
+    // invisible to the outer scope's box, which silently kept the old
+    // value (e.g. -1 from a `let v = -1` decl). Test262 cases:
+    //   - language/statements/for-await-of/async-{gen,func}-decl-dstr-
+    //     array-elem-init-assignment.js — `[v = expr] of …` where `v` is
+    //     a `let`-bound outer variable captured by the async function.
+    // Spec §13.15.5.5 ArrayAssignmentPattern requires PutValue on the
+    // LHS; for a boxed-capture variable that means `struct.set` on
+    // field 0 of the cell.
+    if (boxedCap && defaultInit) {
+      const valType = boxedCap.valType;
+      const undefIdx = ensureExternIsUndefined(ctx, fctx);
+      // Push the box-ref for the eventual struct.set.
+      fctx.body.push({ op: "local.get", index: targetLocal });
+      // Get the extracted value: __extern_get(elem, box(i)) -> externref
+      fctx.body.push({ op: "local.get", index: elemLocal });
+      fctx.body.push({ op: "f64.const", value: i });
+      fctx.body.push({ op: "call", funcIdx: boxIdx! });
+      fctx.body.push({ op: "call", funcIdx: getIdx! });
+      // Tee into a temp so we can both test-undefined and reuse on else.
+      const tmpExt = allocLocal(fctx, `__forof_dflt_ext_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpExt });
+      // Test undefined-ness (using __extern_is_undefined; JS spec applies
+      // defaults only on `undefined`, NOT on `null`).
+      if (undefIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: undefIdx });
+      } else {
+        // Fallback: ref.is_null treats null AS undefined — imprecise but safer
+        // than crashing. The runtime always exposes __extern_is_undefined.
+        fctx.body.push({ op: "ref.is_null" } as Instr);
+      }
+      // Build then-branch (default fires): compile default to valType.
+      const thenInstrs = collectInstrs(fctx, () => {
+        compileExpression(ctx, fctx, defaultInit, valType);
+      });
+      // Build else-branch (value used as-is): coerce externref -> valType.
+      const elseInstrs = collectInstrs(fctx, () => {
+        fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+        if (valType.kind !== "externref") {
+          coerceType(ctx, fctx, { kind: "externref" }, valType);
+        }
+      });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: valType },
+        then: thenInstrs,
+        else: elseInstrs,
+      } as unknown as Instr);
+      // Now stack: [box-ref, value:valType]
       fctx.body.push({
         op: "struct.set",
         typeIdx: boxedCap.refCellTypeIdx,
@@ -2353,6 +2496,59 @@ function compileForOfIteratorAssignDestructuring(
         if (boxedCap.valType.kind !== "externref") {
           coerceType(ctx, fctx, { kind: "externref" }, boxedCap.valType);
         }
+        fctx.body.push({
+          op: "struct.set",
+          typeIdx: boxedCap.refCellTypeIdx,
+          fieldIdx: 0,
+        } as unknown as Instr);
+        if (iterArrSyncGlobalIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: boxedCap.refCellTypeIdx,
+            fieldIdx: 0,
+          } as unknown as Instr);
+          fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
+        }
+        continue;
+      }
+
+      // #1510 — boxed-capture target WITH default initializer (iterator path).
+      // Mirror of the array-path fix in compileForOfAssignDestructuringExternref.
+      // Without this, defaults on captured `let`-bound targets in for-await-of
+      // (over an arbitrary iterable) silently lose the write (overwrites the
+      // box-ref) or trap dereferencing a null pointer when coerceType emits
+      // ref.as_non_null on a null cell.
+      if (boxedCap && defaultInitIter) {
+        const valType = boxedCap.valType;
+        const undefIdx = ensureExternIsUndefined(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: targetLocal });
+        fctx.body.push({ op: "local.get", index: elemLocal });
+        fctx.body.push({ op: "f64.const", value: i });
+        fctx.body.push({ op: "call", funcIdx: boxIdx! });
+        fctx.body.push({ op: "call", funcIdx: getIdx! });
+        const tmpExt = allocLocal(fctx, `__forit_dflt_ext_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.tee", index: tmpExt });
+        if (undefIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: undefIdx });
+        } else {
+          fctx.body.push({ op: "ref.is_null" } as Instr);
+        }
+        const thenInstrs = collectInstrs(fctx, () => {
+          compileExpression(ctx, fctx, defaultInitIter!, valType);
+        });
+        const elseInstrs = collectInstrs(fctx, () => {
+          fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+          if (valType.kind !== "externref") {
+            coerceType(ctx, fctx, { kind: "externref" }, valType);
+          }
+        });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: valType },
+          then: thenInstrs,
+          else: elseInstrs,
+        } as unknown as Instr);
         fctx.body.push({
           op: "struct.set",
           typeIdx: boxedCap.refCellTypeIdx,
