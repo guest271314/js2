@@ -2,7 +2,7 @@
 id: 1400
 sprint: 52
 title: "npm: compile ESLint package entry to valid Wasm"
-status: in-review
+status: done
 created: 2026-05-11
 updated: 2026-05-20
 priority: high
