@@ -5,6 +5,7 @@
  */
 import { ts, forEachChild } from "../../ts-api.js";
 import {
+  isBigIntType,
   isBooleanType,
   isBooleanWrapperType,
   isExternalDeclaredClass,
@@ -13,6 +14,7 @@ import {
   isNumberWrapperType,
   isStringType,
   isStringWrapperType,
+  isSymbolType,
   isVoidType,
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
@@ -4781,6 +4783,81 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const importName = `string_${method}`;
       const funcIdx = ctx.funcMap.get(importName);
       if (funcIdx !== undefined) {
+        // #1445 — ECMA-262 §7.1.4 ToNumber throws TypeError on BigInt /
+        // Symbol arguments. String.prototype methods feed certain args
+        // through ToInteger / ToLength (which call ToNumber). For those
+        // arg positions, emit a static TypeError throw when the arg's
+        // static TS type is `bigint` or `symbol`.
+        //
+        // Map: method → set of arg indices that are ToInteger-coerced.
+        const TO_INTEGER_ARG_INDICES: Record<string, ReadonlyArray<number>> = {
+          charAt: [0],
+          charCodeAt: [0],
+          codePointAt: [0],
+          at: [0],
+          substring: [0, 1],
+          slice: [0, 1],
+          substr: [0, 1],
+          indexOf: [1],
+          lastIndexOf: [1],
+          includes: [1],
+          startsWith: [1],
+          endsWith: [1],
+          padStart: [0],
+          padEnd: [0],
+          repeat: [0],
+        };
+        const integerArgs = TO_INTEGER_ARG_INDICES[method];
+        if (integerArgs) {
+          for (const idx of integerArgs) {
+            const arg = expr.arguments[idx];
+            if (!arg) continue;
+            let argTsType: ts.Type | undefined;
+            try {
+              argTsType = ctx.checker.getTypeAtLocation(arg);
+            } catch {
+              continue;
+            }
+            if (!argTsType) continue;
+            const isBig = isBigIntType(argTsType);
+            const isSym = isSymbolType(argTsType);
+            if (!isBig && !isSym) continue;
+            const msg = isBig
+              ? "TypeError: Cannot convert a BigInt value to a number"
+              : "TypeError: Cannot convert a Symbol value to a number";
+            addStringConstantGlobal(ctx, msg);
+            const strIdx = ctx.stringGlobalMap.get(msg)!;
+            const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
+            if (throwIdx !== undefined) {
+              flushLateImportShifts(ctx, fctx);
+              const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
+              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+              fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+              fctx.body.push({ op: "unreachable" } as Instr);
+            } else {
+              const tagIdx = ensureExnTag(ctx);
+              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+              fctx.body.push({ op: "throw", tagIdx } as Instr);
+            }
+            // After unreachable / throw, the wasm stack is polymorphic.
+            // Push a sentinel matching the method's return type so any
+            // downstream consumer (the implicit drop / coercion in the
+            // statement context) still validates cleanly.
+            const returnsBool = method === "includes" || method === "startsWith" || method === "endsWith";
+            const returnsNum =
+              method === "indexOf" || method === "lastIndexOf" || method === "codePointAt" || method === "search";
+            if (returnsBool) {
+              fctx.body.push({ op: "i32.const", value: 0 });
+              return { kind: "i32" };
+            }
+            if (returnsNum) {
+              fctx.body.push({ op: "f64.const", value: 0 });
+              return { kind: "f64" };
+            }
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
+        }
         // #1248: substring/slice with a single argument default the missing
         // `end` to `s.length`, NOT 0. Without this, the generic padding loop
         // below pushes f64.const 0, and the host import calls
