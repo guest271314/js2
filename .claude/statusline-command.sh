@@ -257,7 +257,8 @@ if [ -z "$in_worktree" ]; then
       }' /dev/null)
     fi
   fi
-  # Agent idle indicator: hidden when all busy; yellow ≤50% idle, red >50%
+  # Agent idle indicator (⏹): hidden when all busy; yellow ≤50% idle, red >50%
+  # Stale agents (no heartbeat >10min) always count as idle, not busy.
   agent_status_dir="/workspace/.claude/agent-status"
   if [ -d "$agent_status_dir" ]; then
     now_sec=$(date +%s)
@@ -265,23 +266,29 @@ if [ -z "$in_worktree" ]; then
     busy_agents=0
     for f in "$agent_status_dir"/*.json; do
       [ -f "$f" ] || continue
-      since=$(jq -r '.since // 0' "$f" 2>/dev/null)
       state=$(jq -r '.state // empty' "$f" 2>/dev/null)
-      case "$since" in
-        *T*Z) since=$(date -d "$since" +%s 2>/dev/null || echo 0) ;;
-        ''|null) since=0 ;;
-      esac
-      age=$((now_sec - since))
-      [ "$age" -gt 10800 ] && continue  # skip stale (>3h)
+      [ -z "$state" ] && continue
+      last_seen=$(jq -r '.last_seen // empty' "$f" 2>/dev/null)
+      if [ -n "$last_seen" ]; then
+        file_age=$((now_sec - last_seen))
+      else
+        since=$(jq -r '.since // 0' "$f" 2>/dev/null)
+        case "$since" in
+          *T*Z) since=$(date -d "$since" +%s 2>/dev/null || echo 0) ;;
+          ''|null) since=0 ;;
+        esac
+        file_age=$((now_sec - since))
+      fi
+      [ "$file_age" -gt 10800 ] && continue  # skip very old files (>3h)
       total_agents=$((total_agents + 1))
-      [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
+      [ "$file_age" -lt 600 ] && [ "$state" = "active" ] && busy_agents=$((busy_agents + 1))
     done
     idle_agents=$((total_agents - busy_agents))
     if [ "$idle_agents" -gt 0 ] && [ "$total_agents" -gt 0 ]; then
       awk -v idle="$idle_agents" -v total="$total_agents" 'BEGIN {
         pct = idle * 100 / total
         color = (pct > 50) ? "00;31" : "00;33"
-        printf " \033[%sm%d idle\033[00m", color, idle
+        printf " \033[%sm%d⏹\033[00m", color, idle
       }' /dev/null
     fi
   fi
