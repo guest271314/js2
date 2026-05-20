@@ -23,7 +23,7 @@ Local validation happens AFTER merging main into your branch, but **full test262
 ## Finalize
 
 5. [ ] Issue file updated with implementation notes
-6. [ ] Issue status set to `review` in frontmatter
+6. [ ] Issue status set to `in-review` in frontmatter
 7. [ ] File locks removed from `plan/method/file-locks.md`
 8. [ ] Branch pushed to `origin`
 9. [ ] PR opened against `main`
@@ -36,7 +36,7 @@ Local validation happens AFTER merging main into your branch, but **full test262
     - `net_per_test > 0`, ratio <10%, no bucket >50 → `gh pr merge <N> --admin --merge`
     - regressions: fix on branch, push, loop back to step 11
     - escalate to tech lead only if: regressions >10, bucket >50, or judgment call
-13. [ ] After merge: mark task `completed` in TaskList, claim next task
+13. [ ] After merge: set issue file `status: done`, mark task `completed` in TaskList, claim next task
 
 ## What NOT to do
 
