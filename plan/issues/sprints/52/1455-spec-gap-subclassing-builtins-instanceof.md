@@ -2,7 +2,7 @@
 id: 1455
 sprint: 52
 title: "spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …)"
-status: in-review
+status: done
 created: 2026-05-20
 priority: medium
 feasibility: medium
