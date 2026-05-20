@@ -1,0 +1,22 @@
+{
+  "pr": 357,
+  "conclusion": "success",
+  "head_branch": "issue-1463-function-bind",
+  "head_sha": "817301749294ae5a7d609ba5b00123de4a2a3b6a",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26132851555",
+  "timestamp": "2026-05-20T08:45:04Z",
+  "pass": 28176,
+  "fail": 13717,
+  "compile_error": 1193,
+  "snapshot_delta": 8,
+  "net_per_test": 53,
+  "regressions": 38,
+  "regressions_real": 5,
+  "regressions_wasm_change": 5,
+  "wasm_identical_noise": 0,
+  "compile_timeouts": 33,
+  "improvements": 58,
+  "baseline_sha": "817301749294ae5a7d609ba5b00123de4a2a3b6a",
+  "baseline_staleness_commits": 32,
+  "baseline_stale": false
+}
