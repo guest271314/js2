@@ -6539,7 +6539,10 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
     // In WASI mode, skip node:fs functions — they're handled by WASI syscall helpers.
     if (ts.isFunctionDeclaration(stmt) && stmt.name && hasDeclareModifier(stmt) && !stmt.body) {
       const name = stmt.name.text;
-      if (ctx.wasi && ctx.wasiNodeFsFuncs.has(name)) continue;
+      // Skip node:fs functions — they're handled by dedicated dispatch:
+      //   • WASI target → __wasi_*  syscall helpers (#1035)
+      //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
+      if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
       if (!ctx.funcMap.has(name)) {
         const sig = ctx.checker.getSignatureFromDeclaration(stmt);
         if (sig) {

@@ -4676,6 +4676,31 @@ assert._isSameValue = isSameValue;
       }
       return () => {};
     }
+    case "node_builtin_fn": {
+      // #1491 — Bind a named function of a Node.js builtin module as a host import.
+      // E.g. `node_builtin_fn { moduleName: "fs", name: "readFileSync" }` resolves
+      // to `require("fs").readFileSync`, bound to the module object so it works
+      // when called with externref-typed args.
+      const modName = intent.moduleName;
+      const fnName = intent.name;
+      const depMod = deps?.[modName];
+      if (depMod !== undefined) {
+        const fn = (depMod as Record<string, unknown>)[fnName];
+        if (typeof fn === "function") return (fn as Function).bind(depMod);
+        return () => undefined;
+      }
+      const req = _getNodeRequire();
+      if (req) {
+        try {
+          const mod = req(modName);
+          const fn = mod?.[fnName];
+          if (typeof fn === "function") return (fn as Function).bind(mod);
+        } catch {
+          // fall through to no-op
+        }
+      }
+      return () => undefined;
+    }
     case "proxy_create":
       return (target: any, handler: any) => {
         // Wrap the Wasm struct target in a real JS Proxy with the given handler.
