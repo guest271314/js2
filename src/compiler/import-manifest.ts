@@ -133,7 +133,13 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__get_filename") return { type: "node_filename" };
   if (name === "__get_import_meta_url") return { type: "node_import_meta_url" };
 
-  // Node builtin modules (#1044)
+  // Node builtin module functions — typed function imports (#1491)
+  // e.g. `__node_fs_readFileSync` → { moduleName: "fs", name: "readFileSync" }
+  if (name.startsWith("__node_fs_")) {
+    return { type: "node_builtin_fn", moduleName: "fs", name: name.slice("__node_fs_".length) };
+  }
+
+  // Node builtin modules (#1044) — module-shaped imports returning the whole module object
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
   // Declared globals (like `declare const document: Document`)
