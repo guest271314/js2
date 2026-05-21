@@ -2122,10 +2122,11 @@ function emitIsClosureExport(ctx: CodegenContext): void {
     // Walk up to the root struct in the chain.
     let root = typeIdx;
     let cur = typeDef;
-    while (cur && cur.kind === "struct" && cur.superTypeIdx >= 0) {
-      const parent = mod.types[cur.superTypeIdx];
+    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
+      const superIdx: number = cur.superTypeIdx;
+      const parent = mod.types[superIdx];
       if (!parent || parent.kind !== "struct") break;
-      root = cur.superTypeIdx;
+      root = superIdx;
       cur = parent;
     }
     if (!seenBase.has(root)) {
@@ -2401,10 +2402,16 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // - #1504: wrapExports marshaling of compiled array returns to plain JS,
   //   which needs __vec_len / __vec_get unconditionally for any module that
   //   declares vec types.
+  // - (#779c) `vec.constructor === Array` identity via the runtime's
+  //   `extern_get` constructor path, which calls `__vec_len` to positively
+  //   distinguish vec wrappers from other null-prototype WasmGC structs.
+  //   When `__extern_get` is imported, the property-access lowering may
+  //   need this discrimination for `vec.constructor` lookups.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
     !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("__extern_get") &&
     ctx.vecTypeMap.size === 0
   ) {
     return;
