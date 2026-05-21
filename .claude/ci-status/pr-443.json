@@ -1,10 +1,11 @@
 {
   "pr": 443,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1543-1544-path-b",
-  "head_sha": "a0eace2e61db55954c7d732795f768ab69b03e31",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196512383",
-  "timestamp": "2026-05-21T01:30:30Z",
+  "head_sha": "9de02cd96caabafe30bb924d87867956ea0c1670",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/443",
+  "timestamp": "2026-05-21T01:59:15Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
