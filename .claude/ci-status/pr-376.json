@@ -1,11 +1,10 @@
 {
   "pr": 376,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1467-error-symbol-protocol",
-  "head_sha": "8a6a95ab7894a5e63f4ecfd5df6d706ca223f80a",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/376",
-  "timestamp": "2026-05-21T01:05:42Z",
+  "head_sha": "476dca28f4f2e520de66b3f33f82f9534f375af1",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196490831",
+  "timestamp": "2026-05-21T01:17:13Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
