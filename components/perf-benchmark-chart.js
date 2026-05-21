@@ -1290,50 +1290,38 @@ class PerfBenchmarkChart extends HTMLElement {
         }
         ratios = [];
         // Lane definitions: when any of these alternate fields are present we
-        // fan a row out into multiple lanes (one bar per lane). The js2wasm
-        // lane is always emitted from `wasmUs`; the others are conditional.
-        // Color is picked up by _renderRatioRows via row.fillColor.
+        // fan a row out into multiple lanes (one bar per lane). Labels are
+        // generic execution-model categories (AOT / Interpreter / Engine) —
+        // bars are monochrome and distinguished by their label, not by color,
+        // so the comparison doesn't visually privilege any one lane.
         const LANES = [
-          {
-            key: "wasmUs",
-            label: "js2wasm AOT",
-            // Brand blue (matches site primary), bright to identify "ours".
-            color: "rgba(96, 165, 250, 0.95)",
-            edgeColor: "rgba(96, 165, 250, 0.95)",
-          },
-          {
-            key: "javyUs",
-            label: "Javy (interpreter)",
-            color: "rgba(251, 146, 60, 0.85)",
-            edgeColor: "rgba(251, 146, 60, 0.95)",
-          },
-          {
-            key: "starlingMonkeyUs",
-            label: "StarlingMonkey (engine)",
-            color: "rgba(192, 132, 252, 0.85)",
-            edgeColor: "rgba(192, 132, 252, 0.95)",
-          },
+          { key: "wasmUs", label: "AOT" },
+          { key: "javyUs", label: "Interpreter" },
+          { key: "starlingMonkeyUs", label: "Engine" },
         ];
         const anyHasExtraLanes = rows.some(
           (row) => Number(row?.javyUs ?? 0) > 0 || Number(row?.starlingMonkeyUs ?? 0) > 0,
         );
+        // When the caller has filtered down to a single benchmark name (the
+        // "one chart per benchmark" layout), prefix each bar with the scenario
+        // so cold/warm bars stay distinguishable inside the same chart.
+        const distinctBenchNames = new Set(rows.map((row) => String(row?.name ?? "")));
+        const showScenarioInLabel = distinctBenchNames.size === 1 && rows.some((row) => row?.scenario);
         for (const row of rows) {
           const jsUs = Number(row?.jsUs ?? 0);
           if (jsUs <= 0) continue;
           if (anyHasExtraLanes) {
-            // Multi-lane mode: emit one ratio entry per present lane. The lane
-            // name becomes the row label so the chart shows lane-per-bar.
-            const baseName = row?.name ?? "unknown";
+            // Multi-lane mode: emit one ratio entry per present lane. The
+            // label becomes the bar's row label so the chart shows lane-per-bar.
+            const baseName = showScenarioInLabel ? String(row?.scenario ?? "") : (row?.name ?? "unknown");
             for (const lane of LANES) {
               const us = Number(row?.[lane.key] ?? 0);
               if (us <= 0) continue;
               ratios.push({
                 ...row,
-                name: `${baseName} — ${lane.label}`,
+                name: baseName ? `${baseName} — ${lane.label}` : lane.label,
                 ratio: jsUs / us,
                 ratioStd: 0,
-                fillColor: lane.color,
-                edgeColor: lane.edgeColor,
                 lane: lane.key,
               });
             }
