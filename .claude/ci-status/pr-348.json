@@ -1,11 +1,10 @@
 {
   "pr": 348,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1379-tonumeric-coercion",
-  "head_sha": "0ad4882c67ed38c550783611211e0f089c8fc7ab",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/348",
-  "timestamp": "2026-05-21T02:24:55Z",
+  "head_sha": "9df1908934b0df024ae4929706108caf83df593f",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197114471",
+  "timestamp": "2026-05-21T03:03:24Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
