@@ -1,10 +1,11 @@
 {
   "pr": 450,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1558-f64-eq-i32-coerce",
-  "head_sha": "53af9f5af139c7e00c491d3987a829bf26fb2547",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196512437",
-  "timestamp": "2026-05-21T01:34:10Z",
+  "head_sha": "b0ed1b5906033a2cefc1676f47ad883ca2bba8c4",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/450",
+  "timestamp": "2026-05-21T01:59:01Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
