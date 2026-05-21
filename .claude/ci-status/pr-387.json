@@ -1,11 +1,10 @@
 {
   "pr": 387,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1510-for-await-of-dstr",
-  "head_sha": "fe0566046f785e43d26d8c9937630202b1944f65",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/387",
-  "timestamp": "2026-05-21T01:05:54Z",
+  "head_sha": "30d1e36e420cece534715c7935c596339cca75d0",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196501162",
+  "timestamp": "2026-05-21T01:24:18Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
