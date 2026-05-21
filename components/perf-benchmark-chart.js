@@ -903,6 +903,11 @@ class PerfBenchmarkChart extends HTMLElement {
       const baseOpacity = "0.1";
       const gradDir = ratio >= 1 ? "to right" : "to left";
       const textOpacity = (0.4 + dist * 0.6).toFixed(2);
+      // When the row carries an explicit lane colour (4-lane perf mode), use it
+      // instead of the default white gradient. baseColor/edgeColor are CSS
+      // colour strings with alpha already applied.
+      const customBaseColor = row.fillColor || `rgba(255,255,255,${baseOpacity})`;
+      const customEdgeColor = row.edgeColor || row.fillColor || null;
 
       const rowEl = document.createElement("div");
       rowEl.className = "bench-row";
@@ -926,6 +931,8 @@ class PerfBenchmarkChart extends HTMLElement {
         baseOpacity,
         edgeOpacity,
         textOpacity,
+        customBaseColor,
+        customEdgeColor,
         ratioStd: Number(row.ratioStd ?? 0),
         fillEl: rowEl.querySelector(".bench-fill"),
         errorEl: rowEl.querySelector(".bench-errorbar"),
@@ -960,7 +967,14 @@ class PerfBenchmarkChart extends HTMLElement {
 
         d.fillEl.style.left = curLeft + "%";
         d.fillEl.style.width = curWidth + "%";
-        d.fillEl.style.background = `linear-gradient(${d.gradDir}, rgba(255,255,255,${d.baseOpacity}), rgba(255,255,255,${curEdgeOp}))`;
+        if (d.customEdgeColor) {
+          // Lane-coloured bar: animate edge alpha by varying the gradient stop
+          // alpha. We keep the colour fixed and let the existing dist→alpha
+          // scaling stay visually consistent across lanes.
+          d.fillEl.style.background = `linear-gradient(${d.gradDir}, ${d.customBaseColor}, ${d.customEdgeColor})`;
+        } else {
+          d.fillEl.style.background = `linear-gradient(${d.gradDir}, rgba(255,255,255,${d.baseOpacity}), rgba(255,255,255,${curEdgeOp}))`;
+        }
 
         const stdRatio = Math.min(d.ratioStd || 0, Math.max(d.ratio - 0.01, 0), Math.max(scaleMax / 100 - d.ratio, 0));
         if (stdRatio > 0) {
@@ -1275,11 +1289,59 @@ class PerfBenchmarkChart extends HTMLElement {
           return;
         }
         ratios = [];
+        // Lane definitions: when any of these alternate fields are present we
+        // fan a row out into multiple lanes (one bar per lane). The js2wasm
+        // lane is always emitted from `wasmUs`; the others are conditional.
+        // Color is picked up by _renderRatioRows via row.fillColor.
+        const LANES = [
+          {
+            key: "wasmUs",
+            label: "js2wasm AOT",
+            // Brand blue (matches site primary), bright to identify "ours".
+            color: "rgba(96, 165, 250, 0.95)",
+            edgeColor: "rgba(96, 165, 250, 0.95)",
+          },
+          {
+            key: "javyUs",
+            label: "Javy (interpreter)",
+            color: "rgba(251, 146, 60, 0.85)",
+            edgeColor: "rgba(251, 146, 60, 0.95)",
+          },
+          {
+            key: "starlingMonkeyUs",
+            label: "StarlingMonkey (engine)",
+            color: "rgba(192, 132, 252, 0.85)",
+            edgeColor: "rgba(192, 132, 252, 0.95)",
+          },
+        ];
+        const anyHasExtraLanes = rows.some(
+          (row) => Number(row?.javyUs ?? 0) > 0 || Number(row?.starlingMonkeyUs ?? 0) > 0,
+        );
         for (const row of rows) {
-          const wasmUs = Number(row?.wasmUs ?? 0);
           const jsUs = Number(row?.jsUs ?? 0);
-          if (wasmUs <= 0 || jsUs <= 0) continue;
-          ratios.push({ ...row, ratio: jsUs / wasmUs, ratioStd: Number(row?.ratioStd ?? 0) });
+          if (jsUs <= 0) continue;
+          if (anyHasExtraLanes) {
+            // Multi-lane mode: emit one ratio entry per present lane. The lane
+            // name becomes the row label so the chart shows lane-per-bar.
+            const baseName = row?.name ?? "unknown";
+            for (const lane of LANES) {
+              const us = Number(row?.[lane.key] ?? 0);
+              if (us <= 0) continue;
+              ratios.push({
+                ...row,
+                name: `${baseName} — ${lane.label}`,
+                ratio: jsUs / us,
+                ratioStd: 0,
+                fillColor: lane.color,
+                edgeColor: lane.edgeColor,
+                lane: lane.key,
+              });
+            }
+          } else {
+            const wasmUs = Number(row?.wasmUs ?? 0);
+            if (wasmUs <= 0) continue;
+            ratios.push({ ...row, ratio: jsUs / wasmUs, ratioStd: Number(row?.ratioStd ?? 0) });
+          }
         }
       }
       const isAbsoluteMode = mode === "absolute-lower-better" || mode === "runtime" || mode === "module-size";

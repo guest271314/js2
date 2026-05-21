@@ -3091,20 +3091,23 @@ match (value) {
         </div>
 
         <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
-          <h3 class="host-bench-title">WebAssembly host (Wasmtime) vs V8 isolate</h3>
+          <h3 class="host-bench-title">Four execution models on the same JS programs</h3>
           <p class="host-bench-subcopy">
             Per-request cost of running the same
             <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
-            on two edge serverless execution models:
-            <strong>
-              Wasmtime with AOT-precompiled
-              <code>.cwasm</code>
-            </strong>
-            (Cranelift compiles offline, no runtime codegen) versus a
+            across four execution models on edge:
+            <strong>js2wasm AOT</strong>
+            (Cranelift-compiled
+            <code>.cwasm</code>
+            , no runtime codegen),
             <strong>V8 isolate</strong>
-            (Ignition → Liftoff → TurboFan, all at request time). Two scenarios per program: a fresh instance per
-            request (cold isolate) and a reused instance (warm isolate). Cranelift-AOT cost stays flat across both; V8
-            swings dramatically because most of its cost is parse + tier-up, paid once per fresh isolate.
+            (Ignition → Liftoff → TurboFan, all at request time),
+            <strong>Javy</strong>
+            (interpreter — Shopify-style dynamic-link, QuickJS plugin preloaded; ~3 kB per function), and
+            <strong>StarlingMonkey</strong>
+            (engine — SpiderMonkey-as-Wasm via ComponentizeJS + Wizer + Weval; ~14 MB per function). Two scenarios per
+            program: fresh instance per request (cold) and reused instance (warm). Javy and StarlingMonkey both run a JS
+            interpreter inside Wasm — the size and per-call cost tradeoff isn't free.
           </p>
           <div class="conformance-diagrams">
             <div
@@ -3119,7 +3122,7 @@ match (value) {
                 mode="perf"
                 title="Cold isolate — fresh instance per request"
                 baseline-label="JS in V8"
-                legend="Full process wall time. Wasmtime: startup + cwasm load + invocation. V8: startup + parse + Ignition → Liftoff → first run. 2× = Wasm twice as fast per cold request as V8. The cost a per-request platform (or the first request to any platform) pays."
+                legend="Full process wall time per program × execution model. js2wasm AOT (blue) loads precompiled .cwasm; V8 (the 1.0× baseline) parses + tiers up; Javy (orange) and StarlingMonkey (purple) load their preloaded interpreter then run. Higher = faster than V8. Per-function deployment cost: js2wasm ~3 kB, Javy ~3 kB + shared plugin, StarlingMonkey ~14 MB."
               ></perf-benchmark-chart>
             </div>
             <div
@@ -3134,7 +3137,7 @@ match (value) {
                 mode="perf"
                 title="Warm isolate — instance reused across requests"
                 baseline-label="JS in V8 (TurboFan-tiered)"
-                legend="Steady-state per-invocation cost on a reused instance. V8: in-process median after TurboFan has tiered up. Wasm: exec time with process startup amortized away. 2× = Wasm twice as fast per warm request as V8. The cost a long-lived isolate pays after warmup."
+                legend="Steady-state per-invocation cost on a reused instance. V8 (1.0× baseline) is in-process median after TurboFan tiered up; js2wasm AOT runs native Cranelift code; Javy + StarlingMonkey run their interpreters inside Wasm (no guest JIT possible in sandboxed Wasm). Where Wasm-native compilation beats interpreter-in-Wasm by 1-2 orders of magnitude on tight loops."
               ></perf-benchmark-chart>
             </div>
             <div
