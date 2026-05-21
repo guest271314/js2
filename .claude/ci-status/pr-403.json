@@ -1,11 +1,10 @@
 {
   "pr": 403,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1501-browser-timer",
-  "head_sha": "30df85757fa4ecefd82c1a5010c54301c156da5b",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/403",
-  "timestamp": "2026-05-21T00:32:30Z",
+  "head_sha": "c8eb0441d4c34e5fe61c44ecb4e2bd92f773f5f0",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26182619901",
+  "timestamp": "2026-05-21T00:41:11Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
