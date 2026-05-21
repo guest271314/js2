@@ -1,10 +1,11 @@
 {
   "pr": 407,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1503-browser-crypto",
-  "head_sha": "ed7e35ddeb82b7da6dc1ae8af63e125a0c5bf118",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26181796843",
-  "timestamp": "2026-05-21T00:28:23Z",
+  "head_sha": "86e87783685d557a65ba5af09d7c87a296f3aa7b",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/407",
+  "timestamp": "2026-05-21T00:47:16Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
