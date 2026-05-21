@@ -1,10 +1,11 @@
 {
   "pr": 452,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1151-gap-b",
-  "head_sha": "205553d189d12591d270288f828c0e2b0330374a",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197111008",
-  "timestamp": "2026-05-21T03:00:22Z",
+  "head_sha": "4b3ecd1211dd42cb30897cf6c69f1c7140a3fa88",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/452",
+  "timestamp": "2026-05-21T13:08:18Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
