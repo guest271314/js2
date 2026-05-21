@@ -1,10 +1,11 @@
 {
   "pr": 359,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1439-regexp-symbol-protocol",
-  "head_sha": "dfe2863e4e2172e0e71362255b4273006b02d3c4",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26150891392",
-  "timestamp": "2026-05-20T09:14:49Z",
+  "head_sha": "f3e4f59b90b5d37581a8c1a1f0459f9ab2dc3171",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/359",
+  "timestamp": "2026-05-21T00:51:33Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
