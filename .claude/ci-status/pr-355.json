@@ -1,11 +1,10 @@
 {
   "pr": 355,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1436-global-functions",
-  "head_sha": "c637e5ba7cd60e66d7c05d8433c5a75206ef3c77",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/355",
-  "timestamp": "2026-05-21T00:40:04Z",
+  "head_sha": "041f6fd5d7c2bff67ec2058b3b2edf898c0ef82c",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197119184",
+  "timestamp": "2026-05-21T03:25:04Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
