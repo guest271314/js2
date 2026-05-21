@@ -2325,10 +2325,12 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // - JSON.stringify on arrays of structs (JSON_stringify)
   // - host-import paths that coerce a vec wrapper to externref and look up
   //   `.constructor` — the runtime extern_get handler uses `__vec_len` to
-  //   identify vec wrappers and report `constructor === Array` (#1441, #1057).
-  //   Without the export, `["a","b"].constructor === Array` is silently false
-  //   for split/map/filter/etc. results in modules that don't otherwise use
-  //   for-of or JSON.stringify.
+  //   identify vec wrappers and report `constructor === Array`
+  //   (#1441, #1057, #779c). Without the export, `["a","b"].constructor ===
+  //   Array` is silently false for split/map/filter/etc. results in modules
+  //   that don't otherwise use for-of or JSON.stringify. The `__extern_get`
+  //   constructor path calls `__vec_len` to positively distinguish vec
+  //   wrappers from other null-prototype WasmGC structs.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
