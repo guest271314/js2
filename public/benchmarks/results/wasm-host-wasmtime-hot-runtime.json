@@ -1,17 +1,54 @@
 [
   {
-    "name": "AOT compiled",
-    "jsUs": 12353.179565201257,
-    "wasmUs": 21703.391021848496
+    "path": "programs/fib.js",
+    "name": "fib",
+    "label": "Fibonacci loop",
+    "mode": "jit",
+    "wasmUs": 12415.046000000075,
+    "jsUs": 110974.99800000014,
+    "wasmStdUs": 863.6121496470244,
+    "jsStdUs": 2209.7979026164157,
+    "ratioStd": 0.6336648220503016,
+    "warmupRounds": 2,
+    "measuredRounds": 7
   },
   {
-    "name": "interpreter",
-    "jsUs": 12353.179565201257,
-    "wasmUs": 272491.071964361
+    "path": "programs/fib-recursive.js",
+    "name": "fib-recursive",
+    "label": "Fibonacci recursion",
+    "mode": "jit",
+    "wasmUs": 6914.740000000165,
+    "jsUs": 16802.411000000575,
+    "wasmStdUs": 843.6454328293388,
+    "jsStdUs": 2767.9866039298504,
+    "ratioStd": 0.5327513510684773,
+    "warmupRounds": 2,
+    "measuredRounds": 7
   },
   {
-    "name": "engine",
-    "jsUs": 12353.179565201257,
-    "wasmUs": 296559.5642152104
+    "path": "programs/array-sum.js",
+    "name": "array-sum",
+    "label": "Array fill + sum",
+    "mode": "jit",
+    "wasmUs": 2069.4120000007388,
+    "jsUs": 49748.741000003065,
+    "wasmStdUs": 553.2993540107072,
+    "jsStdUs": 5643.617945925095,
+    "ratioStd": 6.944300603098132,
+    "warmupRounds": 2,
+    "measuredRounds": 7
+  },
+  {
+    "path": "programs/string-hash.js",
+    "name": "string-hash",
+    "label": "String build + hash",
+    "mode": "jit",
+    "wasmUs": 80538.92700000142,
+    "jsUs": 11088.153000000602,
+    "wasmStdUs": 3991.180587583778,
+    "jsStdUs": 2556.46114104296,
+    "ratioStd": 0.030542816156673938,
+    "warmupRounds": 2,
+    "measuredRounds": 7
   }
 ]

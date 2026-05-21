@@ -3091,14 +3091,16 @@ match (value) {
         </div>
 
         <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
-          <h3 class="host-bench-title">WebAssembly host (Wasmtime, JIT disabled)</h3>
+          <h3 class="host-bench-title">WebAssembly host (Wasmtime)</h3>
           <p class="host-bench-subcopy">
-            This test case approximates a multi-tenant Wasm native serverless environment. 5 small
+            This test case approximates a multi-tenant Wasm-native serverless environment.
             <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
-            are run as WebAssembly in three different setups: 1. compiled ahead of time with JS², 2. interpreted by a
-            separate dynamically linked interpreter module, 3. interpreted by a bundled JS engine (preinitialized +
-            partial AOT evaluation). As a baseline we show the same code running in its native environment inside a V8
-            engine in Node.js with JIT enabled, spawning a fresh runtime process.
+            are precompiled ahead of time with JS² and executed in a fresh Wasmtime process; the JS baseline runs the
+            same source code in Node.js with V8. The left chart pins both runtimes to their optimizing tier — Cranelift
+            for Wasm, V8 TurboFan for JS — the production setup used by Fastly Compute, Shopify Functions, and Fermyon
+            Spin. The right chart pins both runtimes to their no-codegen tier — Pulley (Wasmtime's portable interpreter)
+            and V8 Ignition (--jitless) — the relevant comparison for W^X-restricted sandboxes and environments that
+            disallow runtime code generation.
           </p>
           <div class="conformance-diagrams">
             <div
@@ -3110,8 +3112,21 @@ match (value) {
                 src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                 mode="perf"
                 title="Speed relative to V8 with JIT"
-                baseline-label="V8 with JIT"
-                legend="Speedup relative to V8 with JIT. 2x = twice as fast. 0.57x = 57% the speed. Geometric mean of repeated calls inside one fresh process after module load."
+                baseline-label="JS in V8 (TurboFan)"
+                legend="Optimizing tiers on both sides — V8 TurboFan for JS, Wasmtime Cranelift for Wasm. 2x = Wasm twice as fast as JS. Exec time only; process startup and module load subtracted via a baseline run with arg=0."
+              ></perf-benchmark-chart>
+            </div>
+            <div
+              class="diagram-panel"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime-no-jit.json"
+              style="display: none"
+            >
+              <perf-benchmark-chart
+                src="./benchmarks/results/wasm-host-wasmtime-hot-runtime-no-jit.json"
+                mode="perf"
+                title="Speed relative to V8 jitless"
+                baseline-label="JS in V8 (Ignition, jitless)"
+                legend="No-codegen tiers on both sides — V8 Ignition (--jitless) for JS, Wasmtime Pulley (portable interpreter) for Wasm. 2x = Wasm twice as fast as JS. Exec time only; process startup and module load subtracted via a baseline run with arg=0."
               ></perf-benchmark-chart>
             </div>
             <div

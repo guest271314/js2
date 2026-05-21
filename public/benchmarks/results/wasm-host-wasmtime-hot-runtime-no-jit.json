@@ -1,0 +1,54 @@
+[
+  {
+    "path": "programs/fib.js",
+    "name": "fib",
+    "label": "Fibonacci loop",
+    "mode": "no-jit",
+    "wasmUs": 266607.2359999998,
+    "jsUs": 599631.2960000004,
+    "wasmStdUs": 10825.339876148608,
+    "jsStdUs": 3357.6219944752675,
+    "ratioStd": 0.08651640369262542,
+    "warmupRounds": 2,
+    "measuredRounds": 7
+  },
+  {
+    "path": "programs/fib-recursive.js",
+    "name": "fib-recursive",
+    "label": "Fibonacci recursion",
+    "mode": "no-jit",
+    "wasmUs": 214044.38899999877,
+    "jsUs": 111802.49300000105,
+    "wasmStdUs": 1939.48017320301,
+    "jsStdUs": 3244.30914273856,
+    "ratioStd": 0.018433355116741008,
+    "warmupRounds": 2,
+    "measuredRounds": 7
+  },
+  {
+    "path": "programs/array-sum.js",
+    "name": "array-sum",
+    "label": "Array fill + sum",
+    "mode": "no-jit",
+    "wasmUs": 22731.706000002305,
+    "jsUs": 120966.70299999823,
+    "wasmStdUs": 895.3143264168241,
+    "jsStdUs": 2435.5181702321584,
+    "ratioStd": 0.28939526361030865,
+    "warmupRounds": 2,
+    "measuredRounds": 7
+  },
+  {
+    "path": "programs/string-hash.js",
+    "name": "string-hash",
+    "label": "String build + hash",
+    "mode": "no-jit",
+    "wasmUs": 269005.8699999972,
+    "jsUs": 17238.304999998945,
+    "wasmStdUs": 2206.739413070667,
+    "jsStdUs": 5327.947785852156,
+    "ratioStd": 0.01956630208345116,
+    "warmupRounds": 2,
+    "measuredRounds": 7
+  }
+]
