@@ -2,7 +2,7 @@
 id: 1483
 sprint: 52
 title: "wasi: route Date.now and performance.now to clock_time_get"
-status: in-progress
+status: in-review
 created: 2026-05-20
 priority: high
 feasibility: medium

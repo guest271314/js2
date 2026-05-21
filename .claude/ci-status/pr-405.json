@@ -1,0 +1,23 @@
+{
+  "pr": 405,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1326c-microtask-standalone",
+  "head_sha": "c08b55ba85a3a2499831de1aab6d974ea7c1a92d",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/405",
+  "timestamp": "2026-05-21T00:32:43Z",
+  "pass": null,
+  "fail": null,
+  "compile_error": null,
+  "snapshot_delta": null,
+  "net_per_test": null,
+  "regressions": null,
+  "regressions_real": null,
+  "regressions_wasm_change": null,
+  "wasm_identical_noise": null,
+  "compile_timeouts": null,
+  "improvements": null,
+  "baseline_sha": null,
+  "baseline_staleness_commits": null,
+  "baseline_stale": false
+}
