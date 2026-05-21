@@ -1,11 +1,10 @@
 {
   "pr": 382,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1512-dynamic-import-errors",
-  "head_sha": "a6fce4259743e5d880eada51fb62c6bb201d782c",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/382",
-  "timestamp": "2026-05-21T00:43:55Z",
+  "head_sha": "7bf73f6656cfbd319e0776156c3fc1eb46b66635",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197137430",
+  "timestamp": "2026-05-21T05:38:42Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
