@@ -4673,7 +4673,22 @@ assert._isSameValue = isSameValue;
     case "extern_get":
       return (obj: any, key: any) => {
         const val = _safeGet(obj, key);
-        if (val !== undefined) return val;
+        if (val !== undefined) {
+          // (#779c) Sandbox-aware constructor identity. When a
+          // `globalSandbox` is supplied (test262 per-test realm isolation),
+          // the test's `Array` identifier resolves via `declared_global` to
+          // `sandbox.Array`, but `obj.constructor` for host JS arrays
+          // returns `globalThis.Array`. Substitute the sandbox version so
+          // `arr.constructor === Array` holds. No-op without a sandbox.
+          if (globalSandbox && key === "constructor" && typeof val === "function") {
+            const fname = (val as { name?: string }).name;
+            if (fname && val === (globalThis as any)[fname]) {
+              const sb = globalSandbox[fname];
+              if (sb !== undefined) return sb;
+            }
+          }
+          return val;
+        }
         if (typeof key === "string") {
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${key}`];
@@ -4693,7 +4708,11 @@ assert._isSameValue = isSameValue;
           if (typeof vecLen === "function") {
             try {
               const len = vecLen(obj);
-              if (typeof len === "number") return Array;
+              if (typeof len === "number") {
+                // (#779c) Return sandbox.Array when test262 sandbox is active,
+                // so `vec.constructor === Array` (sandbox.Array) holds.
+                return globalSandbox?.Array ?? Array;
+              }
             } catch {
               // Not a vec wrapper — fall through
             }
