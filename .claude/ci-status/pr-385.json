@@ -1,10 +1,11 @@
 {
   "pr": 385,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1466-proxy-reflect",
-  "head_sha": "bbd91820eee4f59eccc0e072f96f2c27dc823fb3",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196905784",
-  "timestamp": "2026-05-21T02:20:43Z",
+  "head_sha": "6c3465ce9dfebb0807d921e029859b88308fd29d",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/385",
+  "timestamp": "2026-05-21T03:50:27Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
