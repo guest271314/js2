@@ -1,11 +1,10 @@
 {
   "pr": 435,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1526-instr-cast-budget",
-  "head_sha": "92d899b7ea9159fc81a45d5f13b682ebfcf3f89e",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/435",
-  "timestamp": "2026-05-21T01:10:27Z",
+  "head_sha": "2154d1344539332430d9d0c40c11d8daf1d43436",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196505354",
+  "timestamp": "2026-05-21T01:33:36Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
