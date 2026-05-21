@@ -1,10 +1,11 @@
 {
   "pr": 367,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1513-reflect-type-checks",
-  "head_sha": "c73a1cf72478211644fcdac6766530c543683a8d",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196500984",
-  "timestamp": "2026-05-21T01:24:33Z",
+  "head_sha": "dfb9e8c0ce00b56017642add3aef77c202e9b838",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/367",
+  "timestamp": "2026-05-21T01:53:37Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
