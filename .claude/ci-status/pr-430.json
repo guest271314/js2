@@ -1,10 +1,11 @@
 {
   "pr": 430,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1530-ir-fallback-ratchet",
-  "head_sha": "487c53ae16d94899bd1f71e89c3ebc4c3da104e4",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26195990820",
-  "timestamp": "2026-05-21T00:57:14Z",
+  "head_sha": "ca8d877c432545aa9ec31178e90f0a7dc8abb951",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/430",
+  "timestamp": "2026-05-21T01:10:16Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
