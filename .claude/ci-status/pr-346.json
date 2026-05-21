@@ -1,10 +1,11 @@
 {
   "pr": 346,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1311-map-async-handler",
-  "head_sha": "8f809d87388cf99cfe75c4ee0fcc9a1330214426",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196883906",
-  "timestamp": "2026-05-21T01:48:29Z",
+  "head_sha": "2e9adbe1de947d1e2f05233bb64020002f23c9de",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/346",
+  "timestamp": "2026-05-21T02:23:27Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
