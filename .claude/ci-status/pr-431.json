@@ -1,0 +1,23 @@
+{
+  "pr": 431,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1542-class-method-dstr-default",
+  "head_sha": "7b398376701815538825479d325ee4f3b987cecd",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/431",
+  "timestamp": "2026-05-20T23:56:45Z",
+  "pass": null,
+  "fail": null,
+  "compile_error": null,
+  "snapshot_delta": null,
+  "net_per_test": null,
+  "regressions": null,
+  "regressions_real": null,
+  "regressions_wasm_change": null,
+  "wasm_identical_noise": null,
+  "compile_timeouts": null,
+  "improvements": null,
+  "baseline_sha": null,
+  "baseline_staleness_commits": null,
+  "baseline_stale": false
+}
