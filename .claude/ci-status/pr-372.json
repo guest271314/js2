@@ -1,10 +1,11 @@
 {
   "pr": 372,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1443-symbol-replace-dispatch",
-  "head_sha": "2f204c5bed359ad5636b919f92d319e300deac4c",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26150998302",
-  "timestamp": "2026-05-20T09:38:10Z",
+  "head_sha": "4e8be1154ac2a859c3ad61f5f51a4581115bacab",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/372",
+  "timestamp": "2026-05-21T00:38:01Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
