@@ -2327,6 +2327,11 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   //   Promise_any) — runtime helper needs to materialise wasm vec iterables
   //   into JS arrays so the native engine's GetIterator can drive them per
   //   spec (#1465).
+  // - (#779c) `vec.constructor === Array` identity via the runtime's
+  //   `extern_get` constructor path, which calls `__vec_len` to positively
+  //   distinguish vec wrappers from other null-prototype WasmGC structs.
+  //   When `__extern_get` is imported, the property-access lowering may
+  //   need this discrimination for `vec.constructor` lookups.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
@@ -2334,7 +2339,8 @@ function emitVecAccessExports(ctx: CodegenContext): void {
     !ctx.funcMap.has("Promise_all") &&
     !ctx.funcMap.has("Promise_race") &&
     !ctx.funcMap.has("Promise_allSettled") &&
-    !ctx.funcMap.has("Promise_any")
+    !ctx.funcMap.has("Promise_any") &&
+    !ctx.funcMap.has("__extern_get")
   )
     return;
   try {
