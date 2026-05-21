@@ -1,10 +1,11 @@
 {
   "pr": 381,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1517-array-fromasync",
-  "head_sha": "466edf4f3e2ca1ba9b54111810d0c4d9f42fa3be",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196508715",
-  "timestamp": "2026-05-21T01:24:56Z",
+  "head_sha": "7082e4457121378507451c71708cbf64b20afe7a",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/381",
+  "timestamp": "2026-05-21T01:56:24Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
