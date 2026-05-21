@@ -1262,6 +1262,14 @@ class PerfBenchmarkChart extends HTMLElement {
             return shortPath === benchmarkFilter || shortName === benchmarkFilter || path === benchmarkFilter;
           });
         }
+        const srcFilter = (this.getAttribute("src-filter") || "").trim().toLowerCase();
+        if (srcFilter) {
+          rows = rows.filter((row) =>
+            `${row?.scenario ?? ""} ${row?.name ?? ""} ${row?.label ?? ""} ${row?.path ?? ""}`
+              .toLowerCase()
+              .includes(srcFilter),
+          );
+        }
         if (rows.length === 0) {
           this.style.display = "none";
           return;

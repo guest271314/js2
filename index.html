@@ -3091,42 +3091,52 @@ match (value) {
         </div>
 
         <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
-          <h3 class="host-bench-title">WebAssembly host (Wasmtime)</h3>
+          <h3 class="host-bench-title">WebAssembly host (Wasmtime) — Fastly Compute vs Cloudflare Workers</h3>
           <p class="host-bench-subcopy">
-            This test case approximates a multi-tenant Wasm-native serverless environment.
+            Per-request cost of running the same
             <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
-            are precompiled ahead of time with JS² and executed in a fresh Wasmtime process; the JS baseline runs the
-            same source code in Node.js with V8. The left chart pins both runtimes to their optimizing tier — Cranelift
-            for Wasm, V8 TurboFan for JS — the production setup used by Fastly Compute, Shopify Functions, and Fermyon
-            Spin. The right chart pins both runtimes to their no-codegen tier — Pulley (Wasmtime's portable interpreter)
-            and V8 Ignition (--jitless) — the relevant comparison for W^X-restricted sandboxes and environments that
-            disallow runtime code generation.
+            on the two dominant edge serverless models:
+            <strong>
+              Wasmtime with AOT-precompiled
+              <code>.cwasm</code>
+            </strong>
+            (the Fastly Compute / Fermyon Spin / Shopify Functions stack — Cranelift compiles offline, no runtime
+            codegen) versus
+            <strong>V8 isolates</strong>
+            (the Cloudflare Workers / Deno Deploy stack — Ignition → Liftoff → TurboFan, all at request time). Two
+            scenarios per program: a fresh instance per request (cold isolate) and a reused instance (warm isolate).
+            Cranelift-AOT cost stays flat across both; V8 swings dramatically because most of its cost is parse +
+            tier-up, paid once per fresh isolate.
           </p>
           <div class="conformance-diagrams">
             <div
               class="diagram-panel"
               data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+              data-row-filter="cold"
               style="display: none"
             >
               <perf-benchmark-chart
                 src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+                src-filter="cold"
                 mode="perf"
-                title="Speed relative to V8 with JIT"
-                baseline-label="JS in V8 (TurboFan)"
-                legend="Optimizing tiers on both sides — V8 TurboFan for JS, Wasmtime Cranelift for Wasm. 2x = Wasm twice as fast as JS. Exec time only; process startup and module load subtracted via a baseline run with arg=0."
+                title="Cold isolate — fresh instance per request"
+                baseline-label="JS in V8"
+                legend="Full process wall time. Wasmtime: startup + cwasm load + invocation. V8: startup + parse + Ignition → Liftoff → first run. 2× = Wasm twice as fast per cold request as V8. The cost a per-request platform (or the first request to any platform) pays."
               ></perf-benchmark-chart>
             </div>
             <div
               class="diagram-panel"
-              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime-no-jit.json"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+              data-row-filter="warm"
               style="display: none"
             >
               <perf-benchmark-chart
-                src="./benchmarks/results/wasm-host-wasmtime-hot-runtime-no-jit.json"
+                src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+                src-filter="warm"
                 mode="perf"
-                title="Speed relative to V8 jitless"
-                baseline-label="JS in V8 (Ignition, jitless)"
-                legend="No-codegen tiers on both sides — V8 Ignition (--jitless) for JS, Wasmtime Pulley (portable interpreter) for Wasm. 2x = Wasm twice as fast as JS. Exec time only; process startup and module load subtracted via a baseline run with arg=0."
+                title="Warm isolate — instance reused across requests"
+                baseline-label="JS in V8 (TurboFan-tiered)"
+                legend="Steady-state per-invocation cost on a reused instance. V8: in-process median after TurboFan has tiered up. Wasm: exec time with process startup amortized away. 2× = Wasm twice as fast per warm request as V8. The cost a long-lived isolate pays after warmup."
               ></perf-benchmark-chart>
             </div>
             <div
