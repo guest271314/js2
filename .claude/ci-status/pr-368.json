@@ -1,11 +1,10 @@
 {
   "pr": 368,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1450-named-evaluation",
-  "head_sha": "08935388ab35c350e7ba37719403c034e6ca3cfd",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/368",
-  "timestamp": "2026-05-21T00:54:58Z",
+  "head_sha": "dddc8a537f0999c046f75abbb3d6948c25d74acd",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196486680",
+  "timestamp": "2026-05-21T01:08:01Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
