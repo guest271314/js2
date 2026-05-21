@@ -1,11 +1,10 @@
 {
   "pr": 441,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1373b-ir-async-cps",
-  "head_sha": "5562959a8922cc109023a5d0432ed7b5c4fdf2bf",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/441",
-  "timestamp": "2026-05-21T00:22:53Z",
+  "head_sha": "20f57ccc33c67a0acc4248076d0ad10515a23873",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26186075435",
+  "timestamp": "2026-05-21T00:29:42Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
