@@ -3057,11 +3057,15 @@ match (value) {
         </div>
 
         <div class="host-bench-group">
-          <h3 class="host-bench-title">JavaScript host (V8, JIT enabled)</h3>
+          <h3 class="host-bench-title">JavaScript host (V8)</h3>
           <p class="host-bench-subcopy">
             Speedup of JS² compiled WebAssembly relative to the same source code running as JavaScript in V8 (Node.js).
-            Bars extending past the JS baseline mean Wasm is faster; bars falling short mean slower. Press the button to
-            run the benchmark in your browser including additional DOM benchmarks.
+            Bars extending past the JS baseline mean Wasm is faster; bars falling short mean slower. The left chart runs
+            both runtimes with their optimizing JIT tiers enabled (V8 TurboFan for JS, Liftoff→TurboFan for Wasm) — the
+            production setup users see in browsers and Node. The right chart pins both runtimes to their baseline tier
+            (Ignition interpreter for JS, Liftoff for Wasm) — a like-for-like comparison of the no-optimizing-JIT
+            execution path, which matters for cold-start, multi-tenant edge runtimes, and engines without a top tier.
+            Press the button to run the benchmark in your browser including additional DOM benchmarks.
           </p>
           <div class="conformance-diagrams">
             <div class="diagram-panel">
@@ -3070,9 +3074,18 @@ match (value) {
                 mode="perf"
                 rerun-src="./benchmarks/results/loadtime-benchmarks.json"
                 rerun-label="Run Browser Benchmark"
-                title="Speed vs JS in V8"
+                title="Speed vs JS in V8 (both JITs enabled)"
                 baseline-label="JS in V8"
-                legend="Speedup relative to JS baseline in V8. 2x = twice as fast. 0.8x = 20% slower."
+                legend="Both runtimes with JIT enabled — production setup. 2x = Wasm twice as fast as JS. 0.8x = 20% slower."
+              ></perf-benchmark-chart>
+            </div>
+            <div class="diagram-panel">
+              <perf-benchmark-chart
+                src="./benchmarks/results/playground-benchmark-sidebar-no-jit.json"
+                mode="perf"
+                title="Speed vs JS in V8 (both JITs disabled)"
+                baseline-label="JS in V8 (jitless)"
+                legend="Both runtimes pinned to baseline tier — V8 Ignition (--jitless) vs V8 Liftoff (--no-wasm-tier-up). Same flag family as wasmtime cranelift opt-level 0. 2x = Wasm twice as fast as JS."
               ></perf-benchmark-chart>
             </div>
           </div>
