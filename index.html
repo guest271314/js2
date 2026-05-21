@@ -3091,22 +3091,20 @@ match (value) {
         </div>
 
         <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
-          <h3 class="host-bench-title">WebAssembly host (Wasmtime) — Fastly Compute vs Cloudflare Workers</h3>
+          <h3 class="host-bench-title">WebAssembly host (Wasmtime) vs V8 isolate</h3>
           <p class="host-bench-subcopy">
             Per-request cost of running the same
             <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
-            on the two dominant edge serverless models:
+            on two edge serverless execution models:
             <strong>
               Wasmtime with AOT-precompiled
               <code>.cwasm</code>
             </strong>
-            (the Fastly Compute / Fermyon Spin / Shopify Functions stack — Cranelift compiles offline, no runtime
-            codegen) versus
-            <strong>V8 isolates</strong>
-            (the Cloudflare Workers / Deno Deploy stack — Ignition → Liftoff → TurboFan, all at request time). Two
-            scenarios per program: a fresh instance per request (cold isolate) and a reused instance (warm isolate).
-            Cranelift-AOT cost stays flat across both; V8 swings dramatically because most of its cost is parse +
-            tier-up, paid once per fresh isolate.
+            (Cranelift compiles offline, no runtime codegen) versus a
+            <strong>V8 isolate</strong>
+            (Ignition → Liftoff → TurboFan, all at request time). Two scenarios per program: a fresh instance per
+            request (cold isolate) and a reused instance (warm isolate). Cranelift-AOT cost stays flat across both; V8
+            swings dramatically because most of its cost is parse + tier-up, paid once per fresh isolate.
           </p>
           <div class="conformance-diagrams">
             <div
