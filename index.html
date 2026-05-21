@@ -3091,27 +3091,50 @@ match (value) {
         </div>
 
         <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
-          <h3 class="host-bench-title">WebAssembly host (Wasmtime, JIT disabled)</h3>
+          <h3 class="host-bench-title">WebAssembly host (Wasmtime) vs V8 isolate</h3>
           <p class="host-bench-subcopy">
-            This test case approximates a multi-tenant Wasm native serverless environment. 5 small
+            Per-request cost of running the same
             <a href="./benchmarks/competitive/programs/">JavaScript programs</a>
-            are run as WebAssembly in three different setups: 1. compiled ahead of time with JS², 2. interpreted by a
-            separate dynamically linked interpreter module, 3. interpreted by a bundled JS engine (preinitialized +
-            partial AOT evaluation). As a baseline we show the same code running in its native environment inside a V8
-            engine in Node.js with JIT enabled, spawning a fresh runtime process.
+            on two edge serverless execution models:
+            <strong>
+              Wasmtime with AOT-precompiled
+              <code>.cwasm</code>
+            </strong>
+            (Cranelift compiles offline, no runtime codegen) versus a
+            <strong>V8 isolate</strong>
+            (Ignition → Liftoff → TurboFan, all at request time). Two scenarios per program: a fresh instance per
+            request (cold isolate) and a reused instance (warm isolate). Cranelift-AOT cost stays flat across both; V8
+            swings dramatically because most of its cost is parse + tier-up, paid once per fresh isolate.
           </p>
           <div class="conformance-diagrams">
             <div
               class="diagram-panel"
               data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+              data-row-filter="cold"
               style="display: none"
             >
               <perf-benchmark-chart
                 src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+                src-filter="cold"
                 mode="perf"
-                title="Speed relative to V8 with JIT"
-                baseline-label="V8 with JIT"
-                legend="Speedup relative to V8 with JIT. 2x = twice as fast. 0.57x = 57% the speed. Geometric mean of repeated calls inside one fresh process after module load."
+                title="Cold isolate — fresh instance per request"
+                baseline-label="JS in V8"
+                legend="Full process wall time. Wasmtime: startup + cwasm load + invocation. V8: startup + parse + Ignition → Liftoff → first run. 2× = Wasm twice as fast per cold request as V8. The cost a per-request platform (or the first request to any platform) pays."
+              ></perf-benchmark-chart>
+            </div>
+            <div
+              class="diagram-panel"
+              data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+              data-row-filter="warm"
+              style="display: none"
+            >
+              <perf-benchmark-chart
+                src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
+                src-filter="warm"
+                mode="perf"
+                title="Warm isolate — instance reused across requests"
+                baseline-label="JS in V8 (TurboFan-tiered)"
+                legend="Steady-state per-invocation cost on a reused instance. V8: in-process median after TurboFan has tiered up. Wasm: exec time with process startup amortized away. 2× = Wasm twice as fast per warm request as V8. The cost a long-lived isolate pays after warmup."
               ></perf-benchmark-chart>
             </div>
             <div
