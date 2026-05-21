@@ -1,11 +1,10 @@
 {
   "pr": 350,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1198-presize-dense-arrays",
-  "head_sha": "67f81ae64cd311d31465ff6921acdd921c1f747d",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/350",
-  "timestamp": "2026-05-21T01:34:30Z",
+  "head_sha": "06bc187f170cdfd22b105f6435212ee24d4165cf",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196882964",
+  "timestamp": "2026-05-21T01:47:50Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
