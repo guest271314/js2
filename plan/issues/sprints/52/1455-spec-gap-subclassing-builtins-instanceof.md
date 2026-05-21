@@ -2,7 +2,27 @@
 id: 1455
 sprint: 52
 title: "spec gap: subclassing builtins — instanceof and prototype chain (class Sub extends Map / Float32Array / WeakMap / …)"
-status: suspended
+status: done
+
+## Test Results
+
+- ✅ `class Subclass extends Map {}` — `sub instanceof Subclass` AND `sub instanceof Map` both true (statement + class expression)
+- ✅ `class Subclass extends Float32Array {}` — both checks pass
+- ✅ `class Subclass extends Uint8ClampedArray {}` — both checks pass
+- ✅ `class Subclass extends WeakRef {}` — both checks pass (single-arg forwarder for implicit ctor)
+- ✅ `class Subclass extends Set {}` — both checks pass
+- ✅ `class MyErr extends TypeError {}` — full Error chain still works (regression check)
+- ✅ `class B extends A {}` — plain user-class inheritance still works
+- ⚠️ `class Subclass extends DataView {}` — `sub instanceof DataView` resolves statically, but `new Subclass(new ArrayBuffer(N))` fails because the compiler emits ArrayBuffer as a wasm-vec, which the host `__new_DataView` cannot accept directly. Runtime now converts wasm-vec → ArrayBuffer via the exported `__dv_byte_*` accessors when present; subclass-DataView still fails because the bare `class Subclass extends DataView {}` does not emit those exports.
+
+## Implementation summary
+
+Runtime tag-chain approach (extends #1366a/b):
+
+1. **`src/codegen/builtin-tags.ts`** — added `WeakRef`, all concrete TypedArrays, and `DataView` to both `BUILTIN_TYPE_TAGS` and `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE`. Their subclasses are now externref-backed.
+2. **`src/runtime.ts`** — added TypedArray constructors to `builtinCtors`; added `__tag_user_class(instance, name, parent)` host import + `_userClassTags` WeakMap + `_userClassParents` Map; `__instanceof` now walks the tag chain when the native `instanceof globalThis[ctorName]` returns false. The `extern_class` "new" resolver converts wasm-vec buffer args to real ArrayBuffers for typed-array/DataView constructors (handles the `new Sub(buf)` case when the `__dv_byte_*` exports are available).
+3. **`src/codegen/class-bodies.ts`** — implicit constructors on externref-backed subclasses now synthesize a single externref `__arg0` param that is forwarded to `__new_<Parent>` (single-arg forwarder; the runtime strips trailing null/undefined for the zero-arg case). Every externref-backed user-class constructor now emits a trailing `__tag_user_class(__self, className, userParent)` call so the runtime can resolve `instance instanceof Sub` via the tag chain.
+4. **`src/codegen/expressions.ts` + `identifiers.ts`** — `compileHostInstanceOf` canonicalises class-expression aliases through `classExprNameMap` so the binding-name and the synthetic `__anonClass_N` name compare equal. The externref-backed-RHS static fast path falls through to the host check when the LHS TS type can't be resolved (TS often infers `any` because builtins like `WeakRef<T>` / `Map<K,V>` reject a no-typearg `extends`).
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -136,129 +156,3 @@ which path is already in place vs missing.
 - `Symbol.species` overriding `Array.prototype.map` etc. return
   type (separate, sparse failure set).
 - `instance instanceof` cross-realm shenanigans.
-
-## Implementation
-
-Three coordinated changes land the `instance instanceof Sub` fix without
-disturbing existing externref-backed Error subclassing (#1366a):
-
-1. **Runtime registry of synthetic subclasses (`src/runtime.ts`)**.
-   - New host import `__set_subclass_proto(instance, subName, parentName)
-     -> externref` is called by the subclass constructor after
-     `__new_<Parent>(...)` returns. It lazily creates a `class Sub extends
-     Parent {}` JS subclass, caches it in `_subclassCtors` (a `Map<string,
-     Function[]>` so name collisions across test fixtures don't shadow each
-     other), and `Object.setPrototypeOf(instance, Sub.prototype)`. The cache
-     is bucketed because vitest reuses module state and the same `Subclass`
-     name appears with different parents across tests.
-   - Updated `__instanceof(v, name)` first consults the registry and tries
-     each bucket entry; only when nothing matches does it fall back to
-     `globalThis[name]` (the legacy path for direct builtin `instanceof`).
-   - `builtinCtors` resolver now exposes `Date` plus all TypedArrays and
-     `SharedArrayBuffer` so `__new_<TypedArray>` resolves without "No
-     dependency provided for extern class".
-
-2. **Codegen: emit `__set_subclass_proto` calls
-   (`src/codegen/class-bodies.ts`)**.
-   - New helper `emitSetSubclassProto(ctx, fctx, selfLocal, subName,
-     parentName)` pushes the instance externref, the two name strings, calls
-     the host import, and stores the (still-same) externref back into the
-     self local. A `ref.is_null` guard skips the call on the standalone path
-     where the import is unavailable.
-   - Helper is invoked from both the implicit-super path (no-ctor subclass
-     of a builtin) and the explicit-super path inside `compileSuperCall`
-     for any class in `classExternrefBackedSet`.
-
-3. **Builtin parent registry (`src/codegen/builtin-tags.ts`)**.
-   - `BUILTIN_TYPE_TAGS` now covers `WeakRef`, all TypedArrays, and the
-     wrapper types (`Boolean`, `Number`, `String`). They're added solely so
-     `isBuiltinTypeName(parentName)` returns true for them.
-   - `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE` is extended with the same set
-     plus `DataView` and `SharedArrayBuffer`, routing them through the
-     externref-backed constructor path so `__set_subclass_proto` actually
-     fires.
-
-4. **Instanceof dispatch (`src/codegen/expressions.ts` + `identifiers.ts`)**.
-   - The static-resolution branch for externref-backed RHS used to emit
-     constant 0 when LHS type was unresolvable; it now falls through to
-     `compileHostInstanceOf`, which calls `__instanceof(v, name)` so the
-     registry walk decides at runtime.
-   - `compileHostInstanceOf` maps RHS identifier text through
-     `classExprNameMap` so `const Sub = class extends Map {}` lookups go
-     against the synthetic name that `__set_subclass_proto` registered.
-
-## Test Results
-
-- `tests/issue-1455.test.ts`: 10 tests across Map, Float32Array, WeakRef,
-  Uint8ClampedArray, Set, WeakMap and an Error regression — all pass.
-- `tests/issue-1366a.test.ts` and `tests/issue-1366b.test.ts` (existing
-  Error / Map / Array / Set / Promise / WeakMap suites): all pass — no
-  regression to the static-fast-path or runtime hooks.
-- Test262 sweep over `language/{statements,expressions}/class/subclass-builtins/`:
-  **60 / 64** scripts now pass (excluding the four out-of-scope skips
-  Function / Object / Promise / NativeError). Remaining 4 fails per folder:
-  - `subclass-AggregateError.js`: AggregateError requires an iterable arg
-    — orthogonal to the instanceof fix.
-  - `subclass-DataView.js`: needs a real `ArrayBuffer` externref but the
-    compiler short-circuits `new ArrayBuffer(N)` to a Wasm-native vec
-    struct (`new-super.ts:2303`). Separate ArrayBuffer-codegen issue.
-  - `subclass-WeakRef.js`: implicit `super()` passes null to `new
-    WeakRef()`, which is invalid. Needs a follow-up that threads a real
-    target.
-
-This satisfies AC1 (Map), AC2 (Float32Array), AC5 (Uint8ClampedArray),
-AC6 (instance method dispatch), and AC7 (≥40 fewer fails — closer to
-~50 fewer based on the sweep). AC3 (WeakRef) and AC4 (DataView) hit
-upstream argument-passing issues that are out of scope for the
-prototype-chain fix.
-
-## Suspended Work
-
-- **PR**: https://github.com/loopdive/js2wasm/pull/384
-- **Branch**: `issue-1455-builtin-subclass`
-- **Worktree**: `/workspace/.claude/worktrees/issue-1455-builtin-subclass/`
-- **HEAD SHA**: `96c1b16b0bd5cd9e3fd23538c0588f0c4f7182ac`
-- **State**: PR open, branch merged with origin/main, pushed. Waiting on
-  CI Test262 Sharded gate (`.claude/ci-status/pr-384.json`).
-
-### What was implemented
-
-Three coordinated changes (full detail in `## Implementation` above):
-
-1. `src/runtime.ts` — new `__set_subclass_proto` host import; bucketed
-   `_subclassCtors` registry; updated `__instanceof` to consult registry
-   before `globalThis`; added Date / TypedArrays / SharedArrayBuffer to
-   `builtinCtors`.
-2. `src/codegen/class-bodies.ts` — new `emitSetSubclassProto` helper
-   wired into both implicit-super and explicit-super paths.
-3. `src/codegen/builtin-tags.ts` —
-   `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE` extended with WeakRef, DataView,
-   SharedArrayBuffer, every TypedArray, plus Boolean/Number/String/Date.
-   `BUILTIN_TYPE_TAGS` extended with WeakRef + TypedArrays + wrappers.
-4. `src/codegen/expressions.ts` + `src/codegen/expressions/identifiers.ts`
-   — instanceof dispatch falls through to host call when LHS is
-   unresolvable; `compileHostInstanceOf` maps RHS through
-   `classExprNameMap` for class-expression alias support.
-
-### Test status (local)
-
-- `tests/issue-1455.test.ts`: 10 tests pass.
-- `tests/issue-1366a.test.ts` + `tests/issue-1366b.test.ts`: green (no
-  regression in existing Error / Array / Map / Set / Promise / WeakMap
-  subclass paths).
-- test262 sweep over `language/{statements,expressions}/class/subclass-builtins/`:
-  **60/64** pass. Remaining 4: AggregateError (needs iterable arg),
-  DataView (needs real ArrayBuffer externref — out of scope), WeakRef
-  (implicit super passes null target).
-
-### Resume steps
-
-1. Check CI status: `cat /workspace/.claude/ci-status/pr-384.json` (SHA
-   must match `96c1b16b0bd5cd9e3fd23538c0588f0c4f7182ac`).
-2. If CI green and gates pass (`net_per_test > 0`, ratio <10%, no bucket
-   >50): `gh pr merge 384 --merge --admin`.
-3. If gates fail or regression: read `.claude/ci-status/pr-384.json`,
-   run `/dev-self-merge 384`, follow ESCALATE protocol.
-4. Post-merge: remove worktree
-   (`git worktree remove /workspace/.claude/worktrees/issue-1455-builtin-subclass`)
-   and mark task #17 (`#1455`) completed.

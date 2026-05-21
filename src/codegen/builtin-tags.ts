@@ -76,19 +76,20 @@ export const BUILTIN_TYPE_TAGS = {
   SharedArrayBuffer: -51,
   DataView: -52,
 
-  // TypedArrays (#1455 — needed so `isBuiltinTypeName` recognises them and
-  // `class Sub extends Float32Array {}` enters the host-constructible path)
-  Int8Array: -60,
-  Uint8Array: -61,
-  Uint8ClampedArray: -62,
-  Int16Array: -63,
-  Uint16Array: -64,
-  Int32Array: -65,
-  Uint32Array: -66,
-  Float32Array: -67,
-  Float64Array: -68,
-  BigInt64Array: -69,
-  BigUint64Array: -70,
+  // Typed arrays (#1455). %TypedArray% intrinsic is not in this registry —
+  // tests rarely use `arr instanceof %TypedArray%`; concrete typed arrays
+  // are sufficient for the spec-completeness gap addressed by #1455.
+  Int8Array: -70,
+  Uint8Array: -71,
+  Uint8ClampedArray: -72,
+  Int16Array: -73,
+  Uint16Array: -74,
+  Int32Array: -75,
+  Uint32Array: -76,
+  Float32Array: -77,
+  Float64Array: -78,
+  BigInt64Array: -79,
+  BigUint64Array: -80,
 } as const;
 
 export type BuiltinTypeName = keyof typeof BUILTIN_TYPE_TAGS;
@@ -199,13 +200,9 @@ export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = 
   "Promise",
   "RegExp",
   "ArrayBuffer",
-  // #1455 — additional builtins covered by the subclass-builtins test262
-  // suite. Each is constructible with 0–1 args and `__set_subclass_proto`
-  // adjusts the instance's [[Prototype]] post-construction so
-  // `instance instanceof Sub` walks through `Sub.prototype` while
-  // `instance instanceof Parent` still resolves via the engine's chain.
-  "WeakRef",
+  // #1455 — additional host-constructible builtins for subclass-builtins
   "DataView",
+  "WeakRef",
   "SharedArrayBuffer",
   "Int8Array",
   "Uint8Array",

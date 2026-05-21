@@ -1,10 +1,11 @@
 {
   "pr": 352,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1433-disposablestack",
-  "head_sha": "a033755a989d49b1bc432d5bc4d8fe6a573b02db",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26150077680",
-  "timestamp": "2026-05-20T08:32:45Z",
+  "head_sha": "3d1a37a7e2618e4e1f8fb11a80920a012c5687c9",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/352",
+  "timestamp": "2026-05-21T00:30:35Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
