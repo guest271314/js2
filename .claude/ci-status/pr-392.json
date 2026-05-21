@@ -1,10 +1,11 @@
 {
   "pr": 392,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1482-wasi-environ-get",
-  "head_sha": "d7cd9f6630bcb93e7beed0aadc3d06875ef3b0a5",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26198448551",
-  "timestamp": "2026-05-21T11:17:56Z",
+  "head_sha": "87489ec6fda7a647e609a9eb7580828440d98c73",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/392",
+  "timestamp": "2026-05-21T12:15:25Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
