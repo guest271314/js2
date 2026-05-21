@@ -1426,6 +1426,19 @@
                 style="--t262-bg: var(--bg, #060a14)"
               ></t262-donut>
             </div>
+            <!-- #106 — Slider lets readers expand the pass-rate to include
+                 ~5k TC39 proposal tests on top of the ~43k current-standard
+                 baseline. Off by default so the headline number reflects
+                 shipped ECMAScript only. -->
+            <div class="feat-filter conformance-scope-toggle">
+              <label
+                class="feat-toggle"
+                title="Include ~5k TC39 proposal tests (Temporal, decorators, etc.) on top of the ~43k ECMAScript current-standard tests."
+              >
+                <input type="checkbox" id="include-proposals-toggle" />
+                <span>Include TC39 proposals</span>
+              </label>
+            </div>
           </div>
           <div class="diagram-panel">
             <h3 class="diagram-title">ECMAScript Conformance Pass Rate Over Time</h3>
@@ -4558,6 +4571,25 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             editionTimeline.removeAttribute("show-proposals");
           }
           editionTimeline.setAttribute("value", "overall");
+
+          // #106 — "Include TC39 proposals" toggle next to the donut.
+          // Off (default): pass rate counts only the ~43k ECMAScript
+          //   current-standard tests (scope: standard + annex_b).
+          // On: counts ~48k including ~5k TC39 proposals
+          //   (Temporal, decorators, source-phase imports, etc.).
+          // We piggy-back on the existing edition-timeline scope so the
+          // donut, feature rows, and history chart all stay consistent.
+          const proposalsToggle = document.getElementById("include-proposals-toggle");
+          if (proposalsToggle instanceof HTMLInputElement) {
+            // Only meaningful if the report actually carries proposal data.
+            if (!proposalDiffers) {
+              proposalsToggle.disabled = true;
+              proposalsToggle.parentElement?.setAttribute("title", "Current report has no proposal data");
+            }
+            proposalsToggle.addEventListener("change", () => {
+              editionTimeline.setAttribute("value", proposalsToggle.checked ? "overall+proposal" : "overall");
+            });
+          }
         } catch {
           window.__conformanceEditionScope = "overall";
         }
