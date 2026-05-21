@@ -1,10 +1,11 @@
 {
-  "pr": 360,
-  "conclusion": "cancelled",
-  "head_branch": "issue-1435-class-strict-reserved",
-  "head_sha": "9bcbe30bb5c6d2638f09c2025a61fda0eb64bdaf",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197118870",
-  "timestamp": "2026-05-21T03:24:21Z",
+  "pr": 349,
+  "conclusion": null,
+  "pending": true,
+  "head_branch": "issue-1192-ct-classification",
+  "head_sha": "27d9d8208a0ffccb751968f4374f8c41e4700c66",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/349",
+  "timestamp": "2026-05-21T02:25:18Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
