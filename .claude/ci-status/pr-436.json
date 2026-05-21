@@ -1,10 +1,11 @@
 {
   "pr": 436,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1116-promise-resolution",
-  "head_sha": "cd2ecda602cb15439abf74dd2be5c92b2c29cf9a",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196877091",
-  "timestamp": "2026-05-21T01:38:54Z",
+  "head_sha": "a30313952ffc7e7902950a66f8b1e98ed747c56d",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/436",
+  "timestamp": "2026-05-21T02:08:35Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
