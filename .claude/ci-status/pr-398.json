@@ -1,11 +1,10 @@
 {
   "pr": 398,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1492-nodejs-crypto",
-  "head_sha": "98fc1df737577925c403ad24e290934116b58029",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/398",
-  "timestamp": "2026-05-21T01:49:16Z",
+  "head_sha": "3790561ffcf7012b9eee936f733cda6e237ff2c2",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196905546",
+  "timestamp": "2026-05-21T02:30:16Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
