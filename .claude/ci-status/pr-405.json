@@ -1,11 +1,10 @@
 {
   "pr": 405,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1326c-microtask-standalone",
-  "head_sha": "f6f8512bc90cea1d40c3fa728eeabfda2b6d0c9b",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/405",
-  "timestamp": "2026-05-21T01:39:17Z",
+  "head_sha": "bb69ba6e3f02cc8afcc4f85c998dd52656d7de45",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196882645",
+  "timestamp": "2026-05-21T01:48:31Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
