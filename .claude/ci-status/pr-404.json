@@ -1,11 +1,10 @@
 {
   "pr": 404,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1504-browser-export-interop",
-  "head_sha": "e7bb29d48701632901e6b90e67a8dae5ed0be205",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/404",
-  "timestamp": "2026-05-21T00:31:35Z",
+  "head_sha": "817b3779bc69ede5808670f6c42ad0f4fe784c97",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26181800687",
+  "timestamp": "2026-05-21T00:41:07Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
