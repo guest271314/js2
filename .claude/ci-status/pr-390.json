@@ -1,10 +1,11 @@
 {
   "pr": 390,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1456-private-readonly",
-  "head_sha": "6fe70523e79c662732a67e964e154b62ad27acb0",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196901796",
-  "timestamp": "2026-05-21T02:13:42Z",
+  "head_sha": "975c919218ae3409ee35ef69bdc7108bde540931",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/390",
+  "timestamp": "2026-05-21T03:42:51Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
