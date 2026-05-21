@@ -16,7 +16,13 @@
 import ts from "typescript";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
-import { emitMethodParamDefaults, promoteAccessorCapturesToGlobals } from "./closures.js";
+import {
+  compileArrowAsCallback,
+  emitMethodParamDefaults,
+  emitObjectMethodAsClosure,
+  promoteAccessorCapturesToGlobals,
+} from "./closures.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -179,6 +185,225 @@ function compileObjectLiteralAsExternref(
     // mixed spread + named properties should have resolved via ensureStructForType.
     // If we reach here with named properties, let them be silently skipped.
     // The fallback is primarily for all-spread patterns like {...null}, {...yield}.
+  }
+
+  fctx.body.push({ op: "local.get", index: objLocal });
+  return { kind: "externref" };
+}
+
+/**
+ * (#1239) Compile an object literal whose property list contains at least
+ * one `GetAccessorDeclaration` / `SetAccessorDeclaration`.
+ *
+ * Routes through the JS host's plain-object machinery
+ * (`__new_plain_object` + `__extern_set` + `__defineProperty_accessor`)
+ * instead of the wasmGC struct path, so V8 sees real accessor descriptors
+ * and `Get(o, key)` / `Set(o, key, v)` traps invoke the user-defined
+ * getter/setter bodies. Tags the receiving variable in
+ * `ctx.externrefAccessorVars` so subsequent `resolveStructNameForExpr`
+ * lookups bail out to the externref path everywhere.
+ *
+ * The wasmGC struct fallback (the pre-fix behavior) emitted a typed field
+ * for each accessor key and silently dropped the body — a `Get(o, "x")`
+ * via the externref bridge then read the field's default value (`0` /
+ * `null` / `undefined`) instead of running the getter.
+ */
+function compileObjectLiteralWithAccessors(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.ObjectLiteralExpression,
+): ValType | null {
+  // 1. Tag the receiving variable BEFORE recursing into initializers — so
+  //    nested literals (e.g. spread sources) don't see a stale tag.
+  let parent: ts.Node | undefined = expr.parent;
+  while (parent && (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent))) {
+    parent = parent.parent;
+  }
+  if (parent && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+    ctx.externrefAccessorVars.add(parent.name.text);
+  }
+
+  // 2. Create the plain JS host object.
+  const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (newObjIdx === undefined) return null;
+  fctx.body.push({ op: "call", funcIdx: newObjIdx });
+  const objLocal = allocLocal(fctx, `__objlit_acc_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: objLocal });
+
+  // Pre-pass: pair `get x()` and `set x(v)` declarations on the same name
+  // into a single `__defineProperty_accessor` call so the runtime descriptor
+  // carries both slots.
+  type AccessorPair = {
+    getter?: ts.GetAccessorDeclaration;
+    setter?: ts.SetAccessorDeclaration;
+    firstIdx: number; // emit position (source order of the FIRST occurrence)
+    name: string;
+  };
+  const accessorPairs = new Map<string, AccessorPair>();
+  for (let i = 0; i < expr.properties.length; i++) {
+    const p = expr.properties[i]!;
+    if (!ts.isGetAccessorDeclaration(p) && !ts.isSetAccessorDeclaration(p)) continue;
+    const propName = resolveAccessorPropName(ctx, p.name); // (#820b) handles ComputedPropertyName
+    if (propName === undefined) continue; // arbitrary computed key: out of scope
+    let pair = accessorPairs.get(propName);
+    if (!pair) {
+      pair = { firstIdx: i, name: propName };
+      accessorPairs.set(propName, pair);
+    }
+    if (ts.isGetAccessorDeclaration(p)) pair.getter = p;
+    else pair.setter = p;
+  }
+
+  // Helper to emit __extern_set(obj, key, value) — both the value and the
+  // string key sit on the wasm stack first.
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  const accIdx = ensureLateImport(
+    ctx,
+    "__defineProperty_accessor",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (setIdx === undefined || accIdx === undefined) return null;
+
+  // 3. Walk properties in source order. Value/method properties → __extern_set.
+  //    Accessor declarations → emit __defineProperty_accessor at the FIRST
+  //    occurrence of each name (using the merged getter/setter pair).
+  const emittedAccessors = new Set<string>();
+  for (let i = 0; i < expr.properties.length; i++) {
+    const prop = expr.properties[i]!;
+    if (ts.isSpreadAssignment(prop)) {
+      // Compile spread source and call __object_assign(target, [source])
+      const srcType = compileExpression(ctx, fctx, prop.expression);
+      if (srcType) {
+        if (srcType.kind !== "externref") {
+          coerceType(ctx, fctx, srcType, { kind: "externref" });
+        }
+        const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        const assignIdx = ensureLateImport(
+          ctx,
+          "__object_assign",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (arrNewIdx !== undefined && arrPushIdx !== undefined && assignIdx !== undefined) {
+          const srcLocal = allocLocal(fctx, `__spread_src_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: srcLocal });
+          fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+          const arrLocal = allocLocal(fctx, `__spread_arr_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: arrLocal });
+          fctx.body.push({ op: "local.get", index: arrLocal });
+          fctx.body.push({ op: "local.get", index: srcLocal });
+          fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+          fctx.body.push({ op: "local.get", index: objLocal });
+          fctx.body.push({ op: "local.get", index: arrLocal });
+          fctx.body.push({ op: "call", funcIdx: assignIdx });
+          fctx.body.push({ op: "local.set", index: objLocal });
+        }
+      }
+    } else if (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) {
+      // __extern_set(obj, key, value)
+      let propName: string | undefined;
+      if (ts.isIdentifier(prop.name)) propName = prop.name.text;
+      else if (ts.isStringLiteral(prop.name)) propName = prop.name.text;
+      else if (ts.isNumericLiteral(prop.name)) propName = prop.name.text;
+      // Computed property names not handled here — fall through silently.
+      if (propName === undefined) continue;
+      addStringConstantGlobal(ctx, propName);
+      const keyGlobal = ctx.stringGlobalMap.get(propName);
+      if (keyGlobal === undefined) continue;
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push({ op: "global.get", index: keyGlobal });
+      // Compile value and coerce to externref.
+      let valType: ValType | null;
+      if (ts.isShorthandPropertyAssignment(prop)) {
+        valType = compileExpression(ctx, fctx, prop.name);
+      } else {
+        valType = compileExpression(ctx, fctx, prop.initializer);
+      }
+      if (!valType) {
+        // Push undefined as a fallback so the stack stays balanced.
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (valType.kind !== "externref") {
+        coerceType(ctx, fctx, valType, { kind: "externref" });
+      }
+      fctx.body.push({ op: "call", funcIdx: setIdx });
+    } else if (ts.isMethodDeclaration(prop)) {
+      // Compile method as a callback closure, then __extern_set
+      let methodName: string | undefined;
+      if (ts.isIdentifier(prop.name)) methodName = prop.name.text;
+      else if (ts.isStringLiteral(prop.name)) methodName = prop.name.text;
+      if (methodName === undefined) continue;
+      addStringConstantGlobal(ctx, methodName);
+      const keyGlobal = ctx.stringGlobalMap.get(methodName);
+      if (keyGlobal === undefined) continue;
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push({ op: "global.get", index: keyGlobal });
+      const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+      if (!ok) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "call", funcIdx: setIdx });
+    } else if (ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
+      // Emit one __defineProperty_accessor call per pair, at the position
+      // of the FIRST get/set declaration on this name. Subsequent siblings
+      // for the same name are skipped (their info was merged into the pair
+      // during the pre-pass).
+      const propName = resolveAccessorPropName(ctx, prop.name); // (#820b)
+      if (propName === undefined) continue;
+      const pair = accessorPairs.get(propName);
+      if (!pair) continue;
+      if (emittedAccessors.has(propName)) continue;
+      if (pair.firstIdx !== i) continue; // wait for the actual first slot
+      emittedAccessors.add(propName);
+
+      addStringConstantGlobal(ctx, propName);
+      const keyGlobal = ctx.stringGlobalMap.get(propName);
+      if (keyGlobal === undefined) continue;
+
+      // Stack: [obj, key, getterCb | null, setterCb | null, flags]
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push({ op: "global.get", index: keyGlobal });
+
+      // Getter callback (or ref.null.extern when only setter is defined)
+      if (pair.getter) {
+        const ok = compileArrowAsCallback(ctx, fctx, pair.getter as unknown as ts.FunctionExpression, {
+          needsThis: true,
+        });
+        if (!ok) fctx.body.push({ op: "ref.null.extern" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+
+      // Setter callback
+      if (pair.setter) {
+        const ok = compileArrowAsCallback(ctx, fctx, pair.setter as unknown as ts.FunctionExpression, {
+          needsThis: true,
+        });
+        if (!ok) fctx.body.push({ op: "ref.null.extern" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+
+      // Flags: enumerable=true, configurable=true (writable is N/A for
+      // accessor descriptors; matches `computeRuntimeFlags(undefined,
+      // true, true, false)` from object-ops.ts).
+      // Bits: enumerable_specified (1<<4) | enumerable_value (1<<1)
+      //     | configurable_specified (1<<5) | configurable_value (1<<2)
+      const flags = (1 << 4) | (1 << 1) | (1 << 5) | (1 << 2);
+      fctx.body.push({ op: "f64.const", value: flags });
+
+      fctx.body.push({ op: "call", funcIdx: accIdx });
+      fctx.body.push({ op: "drop" }); // returns the same externref
+    }
   }
 
   fctx.body.push({ op: "local.get", index: objLocal });
@@ -700,6 +925,71 @@ export function compileObjectLiteralForStruct(
     }
   }
 
+  // (#1557) Per-literal method funcIdx overrides. When struct dedup collapses
+  // multiple object literals that share a field shape but have methods with
+  // different signatures (e.g. `{ validate(value) {} }` and `{ validate() {} }`
+  // both type as `__anon_0` because `validate` resolves to externref with no
+  // call signatures), the shared `funcMap` entry `__anon_0_validate` would be
+  // overwritten by whichever method body is compiled last — breaking
+  // trampolines emitted against the earlier-arity sig. To keep each literal's
+  // method body + trampoline self-consistent, when we detect a method here
+  // whose `methodFullName` is already bound to a function whose signature
+  // differs from the new one, we allocate a fresh funcIdx for THIS literal's
+  // method and route both the trampoline AND the body to it via this local
+  // map. The shared `funcMap` entry continues to point at the original
+  // placeholder (used by external lookups like `ClassName.prototype.method`).
+  const literalMethodFuncIdx = new Map<string, number>();
+  for (const prop of expr.properties) {
+    if (!ts.isMethodDeclaration(prop)) continue;
+    if (!prop.name) continue;
+    if (
+      !ts.isIdentifier(prop.name) &&
+      !ts.isStringLiteral(prop.name) &&
+      !ts.isNumericLiteral(prop.name) &&
+      !ts.isComputedPropertyName(prop.name)
+    ) {
+      continue;
+    }
+    const methodName = resolveAccessorPropName(ctx, prop.name);
+    if (methodName === undefined) continue;
+    const fullName = `${typeName}_${methodName}`;
+    const existingFuncIdx = ctx.funcMap.get(fullName);
+    if (existingFuncIdx === undefined) continue;
+
+    // Compute the signature this method would compile to.
+    const newParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
+    for (const param of prop.parameters) {
+      const paramType = ctx.checker.getTypeAtLocation(param);
+      let wasmType = resolveWasmType(ctx, paramType);
+      if (param.initializer && wasmType.kind === "ref") {
+        wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+      }
+      newParams.push(wasmType);
+    }
+
+    // Compare against existing function's param count. (Result-type comparison
+    // is harder; param count is the canonical mismatch that causes
+    // "not enough arguments on the stack" trampoline failures.)
+    const localIdx = existingFuncIdx - ctx.numImportFuncs;
+    const existingFunc = ctx.mod.functions[localIdx];
+    if (!existingFunc) continue;
+    const existingType = ctx.mod.types[existingFunc.typeIdx];
+    if (!existingType || existingType.kind !== "func") continue;
+    if (existingType.params.length === newParams.length) continue;
+
+    // Mismatch — allocate a fresh funcIdx for this literal's method without
+    // touching the shared funcMap entry.
+    const freshFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: `${fullName}__lit${freshFuncIdx}`,
+      typeIdx: existingFunc.typeIdx, // placeholder; the body-compile step rewrites this
+      locals: [],
+      body: [],
+      exported: false,
+    });
+    literalMethodFuncIdx.set(methodName, freshFuncIdx);
+  }
+
   for (const field of fields) {
     // First check for an explicit property assignment (identifier, string literal, or computed key)
     const prop = expr.properties.find((p) => resolvePropertyNameText(ctx, p) === field.name);
@@ -707,6 +997,65 @@ export function compileObjectLiteralForStruct(
     const shorthandProp = !prop
       ? expr.properties.find((p) => ts.isShorthandPropertyAssignment(p) && p.name.text === field.name)
       : undefined;
+    // #1118: Method shorthand `{ m() {…} }` — `resolvePropertyNameText`
+    // returns undefined for MethodDeclaration, so the search above misses
+    // it. Look it up explicitly by name. The pre-pass in
+    // `ensureStructForType` already registered the method's funcMap entry;
+    // emit a closure-struct ref to it and convert to the field type.
+    // Without this, the field defaults to `undefined` and dynamic dispatch
+    // through `any` (the test262 wrapper pattern) returns null.
+    const methodProp =
+      !prop && !shorthandProp
+        ? expr.properties.find(
+            (p): p is ts.MethodDeclaration =>
+              ts.isMethodDeclaration(p) &&
+              !!p.name &&
+              ((ts.isIdentifier(p.name) && p.name.text === field.name) ||
+                (ts.isStringLiteral(p.name) && p.name.text === field.name) ||
+                (ts.isNumericLiteral(p.name) && p.name.text === field.name)),
+          )
+        : undefined;
+    if (methodProp) {
+      const methodFullName = `${typeName}_${field.name}`;
+      // (#1557) Prefer the per-literal funcIdx if we detected a sig mismatch
+      // above. The trampoline must reference the funcIdx whose body will
+      // actually be compiled for THIS literal, not a sibling literal's body.
+      const methodFuncIdx = literalMethodFuncIdx.get(field.name) ?? ctx.funcMap.get(methodFullName);
+      if (methodFuncIdx !== undefined) {
+        const closureType = emitObjectMethodAsClosure(ctx, fctx, methodFullName, methodFuncIdx, structTypeIdx);
+        if (closureType) {
+          // Coerce closure-struct ref → field type. The common case is
+          // externref (un-typed obj literal), which needs extern.convert_any.
+          // For a concretely-typed struct field of the same closure type,
+          // no coercion is needed.
+          if (field.type.kind === "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+          } else if (field.type.kind === "eqref") {
+            // ref → eqref: GC ref subtype, no instruction needed (implicit).
+          } else if (
+            (field.type.kind === "ref" || field.type.kind === "ref_null") &&
+            (field.type as { typeIdx: number }).typeIdx !== (closureType as { typeIdx: number }).typeIdx
+          ) {
+            // Mismatched ref types — fall back to the default branch by
+            // dropping our closure and re-emitting undefined below. This
+            // shouldn't happen for well-formed fields but keeps codegen
+            // sound under TypeChecker quirks.
+            fctx.body.push({ op: "drop" } as Instr);
+            fctx.body.push({ op: "ref.null", typeIdx: (field.type as { typeIdx: number }).typeIdx });
+          }
+          continue; // field handled
+        }
+      }
+      // Fall through to the default-undefined branch if the closure
+      // emission failed (e.g. unsupported signature). Better to leave
+      // the field undefined than to leave the stack unbalanced.
+      if (field.type.kind === "externref") emitUndefined(ctx, fctx);
+      else if (field.type.kind === "eqref") fctx.body.push({ op: "ref.null.eq" });
+      else if (field.type.kind === "ref" || field.type.kind === "ref_null")
+        fctx.body.push({ op: "ref.null", typeIdx: field.type.typeIdx });
+      else fctx.body.push({ op: "i32.const", value: 0 });
+      continue;
+    }
     if (prop && ts.isPropertyAssignment(prop)) {
       // Track closure types for valueOf/toString fields
       const bodyLenBefore = fctx.body.length;
@@ -1002,6 +1351,14 @@ export function compileObjectLiteralForStruct(
         if (param.initializer && wasmType.kind === "ref") {
           wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
         }
+        // Binding-pattern params MUST route through the externref destructure path
+        // so that (a) null/undefined trigger a spec-mandated synchronous TypeError and
+        // (b) nested patterns recurse via the generic destructure logic. See #1151
+        // Gap B — mirrors closures.ts:1186 and class-bodies.ts:1160.
+        const hasBindingPattern = ts.isArrayBindingPattern(param.name) || ts.isObjectBindingPattern(param.name);
+        if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
+          wasmType = { kind: "externref" };
+        }
         methodParams.push(wasmType);
       }
 
@@ -1031,9 +1388,12 @@ export function compileObjectLiteralForStruct(
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
 
-      // Check if a placeholder function was already pre-registered (by ensureStructForType).
-      // If so, reuse it instead of pushing a duplicate with an empty body.
-      const existingFuncIdx = ctx.funcMap.get(fullName);
+      // (#1557) If this method was earmarked for a per-literal funcIdx (because
+      // a sibling literal sharing the same struct dedup-key already owns the
+      // shared `funcMap` entry with a different signature), compile into the
+      // dedicated funcIdx instead of overwriting the shared one.
+      const perLiteralIdx = literalMethodFuncIdx.get(methodName);
+      const existingFuncIdx = perLiteralIdx ?? ctx.funcMap.get(fullName);
       let methodFunc: WasmFunction;
       if (existingFuncIdx !== undefined) {
         const localIdx = existingFuncIdx - ctx.numImportFuncs;
@@ -1069,6 +1429,13 @@ export function compileObjectLiteralForStruct(
         // to match the function signature (which uses ref_null so callers can pass ref.null)
         if ((param.initializer || param.questionToken) && wasmType.kind === "ref") {
           wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+        }
+        // Binding-pattern params MUST route through the externref destructure path
+        // (#1151 Gap B). Must mirror the sig-collection phase above so the fctx
+        // param type agrees with the function signature.
+        const hasBindingPattern = ts.isArrayBindingPattern(param.name) || ts.isObjectBindingPattern(param.name);
+        if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
+          wasmType = { kind: "externref" };
         }
         methodFctxParams.push({ name: paramName, type: wasmType });
       }
