@@ -1,10 +1,11 @@
 {
   "pr": 386,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1453-for-iteration-let",
-  "head_sha": "cd29e776e58bc0064e3b2c865057f871324a402e",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196894657",
-  "timestamp": "2026-05-21T02:05:31Z",
+  "head_sha": "f4331c0efc9264708cf357c9c5eddce440ee813d",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/386",
+  "timestamp": "2026-05-21T03:20:46Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
