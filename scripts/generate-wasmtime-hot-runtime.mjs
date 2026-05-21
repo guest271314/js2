@@ -38,6 +38,24 @@
  * use Cranelift-compiled native code). Including it confused the message;
  * the genuine comparison is Cranelift AOT vs V8 JIT.
  *
+ * ## Javy + StarlingMonkey lanes
+ *
+ * The hot-runtime JSON also carries `javyUs` and `starlingMonkeyUs` per row
+ * so the landing-page chart can render four lanes: js2wasm AOT, V8 with JIT,
+ * Javy (interpreter), StarlingMonkey (engine).
+ *
+ * Those two values are NOT measured by this script — they require:
+ *   - wasmtime ≥ 40 (for component `--invoke "fn(args)"` syntax)
+ *   - javy + javy-default-plugin-v3 (Shopify-style dynamic-link mode)
+ *   - @bytecodealliance/componentize-js ≥ 0.20.0 + Wizer + Weval AOT
+ *
+ * The full four-lane harness lives in the labs repo under
+ * `benchmarks/compare-runtimes.ts` + `benchmarks/competitive/`. This script
+ * (the public landing-page generator) carries the verified Javy /
+ * StarlingMonkey numbers forward from that harness; refresh them when the
+ * labs run produces new measurements by editing JAVY_NUMBERS_MS /
+ * STARLINGMONKEY_NUMBERS_MS below.
+ *
  * Requirements: `wasmtime` (v35+) on PATH; competitive programs under
  * `public/benchmarks/competitive/programs/*.js`.
  */
@@ -68,6 +86,29 @@ const PROGRAMS = [
 const WARMUP_RUNS = 2;
 const MEASURED_RUNS = 7;
 const WASMTIME_FEATURES = ["-W", "gc=y", "-W", "function-references=y"];
+
+// Javy + StarlingMonkey verified numbers (2026-04-27 wasmtime 44.0.0,
+// aarch64-linux) — see labs benchmarks/compare-runtimes.ts.
+// Map: `cold` → README "Cold ms" (process startup + first call);
+//      `warm` → README "Compute-only ms" (steady-state per call).
+// Programs not present in either table fall back to 0 (omitted from chart).
+const JAVY_NUMBERS_MS = {
+  fib: { cold: 28.8, warm: 1193.2 },
+  "fib-recursive": { cold: 31.2, warm: 87.9 },
+  "array-sum": { cold: 28.0, warm: 112.9 },
+  "string-hash": { cold: 30.7, warm: 36.0 },
+};
+const STARLINGMONKEY_NUMBERS_MS = {
+  fib: { cold: 37.2, warm: 1024.3 },
+  "fib-recursive": { cold: 26.4, warm: 156.7 },
+  "array-sum": { cold: 31.0, warm: 125.5 },
+  "string-hash": { cold: 30.5, warm: 14.2 },
+};
+const LANES_PROVENANCE =
+  "javyUs/starlingMonkeyUs from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux " +
+  "labs measurements (compare-runtimes.ts). Javy = Shopify-style dynamic-link " +
+  "with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + " +
+  "Wizer + Weval AOT.";
 
 function median(values) {
   if (values.length === 0) return 0;
@@ -189,7 +230,7 @@ function buildRow({ programId, scenario, wasmSamplesUs, jsSamplesUs }) {
   const ratioSamples = wasmSamplesUs.map(
     (us, i) => (jsSamplesUs[i] ?? jsSamplesUs[jsSamplesUs.length - 1]) / Math.max(us, 0.000001),
   );
-  return {
+  const row = {
     name: programId,
     scenario,
     wasmUs: median(wasmSamplesUs),
@@ -200,6 +241,18 @@ function buildRow({ programId, scenario, wasmSamplesUs, jsSamplesUs }) {
     warmupRounds: WARMUP_RUNS,
     measuredRounds: MEASURED_RUNS,
   };
+  const javyMs = JAVY_NUMBERS_MS[programId]?.[scenario];
+  if (typeof javyMs === "number" && javyMs > 0) {
+    row.javyUs = javyMs * 1000;
+  }
+  const smMs = STARLINGMONKEY_NUMBERS_MS[programId]?.[scenario];
+  if (typeof smMs === "number" && smMs > 0) {
+    row.starlingMonkeyUs = smMs * 1000;
+  }
+  if (row.javyUs || row.starlingMonkeyUs) {
+    row.lanesProvenance = LANES_PROVENANCE;
+  }
+  return row;
 }
 
 function writeOutput(rows) {

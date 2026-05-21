@@ -8,7 +8,10 @@
     "jsStdUs": 1916.3658326571722,
     "ratioStd": 0.15066153057109066,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 28800.0,
+    "starlingMonkeyUs": 37200.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "fib",
@@ -19,7 +22,10 @@
     "jsStdUs": 2451.8673361206543,
     "ratioStd": 0.42521984331324486,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 1193200.0,
+    "starlingMonkeyUs": 1024300.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "fib-recursive",
@@ -30,7 +36,10 @@
     "jsStdUs": 2988.8171321253485,
     "ratioStd": 0.18074199423778278,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 31200.0,
+    "starlingMonkeyUs": 26400.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "fib-recursive",
@@ -41,7 +50,10 @@
     "jsStdUs": 42.874978923301676,
     "ratioStd": 0.04413647198341376,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 87900.0,
+    "starlingMonkeyUs": 156700.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "array-sum",
@@ -52,7 +64,10 @@
     "jsStdUs": 2104.273302890544,
     "ratioStd": 0.35379093353823926,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 28000.0,
+    "starlingMonkeyUs": 31000.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "array-sum",
@@ -63,7 +78,10 @@
     "jsStdUs": 547.3251063111289,
     "ratioStd": 6.749706276568299,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 112900.0,
+    "starlingMonkeyUs": 125500.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "string-hash",
@@ -74,7 +92,10 @@
     "jsStdUs": 2851.9373522509827,
     "ratioStd": 0.047219569864664565,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 30700.0,
+    "starlingMonkeyUs": 30500.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "string-hash",
@@ -85,6 +106,9 @@
     "jsStdUs": 34.88853686077583,
     "ratioStd": 0.0004946225297867972,
     "warmupRounds": 2,
-    "measuredRounds": 7
+    "measuredRounds": 7,
+    "javyUs": 36000.0,
+    "starlingMonkeyUs": 14200.0,
+    "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   }
 ]
