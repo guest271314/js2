@@ -1,10 +1,11 @@
 {
   "pr": 437,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-846-class-static-prototype",
-  "head_sha": "ed97d6b3734927359354548e7f9ec54c1e24c44d",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196512003",
-  "timestamp": "2026-05-21T01:33:38Z",
+  "head_sha": "afdf55561f93cb1f6cf0969771917afc7aabafbe",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/437",
+  "timestamp": "2026-05-21T02:00:08Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
