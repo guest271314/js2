@@ -1,10 +1,11 @@
 {
   "pr": 425,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1522-conformance-sync",
-  "head_sha": "75bc25a997e9ac274acb8fc85db59cdb80a2c416",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196914611",
-  "timestamp": "2026-05-21T02:52:54Z",
+  "head_sha": "da0db42a51a3d482a1f319c07142668f537b72c8",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/425",
+  "timestamp": "2026-05-21T05:29:37Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
