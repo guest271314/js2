@@ -1,39 +1,47 @@
 ---
 id: 1542
 title: "Class method destructured-pattern param default not applied; throws \"Cannot destructure null\" instead"
-status: in-progress
+status: suspended
 created: 2026-05-20
 parent: 820
 priority: high
-feasibility: medium
+feasibility: hard
 goal: test262-conformance
 test262_fail: 134
 ---
 
-## Resolution
+## Suspended Work
 
-Root cause was **not** in `coerceType` as the architect spec suggested. The
-default initializer (e.g. `g()`) was being compiled to `ref.null extern`
-because the function declaration `g` was not yet in `funcMap` at the time the
-class method body was compiled.
+**Suspended**: 2026-05-20 by dev-equiv-tests after smoke-testing.
 
-`compileClassesFromStatements` in `src/codegen/declarations.ts` lost the
-`insideFunction` flag when recursing through control-flow constructs
-(`isBlock`, `isIfStatement`, `isTryStatement`, loop bodies, `isSwitchStatement`,
-`isLabeledStatement`). A class declaration nested inside e.g. a try-block of a
-function was therefore treated as if at module level and its body was eagerly
-compiled at module pass time — BEFORE the enclosing function's
-`hoistFunctionDeclarations` pass ran. Sibling function declarations were
-absent from `funcMap` at class-body compile time, and the call-expression
-compiler emitted the graceful `ref.null.extern` fallback.
+**Worktree**: `/workspace/.claude/worktrees/issue-1542-class-method-dstr-default` (branch
+`issue-1542-class-method-dstr-default`). Clean — no commits.
 
-Test262 wraps every test in `export function test() { try { ... } catch ... }`,
-so this hits every class-with-method-default test262 case.
+**Status**: Minimal repros all PASS on current main:
+- `method({ x = 1 } = {})` → 1 ✓
+- `method([,] = g())` with `function* g() { yield; }` → "ok" ✓
+- Side-effect tracking with `let first/second` → matches JS ✓
+- Private method `#m([,] = g())` ✓
+- Static method `static m({ x = 5 } = { x: 10 })` ✓
 
-Fix: propagate `insideFunction` through every recursive descent so a class
-inside any control-flow construct within a function is correctly **deferred**
-until the enclosing function compiles its body (at which point
-`hoistFunctionDeclarations` has registered sibling functions).
+But the baseline still shows 102+ failures (`Cannot destructure 'null' or 'undefined'`
+across `C_method`, `C___priv_method`, `__anonClass_0___priv_method`). The failures
+must require specific test262-harness shape that the simple repros don't trigger.
+
+**Hand-off notes for senior-developer**:
+- Architect spec at line 105+ proposes a `coerceType` branch for externref → vec
+  via `__array_from_iter`. The fall-through at line 1019-1048 of
+  `src/codegen/type-coercion.ts` is where opaque externrefs lose their iterable
+  nature (today emits `ref.null` in the else of `ref.test`).
+- Need to compile actual failing test262 file shape (with harness wrap) and
+  trace the param-default code path to find the bug.
+- One incidental observation while probing: array-elision `[,]` over a generator
+  appears to advance the iterator one extra time (second=1 vs expected 0). This
+  may or may not be a related bug.
+
+Reprioritized to `feasibility: hard` because reproduction requires harness
+shape; the architect's proposed `coerceType` change is the right hypothesis but
+needs validation against the actual failing tests.
 
 # #1542 — Class method destructured-pattern param default not applied
 
