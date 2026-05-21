@@ -1,10 +1,11 @@
 {
   "pr": 364,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1452-for-pattern-scope",
-  "head_sha": "a964a2ac5d63e37f7c90c31a0665837dccc343ae",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196893785",
-  "timestamp": "2026-05-21T02:08:20Z",
+  "head_sha": "5ed655799c1c294967b9e0931fbf385b2ef73853",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/364",
+  "timestamp": "2026-05-21T03:19:58Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
