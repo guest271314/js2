@@ -1,11 +1,10 @@
 {
   "pr": 342,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1383-typeof-eq-gate",
-  "head_sha": "199b5847a9dfb677d98494b393d69202fdf834b8",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/342",
-  "timestamp": "2026-05-21T00:52:13Z",
+  "head_sha": "c13edd9fc2b29b49de89c659db94231afdd3c2e7",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196475075",
+  "timestamp": "2026-05-21T01:06:52Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
