@@ -41,6 +41,9 @@ on:
       - "tests/test262-runner.ts"
       - "tests/test262-scope-classification.test.ts"
       - "tests/test262-shared.ts"
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       include_proposals:
@@ -78,6 +81,7 @@ concurrency:
   group: >-
     ${{ github.event_name == 'push' && 'test262-sharded-main'
      || github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.ref)
+     || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
      || format('test262-sharded-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -85,7 +89,7 @@ jobs:
   gate:
     name: cheap gate (main-ancestor + lint)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -124,7 +128,7 @@ jobs:
           if grep -q '"lint"' package.json; then pnpm run lint 2>&1 | tail -50; fi
 
   test262-shard:
-    if: (github.event_name != 'push' || github.actor != 'github-actions[bot]') && (github.event_name != 'pull_request' || needs.gate.result == 'success')
+    if: (github.event_name != 'push' || github.actor != 'github-actions[bot]') && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.gate.result == 'success')
     needs: [gate]
     name: test262 shard ${{ matrix.chunk }}
     runs-on: ubuntu-latest
