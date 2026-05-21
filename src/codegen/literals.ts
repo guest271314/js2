@@ -244,8 +244,8 @@ function compileObjectLiteralWithAccessors(
   for (let i = 0; i < expr.properties.length; i++) {
     const p = expr.properties[i]!;
     if (!ts.isGetAccessorDeclaration(p) && !ts.isSetAccessorDeclaration(p)) continue;
-    if (!ts.isIdentifier(p.name) && !ts.isStringLiteral(p.name)) continue; // computed: out of scope
-    const propName = (p.name as ts.Identifier | ts.StringLiteral).text;
+    const propName = resolveAccessorPropName(ctx, p.name); // (#820b) handles ComputedPropertyName
+    if (propName === undefined) continue; // arbitrary computed key: out of scope
     let pair = accessorPairs.get(propName);
     if (!pair) {
       pair = { firstIdx: i, name: propName };
@@ -357,8 +357,8 @@ function compileObjectLiteralWithAccessors(
       // of the FIRST get/set declaration on this name. Subsequent siblings
       // for the same name are skipped (their info was merged into the pair
       // during the pre-pass).
-      if (!ts.isIdentifier(prop.name) && !ts.isStringLiteral(prop.name)) continue;
-      const propName = (prop.name as ts.Identifier | ts.StringLiteral).text;
+      const propName = resolveAccessorPropName(ctx, prop.name); // (#820b)
+      if (propName === undefined) continue;
       const pair = accessorPairs.get(propName);
       if (!pair) continue;
       if (emittedAccessors.has(propName)) continue;
@@ -1294,6 +1294,14 @@ export function compileObjectLiteralForStruct(
         if (param.initializer && wasmType.kind === "ref") {
           wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
         }
+        // Binding-pattern params MUST route through the externref destructure path
+        // so that (a) null/undefined trigger a spec-mandated synchronous TypeError and
+        // (b) nested patterns recurse via the generic destructure logic. See #1151
+        // Gap B — mirrors closures.ts:1186 and class-bodies.ts:1160.
+        const hasBindingPattern = ts.isArrayBindingPattern(param.name) || ts.isObjectBindingPattern(param.name);
+        if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
+          wasmType = { kind: "externref" };
+        }
         methodParams.push(wasmType);
       }
 
@@ -1361,6 +1369,13 @@ export function compileObjectLiteralForStruct(
         // to match the function signature (which uses ref_null so callers can pass ref.null)
         if ((param.initializer || param.questionToken) && wasmType.kind === "ref") {
           wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+        }
+        // Binding-pattern params MUST route through the externref destructure path
+        // (#1151 Gap B). Must mirror the sig-collection phase above so the fctx
+        // param type agrees with the function signature.
+        const hasBindingPattern = ts.isArrayBindingPattern(param.name) || ts.isObjectBindingPattern(param.name);
+        if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
+          wasmType = { kind: "externref" };
         }
         methodFctxParams.push({ name: paramName, type: wasmType });
       }
