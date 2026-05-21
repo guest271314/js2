@@ -1,10 +1,11 @@
 {
   "pr": 380,
-  "conclusion": "cancelled",
+  "conclusion": null,
+  "pending": true,
   "head_branch": "issue-1464-iterator-helpers",
-  "head_sha": "8a528906dc6122e2c5f07fcc5d6d38bc48991e51",
-  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26196902394",
-  "timestamp": "2026-05-21T02:19:06Z",
+  "head_sha": "3efe3c7840964d100da1955c49c841e6b4b91194",
+  "run_url": "https://github.com/loopdive/js2wasm/pull/380",
+  "timestamp": "2026-05-21T03:51:11Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -16,7 +17,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": "null",
+  "baseline_sha": null,
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
