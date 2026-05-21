@@ -1,11 +1,10 @@
 {
   "pr": 366,
-  "conclusion": null,
-  "pending": true,
+  "conclusion": "cancelled",
   "head_branch": "issue-1364-class-descriptors",
-  "head_sha": "497317409e562249e01a13a0f7bbc6c5474c5a97",
-  "run_url": "https://github.com/loopdive/js2wasm/pull/366",
-  "timestamp": "2026-05-21T00:13:16Z",
+  "head_sha": "69eaf2b026eac0aaa0a0ac3dfcb2a3ce97bd3865",
+  "run_url": "https://github.com/loopdive/js2wasm/actions/runs/26197115324",
+  "timestamp": "2026-05-21T03:19:41Z",
   "pass": null,
   "fail": null,
   "compile_error": null,
@@ -17,7 +16,7 @@
   "wasm_identical_noise": null,
   "compile_timeouts": null,
   "improvements": null,
-  "baseline_sha": null,
+  "baseline_sha": "null",
   "baseline_staleness_commits": null,
   "baseline_stale": false
 }
