@@ -1207,6 +1207,40 @@ const _hostProxyReverse = new WeakMap<object, any>();
 const _prototypeMethodNames = new WeakMap<object, string[]>();
 
 /**
+ * #1364b — set of method/static names that have been deleted from a registered
+ * class prototype or class object. `delete C.prototype.m` or `delete C.m` must
+ * make the property non-discoverable to subsequent `Object.getOwnPropertyDescriptor`
+ * lookups (spec §10.1.10 — successful delete removes the own property). Without
+ * this, `verifyProperty(C, "m", ...)` failed its second-pass invariant check
+ * which deletes the property then asserts the descriptor is `undefined`.
+ *
+ * We track deletions on a side-set rather than mutating `_prototypeMethodNames`/
+ * `_staticMethodNames` so the enumeration order (`__getOwnPropertyNames`) and
+ * any future undo path remain trivial.
+ */
+const _deletedClassPropNames = new WeakMap<object, Set<string>>();
+
+function _markDeletedClassProp(obj: object, name: string): void {
+  let set = _deletedClassPropNames.get(obj);
+  if (!set) {
+    set = new Set();
+    _deletedClassPropNames.set(obj, set);
+  }
+  set.add(name);
+}
+
+function _isDeletedClassProp(obj: object, name: string): boolean {
+  const set = _deletedClassPropNames.get(obj);
+  if (set !== undefined && set.has(name)) return true;
+  // Unify with the existing `__delete_property` tombstone so codegen-emitted
+  // `delete C.m` (which routes through `__delete_property`, not the proxy
+  // trap) also marks the method/static as gone. `_wasmStructDeletedKeys` is
+  // declared further down the module but is in lexical scope at call time.
+  const tomb = _wasmStructDeletedKeys.get(obj);
+  return tomb !== undefined && tomb.has(name);
+}
+
+/**
  * #1364a — cache of method-name → bridge JS function for class prototypes.
  * The proxy's `get` and `getOwnPropertyDescriptor` traps both produce the
  * same JS function for `C.prototype.m`, so `assert.sameValue(c.m, C.prototype.m)`
@@ -1364,7 +1398,11 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
   // enumeration used for regular instances.
   const fieldNamesForHost = (): string[] => {
     const protoMethods = _prototypeMethodNames.get(obj);
-    if (protoMethods !== undefined) return protoMethods;
+    if (protoMethods !== undefined) {
+      // #1364b — filter out names that have been `delete`d from this class
+      // proto / class object so subsequent enumeration matches spec.
+      return protoMethods.filter((n) => !_isDeletedClassProp(obj, n));
+    }
     return _getStructFieldNames(obj, exports) ?? [];
   };
 
@@ -1457,10 +1495,13 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // would otherwise appear truthy via safeGetField.
       const protoMethods = _prototypeMethodNames.get(obj);
       if (protoMethods !== undefined) {
-        if (typeof key === "string" && protoMethods.includes(key)) return true;
+        if (typeof key === "string" && protoMethods.includes(key) && !_isDeletedClassProp(obj, key)) return true;
         const sc = _wasmStructProps.get(obj);
         return !!sc && key in sc;
       }
+      // #1364b — class object: a deleted static-method name must not appear in
+      // `obj.method in C` checks anymore.
+      if (typeof key === "string" && _isDeletedClassProp(obj, key)) return false;
       if (safeGetField(key) !== undefined) return true;
       const sc = _wasmStructProps.get(obj);
       if (sc && key in sc) return true;
@@ -1473,6 +1514,22 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // present in the sidecar. Returning false here throws a Proxy
       // invariant TypeError. Sidecar delete is best-effort.
       _sidecarDelete(obj, key);
+      // #1364b — if `obj` is a registered class prototype or class object and
+      // `key` is a method/static name from its allowlist, mark it deleted so
+      // subsequent `Object.getOwnPropertyDescriptor(obj, key)` returns
+      // `undefined` (configurable: true semantics). verifyProperty's invariant
+      // pass does exactly this round-trip.
+      if (typeof key === "string") {
+        const protoMethods = _prototypeMethodNames.get(obj);
+        if (protoMethods !== undefined && protoMethods.includes(key)) {
+          _markDeletedClassProp(obj, key);
+        } else {
+          const staticMethods = _staticMethodNames.get(obj);
+          if (staticMethods !== undefined && staticMethods.includes(key)) {
+            _markDeletedClassProp(obj, key);
+          }
+        }
+      }
       return true;
     },
     ownKeys(_t) {
@@ -3263,7 +3320,7 @@ assert._isSameValue = isSameValue;
           // backed by the cached bridge so subsequent
           // `assert.sameValue(c.m, C.prototype.m)` assertions also pass.
           const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined && protoMethods.includes(propStr)) {
+          if (protoMethods !== undefined && protoMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
             return {
               value: _getProtoMethodBridge(obj, propStr),
               writable: true,
@@ -3277,7 +3334,7 @@ assert._isSameValue = isSameValue;
           // descriptor with the spec-correct flags. Mirrors the
           // proto-methods arm above.
           const staticMethods = _staticMethodNames.get(obj);
-          if (staticMethods !== undefined && staticMethods.includes(propStr)) {
+          if (staticMethods !== undefined && staticMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
             return {
               value: _getClassMethodBridge(obj, propStr),
               writable: true,
@@ -3305,9 +3362,10 @@ assert._isSameValue = isSameValue;
           if (!_isWasmStruct(obj)) return Object.getOwnPropertyNames(obj);
           const exports = callbackState?.getExports();
           // #1047 — registered class prototype: return only the allowlist
+          // (filtered through the #1364b deletion set).
           const protoMethods = _prototypeMethodNames.get(obj);
           if (protoMethods !== undefined) {
-            const names = protoMethods.slice();
+            const names = protoMethods.filter((n) => !_isDeletedClassProp(obj, n));
             const sc = _wasmStructProps.get(obj);
             if (sc) {
               for (const k of Object.getOwnPropertyNames(sc)) {
@@ -3317,10 +3375,11 @@ assert._isSameValue = isSameValue;
             }
             return names;
           }
-          // (#1395) Class-object receiver: return the static-method allowlist.
+          // (#1395) Class-object receiver: return the static-method allowlist
+          // (filtered through the #1364b deletion set).
           const staticMethods = _staticMethodNames.get(obj);
           if (staticMethods !== undefined) {
-            const names = staticMethods.slice();
+            const names = staticMethods.filter((n) => !_isDeletedClassProp(obj, n));
             const sc = _wasmStructProps.get(obj);
             if (sc) {
               for (const k of Object.getOwnPropertyNames(sc)) {
