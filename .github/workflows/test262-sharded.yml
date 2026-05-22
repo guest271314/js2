@@ -1,14 +1,13 @@
 name: Test262 Sharded
 
 on:
-  # PR-level CI lives in test262-pr-stub.yml (cheap-gate + stub merge-shard-reports).
-  # This workflow runs the heavy 32-shard test262 ONLY in contexts that gate
-  # actual merges: merge_group (queue) and push:main (baseline). No
-  # pull_request trigger — keeping it off frees all 60 runner slots for the
-  # queue's merge_group cycle, which is the bottleneck.
-  push:
+  # Serial-queue model: full 32-shard test262 runs at PR-time AND in merge_group.
+  # Each PR is validated alone (no ALLGREEN hiding) and developers see test262
+  # regressions on PR push (not just at queue-time). Path filter restricts to
+  # src/test/config changes — docs-only PRs skip.
+  pull_request:
     branches: [main]
-    paths:
+    paths: &test262-paths
       - ".github/workflows/test262-sharded.yml"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -26,6 +25,9 @@ on:
       - "tests/test262-runner.ts"
       - "tests/test262-scope-classification.test.ts"
       - "tests/test262-shared.ts"
+  push:
+    branches: [main]
+    paths: *test262-paths
   merge_group:
     branches: [main]
     types: [checks_requested]
@@ -59,20 +61,22 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
+  # pull_request: per-PR group — a new push cancels the older run for that PR.
   # push to main: shared serial queue.
   # merge_group: per-queue-ref (GitHub serializes the queue itself).
   # workflow_dispatch: unique group so manual runs never collide.
   group: >-
-    ${{ github.event_name == 'push' && 'test262-sharded-main'
+    ${{ github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.event.pull_request.number)
+     || github.event_name == 'push' && 'test262-sharded-main'
      || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
      || format('test262-sharded-dispatch-{0}', github.run_id) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
     name: cheap gate (main-ancestor + lint)
     runs-on: ubuntu-latest
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -116,6 +120,7 @@ jobs:
     # batch.
     if: |
       (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
+      github.event_name == 'pull_request' ||
       github.event_name == 'merge_group' ||
       github.event_name == 'workflow_dispatch'
     needs: [gate]
@@ -297,7 +302,7 @@ jobs:
 
       - name: Fetch fresh baseline from baselines repo
         id: fetch_baseline
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: |
           # Clone the baselines repo to get the current baseline JSONL.
           # This avoids LFS bandwidth on the main repo (all jsonl files are
@@ -330,7 +335,7 @@ jobs:
 
       - name: Check baseline staleness (#1235)
         id: staleness
-        if: github.event_name == 'merge_group' && steps.fetch_baseline.outputs.baseline_ts != '0'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.fetch_baseline.outputs.baseline_ts != '0'
         run: |
           # If the baselines-repo JSONL hasn't been refreshed since several
           # commits landed on main, the regression-gate's wasm_change count
