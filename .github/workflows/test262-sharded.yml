@@ -462,7 +462,10 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Authenticate via SSH deploy key so the post-merge baseline-refresh
+          # commit can be pushed. The merge_queue ruleset blocks GITHUB_TOKEN
+          # pushes — MAIN_DEPLOY_KEY is in the ruleset's bypass_actors list.
+          ssh-key: ${{ secrets.MAIN_DEPLOY_KEY }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
