@@ -1,15 +1,14 @@
 name: Test262 Sharded
 
 on:
-  # NOTE: pull_request handled by test262-pr-stub.yml (cheap stub).
-  # This workflow runs only in contexts where the heavy 16-shard test262
-  # actually matters:
-  #   push to main: full baseline run (path-filtered to src/test changes).
-  #   merge_group: full test262 in queue context — the real gate before merge.
-  #   workflow_dispatch: manual reruns / debugging.
-  push:
+  # Serial-queue model: full test262 runs at PR-time AND in merge_group.
+  # The merge queue is set to batch=1 so each PR is validated alone with no
+  # ALLGREEN hiding. Same-name "merge shard reports" check is produced both
+  # at PR HEAD (gates queue entry) and at merge_group ref (gates the merge).
+  # Path filter restricts to src/test/config changes — docs-only PRs skip.
+  pull_request:
     branches: [main]
-    paths:
+    paths: &test262-paths
       - ".github/workflows/test262-sharded.yml"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -27,6 +26,9 @@ on:
       - "tests/test262-runner.ts"
       - "tests/test262-scope-classification.test.ts"
       - "tests/test262-shared.ts"
+  push:
+    branches: [main]
+    paths: *test262-paths
   merge_group:
     branches: [main]
     types: [checks_requested]
@@ -60,21 +62,23 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
+  # pull_request: per-PR group — a new push cancels the older run for that PR.
   # push to main: shared serial queue so rapid main pushes queue rather than
   #   evicting each other — baseline always gets updated.
   # merge_group: per-queue-ref (GitHub serializes the queue itself).
   # workflow_dispatch: unique group so manual runs never collide.
   group: >-
-    ${{ github.event_name == 'push' && 'test262-sharded-main'
+    ${{ github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.event.pull_request.number)
+     || github.event_name == 'push' && 'test262-sharded-main'
      || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
      || format('test262-sharded-dispatch-{0}', github.run_id) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
     name: cheap gate (main-ancestor + lint)
     runs-on: ubuntu-latest
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -106,14 +110,19 @@ jobs:
           if grep -q '"lint"' package.json; then pnpm run lint 2>&1 | tail -50; fi
 
   test262-shard:
-    # Heavy 16-shard test262 fires ONLY in merge_group / push:main / workflow_dispatch.
-    # NOT on pull_request — the merge queue runs the real validation on its
-    # temp merge-with-main branch (merge_group event), so PR-level test262 is
-    # redundant. PR-level CI is just cheap-gate + the merge-report-stub which
-    # produces a green "merge shard reports" check to unblock queue entry.
-    # If test262 fails in merge_group, the queue rejects the merge.
+    # Heavy 16-shard test262 fires on all gate-relevant events:
+    #   pull_request → per-PR validation (serial queue model — each PR is
+    #     validated alone before entering the queue).
+    #   merge_group → final gate before merge (catches main-drift regressions).
+    #   push to main → baseline update.
+    #   workflow_dispatch → manual reruns.
+    # Cheap-gate must pass first (typecheck + lint). If shards fail, the
+    # regression-gate reports per-test transitions; bad PRs bounce back to
+    # their authors with actionable feedback rather than slipping into a
+    # batch.
     if: |
       (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
+      github.event_name == 'pull_request' ||
       github.event_name == 'merge_group' ||
       github.event_name == 'workflow_dispatch'
     needs: [gate]
@@ -204,8 +213,9 @@ jobs:
   merge-report:
     # Aggregate the 16 shard artifacts into a single test262 report and gate
     # on shard results. Produces the "merge shard reports" required check
-    # for merge_group / push / workflow_dispatch contexts. (pull_request gets
-    # its stub from test262-pr-stub.yml.)
+    # for all gate-relevant contexts. Serial-queue model: this is the same
+    # job whether the trigger is pull_request (PR-level validation) or
+    # merge_group (final pre-merge validation).
     if: |
       always() &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]') &&
@@ -290,7 +300,7 @@ jobs:
 
       - name: Fetch fresh baseline from baselines repo
         id: fetch_baseline
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: |
           # Clone the baselines repo to get the current baseline JSONL.
           # This avoids LFS bandwidth on the main repo (all jsonl files are
@@ -323,7 +333,7 @@ jobs:
 
       - name: Check baseline staleness (#1235)
         id: staleness
-        if: github.event_name == 'merge_group' && steps.fetch_baseline.outputs.baseline_ts != '0'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.fetch_baseline.outputs.baseline_ts != '0'
         run: |
           # If the baselines-repo JSONL hasn't been refreshed since several
           # commits landed on main, the regression-gate's wasm_change count
