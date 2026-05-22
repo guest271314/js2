@@ -64,16 +64,20 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
-  # PR branches: per-PR group so a new push cancels the old run for that PR only.
-  # Push to main: shared queue (cancel-in-progress: false) so rapid merges queue
-  #   rather than each evicting the previous — baseline always gets updated.
-  # workflow_dispatch: unique group so manual runs never cancel each other.
+  # All PR runs share a single SERIAL queue. Each run is 16 shards x ~30 min,
+  # so 30+ in parallel would spawn 480+ concurrent jobs and saturate GitHub
+  # Actions capacity for the org. Serial here means one full test262 run at a
+  # time across all PR branches — slower wall-time per PR, but bounded CI burn.
+  # A newer push to the SAME PR cancels its older run via cancel-in-progress.
+  # Push to main: separate shared queue (no cancel) so baseline always updates.
+  # merge_group: per-queue-ref (GitHub serializes these naturally).
+  # workflow_dispatch: unique group so manual runs never collide.
   group: >-
     ${{ github.event_name == 'push' && 'test262-sharded-main'
-     || github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.ref)
+     || github.event_name == 'pull_request' && 'test262-sharded-pr-serial'
      || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
      || format('test262-sharded-dispatch-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   gate:
