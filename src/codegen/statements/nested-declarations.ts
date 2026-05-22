@@ -42,7 +42,6 @@ import {
   registerEmitArgumentsObject,
   registerHoistFunctionDeclarations,
 } from "../shared.js";
-import { emitUndefined } from "../expressions/late-imports.js";
 
 export function compileNestedClassDeclaration(
   ctx: CodegenContext,
@@ -684,55 +683,19 @@ export function compileNestedFunctionDeclaration(
  *
  * If a function fails to compile during hoisting (e.g., uses unsupported features),
  * it is rolled back and will be re-attempted during normal statement compilation.
- *
- * #1518 — Annex B.3.2 sloppy-mode function-in-block hoisting. When the hoist
- * pass recurses into a block (depth > 0) and the function declaration would
- * not produce a syntactic early error (no conflicting let/const/class/param
- * binding at the surrounding function scope, sloppy mode), the function name
- * is ALSO registered as a `var`-style externref local in the surrounding
- * function context (initialized to `undefined`). The dual-write (function
- * value → local) is emitted later, at the FunctionDeclaration's evaluation
- * site, by `compileStatement`. This lets `init = f` read `undefined` BEFORE
- * the block evaluates, lets `f = 123` be writable, and (when the closure can
- * be reified) lets `after = f` capture the function value AFTER the block
- * evaluates. Top-level (depth === 0) function declarations preserve the
- * existing scoping — they are already in the function's lexical scope, not
- * Annex B candidates.
  */
 export function hoistFunctionDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmts: ts.NodeArray<ts.Statement> | ts.Statement[],
-  depth: number = 0,
 ): void {
   for (const stmt of stmts) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
-      const funcName = stmt.name.text;
-      // #1518: skip-Annex-B detection. We detect conflicts BEFORE deciding
-      // whether to hoist to funcMap so that a `for (let f; ;) { if (true)
-      // function f() {} ... }` does not produce a top-level callable `f` —
-      // which would make `typeof f` mis-report `"function"`. Conflicts at the
-      // surrounding function scope (let/const/class/param/arguments with the
-      // same name) disqualify the declaration from Annex B and (in sloppy
-      // mode) also from being a top-level function — its scope is the block.
-      const isAnnexBCandidate = depth > 0;
-      const isStrict = isAnnexBCandidate && isStrictModeContext(stmt);
-      const hasConflict = isAnnexBCandidate && hasAnnexBConflict(fctx, ctx, funcName, stmt);
-
-      if (isAnnexBCandidate && !isStrict && hasConflict) {
-        // #1518: per Annex B.3.2 step "If replacing the FunctionDeclaration F
-        // with a VariableStatement that has F as a BindingIdentifier would
-        // produce any Early Errors for func ... then" — when the Annex B var
-        // hoisting is disallowed, the function decl reverts to pure
-        // block-scope lexical semantics. We do NOT register it in funcMap
-        // here; the block scope's own compileStatement(FunctionDeclaration)
-        // path is responsible for any block-local binding. This keeps
-        // `typeof f === "undefined"` outside the block matching spec.
-        // (The skip-tests assert exactly this.)
-      } else if (!ctx.funcMap.has(funcName)) {
+      if (!ctx.funcMap.has(stmt.name.text)) {
         // Save state so we can roll back if compilation fails
         const errorsBefore = ctx.errors.length;
         const funcsBefore = ctx.mod.functions.length;
+        const funcName = stmt.name.text;
 
         compileNestedFunctionDeclaration(ctx, fctx, stmt);
 
@@ -746,302 +709,65 @@ export function hoistFunctionDeclarations(
           // Track failed hoist so compileStatement doesn't re-attempt
           if (!ctx.hoistFailedFuncs) ctx.hoistFailedFuncs = new Set();
           ctx.hoistFailedFuncs.add(funcName);
-        } else if (isAnnexBCandidate && !isStrict) {
-          // #1518: allocate `var`-style externref local at surrounding scope.
-          // IMPORTANT: this runs AFTER compileNestedFunctionDeclaration so the
-          // lifted function's capture analysis doesn't mis-classify the
-          // outer `f` slot we're about to allocate as a capture (it would
-          // see it in `fctx.localMap` and try to thread it as a leading
-          // param). The outer slot only exists for outer reads/writes; the
-          // lifted body uses its own self-reference path via funcMap.
-          ensureAnnexBVarBinding(ctx, fctx, funcName);
         }
-      } else if (isAnnexBCandidate && !isStrict) {
-        // Function already registered in funcMap (e.g. duplicate decl across
-        // branches). Still record the Annex B var binding so the dual-write
-        // happens at this declaration's evaluation site too.
-        ensureAnnexBVarBinding(ctx, fctx, funcName);
       }
     }
     // Recurse into block-like structures to find nested function declarations.
     // In JS, function declarations are hoisted to the enclosing function scope,
     // even when inside if-branches, try/catch blocks, etc.
-    const childDepth = depth + 1;
     if (ts.isIfStatement(stmt)) {
       if (ts.isBlock(stmt.thenStatement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.thenStatement.statements, childDepth);
-      } else if (ts.isFunctionDeclaration(stmt.thenStatement)) {
-        // Bare `if (cond) function f() {}` — the function decl is the
-        // immediate statement, treat it as inside an implicit block.
-        hoistFunctionDeclarations(ctx, fctx, [stmt.thenStatement], childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.thenStatement.statements);
       }
       if (stmt.elseStatement) {
         if (ts.isBlock(stmt.elseStatement)) {
-          hoistFunctionDeclarations(ctx, fctx, stmt.elseStatement.statements, childDepth);
+          hoistFunctionDeclarations(ctx, fctx, stmt.elseStatement.statements);
         } else if (ts.isIfStatement(stmt.elseStatement)) {
-          hoistFunctionDeclarations(ctx, fctx, [stmt.elseStatement], depth);
-        } else if (ts.isFunctionDeclaration(stmt.elseStatement)) {
-          hoistFunctionDeclarations(ctx, fctx, [stmt.elseStatement], childDepth);
+          hoistFunctionDeclarations(ctx, fctx, [stmt.elseStatement]);
         }
       }
     }
     if (ts.isTryStatement(stmt)) {
-      hoistFunctionDeclarations(ctx, fctx, stmt.tryBlock.statements, childDepth);
+      hoistFunctionDeclarations(ctx, fctx, stmt.tryBlock.statements);
       if (stmt.catchClause) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.catchClause.block.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.catchClause.block.statements);
       }
       if (stmt.finallyBlock) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.finallyBlock.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.finallyBlock.statements);
       }
     }
     if (ts.isBlock(stmt)) {
-      hoistFunctionDeclarations(ctx, fctx, stmt.statements, childDepth);
+      hoistFunctionDeclarations(ctx, fctx, stmt.statements);
     }
     // Recurse into loop bodies — function declarations inside loops are hoisted
     // to the enclosing function scope in JS semantics.
     if (ts.isForStatement(stmt) || ts.isWhileStatement(stmt) || ts.isDoStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
       } else {
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], childDepth);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
       }
     }
     if (ts.isForInStatement(stmt) || ts.isForOfStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
       } else {
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], childDepth);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
       }
     }
     if (ts.isSwitchStatement(stmt)) {
       for (const clause of stmt.caseBlock.clauses) {
-        hoistFunctionDeclarations(ctx, fctx, clause.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, clause.statements);
       }
     }
     if (ts.isLabeledStatement(stmt)) {
       if (ts.isBlock(stmt.statement)) {
-        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements, childDepth);
+        hoistFunctionDeclarations(ctx, fctx, stmt.statement.statements);
       } else {
-        // Labeled function declaration (`label: function f() {}`) keeps depth
-        // — a label by itself does not introduce a nested block scope.
-        hoistFunctionDeclarations(ctx, fctx, [stmt.statement], depth);
+        hoistFunctionDeclarations(ctx, fctx, [stmt.statement]);
       }
     }
   }
-}
-
-/**
- * #1518: detect strict-mode context at a function-declaration node.
- *
- * A function declaration is strict if any of:
- *   - The source file starts with a `"use strict"` directive prologue.
- *   - An enclosing function/method body starts with `"use strict"`.
- *   - It is inside a class declaration / class expression (class bodies are
- *     always strict per §10.2.1.2).
- *
- * Modules are NOT implicitly strict in our compiler — test262 sloppy-mode
- * tests carry `flags: [noStrict]` and may be wrapped in synthetic `export {}`
- * by ts-api without a strict directive. Mirroring `compiler/validation.ts`
- * isStrictMode (which is the canonical strict-mode classifier).
- */
-function isStrictModeContext(node: ts.Node): boolean {
-  let current: ts.Node | undefined = node;
-  while (current) {
-    if (ts.isSourceFile(current)) {
-      for (const stmt of current.statements) {
-        if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) {
-          if (stmt.expression.text === "use strict") return true;
-        } else {
-          break;
-        }
-      }
-      return false;
-    }
-    if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
-      return true;
-    }
-    if (
-      ts.isFunctionDeclaration(current) ||
-      ts.isFunctionExpression(current) ||
-      ts.isArrowFunction(current) ||
-      ts.isMethodDeclaration(current) ||
-      ts.isConstructorDeclaration(current) ||
-      ts.isGetAccessorDeclaration(current) ||
-      ts.isSetAccessorDeclaration(current)
-    ) {
-      const body = (current as ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration)
-        .body;
-      if (body && ts.isBlock(body)) {
-        for (const stmt of body.statements) {
-          if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) {
-            if (stmt.expression.text === "use strict") return true;
-          } else {
-            break;
-          }
-        }
-      }
-    }
-    current = current.parent;
-  }
-  return false;
-}
-
-/**
- * #1518: detect a binding conflict that disqualifies Annex B var hoisting.
- *
- * Per Annex B.3.2: the var binding is created only when "replacing the
- * FunctionDeclaration F with a VariableStatement that has F as a
- * BindingIdentifier would not produce any Early Errors". Practical conflict
- * checks:
- *   1. The surrounding function's PARAMETERS include `name` (var of same
- *      name as a param is legal, but for safety in our implementation we
- *      skip — the param already holds the binding and a redundant var is a
- *      no-op).
- *   2. The function body contains a top-level `let`/`const`/`class`
- *      declaration of `name`. A top-level lex binding shadows the would-be
- *      var binding and produces an early error.
- *   3. The conflicting binding could also live in any enclosing for-loop or
- *      block at the SAME scope chain between the declaration and the
- *      function body. We conservatively walk up looking for any enclosing
- *      `for ( let|const f ...)` whose body contains our decl — that
- *      shadows the var binding (covered by the `func-skip-early-err-for*`
- *      tests).
- *
- * Returns true when Annex B should be skipped.
- */
-function hasAnnexBConflict(
-  fctx: FunctionContext,
-  ctx: CodegenContext,
-  name: string,
-  decl: ts.FunctionDeclaration,
-): boolean {
-  // 1. surrounding function param? (also check `arguments` shadow.)
-  if (name === "arguments") return true;
-  for (const p of fctx.params) {
-    if (p.name === name) return true;
-  }
-  // 2. top-level let/const/class in the enclosing function body.
-  const surroundingFn = findSurroundingFunctionLike(decl);
-  if (surroundingFn) {
-    const body =
-      "body" in surroundingFn && surroundingFn.body && ts.isBlock(surroundingFn.body) ? surroundingFn.body : undefined;
-    if (body) {
-      for (const stmt of body.statements) {
-        if (ts.isVariableStatement(stmt)) {
-          const kind = stmt.declarationList.flags;
-          // ts.NodeFlags.Let === 1, ts.NodeFlags.Const === 2.
-          if (kind & (ts.NodeFlags.Let | ts.NodeFlags.Const)) {
-            for (const d of stmt.declarationList.declarations) {
-              if (bindingPatternContains(d.name, name)) return true;
-            }
-          }
-        }
-        if (ts.isClassDeclaration(stmt) && stmt.name && stmt.name.text === name) return true;
-      }
-    }
-  } else {
-    // Module / global script — check module-level moduleGlobals as a proxy
-    // for top-level `let`/`const`/`class`. The compiler hoists these into
-    // moduleGlobals before per-function compilation begins, so a hit here
-    // means a top-level lex binding.
-    if (ctx.moduleGlobals.has(name) && ctx.tdzGlobals.has(name)) return true;
-  }
-  // 3. enclosing for-loop with `let`/`const` BindingIdentifier of `name`.
-  let cur: ts.Node | undefined = decl.parent;
-  while (cur && cur !== surroundingFn) {
-    if (ts.isForStatement(cur) && cur.initializer && ts.isVariableDeclarationList(cur.initializer)) {
-      const kind = cur.initializer.flags;
-      if (kind & (ts.NodeFlags.Let | ts.NodeFlags.Const)) {
-        for (const d of cur.initializer.declarations) {
-          if (bindingPatternContains(d.name, name)) return true;
-        }
-      }
-    }
-    if ((ts.isForInStatement(cur) || ts.isForOfStatement(cur)) && ts.isVariableDeclarationList(cur.initializer)) {
-      const kind = cur.initializer.flags;
-      if (kind & (ts.NodeFlags.Let | ts.NodeFlags.Const)) {
-        for (const d of cur.initializer.declarations) {
-          if (bindingPatternContains(d.name, name)) return true;
-        }
-      }
-    }
-    // Catch parameter — `try { ... } catch (f) { function f() {} }` is a
-    // documented Annex-B early-error case.
-    if (ts.isCatchClause(cur) && cur.variableDeclaration && bindingPatternContains(cur.variableDeclaration.name, name))
-      return true;
-    cur = cur.parent;
-  }
-  return false;
-}
-
-function findSurroundingFunctionLike(node: ts.Node): ts.SignatureDeclaration | undefined {
-  let cur: ts.Node | undefined = node.parent;
-  while (cur) {
-    if (
-      ts.isFunctionDeclaration(cur) ||
-      ts.isFunctionExpression(cur) ||
-      ts.isArrowFunction(cur) ||
-      ts.isMethodDeclaration(cur) ||
-      ts.isConstructorDeclaration(cur) ||
-      ts.isGetAccessorDeclaration(cur) ||
-      ts.isSetAccessorDeclaration(cur)
-    ) {
-      return cur as ts.SignatureDeclaration;
-    }
-    if (ts.isSourceFile(cur)) return undefined;
-    cur = cur.parent;
-  }
-  return undefined;
-}
-
-function bindingPatternContains(name: ts.BindingName, target: string): boolean {
-  if (ts.isIdentifier(name)) return name.text === target;
-  if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
-    for (const e of name.elements) {
-      if (ts.isOmittedExpression(e)) continue;
-      if (bindingPatternContains(e.name, target)) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * #1518: allocate the Annex B `var`-style externref binding in the
- * surrounding function context and emit the `local.set $idx, __get_undefined()`
- * prelude write. Records the name in `fctx.annexBHoistedVars` so
- * `compileStatement(FunctionDeclaration)` knows to emit the dual-write
- * (closure → local.set) at the declaration's evaluation site.
- *
- * Behaviour when the slot is already in `localMap`:
- *   - From a prior Annex B candidate at a sibling branch of the same name:
- *     reuse; do not re-emit the init prelude (already issued).
- *   - From `hoistVarDeclarations` (the user wrote `var f`): reuse the
- *     existing slot. Note the slot's type may have been resolved by the TS
- *     checker to the function's call signature rather than externref; in
- *     that case we still record the var name in `annexBHoistedVars` but
- *     skip the dual-write later because the typed slot can't accept the
- *     extern.convert_any coercion safely (#962-style trap risk).
- */
-function ensureAnnexBVarBinding(ctx: CodegenContext, fctx: FunctionContext, name: string): void {
-  if (!fctx.annexBHoistedVars) fctx.annexBHoistedVars = new Set();
-  // Idempotent: a name registered twice (e.g. if/else both declare f) only
-  // gets one slot + one init.
-  if (fctx.annexBHoistedVars.has(name)) return;
-  fctx.annexBHoistedVars.add(name);
-  const existingIdx = fctx.localMap.get(name);
-  if (existingIdx !== undefined) {
-    // Slot already exists (parameter or prior var hoist). Skip allocation +
-    // init. The dual-write at the evaluation site still fires, but only when
-    // the slot is externref (assignment.ts coerces ref → externref via
-    // extern.convert_any; for non-externref slots the coercion is unsafe).
-    return;
-  }
-  const localIdx = allocLocal(fctx, name, { kind: "externref" });
-  // Initialise to JS `undefined` (not externref-null) so that `init = f`
-  // before the block satisfies `assert.sameValue(init, undefined)`. Using
-  // `ref.null.extern` would fail because `null !== undefined` in JS.
-  emitUndefined(ctx, fctx);
-  fctx.body.push({ op: "local.set", index: localIdx });
 }
 
 /**

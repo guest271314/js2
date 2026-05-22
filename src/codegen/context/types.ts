@@ -252,26 +252,6 @@ export interface FunctionContext {
    */
   pendingStringBuilders?: Set<ts.VariableDeclaration>;
   /**
-   * #1518: Annex B.3.2 sloppy-mode function-in-block hoisting.
-   *
-   * Set of function names hoisted from inside a Block/If/Switch/Try statement
-   * (sloppy mode) that, per Annex B.3.2, must ALSO appear as a `var`-style
-   * binding in this surrounding function scope. The var slot is allocated as
-   * an externref local in `fctx.locals` and registered in `fctx.localMap` so
-   * identifier reads route through the local (initialized to `undefined`
-   * before the block evaluates). When the block evaluates the function
-   * declaration, codegen emits `local.set` of the wrapped closure so that
-   * `typeof f` becomes `'function'` and `after = f` captures the function
-   * reference.
-   *
-   * Membership in this set drives two behaviours:
-   *   1. `compileStatement(FunctionDeclaration)` no longer silently skips
-   *      already-hoisted entries — it emits the dual-write to the var local.
-   *   2. `compileTypeofExpression` bypasses the static-fast-path so the
-   *      runtime `__typeof` handles the dynamic undefined → function flip.
-   */
-  annexBHoistedVars?: Set<string>;
-  /**
    * #1210: live string-builder bindings keyed by binding name. While
    * present, `s += <expr>` routes to `compileStringBuilderAppend`
    * (in-place buffer write), and identifier reads materialize a fresh
