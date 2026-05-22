@@ -803,20 +803,42 @@ export function ensureSymbolCounter(ctx: CodegenContext): number {
  * The description argument (if any) is evaluated for side effects but discarded.
  */
 export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, args: readonly ts.Expression[]): ValType {
-  // Evaluate description arg for side effects, then drop it
-  if (args.length > 0) {
+  const counterIdx = ensureSymbolCounter(ctx);
+  // Increment counter first so the new id is reserved before we register a
+  // description for it: `++counter; register_desc(counter, desc); return counter`.
+  fctx.body.push({ op: "global.get", index: counterIdx });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "global.set", index: counterIdx });
+  // (#1467) Pre-register the description so `__box_symbol(id)` later returns
+  // `Symbol(desc)` instead of `Symbol("wasm_<id>")`. This preserves
+  // `Symbol(s).description === s` and `Symbol().description === undefined`.
+  // Standalone-mode fallback: if the host import isn't available, the symbol
+  // is still constructed (with the legacy `wasm_<id>` description); only the
+  // `.description` accessor in JS-host mode benefits.
+  const regIdx = ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
+  if (regIdx !== undefined) {
+    fctx.body.push({ op: "global.get", index: counterIdx });
+    if (args.length > 0) {
+      const argType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+      if (argType && argType.kind !== "externref") {
+        coerceType(ctx, fctx, argType, { kind: "externref" });
+      }
+    } else {
+      // `Symbol()` with no arg → register `null` so the host knows to construct
+      // a Symbol with no description (so `.description === undefined`).
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    flushLateImportShifts(ctx, fctx);
+    fctx.body.push({ op: "call", funcIdx: regIdx });
+  } else if (args.length > 0) {
+    // Standalone-mode: still evaluate the description for side effects.
     const argType = compileExpression(ctx, fctx, args[0]!);
     if (argType !== null) {
       fctx.body.push({ op: "drop" });
     }
   }
-
-  const counterIdx = ensureSymbolCounter(ctx);
-  // ++counter; return counter
-  fctx.body.push({ op: "global.get", index: counterIdx });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "global.set", index: counterIdx });
+  // Push the symbol id (the counter) as the result.
   fctx.body.push({ op: "global.get", index: counterIdx });
   return { kind: "i32" };
 }

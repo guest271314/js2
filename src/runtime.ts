@@ -1004,6 +1004,15 @@ function _wasmToPlain(val: any, exports: Record<string, Function> | undefined): 
 
 /** Symbol.dispose / Symbol.asyncDispose may not exist in older runtimes (ES2026). */
 const _disposeSym: symbol = (Symbol as any).dispose ?? Symbol.for("Symbol.dispose");
+
+// (#1467) Per-module symbol-id → description map. Populated by the codegen
+// pre-call to `__symbol_register_desc(id, desc)` immediately before
+// `__box_symbol(id)` returns a JS Symbol for that id. The cache is keyed by
+// id (i32) so that boxing the same id twice returns the same identity-stable
+// JS Symbol — preserving the same identity rule as the legacy single-arg
+// `__box_symbol(id)` host.
+let _symbolCache: Map<number, symbol> | undefined;
+const _symbolDescRegistry: Map<number, string | null> = new Map();
 const _asyncDisposeSym: symbol = (Symbol as any).asyncDispose ?? Symbol.for("Symbol.asyncDispose");
 
 /** Map from JS well-known Symbols to Wasm "@@name" keys (and vice-versa). */
@@ -2729,30 +2738,56 @@ assert._isSameValue = isSameValue;
         };
       // __box_symbol: convert i32 symbol ID → real JS Symbol (cached by ID)
       // so symbols preserve identity when crossing the Wasm/JS boundary (#864)
+      //
+      // (#1467) Per-id description map: `__symbol_register_desc(id, desc)`
+      // registers a user-supplied description for the next `__box_symbol(id)`
+      // so `Symbol(s).description === s` round-trips correctly even though the
+      // compiler represents symbols as i32 IDs internally. Special sentinel
+      // `''` (empty string) marks "Symbol() called with no arg" so
+      // `.description === undefined` works distinctly from "uninitialized".
       if (name === "__box_symbol") {
-        const symbolCache = new Map<number, symbol>([
-          [1, Symbol.iterator],
-          [2, Symbol.hasInstance],
-          [3, Symbol.toPrimitive],
-          [4, Symbol.toStringTag],
-          [5, Symbol.species],
-          [6, Symbol.isConcatSpreadable],
-          [7, Symbol.match],
-          [8, Symbol.replace],
-          [9, Symbol.search],
-          [10, Symbol.split],
-          [11, Symbol.unscopables],
-          [12, Symbol.asyncIterator],
-          [13, _disposeSym],
-          [14, _asyncDisposeSym],
-        ]);
+        if (!_symbolCache) {
+          _symbolCache = new Map<number, symbol>([
+            [1, Symbol.iterator],
+            [2, Symbol.hasInstance],
+            [3, Symbol.toPrimitive],
+            [4, Symbol.toStringTag],
+            [5, Symbol.species],
+            [6, Symbol.isConcatSpreadable],
+            [7, Symbol.match],
+            [8, Symbol.replace],
+            [9, Symbol.search],
+            [10, Symbol.split],
+            [11, Symbol.unscopables],
+            [12, Symbol.asyncIterator],
+            [13, _disposeSym],
+            [14, _asyncDisposeSym],
+          ]);
+        }
         return (id: number) => {
-          let sym = symbolCache.get(id);
+          let sym = _symbolCache!.get(id);
           if (sym === undefined) {
-            sym = Symbol(`wasm_${id}`);
-            symbolCache.set(id, sym);
+            const reg = _symbolDescRegistry.get(id);
+            // reg === undefined → caller never registered (use legacy wasm_<id>)
+            // reg === null     → Symbol() with no description → undefined
+            // reg is a string  → user-supplied description
+            sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
+            _symbolCache!.set(id, sym);
           }
           return sym;
+        };
+      }
+      // (#1467) Register a description for the symbol at `id` so subsequent
+      // `__box_symbol(id)` calls produce Symbol(desc) preserving Description.
+      // Pass `null` (ref.null extern) to mark "Symbol() with no description".
+      if (name === "__symbol_register_desc") {
+        return (id: number, desc: any): void => {
+          if (id <= 14) return; // never override well-known symbols
+          if (desc == null) {
+            _symbolDescRegistry.set(id, null);
+          } else {
+            _symbolDescRegistry.set(id, String(desc));
+          }
         };
       }
       if (name === "__object_create") return (proto: any) => Object.create(proto);
@@ -3842,6 +3877,111 @@ assert._isSameValue = isSameValue;
       // behaviour) breaks `Symbol.keyFor(s) === undefined` checks in
       // test262 conformance tests.
       if (name === "__symbol_keyFor") return (sym: any): any => Symbol.keyFor(sym);
+      // Symbol.prototype.description (#1467) — accessor on Symbol prototype.
+      // Spec §20.4.3.2: get description on a Symbol-wrapper object via
+      // ToObject + [[SymbolData]] read. The host accessor handles both raw
+      // symbol primitives and Symbol-wrapper objects transparently.
+      if (name === "__symbol_description")
+        return (sym: any): any => {
+          if (sym == null) {
+            throw new TypeError("Cannot read property 'description' of " + String(sym));
+          }
+          // Spec: Symbol.prototype.description.call(symObj) unwraps Symbol-wrapper
+          // objects (ToObject on receiver). The host accessor already implements
+          // this, so we just call it through.
+          return Object.getOwnPropertyDescriptor(Symbol.prototype, "description")!.get!.call(sym);
+        };
+      // Error.isError(value) — ES2025 static method (#1467).
+      // Spec §20.5.2.1: returns true for any value with an [[ErrorData]]
+      // internal slot. Cross-realm safe because it checks the slot, not
+      // `instanceof Error`. We approximate via Object.prototype.toString
+      // tag plus host `instanceof Error` for direct instances.
+      if (name === "__error_isError")
+        return (v: any): number => {
+          if (v == null || typeof v !== "object") return 0;
+          // Prefer ES2025 native if available (cross-realm safe).
+          if (typeof (Error as any).isError === "function") {
+            return (Error as any).isError(v) ? 1 : 0;
+          }
+          // Fallback: check Symbol.toStringTag chain for "Error" or instance.
+          try {
+            if (v instanceof Error) return 1;
+          } catch {
+            /* fall through */
+          }
+          try {
+            const tag = Object.prototype.toString.call(v);
+            if (tag === "[object Error]") return 1;
+          } catch {
+            /* fall through */
+          }
+          return 0;
+        };
+      // new AggregateError(errors, message, options?) — spec §20.5.7.1 (#1467).
+      // Implements the spec construction sequence so that:
+      //   • called without `new` constructs normally (caller dispatches both),
+      //   • undefined errors → TypeError (per IterableToList of undefined),
+      //   • message coerced via ToString (CreateMethodProperty, non-enumerable),
+      //   • errors stored as a non-enumerable own data property (CreateMethodProperty),
+      //   • Object.getPrototypeOf(result) === AggregateError.prototype.
+      if (name === "__new_AggregateError")
+        return (errors: any, message: any, options: any): any => {
+          // Spec step 4: IterableToList(errors). `undefined`/`null` are NOT
+          // iterable and must throw TypeError. This matches Node's native
+          // AggregateError behaviour (`new AggregateError(undefined)` throws).
+          if (errors === null || errors === undefined) {
+            throw new TypeError("Cannot convert undefined or null to object");
+          }
+          // (#1467) The compiler wraps Wasm vec arguments via `__make_iterable`
+          // before they reach this import, so `errors` is already a plain JS
+          // array when called from compiled code. We DELIBERATELY do NOT call
+          // `__make_iterable` recursively on each element — its vec-shape
+          // detection misfires on host Error instances and converts them into
+          // empty arrays. For values that arrive from user JS (rare in
+          // compiled code, but possible via interop) `Array.isArray` is false
+          // and we walk the iterator protocol directly.
+          let errorsList: any[];
+          if (Array.isArray(errors)) {
+            errorsList = errors.slice();
+          } else {
+            const iter = (errors as any)[Symbol.iterator];
+            if (typeof iter !== "function") {
+              throw new TypeError(String(errors) + " is not iterable");
+            }
+            errorsList = [];
+            const it = iter.call(errors);
+            while (true) {
+              const r = it.next();
+              if (r == null || r.done) break;
+              errorsList.push(r.value);
+            }
+          }
+          // Spec step 3: if message !== undefined, ToString(message); then
+          // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
+          // Construct without message first to leave the slot empty (per spec
+          // when message is undefined, no own message property is set).
+          const inst = options === undefined ? new AggregateError([]) : new AggregateError([], undefined, options);
+          if (message !== undefined) {
+            const msgStr = typeof message === "string" ? message : String(message);
+            Object.defineProperty(inst, "message", {
+              value: msgStr,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+          // Spec step 6: CreateNonEnumerableDataPropertyOrThrow(O, "errors",
+          // CreateArrayFromList(errorsList)). The Node native constructor
+          // already sets `errors`, but with different attributes across
+          // engines — overwrite to guarantee the spec descriptor.
+          Object.defineProperty(inst, "errors", {
+            value: errorsList,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          return inst;
+        };
       // ArrayBuffer.isView(arg) — checks if arg is a TypedArray or DataView (#965)
       if (name === "__arraybuffer_isView") return (arg: any): number => (ArrayBuffer.isView(arg) ? 1 : 0);
       // Array.from(iterable, mapFn?) — creates array from iterable (#965).
@@ -5466,6 +5606,12 @@ export function buildImports(
   const callbackState = { getExports: () => wasmExports };
   let hasCallbacks = false;
   let lastCaughtException: any = undefined;
+
+  // (#1467) Each instantiated module gets its own symbol id space (counter
+  // resets to 14 per module). Reset the shared registry + cache so symbol
+  // ids from a prior module don't leak descriptions into this one.
+  _symbolCache = undefined;
+  _symbolDescRegistry.clear();
 
   // Recursion depth guard: host imports can call back into Wasm exports
   // (e.g. callback_maker, valueOf/toString coercion, iterator protocol),
