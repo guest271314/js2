@@ -40,6 +40,9 @@ import {
 } from "./statements/loops.js";
 import { compileNestedClassDeclaration, compileNestedFunctionDeclaration } from "./statements/nested-declarations.js";
 import { compileVariableStatement } from "./statements/variables.js";
+import { emitFuncRefAsClosure } from "./closures.js";
+import type { Instr, ValType } from "../ir/types.js";
+import { getLocalType } from "./context/locals.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports — preserve the existing public API surface
@@ -211,7 +214,29 @@ function compileStatementInner(ctx: CodegenContext, fctx: FunctionContext, stmt:
 
   if (ts.isFunctionDeclaration(stmt)) {
     // Skip if already hoisted (pre-compiled in function hoisting pass)
-    if (stmt.name && ctx.funcMap.has(stmt.name.text)) return;
+    if (stmt.name && ctx.funcMap.has(stmt.name.text)) {
+      // #1518: Annex B.3.2 — when the same function name was hoisted both to
+      // funcMap AND as a `var`-style outer local (registered in
+      // `fctx.annexBHoistedVars` by the nested-function-decl hoist pass),
+      // emit the dual-write at the declaration's evaluation site so that
+      // reads of `f` AFTER the block see the function reference. Before the
+      // block evaluates, the outer local still holds `undefined` (its init
+      // value), matching the Annex B "create var binding initialised to
+      // undefined" semantics.
+      //
+      // The write coerces the closure ref to externref via
+      // `extern.convert_any` (the same coercion that the assignment path
+      // emits via `coerceType` ref → externref). When the lifted function
+      // has captures, `emitFuncRefAsClosure` materialises a closure struct
+      // with the CURRENT outer-scope values — re-executing the block
+      // produces a fresh closure with up-to-date captures, matching
+      // step 3.e/f of Annex B.3.3.1 ("Let fobj be ! benvRec.GetBindingValue(F,
+      // false); Perform ! fenvRec.SetMutableBinding(F, fobj, false)").
+      if (stmt.name && fctx.annexBHoistedVars?.has(stmt.name.text)) {
+        emitAnnexBVarWrite(ctx, fctx, stmt.name.text);
+      }
+      return;
+    }
     // Re-attempt compilation even if hoisting failed — the failure may have been
     // due to const/let captures not yet in scope during the hoisting pre-pass.
     // Now that we're in statement order, those locals should be available.
@@ -260,3 +285,36 @@ function compileStatementInner(ctx: CodegenContext, fctx: FunctionContext, stmt:
 // Register compileStatement delegate in shared.ts so index.ts (and any other
 // module) can call compileStatement without importing statements.ts directly.
 registerCompileStatement(compileStatement);
+
+/**
+ * #1518 — emit the Annex B.3.2 dual-write: wrap the lifted function in a
+ * closure struct, coerce to externref, and `local.set` to the surrounding
+ * function-scope var binding. This runs each time the block-statement
+ * containing the FunctionDeclaration is evaluated, mirroring step 3 of
+ * §B.3.3.1 (NOT step 1, which is the lexical block-env initialization
+ * already covered by the funcMap registration).
+ *
+ * Conservative skips:
+ *   - Slot type isn't externref → coercion path is risky (#962); skip the
+ *     dual-write rather than emit a potentially trapping cast. Callers that
+ *     wrote `var f` AND `if (cond) function f(){}` get the pre-existing
+ *     typed slot's behavior.
+ *   - emitFuncRefAsClosure returns null (signature lookup failed) → skip.
+ */
+function emitAnnexBVarWrite(ctx: CodegenContext, fctx: FunctionContext, name: string): void {
+  const localIdx = fctx.localMap.get(name);
+  if (localIdx === undefined) return;
+  const slotType: ValType | undefined = getLocalType(fctx, localIdx);
+  if (!slotType || slotType.kind !== "externref") return;
+  const funcIdx = ctx.funcMap.get(name);
+  if (funcIdx === undefined) return;
+  const refType = emitFuncRefAsClosure(ctx, fctx, name, funcIdx);
+  if (!refType) return;
+  // Coerce closure ref → externref. We accept any ref kind from
+  // emitFuncRefAsClosure — both ref and ref_null can be widened via
+  // extern.convert_any (the Wasm op accepts anyref operands).
+  if (refType.kind === "ref" || refType.kind === "ref_null") {
+    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: localIdx });
+}
