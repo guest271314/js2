@@ -2702,26 +2702,29 @@ assert._isSameValue = isSameValue;
       // identifiers (Object, this, etc.) compile to null in our Wasm.
       if (name === "__object_isFrozen")
         return (obj: any) => {
-          if (obj == null) return 0; // unresolvable identifier → assume not frozen
-          // Boxed primitives (numbers/strings from __box_number) are not real objects.
-          // Return 0 to match old compile-time behavior (tracking-based, not intrinsic).
-          if (typeof obj !== "object" && typeof obj !== "function") return 0;
+          // (#1462) ES2015+ §19.1.2.13: if Type(O) is not Object, return true.
+          // Primitives (numbers, strings, booleans, symbols, bigints) and
+          // null/undefined are conceptually immutable — `isFrozen` returns
+          // true for them. Test262 covers this under `Object/isFrozen/`.
+          if (obj == null) return 1;
+          if (typeof obj !== "object" && typeof obj !== "function") return 1;
           if (_isWasmStruct(obj)) return _wasmFrozenObjs.has(obj) ? 1 : 0;
           return Object.isFrozen(obj) ? 1 : 0;
         };
       if (name === "__object_isSealed")
         return (obj: any) => {
-          if (obj == null) return 0; // unresolvable identifier → assume not sealed
-          if (typeof obj !== "object" && typeof obj !== "function") return 0;
+          // (#1462) ES2015+ §19.1.2.14: if Type(O) is not Object, return true.
+          if (obj == null) return 1;
+          if (typeof obj !== "object" && typeof obj !== "function") return 1;
           if (_isWasmStruct(obj)) return _wasmSealedObjs.has(obj) || _wasmFrozenObjs.has(obj) ? 1 : 0;
           return Object.isSealed(obj) ? 1 : 0;
         };
       if (name === "__object_isExtensible")
         return (obj: any) => {
-          if (obj == null) return 1; // unresolvable identifier → assume extensible
-          // Boxed primitives (numbers/strings from __box_number) represent wrapper objects.
-          // Return 1 (extensible) to match old compile-time behavior.
-          if (typeof obj !== "object" && typeof obj !== "function") return 1;
+          // (#1462) ES2015+ §19.1.2.12: if Type(O) is not Object, return false.
+          // Primitives have no extensible state to add properties to.
+          if (obj == null) return 0;
+          if (typeof obj !== "object" && typeof obj !== "function") return 0;
           if (_isWasmStruct(obj)) return _wasmNonExtensibleObjs.has(obj) ? 0 : 1;
           return Object.isExtensible(obj) ? 1 : 0;
         };
@@ -3358,7 +3361,12 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__getPrototypeOf")
         return (obj: any) => {
-          if (obj == null) return null;
+          // (#1462) ES2015+ §19.1.2.9: Object.getPrototypeOf(O) performs
+          // ToObject(O) first, which throws TypeError on null/undefined.
+          // Primitives box to wrapper objects whose prototype is the
+          // matching built-in (Number.prototype, String.prototype, …).
+          if (obj === null) throw new TypeError("Cannot convert null to object");
+          if (obj === undefined) throw new TypeError("Cannot convert undefined to object");
           try {
             return Object.getPrototypeOf(obj);
           } catch {

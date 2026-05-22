@@ -2259,8 +2259,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "drop" });
       } else if (argType) {
         fctx.body.push({ op: "drop" });
+        // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.13/14;
+        // isFrozen/isSealed on a primitive returns TRUE.
+        fctx.body.push({ op: "i32.const", value: 1 });
+        return { kind: "i32" };
       }
-      // Fallback: not frozen/sealed (conservative)
+      // Fallback (no argType): treat as not frozen/sealed
       fctx.body.push({ op: "i32.const", value: 0 });
       return { kind: "i32" };
     }
@@ -2294,8 +2298,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "drop" });
       } else if (argType) {
         fctx.body.push({ op: "drop" });
+        // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.12;
+        // isExtensible on a primitive returns FALSE.
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
       }
-      // Fallback: extensible (conservative)
+      // Fallback (no argType): extensible (conservative)
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
@@ -2423,8 +2431,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             // Expression produced no value — push null as fallback
             fctx.body.push({ op: "ref.null.extern" });
           } else if (argType.kind !== "externref") {
-            // Coerce to externref for the host import
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            // (#1462) Use coerceType — handles f64 → __box_number, i32 → boxed,
+            // ref/ref_null → extern.convert_any. Bare extern.convert_any here would
+            // emit an illegal cast on primitive types (e.g. `Object.create(5)`).
+            coerceType(ctx, fctx, argType, { kind: "externref" });
           }
         }
         fctx.body.push({ op: "call", funcIdx: hostIdx });
