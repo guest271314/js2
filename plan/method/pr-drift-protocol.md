@@ -102,6 +102,32 @@ Trade-off for serial-queue + per-PR validation correctness.
 - `INTERVAL_SECS` in the polling script: how often to check. 60s is fine
   for human-driven dispatch; lower to 15s if you want faster reaction.
 
+## Lifecycle — keeping the watcher alive
+
+The polling script runs as a session-scoped Monitor (started by the tech
+lead at session boot, see `session-start-checklist.md`). When the session
+ends or crashes, the Monitor dies and the poller stops. Events posted to
+GitHub during the gap are *not lost* — the state file
+(`/tmp/poll-pr-mentions-state`) records the last-seen timestamp and the
+next start replays everything since.
+
+**Tech lead responsibility per session:**
+
+1. **At session start** — start the Monitor (item 14 in
+   `session-start-checklist.md`). The state file ensures gap recovery.
+2. **Mid-session** — if you notice the Monitor is gone from `TaskList`
+   (crash, accidental TaskStop), restart it immediately with the same
+   command. The state file will replay missed events.
+3. **At session end** — no special action; the Monitor dies naturally,
+   gap recovery happens at the next start.
+
+**If you want true always-on** (script runs 24/7 independent of any Claude
+session): wrap `scripts/poll-pr-mentions.sh` in a launchd plist (macOS) or
+`systemd --user` unit (Linux) with `KeepAlive=true`. Then it survives
+session ends entirely. The Monitor in-session becomes redundant for
+notification but still useful as a real-time event stream for the
+dispatching session.
+
 ## See also
 
 - `.github/workflows/pr-drift-detect.yml`
