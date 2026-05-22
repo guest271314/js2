@@ -61,16 +61,18 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
-  # pull_request: per-PR group — a new push cancels the older run for that PR.
-  # push to main: shared serial queue.
-  # merge_group: per-queue-ref (GitHub serializes the queue itself).
-  # workflow_dispatch: unique group so manual runs never collide.
-  group: >-
-    ${{ github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.event.pull_request.number)
-     || github.event_name == 'push' && 'test262-sharded-main'
-     || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
-     || format('test262-sharded-dispatch-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # GLOBAL serialization: only ONE test262-sharded workflow runs at a time
+  # across pull_request, push, merge_group, workflow_dispatch. With 50 shards
+  # consuming 50 of 60 runner slots, running multiple test262 in parallel
+  # starves sequential follow-up jobs (regression-gate, merge-report) leading
+  # to merge-queue check_response_timeout failures.
+  #
+  # Serializing keeps ~10 slots free for those follow-ups + other workflows
+  # (CI quality, cla-check). Per-event groups would parallelize but produce
+  # the contention pattern above. Sub-cost: pull_request pushes during an
+  # in-flight run queue rather than cancel-and-restart — accept the waste.
+  group: test262-sharded-global
+  cancel-in-progress: false
 
 jobs:
   gate:
