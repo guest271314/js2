@@ -1505,7 +1505,7 @@
           <div class="diagram-panel">
             <div id="conformance-donut-slot">
               <t262-donut
-                src="./benchmarks/results/test262-report.json"
+                src="https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json"
                 style="--t262-bg: var(--bg, #060a14)"
               ></t262-donut>
             </div>
@@ -4536,7 +4536,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const labelEl = document.getElementById("compat-pass-rate-label");
         if (!rateEl || !labelEl) return;
         try {
-          const resp = await fetch("./benchmarks/results/test262-report.json");
+          const resp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!resp.ok) return;
           const report = await resp.json();
           // Use strict-mode summary (tests compatible with ES modules) when available
@@ -4850,7 +4850,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         };
 
         try {
-          const reportResp = await fetch("./benchmarks/results/test262-report.json");
+          const reportResp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!reportResp.ok) throw new Error("conformance data unavailable");
 
           const report = await reportResp.json();
@@ -5200,7 +5200,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const labelEl = document.getElementById("feature-coverage-label");
         if (!coverageEl || !labelEl) return;
         try {
-          const resp = await fetch("./benchmarks/results/test262-report.json");
+          const resp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!resp.ok) return;
           const report = await resp.json();
           const categories = report?.categories;
