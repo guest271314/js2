@@ -33,6 +33,7 @@ import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
   emitThrowString,
+  emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
@@ -1327,6 +1328,46 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       emitThrowString(ctx, fctx, "TypeError: is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
+    }
+  }
+
+  // (#1519 sub-issue B) Built-in non-constructor namespaces — `Math`, `JSON`,
+  // `Reflect`, `Atomics` — have neither call nor construct signatures. Per
+  // ECMA-262 §7.2.10 IsConstructor, `new`-on a value lacking `[[Construct]]`
+  // must throw TypeError. We detect them by name on the unwrapped expression
+  // (so `new Math()`, `new (Math)()`, and `new (Math as any)()` all fire).
+  // User-defined identifier shadowing keeps its own value-type with
+  // construct signatures, so this fires only for the actual builtin symbols
+  // (verified via the type checker's `Math`/`JSON`/`Reflect`/`Atomics`
+  // namespace lookups in lib.es*.d.ts).
+  {
+    let unwrapped: ts.Expression = expr.expression;
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isNonNullExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
+      unwrapped = ts.isParenthesizedExpression(unwrapped)
+        ? unwrapped.expression
+        : ts.isAsExpression(unwrapped)
+          ? unwrapped.expression
+          : ts.isNonNullExpression(unwrapped)
+            ? unwrapped.expression
+            : (unwrapped as ts.TypeAssertion).expression;
+    }
+    if (ts.isIdentifier(unwrapped)) {
+      const name = unwrapped.text;
+      const NAMESPACE_NON_CONSTRUCTORS = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+      if (NAMESPACE_NON_CONSTRUCTORS.has(name)) {
+        // Use the real-TypeError throw path so `assert.throws(TypeError, …)`
+        // in test262 negative cases (S11.2.2_A4_T*) observes a TypeError
+        // instance, not a bare string. Falls back to a string throw when
+        // `__new_TypeError` isn't registered (standalone mode).
+        emitThrowTypeError(ctx, fctx, `${name} is not a constructor`);
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
     }
   }
 
