@@ -4173,6 +4173,113 @@ assert._isSameValue = isSameValue;
         return (iterable: any, keyFn: any): any => (Object as any).groupBy(iterable, keyFn);
       // Proxy.revocable(target, handler) — creates a revocable Proxy (#965)
       if (name === "__proxy_revocable") return (target: any, handler: any): any => Proxy.revocable(target, handler);
+      // ── Reflect.* host dispatch (#1466) ─────────────────────────────────
+      // Each handler delegates to the host's Reflect.X so Proxy targets see
+      // their traps fire and boolean returns are preserved. Wasm structs
+      // arriving as `target` / `receiver` are wrapped via _wrapForHost so
+      // host MOP operations can enumerate / mutate their sidecar fields.
+      if (name === "__reflect_get")
+        return (target: any, key: any, receiver: any): any => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          const r =
+            receiver === undefined || receiver === null
+              ? t
+              : _isWasmStruct(receiver)
+                ? _wrapForHost(receiver, exports)
+                : receiver;
+          return Reflect.get(t, key, r);
+        };
+      if (name === "__reflect_set")
+        return (target: any, key: any, value: any, receiver: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          const v = _isWasmStruct(value) ? _wrapForHost(value, exports) : value;
+          const r =
+            receiver === undefined || receiver === null
+              ? t
+              : _isWasmStruct(receiver)
+                ? _wrapForHost(receiver, exports)
+                : receiver;
+          return Reflect.set(t, key, v, r) ? 1 : 0;
+        };
+      if (name === "__reflect_has")
+        return (target: any, key: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.has(t, key) ? 1 : 0;
+        };
+      if (name === "__reflect_deleteProperty")
+        return (target: any, key: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.deleteProperty(t, key) ? 1 : 0;
+        };
+      if (name === "__reflect_defineProperty")
+        return (target: any, key: any, desc: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          const d = _isWasmStruct(desc) ? _wrapForHost(desc, exports) : desc;
+          return Reflect.defineProperty(t, key, d) ? 1 : 0;
+        };
+      if (name === "__reflect_getOwnPropertyDescriptor")
+        return (target: any, key: any): any => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.getOwnPropertyDescriptor(t, key);
+        };
+      if (name === "__reflect_getPrototypeOf")
+        return (target: any): any => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.getPrototypeOf(t);
+        };
+      if (name === "__reflect_setPrototypeOf")
+        return (target: any, proto: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.setPrototypeOf(t, proto) ? 1 : 0;
+        };
+      if (name === "__reflect_ownKeys")
+        return (target: any): any => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          // Reflect.ownKeys returns string keys *and* Symbol keys (spec §28.1.13).
+          return Reflect.ownKeys(t);
+        };
+      if (name === "__reflect_isExtensible")
+        return (target: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.isExtensible(t) ? 1 : 0;
+        };
+      if (name === "__reflect_preventExtensions")
+        return (target: any): number => {
+          const exports = callbackState?.getExports();
+          const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
+          return Reflect.preventExtensions(t) ? 1 : 0;
+        };
+      if (name === "__reflect_apply")
+        return (fn: any, thisArg: any, argList: any): any => {
+          const exports = callbackState?.getExports();
+          // Per spec §28.1.1: argList undergoes CreateListFromArrayLike — host handles it.
+          // We still wrap wasm structs so the host can enumerate them.
+          const wrappedFn = _isWasmStruct(fn) ? _wrapForHost(fn, exports) : fn;
+          const wrappedThis = _isWasmStruct(thisArg) ? _wrapForHost(thisArg, exports) : thisArg;
+          const wrappedArgs = _isWasmStruct(argList) ? _wrapForHost(argList, exports) : argList;
+          return Reflect.apply(wrappedFn, wrappedThis, wrappedArgs ?? []);
+        };
+      if (name === "__reflect_construct")
+        return (ctor: any, args: any, newTarget: any): any => {
+          const exports = callbackState?.getExports();
+          const wrappedCtor = _isWasmStruct(ctor) ? _wrapForHost(ctor, exports) : ctor;
+          const wrappedArgs = _isWasmStruct(args) ? _wrapForHost(args, exports) : args;
+          if (newTarget === undefined || newTarget === null) {
+            return Reflect.construct(wrappedCtor, wrappedArgs ?? []);
+          }
+          const wrappedNew = _isWasmStruct(newTarget) ? _wrapForHost(newTarget, exports) : newTarget;
+          return Reflect.construct(wrappedCtor, wrappedArgs ?? [], wrappedNew);
+        };
       // Symbol.for(key) — global symbol registry (#965)
       if (name === "__symbol_for") return (key: any): any => Symbol.for(String(key));
       // Symbol.keyFor(sym) — reverse lookup in global registry (#965, #1342)
