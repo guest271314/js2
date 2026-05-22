@@ -1880,6 +1880,28 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#1467) `sym.description` — Symbol.prototype.description accessor.
+  // When the LHS is a Symbol primitive (or Symbol-wrapper object), read the
+  // host's Symbol.prototype.description accessor via `__symbol_description`.
+  // This handles three test262 buckets:
+  //   • Symbol('x').description === 'x'
+  //   • Symbol().description === undefined
+  //   • Symbol.prototype.description.call(wrapperObj) → unwraps the wrapper
+  // Generic __extern_get works for plain JS hosts but bypasses the spec
+  // accessor (which V8 implements specially), so we route directly.
+  if (propName === "description" && (objType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
+    const symDescIdx = ensureLateImport(ctx, "__symbol_description", [{ kind: "externref" }], [{ kind: "externref" }]);
+    if (symDescIdx !== undefined) {
+      const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+      if (recvType && recvType.kind !== "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "externref" });
+      }
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "call", funcIdx: symDescIdx });
+      return { kind: "externref" };
+    }
+  }
+
   // Handle string.length
   if (isStringType(objType) && propName === "length") {
     compileExpression(ctx, fctx, expr.expression);
