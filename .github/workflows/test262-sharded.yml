@@ -63,15 +63,19 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
+  # pull_request: per-PR group so a new push cancels the older run for that PR.
+  #   The detect job is cheap (~20s) — most PRs will short-circuit on need_shards=false
+  #   and only the rare src-touching PR's shards actually consume capacity.
   # Push to main: shared queue (cancel-in-progress: false) so rapid merges queue
   #   rather than each evicting the previous — baseline always gets updated.
   # merge_group: per-queue-ref (GitHub serializes the queue itself).
   # workflow_dispatch: unique group so manual runs never collide.
   group: >-
     ${{ github.event_name == 'push' && 'test262-sharded-main'
+     || github.event_name == 'pull_request' && format('test262-sharded-pr-{0}', github.event.pull_request.number)
      || github.event_name == 'merge_group' && format('test262-sharded-mq-{0}', github.ref)
      || format('test262-sharded-dispatch-{0}', github.run_id) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
