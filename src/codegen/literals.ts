@@ -51,7 +51,7 @@ import {
   flushLateImportShifts,
   registerResolveComputedKeyExpression,
 } from "./shared.js";
-import { pushDefaultValue } from "./type-coercion.js";
+import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
 
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
@@ -2214,12 +2214,34 @@ export function compileArrayLiteral(
     const el = expr.elements[i]!;
     if (ts.isSpreadElement(el)) {
       const srcType = compileExpression(ctx, fctx, el.expression);
-      if (!srcType || (srcType.kind !== "ref" && srcType.kind !== "ref_null")) {
+      if (!srcType) continue;
+      if (srcType.kind === "externref") {
+        // #1514 — Spread of a JS iterable (Set, Map, generator, Array, etc.)
+        // arriving as externref. Materialize into a wasm vec matching the
+        // result's element type by iterating __extern_length / __extern_get,
+        // then treat as a normal vec spread. Without this, `[...realJsSet]`
+        // silently produced an empty array because the externref branch was
+        // dropped.
+        const externLocal = allocLocal(fctx, `__spread_extern_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: externLocal });
+        const matVecInfo = getVecInfo(ctx, vecTypeIdx);
+        if (!matVecInfo) continue;
+        const matInstrs = buildVecFromExternref(ctx, fctx, externLocal, vecTypeIdx, matVecInfo);
+        for (const instr of matInstrs) fctx.body.push(instr);
+        const srcLocal = allocLocal(fctx, `__spread_mat_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: vecTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: srcLocal });
+        fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "i32.add" });
+        spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: vecTypeIdx });
+        continue;
+      }
+      if (srcType.kind !== "ref" && srcType.kind !== "ref_null") {
         // The compiled expression left a value on the stack — drop it so we
         // don't corrupt the running total (i32) that sits underneath.
-        if (srcType) {
-          fctx.body.push({ op: "drop" });
-        }
+        fctx.body.push({ op: "drop" });
         continue;
       }
       const srcVecTypeIdx = (srcType as { typeIdx: number }).typeIdx;
