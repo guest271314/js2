@@ -493,6 +493,12 @@ jobs:
           mkdir -p public/benchmarks/results
           cp shard-artifacts/test262-report-merged.json public/benchmarks/results/test262-report.json
           cp shard-artifacts/test262-results-merged.jsonl public/benchmarks/results/test262-results.jsonl
+          # #1583 — promote the standalone categories file so the landing
+          # page feature-row hydration sees fresh data. build-test262-report.mjs
+          # writes it as a sibling of --output, so the artifact already has it.
+          if [ -f shard-artifacts/test262-categories.json ]; then
+            cp shard-artifacts/test262-categories.json public/benchmarks/results/test262-categories.json
+          fi
 
       - name: Regenerate edition buckets
         run: node --experimental-strip-types scripts/generate-editions.ts --results benchmarks/results/test262-current.jsonl
@@ -587,7 +593,8 @@ jobs:
           git add -f benchmarks/results/test262-current.json \
             benchmarks/results/test262-report.json \
             public/benchmarks/results/test262-report.json \
-            public/benchmarks/results/test262-editions.json
+            public/benchmarks/results/test262-editions.json \
+            public/benchmarks/results/test262-categories.json
           if git diff --cached --quiet; then
             echo "No JSON changes to commit."
             exit 0
@@ -609,11 +616,15 @@ jobs:
             cp shard-artifacts/test262-report-merged.json benchmarks/results/test262-current.json
             cp shard-artifacts/test262-report-merged.json benchmarks/results/test262-report.json
             cp shard-artifacts/test262-report-merged.json public/benchmarks/results/test262-report.json
+            if [ -f shard-artifacts/test262-categories.json ]; then
+              cp shard-artifacts/test262-categories.json public/benchmarks/results/test262-categories.json
+            fi
             node --experimental-strip-types scripts/generate-editions.ts --results /tmp/js2wasm-baselines/test262-current.jsonl
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-report.json \
-              public/benchmarks/results/test262-editions.json
+              public/benchmarks/results/test262-editions.json \
+              public/benchmarks/results/test262-categories.json
             git diff --cached --quiet && exit 0
             if [ -f /tmp/js2wasm-before-refresh/test262-current.after-reset.json ] && \
               node scripts/compare-test262-artifact.mjs \
