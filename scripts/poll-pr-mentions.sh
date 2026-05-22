@@ -1,65 +1,103 @@
 #!/usr/bin/env bash
-# poll-pr-mentions.sh — token-free shell loop that watches for new PR comments
-# tagging a specific marker (default: @claude). Emits one line per new mention
-# so a harness can pick them up — designed to run in a tmux pane, launchd
-# service, or similar.
+# poll-pr-mentions.sh — watches open PRs for main-branch drift. Emits one
+# line per (PR, main-sha) pair the first time the PR is observed drifted,
+# so a Claude Code Monitor or tmux pane surfaces it to the tech lead.
 #
-# When the tech lead sees a line, they dispatch a developer agent to handle
-# the request in the comment (typically: merge main into the PR branch,
-# semantically review the diff, push).
+# Replaces the older "watch for @claude PR comments" design — the strict
+# required-status-checks policy + merge-queue batch=1 means GitHub itself
+# bounces drifted PRs; this script just makes that visible.
+#
+# Single-instance enforced via flock on a lock file.
+# Per-PR/main-sha dedup so we don't re-alert until either main moves OR
+# the PR base catches up.
 #
 # Usage:
-#   scripts/poll-pr-mentions.sh                # default: @claude, 60s interval
-#   MENTION=@reviewer scripts/poll-pr-mentions.sh
+#   scripts/poll-pr-mentions.sh                 # default: poll every 60s
 #   INTERVAL_SECS=30 scripts/poll-pr-mentions.sh
+#   NTFY_URL=https://ntfy.sh/your-topic scripts/poll-pr-mentions.sh
 #
-# State (last-seen timestamp) lives in ${STATE_FILE:-~/.cache/poll-pr-mentions-state}.
+# State files:
+#   $STATE_FILE   — JSON map of {pr_number: "last-alerted-main-sha"}
+#   $LOCK_FILE    — flock target; exit if already locked.
 
 set -euo pipefail
 
 REPO="${REPO:-loopdive/js2wasm}"
-MENTION="${MENTION:-@claude}"
 INTERVAL_SECS="${INTERVAL_SECS:-60}"
-STATE_FILE="${STATE_FILE:-${HOME}/.cache/poll-pr-mentions-state}"
+STATE_FILE="${STATE_FILE:-${HOME}/.cache/poll-pr-drift-state.json}"
+LOCK_FILE="${LOCK_FILE:-/tmp/poll-pr-mentions.lock}"
+# Optional ntfy URL — when set, the script POSTs a short notification per
+# new drift event so the user gets a phone push regardless of whether a
+# Claude session is watching this script's stdout.
+NTFY_URL="${NTFY_URL:-}"
 
 mkdir -p "$(dirname "$STATE_FILE")"
+[ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 
-# Default to looking back one hour on first run so we don't miss boot-time events.
-if [ -f "$STATE_FILE" ]; then
-  LAST_SEEN=$(cat "$STATE_FILE")
-else
-  LAST_SEEN=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-              || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)  # BSD fallback (macOS)
+# ---- single-instance lock ----------------------------------------------------
+# flock -n: non-blocking. If another instance holds the lock, exit immediately.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[poll-pr-mentions] another instance is already running (lock: $LOCK_FILE) — exiting"
+  exit 0
 fi
+echo "$$" >&9
 
-# Print one-line startup banner so the human knows the watcher is alive.
-echo "[poll-pr-mentions] watching $REPO for '$MENTION' (every ${INTERVAL_SECS}s), since=$LAST_SEEN"
+trap 'rm -f "$LOCK_FILE"; exit 0' INT TERM EXIT
 
+echo "[poll-pr-mentions] watching $REPO for main-branch drift (every ${INTERVAL_SECS}s)"
+echo "  state: $STATE_FILE"
+echo "  lock:  $LOCK_FILE (pid $$)"
+
+# ---- main loop ---------------------------------------------------------------
 while true; do
-  # GitHub's "List repo issue comments" endpoint with since= filter.
-  # Lists comments on issues AND PRs (GitHub treats PRs as a kind of issue).
-  # --paginate handles >100 results; harmless when empty.
-  NEW=$(gh api "repos/$REPO/issues/comments?since=$LAST_SEEN&sort=created&direction=asc&per_page=100" \
-          --paginate 2>/dev/null || echo '[]')
+  MAIN_HEAD=$(gh api "repos/$REPO/branches/main" --jq '.commit.sha' 2>/dev/null || echo "")
+  if [ -z "$MAIN_HEAD" ]; then
+    sleep "$INTERVAL_SECS"
+    continue
+  fi
 
-  # Iterate matching comments and emit one event-line each.
-  echo "$NEW" | jq -c --arg mention "$MENTION" '.[] | select(.body | contains($mention))' 2>/dev/null \
-    | while IFS= read -r comment; do
-        pr_url=$(echo "$comment" | jq -r '.issue_url')
-        pr_num=$(echo "$pr_url" | grep -oE '[0-9]+$' | head -1)
-        created=$(echo "$comment" | jq -r '.created_at')
-        author=$(echo "$comment" | jq -r '.user.login')
-        # First line of the body (skipping HTML markers) — caller can fetch
-        # full body via gh api or gh pr view.
-        first_line=$(echo "$comment" | jq -r '.body' \
-                       | grep -v '^<!--' \
-                       | sed -n '/[A-Za-z]/{p;q;}' \
-                       | head -c 200)
-        echo "[$created] @$author on #$pr_num: $first_line"
+  # List open PRs targeting main with auto-merge enabled — these are queue
+  # candidates. For each, fetch base.sha and check drift.
+  gh api "repos/$REPO/pulls?state=open&base=main&per_page=100" --paginate 2>/dev/null \
+    | jq -c '.[] | select(.auto_merge != null) | {number, base: .base.sha, title}' \
+    | while IFS= read -r pr; do
+        number=$(echo "$pr" | jq -r '.number')
+        base=$(echo "$pr" | jq -r '.base')
+        title=$(echo "$pr" | jq -r '.title' | head -c 80)
+
+        # Skip if base already at main HEAD — no drift.
+        [ "$base" = "$MAIN_HEAD" ] && continue
+
+        # Skip if we've already alerted for this (PR, MAIN_HEAD) pair.
+        last_alerted=$(jq -r --arg n "$number" '.[$n] // ""' "$STATE_FILE")
+        [ "$last_alerted" = "$MAIN_HEAD" ] && continue
+
+        # Count non-[skip ci] commits between base and main HEAD.
+        drift=$(gh api "repos/$REPO/compare/$base...$MAIN_HEAD" \
+                  --jq '[.commits[] | select(.commit.message | contains("[skip ci]") | not)] | length' \
+                  2>/dev/null || echo 0)
+        [ "$drift" -lt 1 ] && continue
+
+        ts=$(date -u +%H:%M:%SZ)
+        echo "[$ts] PR #$number drifted: $drift commits behind main (${MAIN_HEAD:0:9}) — $title"
+
+        if [ -n "$NTFY_URL" ]; then
+          curl -fsS -m 5 -X POST \
+            -H "Title: PR #$number drifted" \
+            -H "Priority: default" \
+            -d "$drift commits behind main — $title" \
+            "$NTFY_URL" >/dev/null 2>&1 || true
+        fi
+
+        # Record alert so we don't re-emit until main moves.
+        tmp=$(mktemp)
+        jq --arg n "$number" --arg s "$MAIN_HEAD" '. + {($n): $s}' "$STATE_FILE" > "$tmp"
+        mv "$tmp" "$STATE_FILE"
       done
 
-  # Advance the watermark to *now* so we don't re-emit the same comments.
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE_FILE"
-  LAST_SEEN=$(cat "$STATE_FILE")
+  # Prune state entries for PRs that are now closed/merged, so the file
+  # doesn't grow unbounded. (Optional — drop a "GC every Nth iteration"
+  # pattern later if needed; the file is small.)
   sleep "$INTERVAL_SECS"
 done
