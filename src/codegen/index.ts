@@ -2323,11 +2323,14 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
-  // - (#779c) `vec.constructor === Array` identity via the runtime's
-  //   `extern_get` constructor path, which calls `__vec_len` to positively
-  //   distinguish vec wrappers from other null-prototype WasmGC structs.
-  //   When `__extern_get` is imported, the property-access lowering may
-  //   need this discrimination for `vec.constructor` lookups.
+  // - host-import paths that coerce a vec wrapper to externref and look up
+  //   `.constructor` — the runtime extern_get handler uses `__vec_len` to
+  //   identify vec wrappers and report `constructor === Array`
+  //   (#1441, #1057, #779c). Without the export, `["a","b"].constructor ===
+  //   Array` is silently false for split/map/filter/etc. results in modules
+  //   that don't otherwise use for-of or JSON.stringify. The `__extern_get`
+  //   constructor path calls `__vec_len` to positively distinguish vec
+  //   wrappers from other null-prototype WasmGC structs.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
@@ -3700,7 +3703,10 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
     params: [{ kind: "f64" }, { kind: "externref" }],
     result: { kind: "externref" },
   },
-  split: { params: [{ kind: "externref" }], result: { kind: "externref" } },
+  // split: separator (externref) + limit (f64, NaN sentinel for "no limit" — #1441).
+  // The host runtime in `string_method` detects NaN and calls `split(sep)` without
+  // the limit so the spec default 2^32-1 applies (instead of ToUint32(NaN) === 0).
+  split: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "externref" } },
   match: { params: [{ kind: "externref" }], result: { kind: "externref" } },
   search: { params: [{ kind: "externref" }], result: { kind: "f64" } },
   at: { params: [{ kind: "f64" }], result: { kind: "externref" } },

@@ -2269,6 +2269,16 @@ function resolveImport(
         };
         const recv = coerce(s);
         const args = a.map(coerce);
+        // #1441 — `split` uses NaN as the "limit was not provided" sentinel.
+        // ToUint32(NaN) is 0, which would produce an empty array; per spec
+        // (22.1.3.21 step 8) a missing limit means 2^32 - 1, so we drop the
+        // trailing NaN and let the JS host apply the default.
+        if (method === "split" && args.length >= 2) {
+          const last = args[args.length - 1];
+          if (typeof last === "number" && Number.isNaN(last)) {
+            args.pop();
+          }
+        }
         return (String(recv) as any)[method](...args);
       };
     }
