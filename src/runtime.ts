@@ -2952,6 +2952,42 @@ assert._isSameValue = isSameValue;
           }
           return 0;
         };
+      // __extern_has(obj, key) → i32. Runtime fallback for `key in obj` when
+      // RHS is externref and the compile-time static resolution has no info
+      // (e.g. regex `result.groups`, untyped objects). Mirrors `__extern_has_idx`
+      // but for string keys. Returns 0 on opaque structs / null receivers so it
+      // never throws into Wasm — matching V8's `in` operator semantics for
+      // non-object operands would also throw, but at this dispatch point the
+      // caller already confirmed RHS is an object-shaped externref.
+      if (name === "__extern_has")
+        return (obj: any, key: any): number => {
+          if (obj == null) return 0;
+          // WasmGC struct keys → primitive via ToPrimitive (mirrors _safeGet)
+          if (key != null && typeof key === "object" && _isWasmStruct(key)) {
+            const prim = _toPrimitiveSync(key, "string");
+            if (prim != null && typeof prim !== "object") key = prim;
+          }
+          try {
+            if (key in obj) return 1;
+          } catch {
+            /* opaque struct or non-object obj */
+          }
+          // Fall back to sidecar (user-assigned properties on host objects)
+          if (_sidecarGet(obj, key) !== undefined) return 1;
+          // Wasm struct getter (defineProperty accessor)
+          if (typeof key === "string") {
+            const exports = callbackState?.getExports();
+            if (typeof exports?.[`__sget_${key}`] === "function") {
+              try {
+                const v = exports[`__sget_${key}`](obj);
+                if (v !== undefined) return 1;
+              } catch {
+                /* not a field on this variant */
+              }
+            }
+          }
+          return 0;
+        };
       if (name === "__extern_toString")
         return (v: any) => {
           if (v == null) return String(v);
