@@ -32,8 +32,10 @@ import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
 import {
+  classifyPrivateMember,
   emitCoercedLocalSet,
   emitThrowString,
+  emitThrowTypeError,
   getFuncParamTypes,
   updateLocalType,
   widenLocalToNullable,
@@ -1895,6 +1897,21 @@ function compilePropertyAssignment(
   value: ts.Expression,
 ): InnerResult {
   const objType = ctx.checker.getTypeAtLocation(target.expression);
+
+  // #1456: Private method or getter-only accessor → TypeError on write.
+  // Must run BEFORE any routing decisions because the receiver typing (e.g.
+  // `(this as any).#m`) can otherwise send us through __extern_set and
+  // silently drop the write.
+  if (ts.isPrivateIdentifier(target.name)) {
+    const privateMember = classifyPrivateMember(ctx, target.name);
+    if (privateMember?.kind === "method" || privateMember?.kind === "accessor-readonly") {
+      // Evaluate RHS for side effects before throwing (spec evaluation order).
+      const rhsResult = compileExpression(ctx, fctx, value);
+      if (rhsResult) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "Cannot assign to private method or read-only accessor");
+      return { kind: "externref" };
+    }
+  }
 
   // Compile-away: if the target object is frozen, emit TypeError throw
   if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
@@ -4428,6 +4445,21 @@ function compilePropertyCompoundAssignment(
 ): ValType | null {
   const objType = ctx.checker.getTypeAtLocation(target.expression);
   const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
+
+  // #1456: Private methods and getter-only accessors throw TypeError on write
+  if (ts.isPrivateIdentifier(target.name)) {
+    const privateMember = classifyPrivateMember(ctx, target.name);
+    if (privateMember?.kind === "method" || privateMember?.kind === "accessor-readonly") {
+      // Evaluate receiver for side effects (spec evaluates Reference before throwing)
+      const receiverResult = compileExpression(ctx, fctx, target.expression);
+      if (receiverResult) fctx.body.push({ op: "drop" });
+      // Evaluate RHS for side effects
+      const rhsResult = compileExpression(ctx, fctx, rhs);
+      if (rhsResult) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, "Cannot assign to private method or read-only accessor");
+      return { kind: "f64" };
+    }
+  }
 
   // Handle static property compound assignment: ClassName.staticProp += value
   if (ts.isIdentifier(target.expression) && ctx.classSet.has(target.expression.text)) {
