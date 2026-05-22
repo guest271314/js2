@@ -4813,10 +4813,19 @@ assert._isSameValue = isSameValue;
           return instance;
         };
       // parseInt / parseFloat host imports
+      //
+      // #1436 — pass the argument directly to the native global function so
+      // its internal ToString step throws TypeError on Symbol/BigInt per
+      // ECMA-262 §19.2.5 / §19.2.4 (parseInt / parseFloat both invoke
+      // ? ToString(string) which is the centralized ToString funnel).
+      // Wrapping in `String(s)` swallowed that TypeError because the
+      // `String` constructor returns SymbolDescriptiveString for Symbols
+      // (and never throws) — `parseInt(Symbol())` then silently coerced to
+      // NaN instead of propagating the spec-required TypeError.
       if (name === "parseInt")
         return (s: any, radix: number) => {
           const r = Number.isNaN(radix) ? undefined : radix;
-          return parseInt(String(s), r as any);
+          return parseInt(s as any, r as any);
         };
       if (name === "parseFloat")
         return (s: any) => {
@@ -4831,13 +4840,22 @@ assert._isSameValue = isSameValue;
               /* fall through */
             }
           }
-          return parseFloat(String(s));
+          // Direct pass-through — for Symbol the native parseFloat throws
+          // TypeError via ToString per spec; the wasm catch_all sink will
+          // observe it. (#1436)
+          return parseFloat(s as any);
         };
-      // URI encoding/decoding host imports
-      if (name === "decodeURI") return (s: any) => decodeURI(String(s));
-      if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(String(s));
-      if (name === "encodeURI") return (s: any) => encodeURI(String(s));
-      if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(String(s));
+      // URI encoding/decoding host imports.
+      // #1436 — direct pass-through so the native ToString step throws
+      // TypeError on Symbol/BigInt per ECMA-262 §19.2.6 (encodeURI /
+      // decodeURI / encodeURIComponent / decodeURIComponent all invoke
+      // ? ToString(uri) as their first step). Wrapping in `String(s)`
+      // silently turned `encodeURI(Symbol())` into "Symbol(desc)" instead
+      // of throwing TypeError.
+      if (name === "decodeURI") return (s: any) => decodeURI(s as any);
+      if (name === "decodeURIComponent") return (s: any) => decodeURIComponent(s as any);
+      if (name === "encodeURI") return (s: any) => encodeURI(s as any);
+      if (name === "encodeURIComponent") return (s: any) => encodeURIComponent(s as any);
       // String.fromCharCode / String.fromCodePoint host imports
       if (name === "String_fromCharCode") return (code: number) => String.fromCharCode(code);
       if (name === "String_fromCodePoint") return (code: number) => String.fromCodePoint(code);
