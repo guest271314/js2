@@ -48,7 +48,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
-import { registerAddStringImports } from "./shared.js";
+import { registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
@@ -4641,6 +4641,9 @@ export function addStringImports(ctx: CodegenContext): void {
 // Register addStringImports so any-helpers.ts can call it via the delegate
 // (breaks circular dep: index.ts → any-helpers.ts → shared.ts ← index.ts)
 registerAddStringImports(addStringImports);
+// #1471: lets late-imports.ts route box/unbox/typeof/is_truthy names to the
+// in-module native funcs under no-JS-host mode without an import cycle.
+registerAddUnionImports(addUnionImports);
 
 /** Parse a RegExp literal text (e.g. "/\\d+/gi") into pattern and flags */
 export function parseRegExpLiteral(text: string): { pattern: string; flags: string } {
@@ -5803,13 +5806,14 @@ export function addUnionImports(ctx: CodegenContext): void {
   if (ctx.hasUnionImports) return;
   ctx.hasUnionImports = true;
 
-  // Under `--target wasi` (#1180): emit Wasm-native implementations of the
-  // box / unbox / typeof / is_truthy helpers instead of `env::*` host
-  // imports, since wasmtime cannot satisfy the env::* imports without a JS
-  // host. The native impls preserve the same name + signature so existing
-  // call sites (`ctx.funcMap.get("__unbox_number")` etc.) work unchanged.
+  // Under `--target wasi` (#1180) and `--standalone` (#1471): emit Wasm-native
+  // implementations of the box / unbox / typeof / is_truthy helpers instead of
+  // `env::*` host imports, since a pure-Wasm engine (wasmtime, wasmer) cannot
+  // satisfy the env::* imports without a JS host. The native impls preserve the
+  // same name + signature so existing call sites
+  // (`ctx.funcMap.get("__unbox_number")` etc.) work unchanged.
   // Same dual-mode pattern as #679 (strings) and #682 (RegExp).
-  if (ctx.wasi) {
+  if (ctx.wasi || ctx.standalone) {
     addUnionImportsAsNativeFuncs(ctx);
     return;
   }

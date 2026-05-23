@@ -10,6 +10,29 @@ import type { Instr, ValType } from "../../ir/types.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
+import { addUnionImportsViaRegistry } from "../shared.js";
+
+/**
+ * #1471: helper names that `addUnionImports` provides Wasm-native
+ * implementations for under no-JS-host mode (WASI / standalone). When any of
+ * these is requested via `ensureLateImport` while there is no JS host, route
+ * through `addUnionImports` (which emits in-module funcs registered in
+ * `ctx.funcMap`) instead of adding an unsatisfiable `env::*` host import.
+ */
+const UNION_NATIVE_HELPER_NAMES = new Set([
+  "__box_number",
+  "__unbox_number",
+  "__box_boolean",
+  "__unbox_boolean",
+  "__is_truthy",
+  "__typeof_number",
+  "__typeof_boolean",
+  "__typeof_string",
+  "__typeof_undefined",
+  "__typeof_object",
+  "__typeof_function",
+  "__typeof",
+]);
 
 /**
  * Shift function indices after a late import addition. This must update all
@@ -141,6 +164,15 @@ export function ensureLateImport(
 ): number | undefined {
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
+  // #1471: under no-JS-host mode, the box/unbox/typeof/is_truthy helpers have
+  // Wasm-native implementations emitted by addUnionImports. Route there so the
+  // module needs no unsatisfiable `env::*` host import. addUnionImports is
+  // idempotent and registers every name in UNION_NATIVE_HELPER_NAMES, so a
+  // single call resolves this lookup.
+  if ((ctx.wasi || ctx.standalone) && UNION_NATIVE_HELPER_NAMES.has(name)) {
+    addUnionImportsViaRegistry(ctx);
+    return ctx.funcMap.get(name);
+  }
   // Record importsBefore on the FIRST deferred addition in this batch
   if (ctx.pendingLateImportShift === null) {
     ctx.pendingLateImportShift = { importsBefore: ctx.numImportFuncs };
