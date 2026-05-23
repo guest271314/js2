@@ -760,6 +760,10 @@ function tryEvalAsRegExpPeephole(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
+  // #1474 — this peephole desugars `eval("/" + X + "/")` to a RegExp_new
+  // host call. RegExp has no Wasm-native engine yet, so refuse to register
+  // the host import in --target standalone (eval itself is also host-only).
+  if (ctx.standalone) return undefined;
   if (expr.arguments.length !== 1) return undefined;
 
   // Strip parens around the argument.
@@ -1199,6 +1203,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
   // flags undefined, an edge case we accept). Emit the RegExp_new host call
   // directly so the host constructor runs and validates modifier syntax,
   // throwing SyntaxError on invalid patterns. (#1055)
+  // #1474 — RegExp delegates to the JS host engine; refuse `RegExp(...)`
+  // (no `new`) in --target standalone (Phase 1: refuse-and-document).
+  if (
+    ctx.standalone &&
+    !expr.questionDotToken &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "RegExp"
+  ) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: RegExp(...) is not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone.",
+    );
+    return null;
+  }
+
   if (
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
