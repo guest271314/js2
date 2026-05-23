@@ -12,3 +12,4 @@ export * from "./integration.js";
 export * from "./analysis/lattice.js";
 export * from "./analysis/ownership.js";
 export * from "./analysis/stack-alloc.js";
+export * from "./analysis/escape.js";

@@ -53,6 +53,7 @@ import type {
   IrType,
   IrTypeRef,
 } from "./nodes.js";
+import { analyzeEscape } from "./analysis/escape.js";
 import { analyzeOwnership } from "./analysis/ownership.js";
 import { constantFold } from "./passes/constant-fold.js";
 import { deadCode } from "./passes/dead-code.js";
@@ -454,9 +455,22 @@ export function compileIrPathFunctions(
   // is likewise gated and annotation-only). Behind `JS2WASM_IR_OWNERSHIP=1`
   // for the rollout period.
   // -------------------------------------------------------------------------
-  if (ownershipAnalysisEnabled()) {
+  //
+  // 2h. Escape analysis (#747) — gated, default OFF. When
+  // `JS2WASM_IR_ESCAPE=1`, classifies each allocation
+  // (local/returned/stored/captured/opaque) on top of the ownership result and
+  // writes it to the registry `escape` namespace. Enabling escape implies
+  // running ownership (its oracle). Both are inert — no IR mutation, byte-
+  // identical Wasm — so scalar replacement / stack allocation stays a
+  // follow-up consumer.
+  const wantOwnership = ownershipAnalysisEnabled();
+  const wantEscape = escapeAnalysisEnabled();
+  if (wantOwnership || wantEscape) {
     for (const entry of readyForLower) {
-      analyzeOwnership(entry.fn, allocRegistry);
+      const ownershipResult = analyzeOwnership(entry.fn, allocRegistry);
+      if (wantEscape) {
+        analyzeEscape(entry.fn, allocRegistry, ownershipResult);
+      }
     }
   }
 
@@ -683,6 +697,15 @@ function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
  */
 function ownershipAnalysisEnabled(): boolean {
   return process.env.JS2WASM_IR_OWNERSHIP === "1" || process.env.JS2WASM_IR_OWNERSHIP === "true";
+}
+
+/**
+ * #747 rollout gate. Escape analysis is default-OFF and inert; enabling it runs
+ * the ownership pass (its oracle) too. Stack allocation / scalar replacement
+ * consuming the classification is a follow-up — Phase 1 only annotates.
+ */
+function escapeAnalysisEnabled(): boolean {
+  return process.env.JS2WASM_IR_ESCAPE === "1" || process.env.JS2WASM_IR_ESCAPE === "true";
 }
 
 /**

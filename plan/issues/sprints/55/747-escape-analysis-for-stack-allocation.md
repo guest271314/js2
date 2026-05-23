@@ -1,7 +1,7 @@
 ---
 id: 747
 title: "Escape analysis for stack allocation"
-status: ready
+status: in-progress
 created: 2026-03-22
 updated: 2026-05-23
 sprint: 55
@@ -160,3 +160,54 @@ Equivalence tests in `tests/issue-747-escape.test.ts`:
   `ctx.escapeAnalysis` flag; default off until soak-tested.
 - **Performance**: should be a clear win for hot allocation sites
   (e.g. Point-like classes in inner loops).
+
+## Implementation (Phase 1 — landed)
+
+The architect spec above predates #1586/#1587 and assumed an AST-level pass in
+`src/checker/`. Both dependencies (#1586 AllocSiteRegistry, #1587 ownership /
+access analysis) landed first, so Phase 1 implements escape analysis at the
+**IR level**, directly consuming #1587's ownership result rather than
+re-deriving escape from the AST.
+
+Files added:
+- `src/ir/analysis/escape.ts` — `analyzeEscape(fn, registry?, ownership?)`.
+  Uses the #1587 `OwnershipResult` as the escape oracle, then walks the IR to
+  attribute the strongest escape edge per allocation:
+  `local` ⊏ `returned` ⊏ `stored` ⊏ `captured` ⊏ `opaque`. Edges:
+  return terminator / async.return → returned; object.set/class.set/refcell.set
+  payload → stored; closure.new capture → captured; opaque call / extern /
+  iter.new / coerce / await / throw → opaque. A soundness backstop downgrades
+  any value #1587 proved escaped but the edge walk missed from `local` →
+  `opaque`. Returns an `EscapeResult` (`of`/`classOf`/`localAllocations`) and
+  writes the classification to the registry `escape` namespace (reserved by
+  ADR-0013 for this issue).
+
+Pipeline wiring (`src/ir/integration.ts` step 2h): runs after the #1587
+ownership pass on the final IR shape, **gated behind `JS2WASM_IR_ESCAPE=1`,
+default OFF** (enabling it implies running ownership, its oracle). The pass does
+not mutate the IR; registry annotations are inert at lowering.
+
+### Phase 1 scope vs. the spec
+
+Phase 1 produces the **classification only** — it does NOT yet perform scalar
+replacement / stack allocation (the `expressions.ts` / `property-access.ts`
+rewrites in the spec). That codegen change is the follow-up consumer; keeping
+Phase 1 annotation-only preserves the "removing the pass cannot change emitted
+Wasm" guarantee (matching #1587's discipline and the issue's "default off until
+soak-tested" risk mitigation). The `local` classification (= `localAllocations()`)
+is exactly the set the follow-up will scalar-replace.
+
+## Test Results
+
+`tests/ir/escape-analysis.test.ts` — 7 tests, all pass. Covers each
+classification (local, returned, stored, captured, opaque), the strongest-edge
+rule, and the registry write-back.
+
+Inertness verified: compiling `make(){ const o={x:1}; o.x=2; return o.x }` with
+`JS2WASM_IR_ESCAPE` OFF vs ON yields **byte-identical Wasm** (642 bytes both).
+`tsc --noEmit`, `biome lint`, and `prettier --check` clean on all new/changed
+files.
+
+Follow-ups: scalar-replacement codegen consumer (the actual perf win), and
+inter-procedural escape propagation (depends on a call-graph; #1587 Phase 2
+adds the function summaries this would build on).
