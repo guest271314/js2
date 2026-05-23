@@ -404,11 +404,18 @@ async function optimizeBenchmarkWasm(binary: Uint8Array, label: string): Promise
   for (let pass = 0; pass < 4; pass++) {
     const optResult = await optimizeBinaryAsync(optimizedBinary, { level: 4 });
     if (!optResult.optimized) {
-      throw new Error(
-        `[${label}] wasm-opt optimization is required for offline benchmark artifacts: ${
+      // wasm-opt cannot parse some js2wasm output — notably custom-descriptors
+      // ('exact' heap types), which the pinned Binaryen (v125) does not support
+      // (no Features.CustomDescriptors). Do NOT fail the entire Pages build over
+      // one un-optimizable benchmark artifact: warn and fall back to the best
+      // binary we have. The size figure for this artifact is then unoptimized.
+      // Tracked separately (Binaryen custom-descriptors support / emission gate).
+      console.warn(
+        `[${label}] wasm-opt could not optimize this artifact (${
           optResult.warning ?? "optimizer returned the original binary"
-        }`,
+        }); using unoptimized binary for size measurement.`,
       );
+      return optimizedBinary;
     }
     if (bytesEqual(optResult.binary, optimizedBinary)) return optimizedBinary;
     optimizedBinary = optResult.binary;
