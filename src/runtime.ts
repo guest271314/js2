@@ -880,6 +880,72 @@ function _wrapWasmClosure(
 }
 
 /**
+ * (#1382) Phase 1 — bridge a possibly-Wasm-closure value into a JS-callable.
+ *
+ * Centralises the "is this an opaque WasmGC closure struct? if so, wrap it"
+ * check that the per-host-import call sites need before handing the value
+ * to the native engine. Returns the value unchanged when it's already
+ * JS-callable, null/undefined (caller-side TypeError is correct), or any
+ * non-struct value. Returns a freshly-allocated JS Function bridging into
+ * `__call_fn_<arity>` for Wasm closure structs.
+ *
+ * The returned wrapper is **fresh per call** — callers must not rely on
+ * identity (`p.then(cb) === p.then(cb)` is not preserved). This matches
+ * how `__array_from` mapFn wrapping already behaves and is benign in spec
+ * terms (no protocol observes callback identity across host roundtrips).
+ */
+function _maybeWrapCallable(
+  val: any,
+  arity: number,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (val == null) return val;
+  if (typeof val === "function") return val;
+  if (!_isWasmStruct(val)) return val;
+  const wrapped = _wrapWasmClosure(val, arity, callbackState);
+  return wrapped ?? val;
+}
+
+/**
+ * (#1382) Per-method callback-slot table — maps a method name to the index
+ * of its callback argument and the arity at which the engine will invoke
+ * it. Consulted by `__proto_method_call` and `__extern_method_call` so a
+ * Wasm-closure callback gets pre-wrapped into a JS Function before the
+ * native engine tries to call it.
+ *
+ * Anything not in the table is passed through unchanged (preserving the
+ * pre-#1382 behaviour for methods that don't take callbacks). Adding a new
+ * method requires only adding a row here; no codegen changes needed.
+ */
+const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
+  // Array.prototype — callback at args[0], invoked as (value, index, array)
+  forEach: { argIdx: 0, arity: 3 },
+  map: { argIdx: 0, arity: 3 },
+  filter: { argIdx: 0, arity: 3 },
+  find: { argIdx: 0, arity: 3 },
+  findIndex: { argIdx: 0, arity: 3 },
+  findLast: { argIdx: 0, arity: 3 },
+  findLastIndex: { argIdx: 0, arity: 3 },
+  every: { argIdx: 0, arity: 3 },
+  some: { argIdx: 0, arity: 3 },
+  flatMap: { argIdx: 0, arity: 3 },
+  // reduce/reduceRight — callback at args[0], invoked as (acc, value, index, array)
+  reduce: { argIdx: 0, arity: 4 },
+  reduceRight: { argIdx: 0, arity: 4 },
+  // sort — comparator at args[0], invoked as (a, b)
+  sort: { argIdx: 0, arity: 2 },
+  // String.prototype.replace/replaceAll — replacement may be a fn; spec
+  // arity is variadic. Use 4 as a sensible cap (match + 1 capture + offset
+  // + string). Full variadic support is Phase 2.
+  replace: { argIdx: 1, arity: 4 },
+  replaceAll: { argIdx: 1, arity: 4 },
+  // Map/WeakMap.prototype.getOrInsertComputed (TC39 Stage 3 upsert
+  // proposal — see `__extern_method_call` polyfill) — callback at
+  // args[1], invoked as `callback(key)`.
+  getOrInsertComputed: { argIdx: 1, arity: 1 },
+};
+
+/**
  * (#1382) Materialize a Wasm vec into a real JS array via the `__vec_len`
  * + `__vec_get` exports. Non-vec values pass through:
  *   - JS arrays returned as-is.
@@ -3876,9 +3942,23 @@ assert._isSameValue = isSameValue;
           if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) {
             throw new TypeError("Object.defineProperty called on non-object");
           }
+          // (#1382) When the accessor descriptor's `get`/`set` is a Wasm
+          // closure struct (not a JS function), wrap it into a JS Function
+          // so subsequent property reads/writes invoke through the
+          // `__call_fn_<arity>` bridge instead of trapping inside V8 with
+          // "getter is not a function". Plain JS functions and undefined
+          // values pass through unchanged.
+          //   - get: arity-0 (called as `get.call(this)`)
+          //   - set: arity-1 (called as `set.call(this, value)`)
+          // Note: `this`-binding inside the wrapped accessor is currently
+          // dropped (the bridge ignores `this`). Tracked as Phase 2 / a
+          // follow-up; accessors that close over their `this` keep the
+          // existing accessor-shim path (__make_getter_callback).
+          const wrappedGetter = _maybeWrapCallable(getter, 0, callbackState);
+          const wrappedSetter = _maybeWrapCallable(setter, 1, callbackState);
           const desc: PropertyDescriptor = {};
-          if (getter != null) desc.get = getter;
-          if (setter != null) desc.set = setter;
+          if (wrappedGetter != null) desc.get = wrappedGetter;
+          if (wrappedSetter != null) desc.set = wrappedSetter;
           if (flags & (1 << 4)) desc.enumerable = !!(flags & (1 << 1));
           if (flags & (1 << 5)) desc.configurable = !!(flags & (1 << 2));
           try {
@@ -4265,6 +4345,16 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const wrappedObj = _isWasmStruct(obj) ? _wrapForHost(obj, exports) : obj;
           const wrappedArgs = (args ?? []).map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          // (#1382) Wrap a Wasm-closure callback arg into a JS Function
+          // before the native engine dispatches. Looks up the same slot
+          // table as `__proto_method_call` so Array.prototype.map.call
+          // patterns work identically on bound-method receivers.
+          {
+            const slot = _PROTO_CB_SLOTS[method];
+            if (slot && wrappedArgs.length > slot.argIdx) {
+              wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
+            }
+          }
           const fn = wrappedObj[method];
           if (typeof fn !== "function") {
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
@@ -4428,6 +4518,17 @@ assert._isSameValue = isSameValue;
             wrappedReceiver = Boolean(wrappedReceiver);
           }
           const wrappedArgs = (args ?? []).map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          // (#1382) Replace a Wasm-closure callback arg with a JS-callable
+          // wrapper BEFORE dispatching into the native engine. Without this,
+          // V8 throws "callback is not a function" when the host tries to
+          // invoke the closure struct directly. Lookup is keyed on
+          // methodName so methods without a callback slot are unaffected.
+          {
+            const slot = _PROTO_CB_SLOTS[methodName];
+            if (slot && wrappedArgs.length > slot.argIdx) {
+              wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
+            }
+          }
           // #1234 — sparse-aware fast path for Array.prototype.{unshift,reverse,forEach}
           // on non-Array receivers with a HUGE `length`. V8's native algorithms walk
           // `for (k = 0; k < length;)` (or descending) per spec, which hangs when
@@ -4487,8 +4588,11 @@ assert._isSameValue = isSameValue;
       if (name === "__object_getOwnPropertyDescriptors")
         return (obj: any): any => Object.getOwnPropertyDescriptors(obj);
       // Object.groupBy(iterable, keyFn) — ES2024 grouping (#965)
+      // (#1382) keyFn is invoked as `keyFn(value, index)` — arity 2.
+      // Wrap Wasm-closure keyFn before handing it to the native engine.
       if (name === "__object_groupBy")
-        return (iterable: any, keyFn: any): any => (Object as any).groupBy(iterable, keyFn);
+        return (iterable: any, keyFn: any): any =>
+          (Object as any).groupBy(iterable, _maybeWrapCallable(keyFn, 2, callbackState));
       // Proxy.revocable(target, handler) — creates a revocable Proxy (#965)
       if (name === "__proxy_revocable") return (target: any, handler: any): any => Proxy.revocable(target, handler);
       // ── Reflect.* host dispatch (#1466) ─────────────────────────────────
@@ -5166,11 +5270,16 @@ assert._isSameValue = isSameValue;
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject") return (val: any) => Promise.reject(val);
-      if (name === "Promise_new") return (executor: any) => new Promise(executor);
-      if (name === "Promise_then") return (p: any, cb: any) => p.then(cb);
-      if (name === "Promise_then2") return (p: any, cb1: any, cb2: any) => p.then(cb1, cb2);
-      if (name === "Promise_catch") return (p: any, cb: any) => p.catch(cb);
-      if (name === "Promise_finally") return (p: any, cb: any) => p.finally(cb);
+      // (#1382) `executor` is called as `executor(resolve, reject)` — arity 2.
+      if (name === "Promise_new") return (executor: any) => new Promise(_maybeWrapCallable(executor, 2, callbackState));
+      // (#1382) `onFulfilled` / `onRejected` callbacks are arity-1 (the value or reason).
+      if (name === "Promise_then") return (p: any, cb: any) => p.then(_maybeWrapCallable(cb, 1, callbackState));
+      if (name === "Promise_then2")
+        return (p: any, cb1: any, cb2: any) =>
+          p.then(_maybeWrapCallable(cb1, 1, callbackState), _maybeWrapCallable(cb2, 1, callbackState));
+      if (name === "Promise_catch") return (p: any, cb: any) => p.catch(_maybeWrapCallable(cb, 1, callbackState));
+      // (#1382) `onFinally` is arity-0 (no arg per spec §27.2.5.3).
+      if (name === "Promise_finally") return (p: any, cb: any) => p.finally(_maybeWrapCallable(cb, 0, callbackState));
       // Generator support: buffer management and generator creation
       //
       // Eager-generator hard cap (#991/#992): we lower generators to an array
