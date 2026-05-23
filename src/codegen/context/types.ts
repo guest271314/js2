@@ -53,6 +53,8 @@ export interface CodegenOptions {
   wasiNodeFsFuncs?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
+  /** JSX runtime import detected during preprocessing (#1540). */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 /** Info about an externally declared class. */
@@ -325,6 +327,16 @@ export interface CodegenContext {
   stringLiteralValues: Map<string, string>;
   /** Counter for string literal imports */
   stringLiteralCounter: number;
+  /**
+   * #1463 — Source text per function declaration, keyed by function name.
+   * Populated in `collectDeclarations` from `stmt.getText(sourceFile)` so
+   * `Function.prototype.toString` can return spec-compliant source instead
+   * of the `function () { [native code] }` placeholder for identifier-typed
+   * receivers (`add.toString()` where `add` is a top-level declaration).
+   * Not populated for class methods, arrow functions, or expressions —
+   * those still fall back to the placeholder.
+   */
+  funcSourceText: Map<string, string>;
   /** Map from string literal value → global import index */
   stringGlobalMap: Map<string, number>;
   /** Number of imported globals (string constants) */
@@ -600,6 +612,20 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /**
+   * (#1373b) When true, async functions flow through the IR's CPS lowering
+   * (Phase C). When false (default), the IR selector buckets async functions
+   * into the `"async-function"` fallback reason and they take the legacy
+   * direct-codegen path. The first scaffolding slice (#1373b Slice 1)
+   * keeps this hardcoded `false`; subsequent slices (Slice 2: PENDING-path
+   * CPS continuations, Slice 3: gate-flip) wire it on incrementally once
+   * the lowering is parity-tested against the legacy path.
+   *
+   * Read by `src/ir/select.ts`'s `isAsyncIrReady(ctx)` helper; threaded
+   * through `src/ir/integration.ts` into the selector via the
+   * `IrPlanOptions.supportsAsyncIr` field.
+   */
+  supportsAsyncIr: boolean;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;
@@ -607,6 +633,18 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiBumpPtrGlobalIdx: number;
+  /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
+  wasiClockTimeGetIdx?: number;
+  /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */
+  wasiPendingFdWriteHelper?: boolean;
+  /** (#1483 + #1493) Pending flag — emit `__wasi_write_string_stderr` after lib-globals scan. */
+  wasiPendingConsoleStderrHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_write_file_sync` after lib-globals scan. */
+  wasiPendingPathOpenHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
+  wasiClockHelpersPending?: boolean;
+  /** (#1483 + #1481) Pending flag — emit `__wasi_read_stdin_all` after lib-globals scan. */
+  wasiPendingFdReadHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
@@ -629,6 +667,16 @@ export interface CodegenContext {
   ensureStructPending: Set<ts.Type>;
   /** Node builtin modules registered as externref globals (#1044) */
   nodeBuiltinGlobals: Map<string, number>; // localName → funcIdx
+  /**
+   * JSX runtime import detected during preprocessing (#1540). The codegen
+   * intercepts call expressions whose callee identifier matches one of the
+   * recorded local names (`localJsx`/`localJsxs`/`localJsxDev`) and routes
+   * them to the matching `__jsx_runtime_*` host import. The `Fragment`
+   * binding is exposed as a no-arg externref-returning function under
+   * `nodeBuiltinGlobals` so identifier resolution treats it like any
+   * declared externref.
+   */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 export type { SourcePos };

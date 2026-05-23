@@ -16,7 +16,7 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation } from "../ir/select.js";
+import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -47,6 +47,7 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
+import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { registerAddStringImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
 
@@ -648,6 +649,58 @@ function valTypeToIrField(_ctx: CodegenContext, vt: import("../ir/types.js").Val
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// #1530 — IR fallback phase-out hooks.
+//
+// Two strict-mode sets that let later PRs close the legacy fallback path
+// for specific rejection / build-error classes. Both start empty so the
+// current behaviour is unchanged; the sets exist as a single, well-known
+// integration point so future PRs add one entry per retired bucket.
+//
+// `STRICT_IR_REASONS`     — selector-rejection reasons that must NOT show
+//                           up in any compilation. When non-empty, the
+//                           selector is run with `trackFallbacks: true` and
+//                           every matching reason is surfaced as a hard
+//                           compile error rather than silently flowing to
+//                           legacy. Add a reason here once its bucket in
+//                           `scripts/ir-fallback-baseline.json` hits zero.
+//
+// `STRICT_IR_BUILD_ERRORS` — substring patterns matched against the
+//                           per-function message returned by
+//                           `compileIrPathFunctions`. When any pattern
+//                           matches, the diagnostic is promoted from a
+//                           "warning" (legacy fallback) to an "error"
+//                           (hard fail). Add a pattern here once the
+//                           corresponding IR-build path is known to be
+//                           permanently fixed.
+//
+// See `plan/log/ir-adoption.md` for the per-bucket ownership + target
+// dates that drive this list.
+// ---------------------------------------------------------------------------
+const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReason>();
+// Empty as of #1530 — flip entries to "strict" in follow-up PRs once
+// their `scripts/ir-fallback-baseline.json` bucket reaches zero. The
+// intended order (cheapest first, see plan/log/ir-adoption.md):
+//   "param-type-not-resolvable",
+//   "call-graph-closure",
+//   "body-shape-rejected",
+
+const STRICT_IR_BUILD_ERRORS: ReadonlyArray<string> = [
+  // Empty as of #1530 — add substring patterns here when a known build
+  // error class is permanently fixed and a legacy fallback should no
+  // longer mask a real bug. Example for a future PR:
+  //   "post-hygiene verify:",
+  //   "class-method typeIdx parity mismatch",
+];
+
+function isStrictIrBuildError(message: string): boolean {
+  if (STRICT_IR_BUILD_ERRORS.length === 0) return false;
+  for (const pat of STRICT_IR_BUILD_ERRORS) {
+    if (message.includes(pat)) return true;
+  }
+  return false;
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -693,6 +746,12 @@ export function generateModule(
     // #1044 — Register Node builtin modules as externref host imports
     if (options?.nodeBuiltins && options.nodeBuiltins.length > 0) {
       registerNodeBuiltinImports(ctx, options.nodeBuiltins);
+    }
+
+    // #1540 — Register JSX runtime imports (jsx/jsxs/Fragment) so codegen
+    // call/identifier resolution can route them to the right host imports.
+    if (options?.jsxRuntime) {
+      registerJsxRuntimeImports(ctx, options.jsxRuntime);
     }
 
     // Pre-pass: detect empty object literals that get properties assigned later
@@ -749,6 +808,12 @@ export function generateModule(
     // where direct addImport calls do not shift defined-function indices).
     emitToUint32Helper(ctx);
 
+    // (#1483) Emit deferred WASI helper functions for the same reason —
+    // `__wasi_write_string` / `__wasi_date_now` etc. reference imports via
+    // funcMap, and addImport callers earlier in this pipeline (lib-globals
+    // scan adding `eval` / `parseInt`) do not shift defined-func entries.
+    emitDeferredWasiHelpers(ctx);
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -787,8 +852,32 @@ export function generateModule(
       // selector to track every top-level FunctionDeclaration that didn't
       // make it into `funcs` along with the rejection reason. Logged to
       // stderr at end of compile. Off by default (zero overhead).
-      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1";
+      // #1530 — `trackFallbacks` is also enabled when one or more
+      // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
+      // starts empty (purely a hook for follow-up PRs); when populated,
+      // selector rejections of those reasons promote from a silent skip
+      // to a hard error so the IR path becomes the only path for the
+      // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
+      // continues to enable the histogram log; the strict set additionally
+      // forces collection.
+      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
       const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
+      // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
+      // promote every fallback with that reason to a hard compile error
+      // instead of letting the legacy path silently catch it. The set
+      // starts empty; once a bucket hits zero against
+      // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
+      // added here in a follow-up PR.
+      if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
+        for (const fb of selection.fallbacks) {
+          if (STRICT_IR_REASONS.has(fb.reason)) {
+            reportErrorNoNode(
+              ctx,
+              `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
+            );
+          }
+        }
+      }
       // Slice 4 (#1169d) — build the class-shape registry from the
       // legacy class collection (`ctx.classSet`, `ctx.structFields`,
       // `ctx.funcMap`). Done BEFORE override resolution so class-typed
@@ -886,12 +975,22 @@ export function generateModule(
       // gate. Cleaner long-term: thread an `IrPathReport` channel through
       // `CompileResult` separate from compile diagnostics; tracked as a
       // follow-up.
+      //
+      // #1530 — the demotion is gated by `STRICT_IR_BUILD_ERRORS`: if any
+      // pattern in that set matches the build-error message, the
+      // diagnostic is promoted to "error" instead. The set starts empty
+      // (non-behavioural change); once a build-error class is known to
+      // be permanently fixed in the IR path, the matching pattern is
+      // added here and the legacy fallback path is closed for that
+      // class. This is the per-kind scoping hook the long-term retire
+      // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
+        const isStrict = isStrictIrBuildError(err.message);
         ctx.errors.push({
           message: `IR path failed for ${err.func}: ${err.message}`,
           line: 0,
           column: 0,
-          severity: "warning",
+          severity: isStrict ? "error" : "warning",
         });
       }
       // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS=1, log a one-line
@@ -983,6 +1082,9 @@ export function generateModule(
     // DataView.prototype.{get,set}{Uint,Int,Float}* on i32_byte vec structs (#1056)
     emitDataViewByteExports(ctx);
 
+    // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
+    emitVecSetByteExport(ctx);
+
     // Emit __test_str_from_externref / __test_str_to_externref exports for
     // dual-run testing in nativeStrings mode (#1187). No-op unless
     // ctx.testRuntime && ctx.nativeStrings.
@@ -1014,6 +1116,11 @@ export function generateModule(
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
+
+    // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
+    // _start wrapper (which appends a drain call) can find its funcIdx.
+    // Idempotent + no-op when the queue was never registered.
+    exportDrainMicrotasksIfRegistered(ctx);
 
     // WASI: export _start entry point (before dead import elimination adjusts indices)
     if (ctx.wasi) {
@@ -1058,7 +1165,10 @@ export function generateModule(
   return { module: mod, errors: ctx.errors };
 }
 
-/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122) */
+/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122).
+ *  When the async microtask queue was registered (#1326c Phase 1C-A), append a
+ *  call to `__drain_microtasks` after the entry function so any scheduled
+ *  microtasks fire before WASI process exit. */
 function addWasiStartExport(ctx: CodegenContext): void {
   // Prefer __module_init — it's always () -> void and handles all top-level code
   let targetIdx: number | undefined;
@@ -1090,6 +1200,15 @@ function addWasiStartExport(ctx: CodegenContext): void {
     const startTypeIdx = addFuncType(ctx, [], [], "$wasi_start_type");
     const startFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     const body: Instr[] = [{ op: "call", funcIdx: targetIdx }];
+
+    // #1326c Phase 1C-A — auto-drain the microtask queue after the entry
+    // function returns. Only emits the call when the async scheduler
+    // actually registered the queue helpers; otherwise leaves the body
+    // unchanged (no perf cost for modules that never schedule microtasks).
+    const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
+    if (drainFuncIdx !== null) {
+      body.push({ op: "call", funcIdx: drainFuncIdx });
+    }
 
     ctx.mod.functions.push({
       name: "_start",
@@ -2323,15 +2442,19 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
-  // - (#779c) `vec.constructor === Array` identity via the runtime's
-  //   `extern_get` constructor path, which calls `__vec_len` to positively
-  //   distinguish vec wrappers from other null-prototype WasmGC structs.
-  //   When `__extern_get` is imported, the property-access lowering may
-  //   need this discrimination for `vec.constructor` lookups.
+  // - host-import paths that coerce a vec wrapper to externref and look up
+  //   `.constructor` — the runtime extern_get handler uses `__vec_len` to
+  //   identify vec wrappers and report `constructor === Array`
+  //   (#1441, #1057, #779c). Without the export, `["a","b"].constructor ===
+  //   Array` is silently false for split/map/filter/etc. results in modules
+  //   that don't otherwise use for-of or JSON.stringify. The `__extern_get`
+  //   constructor path calls `__vec_len` to positively distinguish vec
+  //   wrappers from other null-prototype WasmGC structs.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
     !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
     !ctx.funcMap.has("__extern_get")
   )
     return;
@@ -2487,6 +2610,105 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       desc: { kind: "func", index: getFuncIdx },
     });
   }
+}
+
+/**
+ * (#1503) Emit `__vec_set_byte(externref vec, i32 idx, i32 byte) -> ()` so
+ * the JS runtime can write bytes back into a WasmGC vec struct from inside
+ * `crypto.getRandomValues(...)`. Mirrors the dispatch pattern of
+ * `__vec_get` / `__dv_byte_set`: ref.test against every registered vec
+ * type, then ref.cast + struct.get the underlying array, then array.set the
+ * element. The element-type conversion depends on the vec's element kind:
+ *
+ *   - "f64"      → f64.convert_i32_u then array.set       (TypedArrays — Uint8Array etc.)
+ *   - "i32"      → array.set directly                     (plain JS arrays of numbers stored as i32 — rare)
+ *   - "i32_byte" → array.set directly                     (ArrayBuffer / DataView backing)
+ *   - other      → skipped (no safe coercion from a byte)
+ *
+ * Gated on `__crypto_get_random_values` being imported; otherwise we'd add
+ * a dead export and bloat every module.
+ */
+function emitVecSetByteExport(ctx: CodegenContext): void {
+  if (!ctx.funcMap.has("__crypto_get_random_values")) return;
+  try {
+    _emitVecSetByteExportInner(ctx);
+  } catch {
+    // Non-fatal — if dispatch emission fails the runtime call will throw
+    // a descriptive TypeError when the export is missing.
+  }
+}
+
+function _emitVecSetByteExportInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecEntries = Array.from(ctx.vecTypeMap.entries());
+  if (vecEntries.length === 0) return;
+
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }, { kind: "i32" }],
+    [],
+    "$__vec_set_byte_type",
+  );
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // local 0 = vec externref, local 1 = idx i32, local 2 = byte i32, local 3 = anyref
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 3 } as Instr,
+  ];
+
+  let current: Instr[] = [];
+  for (let i = vecEntries.length - 1; i >= 0; i--) {
+    const [elemKey, vecTypeIdx] = vecEntries[i]!;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) continue;
+    let writeInstrs: Instr[];
+    if (elemKey === "f64") {
+      writeInstrs = [
+        { op: "local.get", index: 3 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: 1 } as Instr, // idx
+        { op: "local.get", index: 2 } as Instr, // byte (i32)
+        { op: "f64.convert_i32_u" } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+      ];
+    } else if (elemKey === "i32" || elemKey === "i32_byte") {
+      writeInstrs = [
+        { op: "local.get", index: 3 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "local.get", index: 2 } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+      ];
+    } else {
+      // Element types we don't know how to write a byte to (externref,
+      // i64, etc.) — skip silently. The runtime will TypeError if asked.
+      continue;
+    }
+    current = [
+      { op: "local.get", index: 3 } as Instr,
+      { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...writeInstrs, { op: "return" } as Instr],
+        else: current,
+      } as Instr,
+    ];
+  }
+  body.push(...current);
+
+  mod.functions.push({
+    name: "__vec_set_byte",
+    typeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as any);
+  mod.exports.push({ name: "__vec_set_byte", desc: { kind: "func", index: funcIdx } });
 }
 
 /**
@@ -2818,6 +3040,9 @@ export function generateMultiModule(
     // Emit __toUint32 Wasm helper after all imports registered.
     emitToUint32Helper(ctx);
 
+    // (#1483) Emit deferred WASI helper functions for the same reason.
+    emitDeferredWasiHelpers(ctx);
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -2926,6 +3151,11 @@ export function generateMultiModule(
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
+
+    // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
+    // _start wrapper (which appends a drain call) can find its funcIdx.
+    // Idempotent + no-op when the queue was never registered.
+    exportDrainMicrotasksIfRegistered(ctx);
 
     // WASI: export _start entry point (before dead import elimination adjusts indices)
     if (ctx.wasi) {
@@ -3076,6 +3306,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   let needsConsoleStderr = false;
   let needsProcExit = false;
   let needsRandomGet = false;
+  // (#1483) Detect Date.now / performance.now / new Date() — all routed to
+  // WASI clock_time_get under --target wasi.
+  let needsClockTimeGet = false;
   let needsFdRead = false;
 
   // ctx.wasiNodeFsFuncs is populated from the original source before import preprocessing
@@ -3110,6 +3343,20 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         propAccess.name.text === "random"
       ) {
         needsRandomGet = true;
+      }
+      // (#1483) Date.now() / performance.now()
+      if (
+        ts.isIdentifier(propAccess.expression) &&
+        (propAccess.expression.text === "Date" || propAccess.expression.text === "performance") &&
+        propAccess.name.text === "now"
+      ) {
+        needsClockTimeGet = true;
+      }
+    }
+    // (#1483) `new Date()` (no args) defaults to current time → clock_time_get.
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Date") {
+      if (!node.arguments || node.arguments.length === 0) {
+        needsClockTimeGet = true;
       }
     }
     // #1481: readStdin() builtin → triggers fd_read import + helper
@@ -3163,6 +3410,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     addImport(ctx, "wasi_snapshot_preview1", "random_get", { kind: "func", typeIdx: randomGetType });
   }
 
+  // (#1483) clock_time_get(clockid: i32, precision: i64, out_ptr: i32) -> errno (i32)
+  // Used by Date.now() / performance.now() / new Date() under --target wasi.
+  // Registered BEFORE any defined helpers so its late-import-shift discipline
+  // matches `random_get` (see CLAUDE.md "addUnionImports" note).
+  if (needsClockTimeGet) {
+    const clockType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i64" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_clock_time_get",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "clock_time_get", { kind: "func", typeIdx: clockType });
+    ctx.wasiClockTimeGetIdx = ctx.funcMap.get("clock_time_get")!;
+  }
+
   // path_open(fd: i32, dirflags: i32, path: i32, path_len: i32, oflags: i32,
   //           rights_base: i64, rights_inheriting: i64, fdflags: i32, fd_out: i32) -> i32
   if (needsPathOpen) {
@@ -3191,24 +3453,140 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     ctx.wasiFdCloseIdx = ctx.funcMap.get("fd_close")!;
   }
 
-  // Register a helper function: __wasi_write_string(strPtr: i32, strLen: i32) -> void
-  // This writes to stdout (fd=1) using fd_write
+  // (#1483) Stash pending-helper flags. We emit WASI helper *functions*
+  // AFTER `collectExternDeclarations` has registered any lib.es5.d.ts globals
+  // (eval / parseInt / etc.) — emitting them earlier would seed funcMap with
+  // entries pointing at indices that the subsequent direct `addImport` calls
+  // silently shift past, corrupting later lookups (e.g. `__wasi_write_string`
+  // referenced by `ensureWasiWriteI32Helper` during user-code compilation).
   if (needsFdWrite) {
+    ctx.wasiPendingFdWriteHelper = true;
+  }
+  if (needsConsoleStderr) {
+    ctx.wasiPendingConsoleStderrHelper = true;
+  }
+  if (needsPathOpen) {
+    ctx.wasiPendingPathOpenHelper = true;
+  }
+  if (needsClockTimeGet) {
+    ctx.wasiClockHelpersPending = true;
+  }
+  if (needsFdRead) {
+    ctx.wasiPendingFdReadHelper = true;
+  }
+}
+
+/**
+ * (#1483) Emit deferred WASI helper functions. Called after
+ * `collectExternDeclarations` (and any other direct-`addImport` callers)
+ * have registered all module imports, so the funcMap entries written here
+ * are stable for subsequent lookups by lazily-registered helpers.
+ */
+export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
+  if (!ctx.wasi) return;
+  if (ctx.wasiPendingFdWriteHelper && !ctx.funcMap.has("__wasi_write_string")) {
     emitWasiWriteStringHelper(ctx);
     // #1493: also register __wasi_write_string_stderr (fd=2) for console.warn/error.
-    if (needsConsoleStderr) {
+    if (ctx.wasiPendingConsoleStderrHelper) {
       emitWasiWriteStringStderrHelper(ctx);
     }
   }
-
-  // Register __wasi_write_file_sync(pathPtr, pathLen, dataPtr, dataLen) helper
-  if (needsPathOpen) {
+  if (ctx.wasiPendingPathOpenHelper && !ctx.funcMap.has("__wasi_write_file_sync")) {
     emitWasiWriteFileSyncHelper(ctx);
+  }
+  if (ctx.wasiClockHelpersPending && !ctx.funcMap.has("__wasi_date_now")) {
+    emitWasiClockHelpers(ctx);
   }
 
   // #1481: register __wasi_read_stdin_all() -> ref NativeString helper
-  if (needsFdRead) {
+  if (ctx.wasiPendingFdReadHelper && !ctx.funcMap.has("__wasi_read_stdin_all")) {
     emitWasiReadStdinAllHelper(ctx);
+  }
+}
+
+/**
+ * (#1483) Emit __wasi_date_now() -> f64 and __wasi_performance_now() -> f64
+ * helpers. Both wrap `clock_time_get` from wasi_snapshot_preview1.
+ *
+ * Memory scratch layout (after the path_open / fd_write 0..15 region):
+ *   [16..23] = i64 nanosecond timestamp for CLOCK_REALTIME (Date.now)
+ *   [24..31] = i64 nanosecond timestamp for CLOCK_MONOTONIC (performance.now)
+ */
+function emitWasiClockHelpers(ctx: CodegenContext): void {
+  const helperTypeIdx = addFuncType(ctx, [], [{ kind: "f64" }]);
+
+  /**
+   * Build the body that, after `clock_time_get` has written an i64 LE
+   * nanosecond count at `outPtr`, recombines it into a single i64 on the
+   * stack via two unsigned i32 loads. (We avoid `i64.load` because the
+   * current binary emitter does not support it.)
+   *
+   * Stack effect: pushes i64 ns.
+   */
+  function buildI64NsFromMem(outPtr: number): Instr[] {
+    return [
+      // hi32 << 32
+      { op: "i32.const", value: outPtr + 4 } as Instr,
+      { op: "i32.load", align: 2, offset: 0 } as Instr,
+      { op: "i64.extend_i32_u" } as Instr,
+      { op: "i64.const", value: 32n } as unknown as Instr,
+      { op: "i64.shl" } as Instr,
+      // | lo32
+      { op: "i32.const", value: outPtr } as Instr,
+      { op: "i32.load", align: 2, offset: 0 } as Instr,
+      { op: "i64.extend_i32_u" } as Instr,
+      { op: "i64.or" } as Instr,
+    ];
+  }
+
+  // __wasi_date_now() — CLOCK_REALTIME (0). Out-ptr lives at scratch[16..23].
+  {
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__wasi_date_now", funcIdx);
+    const body: Instr[] = [
+      // clock_time_get(CLOCK_REALTIME=0, precision=1_000_000ns=1ms, out_ptr=16) -> errno
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "i64.const", value: 1000000n } as unknown as Instr,
+      { op: "i32.const", value: 16 } as Instr,
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
+      { op: "drop" } as Instr, // ignore errno
+      ...buildI64NsFromMem(16),
+      // i64 ns → f64 ms (signed convert OK: i64 ns range is good for ~292y past 1970)
+      { op: "f64.convert_i64_s" } as Instr,
+      { op: "f64.const", value: 1e6 } as Instr,
+      { op: "f64.div" } as Instr,
+    ];
+    ctx.mod.functions.push({
+      name: "__wasi_date_now",
+      typeIdx: helperTypeIdx,
+      locals: [],
+      body,
+      exported: false,
+    });
+  }
+
+  // __wasi_performance_now() — CLOCK_MONOTONIC (1). Out-ptr lives at scratch[24..31].
+  {
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__wasi_performance_now", funcIdx);
+    const body: Instr[] = [
+      { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
+      { op: "i64.const", value: 1000n } as unknown as Instr, // precision = 1us
+      { op: "i32.const", value: 24 } as Instr,
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
+      { op: "drop" } as Instr,
+      ...buildI64NsFromMem(24),
+      { op: "f64.convert_i64_s" } as Instr,
+      { op: "f64.const", value: 1e6 } as Instr,
+      { op: "f64.div" } as Instr,
+    ];
+    ctx.mod.functions.push({
+      name: "__wasi_performance_now",
+      typeIdx: helperTypeIdx,
+      locals: [],
+      body,
+      exported: false,
+    });
   }
 }
 
@@ -3700,7 +4078,10 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
     params: [{ kind: "f64" }, { kind: "externref" }],
     result: { kind: "externref" },
   },
-  split: { params: [{ kind: "externref" }], result: { kind: "externref" } },
+  // split: separator (externref) + limit (f64, NaN sentinel for "no limit" — #1441).
+  // The host runtime in `string_method` detects NaN and calls `split(sep)` without
+  // the limit so the spec default 2^32-1 applies (instead of ToUint32(NaN) === 0).
+  split: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "externref" } },
   match: { params: [{ kind: "externref" }], result: { kind: "externref" } },
   search: { params: [{ kind: "externref" }], result: { kind: "f64" } },
   at: { params: [{ kind: "f64" }], result: { kind: "externref" } },
@@ -3721,7 +4102,11 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
       const methodName = prop.name.text;
       if (isStringType(receiverType) && Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)) {
         needed.add(methodName);
-        // Track if the method has a RegExp arg (replace, replaceAll, split, match, search)
+        // Track if the method has a non-string arg (RegExp or custom object
+        // implementing Symbol.replace/Symbol.match/etc). The native helpers
+        // only handle string search values — for any other type the host
+        // import must be available so JS handles @@replace/@@match dispatch
+        // (#1443).
         if (
           (methodName === "replace" ||
             methodName === "replaceAll" ||
@@ -3731,8 +4116,20 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
           node.arguments.length > 0
         ) {
           const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-          const symName = argType.getSymbol()?.getName();
-          if (symName === "RegExp") {
+          const isStringLike = (t: ts.Type): boolean => {
+            if ((t.flags & ts.TypeFlags.String) !== 0) return true;
+            if ((t.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
+            if ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String") return true;
+            return false;
+          };
+          let needsHost = false;
+          if ((argType.flags & ts.TypeFlags.Union) !== 0) {
+            const union = argType as ts.UnionType;
+            needsHost = !union.types.every(isStringLike);
+          } else {
+            needsHost = !isStringLike(argType);
+          }
+          if (needsHost) {
             regexpArgMethods.add(methodName);
           }
         }
@@ -4484,6 +4881,14 @@ export const KNOWN_CONSTRUCTORS = new Set([
   "URIError",
   "EvalError",
   "ReferenceError",
+  // (#1467) AggregateError gets its own 3-param `__new_AggregateError` host
+  // import registered by new-super.ts (errors + message + options). The
+  // generic unknown-constructor pre-pass would register it with a 2-param
+  // signature (errors + message only), which then collides with new-super.ts's
+  // 3-param call site and silently drops the `options` argument. Keep this
+  // entry in `KNOWN_CONSTRUCTORS` so the pre-pass skips it and lets
+  // new-super.ts register the canonical signature.
+  "AggregateError",
   "Test262Error",
   "Object",
   "Function",
@@ -4714,8 +5119,13 @@ function collectPromiseImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
     if (!ctx.funcMap.has(importName)) {
       // (#1368) Aggregators (all/race/allSettled/any) take (thisArg, iterable);
       // resolve/reject keep their original 1-arg signature.
+      // (#1116) Aggregators add an i32 `directCall` flag — 1 when codegen used
+      // the bare `Promise.METHOD(iter)` form (substitute globalThis.Promise),
+      // 0 when user wrote `Promise.METHOD.call(thisArg, iter)` (use thisArg).
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
-      const params: ValType[] = isAggregator ? [{ kind: "externref" }, { kind: "externref" }] : [{ kind: "externref" }];
+      const params: ValType[] = isAggregator
+        ? [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }]
+        : [{ kind: "externref" }];
       const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
     }
@@ -5733,6 +6143,13 @@ export function addIteratorImports(ctx: CodegenContext): void {
     kind: "func",
     typeIdx: extToVoid,
   });
+
+  // __iterator_rest: (externref) → externref — drains a partially-consumed
+  // iterator into a real JS Array for the `[...rest]` binding pattern (#1052).
+  addImport(ctx, "env", "__iterator_rest", {
+    kind: "func",
+    typeIdx: extToExt,
+  });
 }
 
 /** Register array iterator host imports (entries/keys/values) if not already registered */
@@ -6112,10 +6529,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     }
   }
 
-  // Handle unions (T | undefined) — resolve inner type
+  // Handle unions (T | undefined | void) — resolve inner type.
+  // (#1550) Filter Void alongside Null/Undefined — TS treats counter()'s `void`
+  // return as a distinct type, but at runtime it's just `undefined`. Without
+  // this, `void | null` (e.g. binding `w` in `function f({w = counter()} = {w: null})`)
+  // collapses to `void` → i32 and the destructured null is erased.
   if (tsType.isUnion()) {
     const nonNullish = tsType.types.filter(
-      (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined),
+      (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined) && !(t.flags & ts.TypeFlags.Void),
     );
     if (nonNullish.length === 1 && tsType.types.length === 2) {
       const inner = resolveWasmType(ctx, nonNullish[0]!, _depth + 1, _visited);
@@ -6260,6 +6681,34 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     ensureStructForType(ctx, propType);
     // Use resolveWasmType so nested structs get ref types, not externref
     let wasmType = resolveWasmType(ctx, propType);
+    // (#1468) `{ k: undefined }` makes TS infer the property's type as the
+    // literal `undefined`. `mapTsTypeToWasm` maps that to i32 because for
+    // function return types `undefined`/`void` indicate "no result". For a
+    // struct *field* the property is a value slot, so i32 silently loses the
+    // information that the slot holds `undefined`: codegen writes
+    // `i32.const 0` (which the host reads back as `false`) and destructuring
+    // defaults like `{ k = D }` never fire because the value isn't
+    // observably undefined. Widening the field to externref lets the
+    // existing `__get_undefined()` path in `compileExpression` preserve the
+    // identity of `undefined`, which then trips `__extern_is_undefined` in
+    // the destructuring default fast-path.
+    //
+    // Scope: only when the field's TS type is *exactly* the `undefined`
+    // (or `void`) primitive — for `T | undefined` unions the union branch
+    // in `mapTsTypeToWasm` already widens to externref / inner-T, so this
+    // never affects them.
+    if (
+      wasmType.kind === "i32" &&
+      (propType.flags & ts.TypeFlags.Undefined || propType.flags & ts.TypeFlags.Void) &&
+      !(propType.flags & ts.TypeFlags.Boolean) &&
+      !(propType.flags & ts.TypeFlags.BooleanLiteral) &&
+      !(propType.flags & ts.TypeFlags.Number) &&
+      !(propType.flags & ts.TypeFlags.NumberLiteral) &&
+      !(propType.flags & ts.TypeFlags.ESSymbol) &&
+      !(propType.flags & ts.TypeFlags.UniqueESSymbol)
+    ) {
+      wasmType = { kind: "externref" };
+    }
     const callSigs = propType.getCallSignatures();
     // For valueOf/toString callable properties, store as eqref instead of externref
     // so coercion can recover the closure and call it via call_ref
@@ -7494,6 +7943,67 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
   }
 }
 
+/**
+ * Register JSX runtime imports detected by preprocessImports (#1540).
+ *
+ * Wires three host-import shapes:
+ *   - `__jsx_runtime_jsx` / `__jsx_runtime_jsxs`: `(externref, externref,
+ *     externref) -> externref` — called by the JSX call-site intercept in
+ *     `expressions/calls.ts`.
+ *   - `__jsx_runtime_Fragment`: `() -> externref` — exposed as a declared
+ *     global under the user's `localFragment` name, so identifier
+ *     resolution sees it like a normal externref.
+ *   - `__jsx_runtime_jsxDEV` (when present): same shape as `jsx`/`jsxs`
+ *     with three extra throwaway args we ignore in v1.
+ *
+ * In WASI mode we still register the imports (the standalone-target
+ * Wasm-native VDOM path is a follow-up); the user is expected to provide
+ * `deps.jsxRuntime` or accept the built-in React-shaped fallback.
+ *
+ * `ctx.mod.jsxImportSource` is set so the import-manifest classifier can
+ * carry the specifier through to `resolveImport`.
+ */
+function registerJsxRuntimeImports(
+  ctx: CodegenContext,
+  jsxRuntime: import("../import-resolver.js").JsxRuntimeImport,
+): void {
+  ctx.mod.jsxImportSource = jsxRuntime.specifier;
+  ctx.jsxRuntime = jsxRuntime;
+  const ext: ValType = { kind: "externref" };
+
+  const callableShapes: { method: "jsx" | "jsxs" | "jsxDEV"; local: string | undefined; arity: number }[] = [
+    { method: "jsx", local: jsxRuntime.localJsx, arity: 3 },
+    { method: "jsxs", local: jsxRuntime.localJsxs, arity: 3 },
+    // jsxDEV takes extra (isStatic, source, self) args. We accept up to 6
+    // and ignore the trailing three at the host binding side.
+    { method: "jsxDEV", local: jsxRuntime.localJsxDev, arity: 6 },
+  ];
+  for (const { method, local, arity } of callableShapes) {
+    if (!local) continue;
+    const importName = `__jsx_runtime_${method}`;
+    if (ctx.funcMap.has(importName)) continue;
+    const params: ValType[] = Array.from({ length: arity }, () => ext);
+    const typeIdx = addFuncType(ctx, params, [ext]);
+    addImport(ctx, "env", importName, { kind: "func", typeIdx });
+  }
+
+  // Fragment is an externref-returning thunk so identity comparisons work
+  // (the host binding caches a single Symbol). Surface it as a declared
+  // global so identifier resolution picks it up.
+  if (jsxRuntime.localFragment) {
+    const importName = `__jsx_runtime_Fragment`;
+    if (!ctx.funcMap.has(importName)) {
+      const typeIdx = addFuncType(ctx, [], [ext]);
+      addImport(ctx, "env", importName, { kind: "func", typeIdx });
+    }
+    const funcIdx = ctx.funcMap.get(importName);
+    if (funcIdx !== undefined) {
+      ctx.declaredGlobals.set(jsxRuntime.localFragment, { type: { kind: "externref" }, funcIdx });
+      ctx.nodeBuiltinGlobals.set(jsxRuntime.localFragment, funcIdx);
+    }
+  }
+}
+
 /** Check if source code references DOM globals (document, window) */
 const LIB_GLOBALS = new Set([
   "document",
@@ -7748,7 +8258,35 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     if (fctx.localMap.has(name)) return;
     if (ctx.moduleGlobals.has(name)) return;
     const varType = ctx.checker.getTypeAtLocation(decl);
-    const wasmType = resolveWasmType(ctx, varType);
+    // (#1239 / #1433) Object literals carrying get/set accessor declarations,
+    // or `[Symbol.dispose]` / `[Symbol.asyncDispose]` computed methods, are
+    // routed through the JS-host plain-object (externref) path. The local
+    // must be allocated as externref so subsequent property reads/writes
+    // bind to the host object, not a struct slot. Tag the var here so
+    // resolveStructNameForExpr sees the override at every later access.
+    let initForcesExternref = false;
+    if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      for (const p of decl.initializer.properties) {
+        if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
+          initForcesExternref = true;
+          break;
+        }
+        if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
+          const inner = p.name.expression;
+          if (
+            ts.isPropertyAccessExpression(inner) &&
+            ts.isIdentifier(inner.expression) &&
+            inner.expression.text === "Symbol" &&
+            (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
+          ) {
+            initForcesExternref = true;
+            break;
+          }
+        }
+      }
+    }
+    const wasmType: ValType = initForcesExternref ? { kind: "externref" as const } : resolveWasmType(ctx, varType);
+    if (initForcesExternref) ctx.externrefAccessorVars.add(name);
     const localIdx = allocLocal(fctx, name, wasmType);
     // In JS, hoisted `var` variables are `undefined` before their declaration,
     // not `null`. For externref locals, emit __get_undefined() + local.set (#737).

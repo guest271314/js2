@@ -23,7 +23,7 @@ import {
   compileLogicalAssignment,
   isCompoundAssignment,
 } from "./expressions/assignment.js";
-import { emitThrowString, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
+import { emitThrowTypeError, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -583,6 +583,38 @@ export function compileBinaryExpression(
     if (staticKey !== null) {
       const hasInStruct = structFieldNames !== null && structFieldNames.includes(staticKey);
       const has = hasInStruct || tsTypeHasProperty;
+      // (#1444) When RHS is externref/anyref AND static analysis came up empty
+      // (no struct field, no TS-typed prop), the answer is NOT reliably false
+      // — the host object may carry dynamic keys (e.g. regex `result.groups`).
+      // Route through `__extern_has` for the real `in` check instead of
+      // emitting an unconditional `false`.
+      if (!has && (rightWasm.kind === "externref" || rightWasm.kind === "anyref")) {
+        const hasIdx = ensureLateImport(
+          ctx,
+          "__extern_has",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "i32" }],
+        );
+        if (hasIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult && rightResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+          if (leftResult && leftResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (leftResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: hasIdx });
+          return { kind: "i32" };
+        }
+      }
       // Evaluate both operands for side effects (needed for comma expressions like
       // (NUMBER = Number, "MAX_VALUE") in NUMBER). Drop the produced values.
       const leftResult = compileExpression(ctx, fctx, expr.left);
@@ -632,6 +664,41 @@ export function compileBinaryExpression(
     // Compile both sides for side effects, then use TS type system if the key
     // can be resolved from its type (e.g., a string variable with a known literal type).
     {
+      // (#1444) When RHS is externref-backed (host object — e.g. regex
+      // `result.groups`, untyped JS values), route through `__extern_has` so
+      // `'key' in hostObj` reflects the actual JS `in` semantics instead of
+      // the unconditional `false` fallback. The static path above still
+      // covers WasmGC structs / vec types / TS-typed properties where the
+      // compile-time answer is reliable.
+      if (rightWasm.kind === "externref" || rightWasm.kind === "anyref") {
+        const hasIdx = ensureLateImport(
+          ctx,
+          "__extern_has",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "i32" }],
+        );
+        if (hasIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          // Push obj (RHS) then key (LHS) — runtime signature is (obj, key).
+          const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+          if (rightResult && rightResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (rightResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+          if (leftResult && leftResult.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+          if (leftResult === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: hasIdx });
+          return { kind: "i32" };
+        }
+      }
+
       const leftResult = compileExpression(ctx, fctx, expr.left);
       if (leftResult) {
         fctx.body.push({ op: "drop" });
@@ -910,13 +977,21 @@ export function compileBinaryExpression(
         return { kind: "i32" };
       }
 
-      // Mixed BigInt + Number arithmetic (e.g. 1n + 1): always a TypeError in JS.
+      // Mixed BigInt + Number arithmetic (e.g. 1n + 1): per spec §6.1.6.2.1
+      // (and §13.15 ApplyStringOrNumericBinaryOperator), throw a real
+      // TypeError instance (so `assert.throws(TypeError, …)` catches it).
+      // Special case: `+` with a string operand is *concatenation*, not
+      // numeric add — route to the string path which calls ToString on the
+      // BigInt side (`1n + "" === "1"` per §13.15.4).
+      if (op === ts.SyntaxKind.PlusToken && (isStringType(leftTsType) || isStringType(rightTsType))) {
+        return compileStringBinaryOp(ctx, fctx, expr, op);
+      }
       // Compile both sides for side effects, drop their values, then throw.
       const lt = compileExpression(ctx, fctx, expr.left);
       if (lt) fctx.body.push({ op: "drop" });
       const rt = compileExpression(ctx, fctx, expr.right);
       if (rt) fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "Cannot mix BigInt and other types, use explicit conversions");
+      emitThrowTypeError(ctx, fctx, "Cannot mix BigInt and other types, use explicit conversions");
       return { kind: "i32" };
     }
 
@@ -1656,6 +1731,23 @@ export function compileBinaryExpression(
             // Strict equality: __host_eq (JS ===) for reference identity.
             // If that returns false, fall through to numeric unboxing for
             // boxed numbers that differ in identity but have the same value. (#1065)
+            //
+            // (#1383) Gate the numeric-unbox fallback on a runtime typeof
+            // check — only fire it when BOTH operands are typeof === "number".
+            // The fallback was load-bearing for genuinely-different-identity
+            // boxed numbers (V8 sometimes returns different externref ids for
+            // numerically-equal JS numbers), but it incorrectly succeeded for
+            // cross-type strict comparisons too: `null === 0` produced
+            // `__unbox_number(null) === 0`, `__unbox_number(0) === 0`, true.
+            // Spec §7.2.16 says strict equality between values of different
+            // types is always false.
+            //
+            // Earlier PR #272 tried to drop the fallback entirely and caused
+            // -12 net test262 — the fallback was masking unrelated mismatches
+            // (boolean / undefined externrefs that also happen to land in
+            // the externref-vs-externref path). Gating with a typeof check
+            // preserves the load-bearing same-type case AND fixes the
+            // cross-type leak.
             const hostEqIdx = ensureLateImport(
               ctx,
               "__host_eq",
@@ -1663,6 +1755,7 @@ export function compileBinaryExpression(
               [{ kind: "i32" }],
             );
             flushLateImportShifts(ctx, fctx);
+            const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
@@ -1672,11 +1765,31 @@ export function compileBinaryExpression(
                 blockType: { kind: "val", type: { kind: "i32" } },
                 then: [{ op: "i32.const", value: isNeqOp ? 0 : 1 } as Instr],
                 else: [
+                  // Both operands must be JS numbers for the numeric-unbox
+                  // fallback to be sound. Otherwise host_eq's `false` is
+                  // definitive (cross-type strict equality is always false).
                   { op: "local.get", index: tmpLeft },
-                  { op: "call", funcIdx: unboxIdx },
+                  { op: "call", funcIdx: typeofNumIdx } as Instr,
                   { op: "local.get", index: tmpRight },
-                  { op: "call", funcIdx: unboxIdx },
-                  { op: isEqOp ? "f64.eq" : "f64.ne" } as Instr,
+                  { op: "call", funcIdx: typeofNumIdx } as Instr,
+                  { op: "i32.and" } as Instr,
+                  {
+                    op: "if",
+                    blockType: { kind: "val", type: { kind: "i32" } },
+                    then: [
+                      // Both numbers: numeric-unbox compare is safe and
+                      // recovers same-value-different-identity cases.
+                      { op: "local.get", index: tmpLeft },
+                      { op: "call", funcIdx: unboxIdx },
+                      { op: "local.get", index: tmpRight },
+                      { op: "call", funcIdx: unboxIdx },
+                      { op: isEqOp ? "f64.eq" : "f64.ne" } as Instr,
+                    ] as Instr[],
+                    else: [
+                      // Cross-type or non-number: host_eq's false is final.
+                      { op: "i32.const", value: isNeqOp ? 1 : 0 } as Instr,
+                    ] as Instr[],
+                  } as Instr,
                 ] as Instr[],
               } as Instr,
             ] as Instr[];
