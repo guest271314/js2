@@ -633,6 +633,12 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiBumpPtrGlobalIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
+  wasiEnvironSizesGetIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_get import index (-1 = not registered) */
+  wasiEnvironGetIdx: number;
+  /** #1482: env::__wasi_env_get_str late import index for JS-polyfill fast path (-1 = not registered) */
+  wasiEnvGetStrIdx: number;
   /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
   wasiClockTimeGetIdx?: number;
   /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */

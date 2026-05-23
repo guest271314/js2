@@ -470,7 +470,7 @@ Status-only updates (no move):
 |------|---------------|--------|
 | `sprints/54/1583-landing-feature-support-table-audit.md` | in-progress → done | PR #489 merged 2026-05-23 |
 | `sprints/54/1589-test262-compile-timeout-bucket-100-tests.md` | ready → done | PR #509 merged 2026-05-23 |
-| `sprints/53/1580-string-hash-benchmark-...md` | ready → done | PR #482 merged 2026-05-22 (was stale) |
+| `sprints/54/1580-string-hash-benchmark-...md` | ready → done | PR #482 merged 2026-05-22 (was stale; PR #521 had already moved the file from s53 to s54 before this PR landed) |
 
 #1580's PR landed before sprint 53 even closed; the file's status was
 just never updated. This closeout sweeps it back to `done` so it doesn't
