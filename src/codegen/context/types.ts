@@ -147,6 +147,15 @@ export interface FunctionContext {
   isDerivedConstructor?: boolean;
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
+  /**
+   * (#1042) True while {@link emitAsyncStateMachine} is driving an async
+   * function body through the CPS transform. Read by the `AwaitExpression`
+   * dispatcher in expressions.ts to decide between the legacy pass-through and
+   * a continuation split. Inert in #1042 PR1 (the activation hook is unwired
+   * and `ASYNC_CPS_ENABLED` is false), so it stays undefined/false and the
+   * emitted Wasm is byte-identical.
+   */
+  asyncCpsActive?: boolean;
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;
   /** Set of variable names that are const bindings — assignment throws TypeError at runtime */
