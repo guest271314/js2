@@ -3391,6 +3391,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   let needsConsoleStderr = false;
   let needsProcExit = false;
   let needsRandomGet = false;
+  // #1482: process.env.X access — register environ_get / environ_sizes_get +
+  // the JS-polyfill fast-path host import.
+  let needsEnviron = false;
   // (#1483) Detect Date.now / performance.now / new Date() — all routed to
   // WASI clock_time_get under --target wasi.
   let needsClockTimeGet = false;
@@ -3444,6 +3447,20 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         needsClockTimeGet = true;
       }
     }
+    // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
+    // and `process.env["X"]` (ElementAccessExpression). The outer node may be
+    // either form; we detect the inner `process.env` chain.
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const obj = node.expression;
+      if (
+        ts.isPropertyAccessExpression(obj) &&
+        ts.isIdentifier(obj.expression) &&
+        obj.expression.text === "process" &&
+        obj.name.text === "env"
+      ) {
+        needsEnviron = true;
+      }
+    }
     // #1481: readStdin() builtin → triggers fd_read import + helper
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "readStdin") {
       needsFdRead = true;
@@ -3493,6 +3510,36 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsRandomGet) {
     const randomGetType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$wasi_random_get");
     addImport(ctx, "wasi_snapshot_preview1", "random_get", { kind: "func", typeIdx: randomGetType });
+  }
+
+  // #1482: process.env access — register the WASI environ imports for protocol
+  // compliance (a wasmtime host can satisfy these) AND register the JS-polyfill
+  // fast-path host import. The codegen path emits a `call $__wasi_env_get_str`
+  // because reconstructing a NativeString from a `KEY=VALUE` byte run inside
+  // pure Wasm requires considerable scaffolding; the host-import shortcut keeps
+  // the MVP scope tight. The environ_* imports stay declared so a future
+  // pure-WASI implementation can swap in without changing the manifest.
+  if (needsEnviron) {
+    // environ_sizes_get(count_ptr: i32, buf_size_ptr: i32) -> errno (i32)
+    const envSizesType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_environ_sizes_get",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "environ_sizes_get", { kind: "func", typeIdx: envSizesType });
+    ctx.wasiEnvironSizesGetIdx = ctx.funcMap.get("environ_sizes_get")!;
+
+    // environ_get(envPtrs: i32, buf: i32) -> errno (i32)
+    const envGetType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$wasi_environ_get");
+    addImport(ctx, "wasi_snapshot_preview1", "environ_get", { kind: "func", typeIdx: envGetType });
+    ctx.wasiEnvironGetIdx = ctx.funcMap.get("environ_get")!;
+
+    // env::__wasi_env_get_str(key: externref) -> externref
+    // JS-polyfill fast path. The polyfill maps this to `process.env[key]`.
+    const envGetStrType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$wasi_env_get_str_t");
+    addImport(ctx, "env", "__wasi_env_get_str", { kind: "func", typeIdx: envGetStrType });
+    ctx.wasiEnvGetStrIdx = ctx.funcMap.get("__wasi_env_get_str")!;
   }
 
   // (#1483) clock_time_get(clockid: i32, precision: i64, out_ptr: i32) -> errno (i32)
