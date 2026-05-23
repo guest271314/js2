@@ -17,6 +17,13 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Wasm experimental flags propagated to all child Node processes:
+  # - stringref: stringview_wtf16 heap type (wasm:js-string ops)
+  # - custom-descriptors: 'exact' heap type
+  # Needed by generate-size-benchmarks + generate-playground-benchmark-sidebar
+  # which instantiate emitted Wasm modules. Without these, Node 25 rejects
+  # the modules at compile-time.
+  NODE_OPTIONS: "--experimental-wasm-stringref --experimental-wasm-custom-descriptors"
 
 concurrency:
   group: benchmark-refresh-${{ github.event.pull_request.number || github.ref }}
@@ -24,7 +31,7 @@ concurrency:
 
 jobs:
   refresh-benchmarks:
-    if: github.repository == 'loopdive/js2wasm' && (github.event_name != 'push' || github.actor != 'github-actions[bot]')
+    if: github.repository == 'loopdive/js2' && (github.event_name != 'push' || github.actor != 'github-actions[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -38,7 +45,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 25
 
       - name: Setup pnpm via Corepack
         run: |
@@ -96,26 +103,43 @@ jobs:
             echo "regressions=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Print performance regressions (informational on PR/push, gating on workflow_dispatch)
+      - name: Print performance regressions (informational on push, gating on PR + workflow_dispatch)
         if: steps.benchmark_diff.outputs.regressions == 'true'
         run: |
           echo "Landing-page benchmark regressions detected relative to benchmarks/results/playground-benchmark-sidebar.json:"
           cat benchmark-reports/performance-regressions.txt
           echo
-          echo "Note (#1214): on pull_request and push events, this step does NOT fail the workflow."
-          echo "  The committed baseline is generated locally, but CI runs on shared GitHub Actions"
-          echo "  runners (slower, noisier scheduling). Both wasm AND js measurements are affected,"
-          echo "  but wasm is more sensitive to cache/scheduling variance — so the wasm:js ratio"
-          echo "  drifts in a way that is NOT a real compiler regression."
-          echo "  To enforce regression gating manually: trigger via workflow_dispatch with"
-          echo "  allow_performance_regressions=false."
-          echo "  Architectural follow-up: regenerate baseline on push-to-main and commit it back"
-          echo "  (see #1214 option A) — this would make the gate meaningful again on PRs."
+          echo "Gating policy (#1525, docs/ci-policy.md §6):"
+          echo "  - pull_request:     HARD GATE — this workflow fails on regression."
+          echo "                      The committed baseline is now CI-runner-derived (#1216),"
+          echo "                      so wasm:js-ratio drift is small enough to gate against."
+          echo "  - push (main):      informational only — the auto-commit step below skips on"
+          echo "                      regression, which is the right outcome (don't promote"
+          echo "                      regressed numbers)."
+          echo "  - workflow_dispatch: enforced unless allow_performance_regressions=true."
+          echo
+          echo "Override (PR only): set BENCHMARK_STRICT=0 in the workflow env to demote back to"
+          echo "  informational. Only do this with explicit reviewer sign-off."
 
-      - name: Fail on performance regressions (workflow_dispatch only)
-        if: steps.benchmark_diff.outputs.regressions == 'true' && github.event_name == 'workflow_dispatch' && !inputs.allow_performance_regressions
+      - name: Fail on performance regressions (PR + workflow_dispatch)
+        # #1525 — PR path is now a hard gate (#1216 made the baseline
+        # CI-runner-derived, so wasm:js drift is small enough to enforce).
+        # workflow_dispatch: existing behaviour (enforced unless
+        # allow_performance_regressions=true).
+        # push to main: this step is skipped; the auto-commit step further
+        # below already refuses to promote regressed numbers.
+        if: |
+          steps.benchmark_diff.outputs.regressions == 'true' && (
+            (github.event_name == 'pull_request' && env.BENCHMARK_STRICT != '0') ||
+            (github.event_name == 'workflow_dispatch' && !inputs.allow_performance_regressions)
+          )
+        env:
+          # Escape hatch: set BENCHMARK_STRICT=0 in workflow env to demote the
+          # PR-event gate back to informational. Default (unset) = strict.
+          BENCHMARK_STRICT: ${{ env.BENCHMARK_STRICT || '1' }}
         run: |
-          echo "Failing workflow due to performance regressions (workflow_dispatch enforcement)."
+          echo "Failing workflow due to landing-page benchmark regressions."
+          echo "Event: ${{ github.event_name }}; strict=${BENCHMARK_STRICT}"
           exit 1
 
       - name: Upload benchmark artifacts
@@ -142,13 +166,18 @@ jobs:
           if-no-files-found: warn
 
       # #1216: auto-commit a freshly-generated playground benchmark baseline
-      # back to main on push events. This is the architectural follow-up to
-      # #1214 — by promoting the CI-derived baseline, future PR comparisons
-      # will run against numbers that reflect CI runner characteristics
-      # (slower CPUs, noisier scheduling) instead of a local dev machine.
-      # That makes the regression-detection step meaningful again on PRs.
+      # back to main on push events.
       #
-      # Guards:
+      # DISABLED (post #491): The main branch ruleset enforces the merge
+      # queue, so direct `git push` from this workflow fails with
+      # `GH013: Changes must be made through the merge queue`. The whole
+      # auto-commit step is commented out; the benchmark refresh still
+      # RUNS (and uploads artifacts via the upload-artifact step above),
+      # but the freshly-generated baseline is no longer auto-committed
+      # back to main. The baseline can be refreshed via a normal PR when
+      # it drifts.
+      #
+      # Original guards (retained for context):
       #   - Only on `push: main` (not pull_request, not workflow_dispatch).
       #     The actor check excludes the bot itself to avoid commit loops.
       #   - Skip if the benchmark diff reported regressions — promoting
@@ -159,48 +188,33 @@ jobs:
       #     retriggering the workflow.
       #
       # Pattern follows `refresh-committed-baseline.yml` (test262 JSONL sync).
-      - name: Auto-commit refreshed baseline (#1216)
-        if: |
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          github.actor != 'github-actions[bot]' &&
-          steps.benchmark_diff.outputs.regressions != 'true'
-        run: |
-          set -euo pipefail
-          # Configure bot identity for the commit. Same identity as
-          # refresh-committed-baseline.yml so the commit-back loop is
-          # consistently attributable.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage only the canonical committed location (per #1170 LFS
-          # migration: the public/ copies are gitignored downstream artifacts;
-          # they get regenerated by build-pages.js at deploy time).
-          # Both JIT and no-JIT (#107) baselines are refreshed in the same
-          # commit — the no-JIT JSON is the data source for the second
-          # landing-page chart and lives next to the JIT baseline.
-          git add -f benchmarks/results/playground-benchmark-sidebar.json
-          git add -f benchmarks/results/playground-benchmark-sidebar-no-jit.json || true
-          if git diff --cached --quiet; then
-            echo "Baseline byte-identical to committed copy — nothing to commit."
-            exit 0
-          fi
-          # [skip ci] keeps this commit from retriggering the Refresh
-          # Benchmarks workflow (or any other workflow on main pushes).
-          git commit -m "chore(ci #1216): refresh playground benchmark baseline [skip ci]"
-          # Race handling: another [skip ci] commit may have landed while
-          # we were running. Try fast-forward; on conflict, reset to
-          # origin/main and reapply the regenerated file. Mirrors the
-          # refresh-committed-baseline.yml pattern.
-          if ! git pull --rebase --autostash origin main; then
-            git rebase --abort 2>/dev/null || true
-            git fetch origin main
-            git reset --hard origin/main
-            git add -f benchmarks/results/playground-benchmark-sidebar.json
-            git add -f benchmarks/results/playground-benchmark-sidebar-no-jit.json || true
-            git diff --cached --quiet && exit 0
-            git commit -m "chore(ci #1216): refresh playground benchmark baseline [skip ci]"
-          fi
-          git push
+      # - name: Auto-commit refreshed baseline (#1216)
+      #   if: |
+      #     github.event_name == 'push' &&
+      #     github.ref == 'refs/heads/main' &&
+      #     github.actor != 'github-actions[bot]' &&
+      #     steps.benchmark_diff.outputs.regressions != 'true'
+      #   run: |
+      #     set -euo pipefail
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      #     git add -f benchmarks/results/playground-benchmark-sidebar.json
+      #     git add -f benchmarks/results/playground-benchmark-sidebar-no-jit.json || true
+      #     if git diff --cached --quiet; then
+      #       echo "Baseline byte-identical to committed copy — nothing to commit."
+      #       exit 0
+      #     fi
+      #     git commit -m "chore(ci #1216): refresh playground benchmark baseline [skip ci]"
+      #     if ! git pull --rebase --autostash origin main; then
+      #       git rebase --abort 2>/dev/null || true
+      #       git fetch origin main
+      #       git reset --hard origin/main
+      #       git add -f benchmarks/results/playground-benchmark-sidebar.json
+      #       git add -f benchmarks/results/playground-benchmark-sidebar-no-jit.json || true
+      #       git diff --cached --quiet && exit 0
+      #       git commit -m "chore(ci #1216): refresh playground benchmark baseline [skip ci]"
+      #     fi
+      #     git push
 
       # Note (#1216): even after auto-commit lands, the regression-detection
       # step is still informational on PR/push events (gating only on

@@ -1418,17 +1418,24 @@ export function coerceType(
     fctx.body.push({ op: "ref.null.extern" });
     return;
   }
-  // ref/ref_null → externref: check @@toPrimitive("string") first, then toString(), else extern.convert_any
+  // ref/ref_null → externref:
+  // - With explicit toPrimitiveHint (e.g. template literal span, String() call):
+  //   walk @@toPrimitive("string") → toString() per §7.1.1 OrdinaryToPrimitive.
+  // - Without a hint (plain `any`/externref typing): just `extern.convert_any`.
+  //   #1525: previously this path eagerly called `${name}_toString` whenever a
+  //   matching standalone method existed, so `const obj: any = { toString(){...} }`
+  //   would store the toString result as obj instead of the struct itself —
+  //   breaking `typeof obj === "object"`, downstream `obj + n`, `obj != 0`, and
+  //   any host method that runs its own ToPrimitive on the wasmGC arg.
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "externref") {
     const typeIdx = (from as { typeIdx: number }).typeIdx;
     const name = ctx.typeIdxToStructName.get(typeIdx);
-    if (name !== undefined) {
+    if (name !== undefined && toPrimitiveHint !== undefined) {
       // Check for [Symbol.toPrimitive] method first
       const toPrimFuncIdx = ctx.funcMap.get(`${name}_@@toPrimitive`);
       if (toPrimFuncIdx !== undefined) {
         // Call ClassName_@@toPrimitive(self, hint)
-        // Use provided hint, or default to "string" for externref target
-        const hint = toPrimitiveHint ?? "string";
+        const hint = toPrimitiveHint;
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to externref if needed
@@ -1457,7 +1464,8 @@ export function coerceType(
       }
       const toStringFuncIdx = ctx.funcMap.get(`${name}_toString`);
       if (toStringFuncIdx !== undefined) {
-        // Call ClassName_toString(self) — self is already on stack
+        // Call ClassName_toString(self) — self is already on stack.
+        // Only fire when ToPrimitive("string") was explicitly requested.
         fctx.body.push({ op: "call", funcIdx: toStringFuncIdx });
         return;
       }
@@ -2138,25 +2146,18 @@ function emitToStringResultToF64ByKind(ctx: CodegenContext, fctx: FunctionContex
 export function emitSafeExternrefToF64(ctx: CodegenContext, fctx: FunctionContext): void {
   addUnionImports(ctx);
   const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-  const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
-  const tmpLocal = allocTempLocal(fctx, { kind: "externref" });
-  fctx.body.push({ op: "local.tee", index: tmpLocal } as unknown as Instr);
-  // Check if it's a JS number (typeof === "number")
-  fctx.body.push({ op: "call", funcIdx: typeofNumIdx });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "val", type: { kind: "f64" } },
-    then: [
-      // JS number: safe to unbox
-      { op: "local.get", index: tmpLocal } as Instr,
-      { op: "call", funcIdx: unboxIdx } as Instr,
-    ],
-    else: [
-      // Not a number (GC struct, string, null, etc.): return NaN
-      { op: "f64.const", value: NaN } as Instr,
-    ],
-  } as unknown as Instr);
-  releaseTempLocal(fctx, tmpLocal);
+  // (#1379) `__unbox_number` calls JS `Number(v)` which implements the spec
+  // ToNumber operation: null→0, undefined→NaN, "1"→1, "abc"→NaN, true→1,
+  // and ToPrimitive→Number for objects (with #1319's fix that returns
+  // "[object Object]" for wasm-structs without conversion methods, this
+  // path no longer throws on plain GC structs). Pre-#1379 we gated the
+  // call behind a `__typeof_number` check and returned NaN otherwise —
+  // that broke `var x = null; ++x` (expected 1, got NaN), `var x = "1";
+  // x--` (expected 0, got NaN), and the rest of the
+  // language/expressions/{prefix,postfix}-{increment,decrement} cluster.
+  // Routing through `__unbox_number` directly gives spec-correct ToNumeric
+  // for the f64 numeric path.
+  fctx.body.push({ op: "call", funcIdx: unboxIdx });
 }
 
 /**
