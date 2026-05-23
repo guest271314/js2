@@ -2,7 +2,7 @@
 id: 1474
 sprint: 55
 title: "host-independence: eliminate JS host RegExp for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -128,13 +128,36 @@ uses.
 ## Acceptance criteria
 
 ### Phase 1 (this issue, Option A)
-- [ ] `--standalone` build with a regex literal or `new RegExp(…)`
+- [x] `--standalone` build with a regex literal or `new RegExp(…)`
       fails at compile time with: "RegExp is not supported in
       standalone mode (#1474). Recompile without --standalone, or
       avoid regex."
-- [ ] Source line / column reported in the error.
-- [ ] `--js-host` default mode unchanged — all existing regex tests
+- [x] Source line / column reported in the error.
+- [x] `--js-host` default mode unchanged — all existing regex tests
       still pass.
+
+## Phase 1 implementation notes (landed)
+
+Refuse-and-document gates added on `ctx.standalone` at every codegen
+site that produces or host-routes a RegExp value. All use the
+`Codegen error:` prefix so `compiler.ts` fails the build (matching the
+WASI DOM/timer refusal pattern at `index.ts:8362/8439`):
+
+- `src/codegen/typeof-delete.ts` `compileRegExpLiteral` — regex literals.
+- `src/codegen/expressions/new-super.ts` — `new RegExp(...)`.
+- `src/codegen/expressions/calls.ts` — `RegExp(...)` (no `new`), plus the
+  `eval("/"+X+"/")` peephole (returns `undefined` so the host import is
+  never registered).
+- `src/codegen/string-ops.ts` — host fall-through for
+  `match`/`matchAll`/`search` (always regex) and
+  `replace`/`replaceAll`/`split` when the first arg is statically a RegExp.
+
+Tests: `tests/issue-1474-standalone-regex-refuse.test.ts` (14 cases —
+9 refusal + location asserts, 4 default-mode-unchanged, 1 no-import
+assert). Default-mode `tests/regexp.test.ts` and standalone
+`tests/issue-1470-standalone-string-imports.test.ts` both still green.
+
+Phase 2 (NFA engine) remains a separate follow-up issue.
 
 ### Phase 2 (follow-up, Option B — separate issue)
 - [ ] `--standalone` builds with regex emit a pure-Wasm NFA engine.
