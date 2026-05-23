@@ -142,6 +142,21 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Node builtin modules (#1044) — module-shaped imports returning the whole module object
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
+  // #1492 — Node builtin function host imports (e.g. `crypto.randomUUID`).
+  // Format: `__nodefn__<module>__<fnName>`. Both module and fnName must be
+  // non-empty; we split on the first `__` boundary inside the payload.
+  if (name.startsWith("__nodefn__")) {
+    const payload = name.slice("__nodefn__".length);
+    const sepIdx = payload.indexOf("__");
+    if (sepIdx > 0) {
+      const moduleName = payload.slice(0, sepIdx);
+      const fnName = payload.slice(sepIdx + 2);
+      if (fnName.length > 0) {
+        return { type: "node_builtin_fn", moduleName, name: fnName };
+      }
+    }
+  }
+
   // JSX runtime imports (#1540) — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV` after
   // TypeScript desugars JSX with `jsx: react-jsx`. The host binding is
   // either a user-supplied `deps.jsxRuntime` or a built-in React-shaped

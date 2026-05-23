@@ -2541,6 +2541,74 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
 }
 
 /**
+ * #1492 — Adapt a raw Node-builtin function into the JS-host calling
+ * convention used by compiled Wasm.
+ *
+ * - `randomBytes` may return a Node `Buffer`. We normalize to a plain
+ *   `Uint8Array` so `.length` and indexed reads behave identically across
+ *   Node and browser backends — and so the compiled `Uint8Array` runtime
+ *   shim does not have to special-case Buffer.
+ * - All other functions are passed through unchanged.
+ */
+function makeNodeBuiltinFnAdapter(moduleName: string, fnName: string, raw: (...args: any[]) => any): Function {
+  if (moduleName === "crypto" && fnName === "randomBytes") {
+    return (n: number) => {
+      const out = raw(n);
+      if (out instanceof Uint8Array) return out;
+      // Node Buffer is a Uint8Array subclass, but copy to a plain Uint8Array
+      // to strip Buffer-specific prototype and ensure compiler shims see
+      // a vanilla typed array.
+      if (out && typeof out.length === "number") {
+        return new Uint8Array(out.buffer ?? out, out.byteOffset ?? 0, out.length);
+      }
+      return new Uint8Array(0);
+    };
+  }
+  return raw;
+}
+
+let _warnedNodeBuiltinFnFallback = false;
+/**
+ * #1492 — Last-resort shim when neither Node `require` nor `globalThis.crypto`
+ * are available (e.g. pure standalone Wasm with no JS host bridge supplied).
+ * Returns a deterministic, NON-CRYPTOGRAPHIC result so the call doesn't
+ * throw. Logs once.
+ */
+function makeNodeBuiltinFnStandaloneFallback(moduleName: string, fnName: string): Function {
+  return (..._args: any[]) => {
+    if (!_warnedNodeBuiltinFnFallback) {
+      _warnedNodeBuiltinFnFallback = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[js2wasm] node:${moduleName}.${fnName} called without a host runtime — ` +
+          `using Math.random fallback (NOT cryptographically secure). ` +
+          `Provide a deps override or run under Node/Browser with crypto support.`,
+      );
+    }
+    if (moduleName === "crypto" && fnName === "randomBytes") {
+      const n = Number(_args[0] ?? 0);
+      const out = new Uint8Array(Math.max(0, n | 0));
+      for (let i = 0; i < out.length; i++) out[i] = Math.floor(Math.random() * 256);
+      return out;
+    }
+    if (moduleName === "crypto" && fnName === "randomUUID") {
+      // RFC4122 v4 layout (NON-secure source).
+      const hex = "0123456789abcdef";
+      const rb = (): string => hex[Math.floor(Math.random() * 16)]!;
+      let s = "";
+      for (let i = 0; i < 36; i++) {
+        if (i === 8 || i === 13 || i === 18 || i === 23) s += "-";
+        else if (i === 14) s += "4";
+        else if (i === 19) s += hex[(Math.floor(Math.random() * 16) & 0x3) | 0x8]!;
+        else s += rb();
+      }
+      return s;
+    }
+    return undefined;
+  };
+}
+
+/**
  * Built-in JSX runtime sentinels (#1540). Matches React's `REACT_ELEMENT_TYPE`
  * marker so genuine React tooling (e.g. `React.isValidElement`,
  * `react-test-renderer`) recognises elements produced by our built-in
@@ -6399,29 +6467,53 @@ assert._isSameValue = isSameValue;
       };
     }
     case "node_builtin_fn": {
-      // #1491 — Bind a named function of a Node.js builtin module as a host import.
-      // E.g. `node_builtin_fn { moduleName: "fs", name: "readFileSync" }` resolves
-      // to `require("fs").readFileSync`, bound to the module object so it works
-      // when called with externref-typed args.
-      const modName = intent.moduleName;
+      // #1491 / #1492 — Bind a single function exported by a Node.js builtin
+      // module (e.g. `fs.readFileSync`, `crypto.randomUUID`). Resolution order:
+      //   1. `deps[moduleName][name]` — explicit dep override (test injection).
+      //   2. `require(moduleName)[name]` — Node.js runtime.
+      //   3. `globalThis.crypto[name]` / `getRandomValues` — browser fallback
+      //      for the crypto module (#1492).
+      //   4. Last-resort non-crypto shim — keeps the call non-throwing under
+      //      pure standalone Wasm but the result is NOT cryptographically
+      //      strong (logged once for visibility) (#1492).
+      //
+      // `randomBytes(n)` returns a `Uint8Array` (Node returns a Buffer; we
+      // wrap it so .length and indexed reads behave identically on both
+      // backends). `randomUUID()` returns a string.
+      const moduleName = intent.moduleName;
       const fnName = intent.name;
-      const depMod = deps?.[modName];
-      if (depMod !== undefined) {
-        const fn = (depMod as Record<string, unknown>)[fnName];
-        if (typeof fn === "function") return (fn as Function).bind(depMod);
-        return () => undefined;
+      const depMod = deps?.[moduleName] as Record<string, unknown> | undefined;
+      if (depMod && typeof depMod[fnName] === "function") {
+        return makeNodeBuiltinFnAdapter(moduleName, fnName, (depMod[fnName] as Function).bind(depMod));
       }
       const req = _getNodeRequire();
       if (req) {
         try {
-          const mod = req(modName);
-          const fn = mod?.[fnName];
-          if (typeof fn === "function") return (fn as Function).bind(mod);
+          const mod = req(moduleName);
+          const raw = mod?.[fnName];
+          if (typeof raw === "function") {
+            return makeNodeBuiltinFnAdapter(moduleName, fnName, raw.bind(mod));
+          }
         } catch {
-          // fall through to no-op
+          // fall through to browser / standalone fallback
         }
       }
-      return () => undefined;
+      // Browser fallback: globalThis.crypto.{randomUUID, getRandomValues}
+      const gCrypto = (globalThis as any)?.crypto;
+      if (moduleName === "crypto" && gCrypto) {
+        if (fnName === "randomUUID" && typeof gCrypto.randomUUID === "function") {
+          return makeNodeBuiltinFnAdapter("crypto", "randomUUID", () => gCrypto.randomUUID());
+        }
+        if (fnName === "randomBytes" && typeof gCrypto.getRandomValues === "function") {
+          return makeNodeBuiltinFnAdapter("crypto", "randomBytes", (n: number) => {
+            const buf = new Uint8Array(n);
+            gCrypto.getRandomValues(buf);
+            return buf;
+          });
+        }
+      }
+      // Last-resort: non-crypto shim (warn once).
+      return makeNodeBuiltinFnStandaloneFallback(moduleName, fnName);
     }
     case "jsx_runtime": {
       // #1540 — JSX runtime binding. Priority order:
