@@ -227,3 +227,27 @@ The compressed-cycle leftovers feed directly into S55:
   lead to push.
 - This closeout PR (`close-sprint-54-compressed-cycle`) is plan-only —
   no source changes.
+
+## Issue migration into S55
+
+As part of this closeout, 11 issue files were moved into
+`plan/issues/sprints/55/` so S55 starts with a clean carry-in
+manifest:
+
+- **From s54**: #1589A (Hot Spot A real fix — today landed
+  diagnosis+skips via #1589/#509 only, not the underlying fix).
+- **From s53 carry-over (via PR #521)**: #1553b/c/d (decl-mode
+  destructuring chain), #820d (async-gen-meth `unresolvable` cast).
+- **From s52**: #1471/#1472/#1473/#1474 (host-independence series —
+  un-attempted in s52, s53, and s54; needs a dedicated runtime-owner
+  dispatch in s55).
+- **From backlog**: #1130 (Array accessor-observability), #1116
+  (Promise resolution v2 — #436 landed a partial slice; the v2 plan
+  in the issue body has further WI1–WI8 work outstanding).
+
+Also marked done as part of cleanup:
+- s54: #1583 (PR #489), #1589 (PR #509)
+- s53: #1580 (PR #482 — landed 2026-05-22 but status never updated)
+
+The s55 sprint.md got a new "Carry-in from sprint 54" section
+documenting these arrivals with ownership / dependency notes.

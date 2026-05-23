@@ -337,12 +337,16 @@ regression revert mid-cycle — see `#440 / #516` below.)
 ### Total issues / done / deferred
 
 - **Total in plan**: 24 issues across waves 1–3 (W4 stretch unscheduled).
-- **Done this cycle (issue-file PRs only)**: 6 — see "Issue PRs" below.
-- **Deferred to S55**: 5 carry-over issues moved from sprint 53
-  (#1553b, #1553c, #1553d, #820d, #1580) plus the bulk of the W1–W3
-  plan that was not attempted as a structured wave (the cycle's
-  realised work was dominated by infra + conflict resolution rather
-  than the planned spec-compliance harvest).
+- **Sprint 54 issue files at close (after #521)**: 3 — #1583, #1589, #1589A.
+- **Done in sprint 54**: 2 — #1583 (via PR #489), #1589 (via PR #509).
+- **Moved to sprint 55**: 1 directly from sprint 54 (#1589A — Hot Spot A
+  needs real fix); 4 transitively from sprint 53 carry-over (#1553b,
+  #1553c, #1553d, #820d); 4 from sprint 52 (#1471–#1474 host-indep);
+  2 from backlog (#1130, #1116). Total moved: **11** issue files.
+- **Marked done in sprint 53 by this closeout**: #1580 (PR #482 merged on
+  2026-05-22; previously stale `ready` status).
+- **Deferred from the W1–W3 plan**: ~16 issues (the structured
+  spec-compliance harvest was not attempted as scheduled).
 
 ### Key landed PRs (merged on `main` between sprint-54/begin and sprint/54)
 
@@ -438,3 +442,36 @@ wave plan did not materialise and what S55 should do differently.
   push.
 - Sprint 53 also has its end-tag local-only (`sprint/53`); the begin
   tag for s53 was never created (noted in s53 retro).
+
+### Issue moves performed by this closeout PR
+
+The following files were moved + frontmatter updated by this PR. If PR
+#521 (sprint 53 close) lands first, the s53→s55 rename pairs may
+conflict on disk — tech lead to resolve in favor of the
+`sprints/55/` destination (this PR's intent).
+
+| File | From | To | Frontmatter change |
+|------|------|------|--------------------|
+| `1589A-object-literal-field-type-and-has-idx.md` | `sprints/54/` | `sprints/55/` | sprint: 54 → 55 |
+| `1553b.md` | `sprints/53/` (PR #521 moves to `sprints/54/`) | `sprints/55/` | sprint: 53 → 55 |
+| `1553c.md` | `sprints/53/` (PR #521 moves to `sprints/54/`) | `sprints/55/` | sprint: 53 → 55 |
+| `1553d.md` | `sprints/53/` (PR #521 moves to `sprints/54/`) | `sprints/55/` | sprint: 53 → 55 |
+| `820d-async-gen-meth-unresolvable-cast.md` | `sprints/53/` (PR #521 moves to `sprints/54/`) | `sprints/55/` | sprint: 53 → 55 |
+| `1471-no-js-host-boxing-unboxing.md` | `sprints/52/` | `sprints/55/` | sprint: 52 → 55 |
+| `1472-no-js-host-object-property-ops.md` | `sprints/52/` | `sprints/55/` | sprint: 52 → 55 |
+| `1473-no-js-host-error-exceptions.md` | `sprints/52/` | `sprints/55/` | sprint: 52 → 55 |
+| `1474-no-js-host-regex-standalone.md` | `sprints/52/` | `sprints/55/` | sprint: 52 → 55 |
+| `1130-array-methods-getter-observing-property.md` | `backlog/` | `sprints/55/` | add sprint: 55 |
+| `1116-promise-resolution-and-async-error.md` | `backlog/` | `sprints/55/` | add sprint: 55 |
+
+Status-only updates (no move):
+
+| File | Status change | Reason |
+|------|---------------|--------|
+| `sprints/54/1583-landing-feature-support-table-audit.md` | in-progress → done | PR #489 merged 2026-05-23 |
+| `sprints/54/1589-test262-compile-timeout-bucket-100-tests.md` | ready → done | PR #509 merged 2026-05-23 |
+| `sprints/53/1580-string-hash-benchmark-...md` | ready → done | PR #482 merged 2026-05-22 (was stale) |
+
+#1580's PR landed before sprint 53 even closed; the file's status was
+just never updated. This closeout sweeps it back to `done` so it doesn't
+linger as fake-open work into sprint 55.
