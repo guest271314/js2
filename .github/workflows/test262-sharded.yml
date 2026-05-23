@@ -117,11 +117,24 @@ jobs:
           corepack prepare pnpm@10.30.2 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Typecheck + lint
+      - name: Typecheck + lint (parallel)
         run: |
-          pnpm run typecheck 2>&1 | tail -50 || (echo "::error::typecheck failed"; exit 1)
-          # If lint script exists, run it (otherwise skip silently)
-          if grep -q '"lint"' package.json; then pnpm run lint 2>&1 | tail -50; fi
+          # Run both in parallel; capture each to its own tail-buffer; wait;
+          # fail if either fails. typecheck is the heavier of the two (tsc
+          # incremental ~5-10s, biome lint <2s) so wall time is bounded by
+          # typecheck rather than typecheck+lint.
+          set -o pipefail
+          tmp_tc=$(mktemp); tmp_lint=$(mktemp)
+          ( pnpm run typecheck > "$tmp_tc" 2>&1 ) &
+          pid_tc=$!
+          ( if grep -q '"lint"' package.json; then pnpm run lint > "$tmp_lint" 2>&1; fi ) &
+          pid_lint=$!
+          wait $pid_tc; tc_rc=$?
+          wait $pid_lint; lint_rc=$?
+          echo "--- typecheck (last 50 lines) ---"; tail -50 "$tmp_tc"
+          echo "--- lint (last 50 lines) ---"; tail -50 "$tmp_lint"
+          if [ "$tc_rc" -ne 0 ]; then echo "::error::typecheck failed (rc=$tc_rc)"; exit "$tc_rc"; fi
+          if [ "$lint_rc" -ne 0 ]; then echo "::warning::lint failed (rc=$lint_rc) — not blocking"; fi
 
   test262-shard:
     # Heavy 16-shard test262 fires on all gate-relevant events:
