@@ -612,6 +612,11 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#1472 Phase A) Set of dynamic-shape object/property host-import names
+   *  already refused under `--target standalone`, used to deduplicate the
+   *  compile-error so a single source construct emits at most one error per
+   *  import name. Lazily initialized in late-imports.ts. */
+  standaloneRefusedImports?: Set<string>;
   /**
    * (#1373b) When true, async functions flow through the IR's CPS lowering
    * (Phase C). When false (default), the IR selector buckets async functions

@@ -2,7 +2,7 @@
 id: 1472
 sprint: 55
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -218,11 +218,47 @@ if (ctx.standalone) {
 ```
 
 Acceptance for Phase A:
-- [ ] `--target standalone` compiles a class-only / typed-only
+- [x] `--target standalone` compiles a class-only / typed-only
       program (math fixtures, fib, string-basics) with **zero**
       `env::__extern_*`/`env::__object_*` imports.
-- [ ] Any open-object usage in `--target standalone` fails with a
+- [x] Any open-object usage in `--target standalone` fails with a
       clear error message pointing to #1472 Phase B.
+
+### Phase A — DONE (PR pending)
+
+Implemented as a single central choke point rather than per-call-site
+gates (the plan's per-site retargeting is Phase B work):
+
+- `src/codegen/expressions/late-imports.ts` — `ensureLateImport` now
+  calls `refuseStandaloneObjectImport(ctx, name)`. Under `ctx.standalone`,
+  any object/property host-import family name (`__extern_*`, `__object_*`,
+  `__for_in_*`, `__defineProperty*`, `__getOwn*`, `__new_plain_object`,
+  `__delete_property`, `__hasOwnProperty`, `__propertyIsEnumerable`,
+  `__isPrototypeOf`, `__register_prototype`, `__register_class_object`,
+  `__proxy_*`, `__get_builtin`, `__proto_method_call`) queues a
+  `Codegen error:`-prefixed diagnostic (deduplicated per name) pointing
+  at Phase B. The prefix routes through compiler.ts's hard-fail path
+  (`success: false`, empty module) so no half-working module with a
+  leaked host import is emitted.
+- `src/codegen/index.ts` — the eager `__register_prototype` /
+  `__register_class_object` registration (only needed by the JS-host
+  Proxy wrapper) is now gated `&& !ctx.standalone`. `emitLazyProtoGet` /
+  `emitLazyClassObjectGet` already gate their `call` on the import being
+  in funcMap, so class prototype/class-object globals still work
+  natively (struct.new + global.set) with no host notification.
+- `src/codegen/context/types.ts` — added `standaloneRefusedImports?:
+  Set<string>` for per-name error dedup.
+- Test: `tests/issue-1472-standalone-object-imports.test.ts` (4 tests,
+  passing): typed object literal + class instance compile with zero host
+  object imports; open `any` object refuses with the Phase B error;
+  default `gc` target still uses the JS-host object machinery.
+
+Closed-shape struct access (the `getFieldEntry` fast path) never reaches
+the gate — it emits struct.get/struct.set and never calls
+`ensureLateImport` for these names, so it works standalone unchanged.
+
+**Phase B** (Wasm-native open-object runtime) and **Phase C** (Proxy
+refusal + Reflect dispatch) remain as follow-up work — see plan below.
 
 #### Phase B (follow-up issue): Wasm-native open-object runtime
 
