@@ -354,6 +354,7 @@ export function compileSource(
         nativeStrings: options.nativeStrings,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        standalone: options.target === "standalone",
         // Phase 2 (#1131): default experimentalIR to on so recursive
         // numeric kernels (fib, factorial, etc.) compile without the
         // boxing roundtrip the legacy path emits for untyped JS
@@ -364,6 +365,7 @@ export function compileSource(
         wasiNodeFsFuncs,
         allowFs: options.allowFs ?? false,
         strictNoHostImports: options.strictNoHostImports,
+        jsxRuntime: preprocessed.jsxRuntime,
       });
       mod = result.module;
       // Propagate codegen errors with source locations
@@ -650,6 +652,7 @@ export function compileMultiSource(
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
         strictNoHostImports: options.strictNoHostImports,
+        standalone: options.target === "standalone",
       });
       mod = result.module;
       // Propagate codegen errors with source locations
@@ -895,6 +898,7 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
         strictNoHostImports: options.strictNoHostImports,
+        standalone: options.target === "standalone",
       });
       mod = result.module;
       for (const err of result.errors) {

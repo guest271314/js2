@@ -21,7 +21,12 @@ export function createCodegenContext(
   // `--allow-host-imports` does this). Strict mode also implies
   // `nativeStrings` so the wasm:js-string namespace is not requested.
   const strictNoHostImports = options?.strictNoHostImports ?? options?.wasi ?? false;
-  const nativeStrings = options?.nativeStrings ?? options?.fast ?? options?.wasi ?? strictNoHostImports;
+  // #1470 — standalone target forces nativeStrings:true so the module has
+  // no `wasm:js-string` and no env JS-host string helpers. Use logical OR
+  // for the implication chain so `wasi: false` doesn't short-circuit
+  // `standalone: true` (`?? ` returns the LHS on `false`).
+  const nativeStrings =
+    options?.nativeStrings ?? !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports);
   const ctx: CodegenContext = {
     mod,
     checker,
@@ -138,11 +143,18 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
+    standalone: options?.standalone ?? false,
+    // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
+    // expose a CLI/option flag once the CPS lowering is parity-tested.
+    supportsAsyncIr: false,
     wasiFdWriteIdx: -1,
     wasiProcExitIdx: -1,
     wasiPathOpenIdx: -1,
     wasiFdCloseIdx: -1,
     wasiBumpPtrGlobalIdx: -1,
+    wasiEnvironSizesGetIdx: -1,
+    wasiEnvironGetIdx: -1,
+    wasiEnvGetStrIdx: -1,
     wasiNodeFsFuncs: options?.wasiNodeFsFuncs ?? new Set(),
     allowFs: options?.allowFs ?? false,
     strictNoHostImports,
@@ -156,6 +168,7 @@ export function createCodegenContext(
     funcConstructorMap: new Map(),
     ensureStructPending: new Set(),
     nodeBuiltinGlobals: new Map(),
+    jsxRuntime: options?.jsxRuntime,
   };
 
   getOrRegisterVecType(ctx, "externref", { kind: "externref" });
