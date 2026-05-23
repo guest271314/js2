@@ -1427,7 +1427,7 @@ function emitStructFieldNamesExport(
       blockType: { kind: "val", type: { kind: "externref" } },
       then: thenBranch,
       else: fallback,
-    } as unknown as Instr;
+    };
 
     fallback = [{ op: "local.get", index: anyLocal } as Instr, { op: "ref.test", typeIdx } as Instr, ifInstr];
   }
@@ -1855,7 +1855,7 @@ function emitClosureCallExport1(ctx: CodegenContext): void {
         const unboxIdx = ctx.funcMap.get("__unbox_number");
         if (unboxIdx !== undefined) {
           argConversion.push({ op: "call", funcIdx: unboxIdx } as Instr);
-          argConversion.push({ op: "i32.trunc_f64_s" } as unknown as Instr);
+          argConversion.push({ op: "i32.trunc_f64_s" });
         }
       }
       // externref → externref: no conversion
@@ -2113,7 +2113,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
-            ops.push({ op: "i32.trunc_f64_s" } as unknown as Instr);
+            ops.push({ op: "i32.trunc_f64_s" });
           }
         }
         // externref: no conversion
@@ -2416,32 +2416,31 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
 
       const thenInstrs: Instr[] = [];
       if (entry.mode === "standalone") {
-        thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.typeIdx } as unknown as Instr,
-          { op: "call", funcIdx: entry.funcIdx } as Instr,
-        );
+        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
+          op: "call",
+          funcIdx: entry.funcIdx,
+        } as Instr);
         boxResult(entry.resultType, thenInstrs);
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
-        thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.typeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
-        );
+        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
+          op: "struct.get",
+          typeIdx: entry.typeIdx,
+          fieldIdx: entry.fieldIdx,
+        } as Instr);
         // The struct.get returns the field type (eqref or ref). Store in eqref local.
         const closureLocal = 2; // eqref local
         thenInstrs.push(
           { op: "local.set", index: closureLocal } as Instr,
           // Cast eqref to closure struct type for the self-param
           { op: "local.get", index: closureLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.closureTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           // Get funcref from closure field 0
           { op: "local.get", index: closureLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.closureTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "ref.cast", typeIdx: ci.funcTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: ci.funcTypeIdx },
           { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
         );
         const retType = ci.returnType ?? { kind: "externref" as const };
@@ -2455,7 +2454,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
 
       return [
         { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.test", typeIdx: entry.typeIdx } as unknown as Instr,
+        { op: "ref.test", typeIdx: entry.typeIdx },
         {
           op: "if",
           blockType: { kind: "val" as const, type: { kind: "externref" as const } },
@@ -2820,21 +2819,21 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 1 },
       { op: "local.get", index: 1 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 },
           { op: "return" } as Instr,
         ],
         else: [],
-      } as unknown as Instr,
+      },
       { op: "i32.const", value: -1 } as Instr,
     ];
     mod.functions.push({
@@ -2858,23 +2857,23 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 2 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: 1 } as Instr,
-          { op: "array.get", typeIdx: arrTypeIdx } as unknown as Instr,
+          { op: "array.get", typeIdx: arrTypeIdx },
           { op: "return" } as Instr,
         ],
         else: [],
-      } as unknown as Instr,
+      },
       { op: "i32.const", value: 0 } as Instr,
     ];
     mod.functions.push({
@@ -2898,23 +2897,23 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 3 },
       { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 3 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: 1 } as Instr,
           { op: "local.get", index: 2 } as Instr,
-          { op: "array.set", typeIdx: arrTypeIdx } as unknown as Instr,
+          { op: "array.set", typeIdx: arrTypeIdx },
         ],
         else: [],
-      } as unknown as Instr,
+      },
     ];
     mod.functions.push({
       name: "__dv_byte_set",
@@ -2967,7 +2966,7 @@ function buildNestedIfElse(
       blockType: { kind: "val", type: blockRetType },
       then: thenBranch,
       else: current,
-    } as unknown as Instr;
+    };
 
     current = [
       { op: "local.get", index: anyLocal } as Instr,
@@ -3011,7 +3010,7 @@ function buildGetterExtract(
     if (ft.kind === "i32") {
       // Already i32
     } else if (ft.kind === "f64") {
-      then.push({ op: "i32.trunc_sat_f64_s" } as unknown as Instr);
+      then.push({ op: "i32.trunc_sat_f64_s" });
     } else {
       then.push({ op: "drop" } as Instr);
       then.push({ op: "i32.const", value: 0 } as Instr);
@@ -3783,8 +3782,8 @@ function emitWasiWriteFileSyncHelper(ctx: CodegenContext): void {
     { op: "local.get", index: 0 } as Instr, // path ptr
     { op: "local.get", index: 1 } as Instr, // path len
     { op: "i32.const", value: 9 } as Instr, // oflags = O_CREAT(1) | O_TRUNC(8) = 9
-    { op: "i64.const", value: 64n } as unknown as Instr, // rights_base = RIGHT_FD_WRITE(64)
-    { op: "i64.const", value: 0n } as unknown as Instr, // rights_inheriting = 0
+    { op: "i64.const", value: 64n }, // rights_base = RIGHT_FD_WRITE(64)
+    { op: "i64.const", value: 0n }, // rights_inheriting = 0
     { op: "i32.const", value: 0 } as Instr, // fdflags = 0
     { op: "i32.const", value: 12 } as Instr, // fd_out ptr at memory[12]
     { op: "call", funcIdx: ctx.wasiPathOpenIdx } as Instr,
@@ -3956,7 +3955,7 @@ function emitWasiReadStdinAllHelper(ctx: CodegenContext): void {
             { op: "i32.const", value: STDIN_BUF_START } as Instr,
             { op: "local.get", index: I } as Instr,
             { op: "i32.add" } as Instr,
-            { op: "i32.load8_u", align: 0, offset: 0 } as unknown as Instr,
+            { op: "i32.load8_u", align: 0, offset: 0 },
             { op: "local.set", index: B } as Instr,
 
             // dataArr[i] = b
@@ -4846,7 +4845,7 @@ export function emitToUint32Helper(ctx: CodegenContext): void {
     { op: "f64.eq" },
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
     { op: "local.get", index: 0 },
-    { op: "i64.trunc_sat_f64_s" } as unknown as Instr,
+    { op: "i64.trunc_sat_f64_s" },
     { op: "i32.wrap_i64" },
   ];
   ctx.mod.functions.push({
@@ -5892,7 +5891,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_number", f64ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxNumStructIdx },
-    { op: "extern.convert_any" } as unknown as Instr,
+    { op: "extern.convert_any" },
   ]);
 
   // 4. __unbox_number(externref) -> f64
@@ -5913,7 +5912,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       },
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       // if (ref.test $box_number_struct any) return any.value
       { op: "ref.test", typeIdx: boxNumStructIdx },
@@ -5922,7 +5921,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxNumStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
           { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -5937,7 +5936,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_boolean", i32ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxBoolStructIdx },
-    { op: "extern.convert_any" } as unknown as Instr,
+    { op: "extern.convert_any" },
   ]);
 
   // 6. __unbox_boolean(externref) -> i32
@@ -5960,7 +5959,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       { op: "ref.test", typeIdx: boxBoolStructIdx },
       {
@@ -5968,7 +5967,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxBoolStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
           { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -5996,7 +5995,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       },
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       // boxed number? → value !== 0 && value === value
       { op: "ref.test", typeIdx: boxNumStructIdx },
@@ -6005,7 +6004,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxNumStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
           { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
           { op: "local.tee", index: 2 },
           // value !== 0
@@ -6027,7 +6026,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxBoolStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
           { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -6051,7 +6050,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as unknown as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: boxNumStructIdx },
   ]);
 
@@ -6065,7 +6064,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as unknown as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: boxBoolStructIdx },
   ]);
 
@@ -6083,7 +6082,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "ref.test", typeIdx: strTypeIdx },
     ]);
   } else {
@@ -6110,7 +6109,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       { op: "ref.test", typeIdx: boxNumStructIdx },
       {
@@ -6140,7 +6139,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     per tag; defer until a wasi caller needs the typeof RESULT as a
   //     string (today's callers compare against literal tags via the
   //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" } as unknown as Instr]);
+  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
 }
 
 /**
