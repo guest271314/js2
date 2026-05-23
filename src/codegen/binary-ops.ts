@@ -23,7 +23,7 @@ import {
   compileLogicalAssignment,
   isCompoundAssignment,
 } from "./expressions/assignment.js";
-import { emitThrowString, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
+import { emitThrowTypeError, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -977,13 +977,21 @@ export function compileBinaryExpression(
         return { kind: "i32" };
       }
 
-      // Mixed BigInt + Number arithmetic (e.g. 1n + 1): always a TypeError in JS.
+      // Mixed BigInt + Number arithmetic (e.g. 1n + 1): per spec §6.1.6.2.1
+      // (and §13.15 ApplyStringOrNumericBinaryOperator), throw a real
+      // TypeError instance (so `assert.throws(TypeError, …)` catches it).
+      // Special case: `+` with a string operand is *concatenation*, not
+      // numeric add — route to the string path which calls ToString on the
+      // BigInt side (`1n + "" === "1"` per §13.15.4).
+      if (op === ts.SyntaxKind.PlusToken && (isStringType(leftTsType) || isStringType(rightTsType))) {
+        return compileStringBinaryOp(ctx, fctx, expr, op);
+      }
       // Compile both sides for side effects, drop their values, then throw.
       const lt = compileExpression(ctx, fctx, expr.left);
       if (lt) fctx.body.push({ op: "drop" });
       const rt = compileExpression(ctx, fctx, expr.right);
       if (rt) fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "Cannot mix BigInt and other types, use explicit conversions");
+      emitThrowTypeError(ctx, fctx, "Cannot mix BigInt and other types, use explicit conversions");
       return { kind: "i32" };
     }
 
