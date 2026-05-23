@@ -17,6 +17,13 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Wasm experimental flags propagated to all child Node processes:
+  # - stringref: stringview_wtf16 heap type (wasm:js-string ops)
+  # - custom-descriptors: 'exact' heap type
+  # Needed by generate-size-benchmarks + generate-playground-benchmark-sidebar
+  # which instantiate emitted Wasm modules. Without these, Node 25 rejects
+  # the modules at compile-time.
+  NODE_OPTIONS: "--experimental-wasm-stringref --experimental-wasm-custom-descriptors"
 
 concurrency:
   group: benchmark-refresh-${{ github.event.pull_request.number || github.ref }}
