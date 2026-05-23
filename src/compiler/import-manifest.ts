@@ -128,6 +128,10 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Used by Array.prototype.includes on array-like receivers (#1360).
   if (name === "__same_value_zero") return { type: "same_value_zero" };
 
+  // Browser Storage interface (#1502)
+  if (name === "__get_localStorage") return { type: "web_storage", which: "local" };
+  if (name === "__get_sessionStorage") return { type: "web_storage", which: "session" };
+
   // Node-specific module-scope values (#1494)
   if (name === "__get_dirname") return { type: "node_dirname" };
   if (name === "__get_filename") return { type: "node_filename" };
