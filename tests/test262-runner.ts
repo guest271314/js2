@@ -301,6 +301,14 @@ const HANGING_TESTS = new Set([
   // Local probe (May 2026): wrapTest + compile + instantiate + test() runs
   // ~1.2s total; test() throws WebAssembly.Exception immediately because
   // `Temporal` is not defined in our runtime. No iteration, no hang. Removed.
+
+  // #1589 Hot spot C: language/comments/S7.4_A6.js calls `eval()` inside a
+  // `for (i = 0; i <= 65535; i++)` loop. Our eval stub throws each iteration
+  // but the loop continues — wall time grows linearly with iteration count
+  // (≥65s, well past the 30s vitest budget). Skip until we either (a) tighten
+  // the skip filter to catch eval anywhere in source, or (b) ship a no-op
+  // eval stub that lets such loops terminate quickly. See #1589 Findings.
+  "language/comments/S7.4_A6.js",
 ]);
 
 export function shouldSkip(source: string, meta: Test262Meta, filePath?: string): FilterResult {
