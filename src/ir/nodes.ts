@@ -358,6 +358,40 @@ export function asValueId(n: number): IrValueId {
   return n as IrValueId;
 }
 
+/**
+ * Stable identity of an allocation site (#1586).
+ *
+ * Unlike {@link IrValueId} — which is a per-function SSA index that inlining
+ * and monomorphization renumber — an `AllocSiteId` is **module-global** and
+ * travels on the instruction itself (`IrInstrBase.alloc`). It survives every
+ * IR transformation: passes preserve it through value-preserving rewrites,
+ * alias it through fusion, and retire it on deletion (see the pass-discipline
+ * rules in docs/adr/0013-ir-allocation-sites.md).
+ *
+ * Identity MUST NOT be keyed on `IrValueId` — that breaks under renumbering.
+ */
+export type AllocSiteId = number & { readonly __brand: "AllocSiteId" };
+
+export function asAllocSiteId(n: number): AllocSiteId {
+  return n as AllocSiteId;
+}
+
+/**
+ * The category of value an allocation site brings into existence. Mirrors the
+ * value-creating IR instr kinds (object.new, closure.new, …). Black-box
+ * built-in internal allocations are out of scope (#1586 non-goals).
+ */
+export type AllocKind =
+  | "object"
+  | "array"
+  | "string"
+  | "closure"
+  | "refcell"
+  | "box"
+  | "extern"
+  | "iterator"
+  | "generator";
+
 /** Allocate sequential IrValueIds within a function. */
 export class IrValueIdAllocator {
   private next = 0;
@@ -405,6 +439,14 @@ export interface IrInstrBase {
   readonly resultType: IrType | null;
   /** Source location for diagnostics. Optional in Phase 1. */
   readonly site?: IrSiteId;
+  /**
+   * Stable allocation-site identity (#1586). Present iff this instr is a
+   * value-creating (allocation) site — see {@link AllocKind} and the audit
+   * table in docs/adr/0013-ir-allocation-sites.md. Distinct from `result`
+   * (an `IrValueId`, which inlining/monomorphize renumber). Inert at
+   * lowering, so the emitted Wasm is byte-identical whether or not it is set.
+   */
+  readonly alloc?: AllocSiteId;
 }
 
 /** Materialize a constant into an SSA value. */

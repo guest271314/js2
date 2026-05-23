@@ -1,7 +1,7 @@
 ---
 id: 1586
 title: "IR preparation: explicit allocation sites with stable identity and metadata hooks"
-status: ready
+status: in-progress
 sprint: 55
 created: 2026-05-23
 updated: 2026-05-23

@@ -10,6 +10,8 @@ import {
   asBlockId,
   asValueId,
   irVal,
+  AllocKind,
+  AllocSiteId,
   IrBinop,
   IrBlock,
   IrBlockId,
@@ -22,6 +24,7 @@ import {
   IrInstr,
   IrObjectShape,
   IrParam,
+  IrSiteId,
   IrSlotDef,
   IrTerminator,
   IrType,
@@ -29,6 +32,7 @@ import {
   IrValueId,
   IrValueIdAllocator,
 } from "./nodes.js";
+import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { Instr, ValType } from "./types.js";
 
 interface OpenBlock {
@@ -69,7 +73,20 @@ export class IrFunctionBuilder {
     private readonly name: string,
     private readonly resultTypes: readonly IrType[],
     private readonly exported = false,
+    // #1586: module-global allocation-site registry. Optional so test builders
+    // and any non-module-driven construction work without one — emitters then
+    // simply leave `alloc` unset, which is inert at lowering.
+    private readonly allocRegistry?: AllocSiteRegistry,
   ) {}
+
+  /**
+   * #1586: mint a stable allocation-site id for a value-creating instr. Returns
+   * `undefined` when no registry is wired (test builders), in which case the
+   * instr's `alloc` field stays absent — lowering ignores it either way.
+   */
+  private allocId(kind: AllocKind, type: IrType, site?: IrSiteId): AllocSiteId | undefined {
+    return this.allocRegistry?.fresh(kind, type, site);
+  }
 
   // --- params -------------------------------------------------------------
 
@@ -258,7 +275,8 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "string" };
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "string.const", value, result, resultType });
+    const alloc = this.allocId("string", resultType);
+    this.pushInstr({ kind: "string.const", value, result, resultType, alloc });
     return result;
   }
 
@@ -266,7 +284,8 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "string" };
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType });
+    const alloc = this.allocId("string", resultType);
+    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType, alloc });
     return result;
   }
 
@@ -304,12 +323,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "object", shape };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("object", resultType);
     this.pushInstr({
       kind: "object.new",
       shape,
       values: [...values],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -367,6 +388,7 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "closure", signature };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("closure", resultType);
     this.pushInstr({
       kind: "closure.new",
       liftedFunc,
@@ -375,6 +397,7 @@ export class IrFunctionBuilder {
       captures: [...captures],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -422,11 +445,13 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "boxed", inner };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("refcell", resultType);
     this.pushInstr({
       kind: "refcell.new",
       value,
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -487,12 +512,16 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "class", shape };
     this.valueTypes.set(result, resultType);
+    // The ctor body allocates internally (black-box per #1586 non-goals); the
+    // site is the constructing call, kind "object".
+    const alloc = this.allocId("object", resultType);
     this.pushInstr({
       kind: "class.new",
       shape,
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -570,12 +599,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "extern", className };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("extern", resultType);
     this.pushInstr({
       kind: "extern.new",
       className,
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -652,12 +683,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "extern", className: "RegExp" };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("extern", resultType);
     this.pushInstr({
       kind: "extern.regex",
       pattern,
       flags,
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -756,7 +789,9 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = irVal({ kind: "externref" });
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "gen.epilogue", result, resultType });
+    // `__create_generator(buffer)` allocates the Generator object (black-box).
+    const alloc = this.allocId("generator", resultType);
+    this.pushInstr({ kind: "gen.epilogue", result, resultType, alloc });
     return result;
   }
 
@@ -954,7 +989,8 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = irVal({ kind: "externref" });
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "iter.new", iterable, async, result, resultType });
+    const alloc = this.allocId("iterator", resultType);
+    this.pushInstr({ kind: "iter.new", iterable, async, result, resultType, alloc });
     return result;
   }
 
