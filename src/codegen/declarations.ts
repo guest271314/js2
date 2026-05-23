@@ -273,7 +273,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // ── collectStringMethodImports (also uses call+propertyAccess) ──
     if (isStringType(receiverType) && Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)) {
       state.stringMethodNeeded.add(methodName);
-      // Track if the method is called with a RegExp arg (replace, replaceAll, split, match, search)
+      // Track if the method is called with a non-string arg (RegExp or
+      // custom object with Symbol.replace/Symbol.match/etc). For those we
+      // need the host import in addition to any native helper because the
+      // native helpers only handle string search values and we need JS
+      // semantics for @@replace / @@match / @@search / @@split dispatch
+      // (#1443).
       if (
         (methodName === "replace" ||
           methodName === "replaceAll" ||
@@ -284,8 +289,20 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         node.arguments.length > 0
       ) {
         const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-        const symName = argType.getSymbol()?.getName();
-        if (symName === "RegExp") {
+        const isStringLike = (t: ts.Type): boolean => {
+          if ((t.flags & ts.TypeFlags.String) !== 0) return true;
+          if ((t.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
+          if ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String") return true;
+          return false;
+        };
+        let needsHost = false;
+        if ((argType.flags & ts.TypeFlags.Union) !== 0) {
+          const union = argType as ts.UnionType;
+          needsHost = !union.types.every(isStringLike);
+        } else {
+          needsHost = !isStringLike(argType);
+        }
+        if (needsHost) {
           state.stringRegexpMethodNeeded.add(methodName);
         }
       }
@@ -3122,20 +3139,14 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       } else if (ts.isFunctionDeclaration(stmt) && stmt.body) {
         compileClassesFromStatements(stmt.body.statements, true);
       } else if (ts.isIfStatement(stmt)) {
-        // #1542: propagate `insideFunction` so a class nested inside a block/try
-        // inside a function is still treated as nested. Without this the body
-        // would be eagerly compiled at module level before the enclosing
-        // function's `hoistFunctionDeclarations` pass runs, leaving sibling
-        // function declarations (e.g. `function* g` used as a method-default
-        // initializer) absent from `funcMap` at body-compile time.
         if (ts.isBlock(stmt.thenStatement)) {
-          compileClassesFromStatements(stmt.thenStatement.statements, insideFunction);
+          compileClassesFromStatements(stmt.thenStatement.statements);
         }
         if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
-          compileClassesFromStatements(stmt.elseStatement.statements, insideFunction);
+          compileClassesFromStatements(stmt.elseStatement.statements);
         }
       } else if (ts.isBlock(stmt)) {
-        compileClassesFromStatements(stmt.statements, insideFunction);
+        compileClassesFromStatements(stmt.statements);
       } else if (
         ts.isForStatement(stmt) ||
         ts.isForInStatement(stmt) ||
@@ -3145,23 +3156,23 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ) {
         const body = stmt.statement;
         if (ts.isBlock(body)) {
-          compileClassesFromStatements(body.statements, insideFunction);
+          compileClassesFromStatements(body.statements);
         }
       } else if (ts.isSwitchStatement(stmt)) {
         for (const clause of stmt.caseBlock.clauses) {
-          compileClassesFromStatements(clause.statements, insideFunction);
+          compileClassesFromStatements(clause.statements);
         }
       } else if (ts.isTryStatement(stmt)) {
-        compileClassesFromStatements(stmt.tryBlock.statements, insideFunction);
+        compileClassesFromStatements(stmt.tryBlock.statements);
         if (stmt.catchClause) {
-          compileClassesFromStatements(stmt.catchClause.block.statements, insideFunction);
+          compileClassesFromStatements(stmt.catchClause.block.statements);
         }
         if (stmt.finallyBlock) {
-          compileClassesFromStatements(stmt.finallyBlock.statements, insideFunction);
+          compileClassesFromStatements(stmt.finallyBlock.statements);
         }
       } else if (ts.isLabeledStatement(stmt)) {
         if (ts.isBlock(stmt.statement)) {
-          compileClassesFromStatements(stmt.statement.statements, insideFunction);
+          compileClassesFromStatements(stmt.statement.statements);
         }
       }
       // Compile bodies for anonymous class expressions in new expressions
