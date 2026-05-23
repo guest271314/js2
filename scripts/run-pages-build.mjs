@@ -27,13 +27,14 @@ if (hasPlanningArtifacts) {
 run(process.execPath, ["--experimental-strip-types", "scripts/generate-editions.ts"]);
 run("pnpm", ["run", "build:playground"]);
 run("pnpm", ["run", "build:compiler-bundle"]);
-// --experimental-wasm-stringref is required because generate-size-benchmarks
-// instantiates wasm modules that may use stringview_wtf16 (e.g. when the
-// compiler emits wasm:js-string ops). Without the flag, Node 22+ rejects
-// the module at compile-time with "invalid heap type 'stringview_wtf16'".
+// Experimental Wasm flags required by generate-size-benchmarks (Node 25):
+//   --experimental-wasm-stringref         — stringview_wtf16 (wasm:js-string ops)
+//   --experimental-wasm-custom-descriptors — exact heap type (custom-descriptors)
+// Without these, Node rejects modules at compile-time with "invalid heap type X".
 run(process.execPath, [
   "--experimental-strip-types",
   "--experimental-wasm-stringref",
+  "--experimental-wasm-custom-descriptors",
   "scripts/generate-size-benchmarks.ts",
 ]);
 run("node", ["scripts/build-pages.js"]);
