@@ -6133,6 +6133,13 @@ export function addIteratorImports(ctx: CodegenContext): void {
     kind: "func",
     typeIdx: extToVoid,
   });
+
+  // __iterator_rest: (externref) → externref — drains a partially-consumed
+  // iterator into a real JS Array for the `[...rest]` binding pattern (#1052).
+  addImport(ctx, "env", "__iterator_rest", {
+    kind: "func",
+    typeIdx: extToExt,
+  });
 }
 
 /** Register array iterator host imports (entries/keys/values) if not already registered */

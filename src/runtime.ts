@@ -5665,6 +5665,22 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           return exports?.__sget_value?.(result);
         };
+      if (name === "__iterator_rest")
+        return (iter: any) => {
+          // #1052 — drain an already-partially-consumed iterator into an Array
+          // for the `[...rest]` binding. Returns a real JS Array so host-side
+          // `instanceof Array` and `Array.isArray` observers see correct value.
+          const out: any[] = [];
+          if (iter == null) return out;
+          const next = iter.next ?? _sidecarGet(iter, "next");
+          if (typeof next !== "function") return out;
+          for (;;) {
+            const r = next.call(iter);
+            if (r == null || r.done) break;
+            out.push(r.value);
+          }
+          return out;
+        };
       if (name === "__iterator_return")
         return (iter: any) => {
           // ES spec 7.4.6 IteratorClose + 7.3.11 GetMethod:
