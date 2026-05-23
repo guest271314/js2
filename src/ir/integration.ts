@@ -53,6 +53,7 @@ import type {
   IrType,
   IrTypeRef,
 } from "./nodes.js";
+import { analyzeOwnership } from "./analysis/ownership.js";
 import { constantFold } from "./passes/constant-fold.js";
 import { deadCode } from "./passes/dead-code.js";
 import { inlineSmall } from "./passes/inline-small.js";
@@ -442,6 +443,24 @@ export function compileIrPathFunctions(
   if (readyForLower.length === 0) return { compiled, errors };
 
   // -------------------------------------------------------------------------
+  // 2g. Ownership + access-semantics analysis (#1587) — gated, default OFF.
+  //
+  // Runs on the final (post-mono/TU) IR shape, writing inferred ownership /
+  // access annotations to the registry `ownership` namespace. The analysis is
+  // purely an optimization aid: it does NOT mutate the IR and registry
+  // annotations are inert at lowering, so emitted Wasm is byte-identical
+  // whether or not this runs (ADR-0014). Consumers query the per-function
+  // `OwnershipResult` (the demonstration consumer in `analysis/stack-alloc.ts`
+  // is likewise gated and annotation-only). Behind `JS2WASM_IR_OWNERSHIP=1`
+  // for the rollout period.
+  // -------------------------------------------------------------------------
+  if (ownershipAnalysisEnabled()) {
+    for (const entry of readyForLower) {
+      analyzeOwnership(entry.fn, allocRegistry);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Register monomorphized clones in `ctx` — append a placeholder
   // WasmFunction slot and record the assigned funcIdx in `ctx.funcMap`.
   // The placeholder body is overwritten with the real lowered body in the
@@ -655,6 +674,15 @@ export function compileIrPathFunctions(
 
 function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
   return !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/**
+ * #1587 rollout gate. The ownership analysis is default-OFF: it only runs the
+ * extra (inert) analysis pass when explicitly enabled, so production builds pay
+ * nothing and emitted Wasm is unchanged until a consumer opts in.
+ */
+function ownershipAnalysisEnabled(): boolean {
+  return process.env.JS2WASM_IR_OWNERSHIP === "1" || process.env.JS2WASM_IR_OWNERSHIP === "true";
 }
 
 /**
