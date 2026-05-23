@@ -1,6 +1,6 @@
 ---
 id: 1474
-sprint: 52
+sprint: 55
 title: "host-independence: eliminate JS host RegExp for standalone Wasm"
 status: ready
 created: 2026-05-20

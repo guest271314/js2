@@ -2,7 +2,7 @@
 id: 1580
 sprint: 54
 title: "string-hash benchmark: wasm-validator pre-existing bug + uncompetitive hot runtime"
-status: ready
+status: done
 created: 2026-05-21
 priority: high
 feasibility: medium
