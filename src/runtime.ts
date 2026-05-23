@@ -6155,6 +6155,36 @@ assert._isSameValue = isSameValue;
       // ToUint32 for Math.clz32/imul — spec-correct conversion
       // (x >>> 0) applies the ToUint32 abstract operation per ES spec
       if (name === "__toUint32") return (x: number) => x >>> 0;
+      // (#1490) Node.js process.* host imports — only meaningful when running
+      // under Node (or any host that injects a `process` global). In other
+      // environments (browser, standalone Wasm) these return safe defaults so
+      // compiled programs do not crash on access.
+      if (name === "__get_process_argv")
+        return () => (typeof process !== "undefined" && process.argv ? process.argv : []);
+      if (name === "__get_process_env") return () => (typeof process !== "undefined" && process.env ? process.env : {});
+      if (name === "__get_process_cwd")
+        return () => {
+          if (typeof process !== "undefined" && typeof process.cwd === "function") {
+            return process.cwd();
+          }
+          return "";
+        };
+      if (name === "__get_process_platform")
+        return () => (typeof process !== "undefined" && process.platform ? process.platform : "");
+      if (name === "__get_process_arch")
+        return () => (typeof process !== "undefined" && (process as any).arch ? (process as any).arch : "");
+      if (name === "__process_exit")
+        return (code: number) => {
+          // f64 → integer exit code (NaN/Infinity → 0 per spec coercion).
+          const c = Number.isFinite(code) ? code | 0 : 0;
+          if (typeof process !== "undefined" && typeof process.exit === "function") {
+            process.exit(c);
+            return;
+          }
+          // Hosts without process.exit (browser, standalone): throw so the
+          // caller can observe the exit attempt rather than silently continuing.
+          throw new Error(`process.exit(${c}) called but no host process.exit available`);
+        };
       // (#1503) Web Crypto host imports — crypto.randomUUID() and
       // crypto.getRandomValues(typedArray). Prefer globalThis.crypto
       // (Web Crypto API; available in browsers + Node 19+); fall back to
