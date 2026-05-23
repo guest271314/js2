@@ -10,3 +10,6 @@ export * from "./select.js";
 export * from "./from-ast.js";
 export * from "./integration.js";
 export * from "./analysis/encoding.js";
+export * from "./analysis/lattice.js";
+export * from "./analysis/ownership.js";
+export * from "./analysis/stack-alloc.js";
