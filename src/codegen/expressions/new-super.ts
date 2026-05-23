@@ -787,7 +787,7 @@ function compileNewFunctionDeclaration(
     } else if (field.type.kind === "i32") {
       ctorFctx.body.push({ op: "i32.const", value: 0 });
     } else if (field.type.kind === "i64") {
-      ctorFctx.body.push({ op: "i64.const", value: 0n } as unknown as Instr);
+      ctorFctx.body.push({ op: "i64.const", value: 0n });
     } else if (field.type.kind === "externref") {
       ctorFctx.body.push({ op: "ref.null.extern" });
     } else if (field.type.kind === "ref_null") {
@@ -1217,8 +1217,8 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
   if (classNameForCheck && ctx.classThrowsOnEval.has(classNameForCheck)) {
-    emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
+    fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }
 
@@ -1263,7 +1263,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       unwrappedNew = unwrappedNew.expression;
     }
     if (ts.isArrowFunction(unwrappedNew)) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: throw a real TypeError instance so `assert.throws(TypeError, …)`
+      // catches it (the bare-string throw is only `instanceof Error`/string).
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
@@ -1313,7 +1315,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (ts.isPropertyAccessExpression(expr.expression)) {
       const obj = expr.expression.expression; // e.g. Array.prototype
       if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") {
-        emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+        // #1528: real TypeError instance so test262 `assert.throws(TypeError, …)`
+        // catches it (prototype methods are not constructors per spec §9.2.2).
+        emitThrowTypeError(ctx, fctx, "is not a constructor");
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
@@ -1325,7 +1329,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
     if (callSigs.length > 0 && constructSigs.length === 0) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: real TypeError instance — spec requires `Construct(F)` to throw
+      // `TypeError("F is not a constructor")` when F has no [[Construct]].
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
@@ -1483,7 +1489,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // instead of a `env.__new_<Name>` host import that would leave the
       // module unsatisfiable at instantiation time. JS-host mode is unchanged.
       const importName = `__new_${ctorName}`;
-      if (ctx.wasi && isWasiErrorName(ctorName)) {
+      // #1473 — standalone mode also has no JS host; build the Error in-module.
+      if ((ctx.wasi || ctx.standalone) && isWasiErrorName(ctorName)) {
         emitWasiErrorConstructor(ctx, ctorName, 1);
         const internalFuncIdx = ctx.funcMap.get(importName);
         if (internalFuncIdx !== undefined) {
@@ -1648,13 +1655,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
 
     if (args.length === 0) {
+      // (#1483) Under --target wasi, route `new Date()` (no args) to
+      // clock_time_get via the __wasi_date_now helper (registered up front in
+      // registerWasiImports).
+      if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
       const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
       if (dateNowIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);
         fctx.body.push({ op: "call", funcIdx: dateNowIdx } as Instr);
         fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
       } else {
-        fctx.body.push({ op: "i64.const", value: 0n } as unknown as Instr);
+        fctx.body.push({ op: "i64.const", value: 0n });
       }
       fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
       return { kind: "ref", typeIdx: dateTypeIdx };
@@ -1676,9 +1692,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i64" } },
-        then: [{ op: "i64.const", value: -9223372036854775808n } as unknown as Instr],
+        then: [{ op: "i64.const", value: -9223372036854775808n }],
         else: [{ op: "local.get", index: msLocal } as Instr, { op: "i64.trunc_sat_f64_s" } as Instr],
-      } as unknown as Instr);
+      });
       releaseTempLocal(fctx, msLocal);
       fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
       return { kind: "ref", typeIdx: dateTypeIdx };
@@ -1772,7 +1788,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             { op: "i64.add" } as Instr,
             { op: "local.set", index: yearLocal } as Instr,
           ],
-        } as unknown as Instr,
+        },
       );
 
       // Call days_from_civil(year, month, day) → i64 days
@@ -1978,6 +1994,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
+  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
+  // regex engine yet. Refuse `new RegExp(...)` in --target standalone
+  // (Phase 1: refuse-and-document). Match either the resolved builtin name
+  // or the literal identifier (which is how `new RegExp(...)` appears).
+  if (
+    ctx.standalone &&
+    (className === "RegExp" || (ts.isIdentifier(expr.expression) && expr.expression.text === "RegExp"))
+  ) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: new RegExp(...) is not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone.",
+    );
+    return null;
+  }
+
   // Check if the identifier resolves to a function declaration used as constructor
   // (e.g. `function Foo() { this.x = 1; }; new Foo()`)
   if ((!className || !ctx.classSet.has(className)) && ts.isIdentifier(expr.expression)) {
@@ -2054,7 +2087,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Check: len != floor(len) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: lenF64 });
       fctx.body.push({ op: "local.get", index: lenF64 });
-      fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+      fctx.body.push({ op: "f64.floor" });
       fctx.body.push({ op: "f64.ne" });
       // Check: len < 0
       fctx.body.push({ op: "local.get", index: lenF64 });
@@ -2094,7 +2127,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           else: [],
         });
         fctx.body.push({ op: "local.get", index: offsetF64 });
-        fctx.body.push({ op: "f64.trunc" } as unknown as Instr);
+        fctx.body.push({ op: "f64.trunc" });
         fctx.body.push({ op: "local.set", index: offsetF64 });
         // Check: offset < 0 OR offset > 2^53-1
         fctx.body.push({ op: "local.get", index: offsetF64 });
@@ -2133,7 +2166,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           else: [],
         });
         fctx.body.push({ op: "local.get", index: lenF64 });
-        fctx.body.push({ op: "f64.trunc" } as unknown as Instr);
+        fctx.body.push({ op: "f64.trunc" });
         fctx.body.push({ op: "local.set", index: lenF64 });
         // Check: len < 0 OR len > 2^53-1
         fctx.body.push({ op: "local.get", index: lenF64 });
@@ -2166,7 +2199,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Check: n != floor(n) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: nF64 });
       fctx.body.push({ op: "local.get", index: nF64 });
-      fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+      fctx.body.push({ op: "f64.floor" });
       fctx.body.push({ op: "f64.ne" });
       // Check: n < 0
       fctx.body.push({ op: "local.get", index: nF64 });
@@ -2381,7 +2414,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       fctx.body.push({ op: "local.tee", index: lenF64Local });
       // Check len != floor(len) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: lenF64Local });
-      fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+      fctx.body.push({ op: "f64.floor" });
       fctx.body.push({ op: "f64.ne" });
       // Check len < 0
       fctx.body.push({ op: "local.get", index: lenF64Local });
@@ -2461,7 +2494,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         });
         // Truncate toward zero (ToIntegerOrInfinity for finite non-NaN).
         fctx.body.push({ op: "local.get", index: offsetF64 });
-        fctx.body.push({ op: "f64.trunc" } as unknown as Instr);
+        fctx.body.push({ op: "f64.trunc" });
         fctx.body.push({ op: "local.set", index: offsetF64 });
 
         // Check: offset < 0 OR offset > 2^53-1 (ToIndex bounds → RangeError)
@@ -2517,7 +2550,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         });
         // Truncate toward zero
         fctx.body.push({ op: "local.get", index: lenF64 });
-        fctx.body.push({ op: "f64.trunc" } as unknown as Instr);
+        fctx.body.push({ op: "f64.trunc" });
         fctx.body.push({ op: "local.set", index: lenF64 });
 
         // Check: len < 0 OR len > 2^53-1 → RangeError
@@ -2585,7 +2618,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         if (regIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: bufLocal });
           if (isStructBuf) {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           fctx.body.push({ op: "local.get", index: offsetF64 });
           fctx.body.push({ op: "local.get", index: lenF64 });
@@ -2696,7 +2729,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       fctx.body.push({ op: "local.tee", index: nF64Local });
       // Check n != floor(n) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: nF64Local });
-      fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+      fctx.body.push({ op: "f64.floor" });
       fctx.body.push({ op: "f64.ne" });
       // Check n < 0
       fctx.body.push({ op: "local.get", index: nF64Local });

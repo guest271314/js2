@@ -14,7 +14,6 @@ goal: spec-completeness
 depends_on: [1058, 1006, 1066, 1102]
 es_edition: multi
 ---
-
 # #1584 — Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback
 
 Strategy proposal for executing genuinely dynamic JavaScript inside the
@@ -63,7 +62,8 @@ test for #1058 (self-host).
 The investment is real (estimated 8–12 weeks of focused engineering with a
 multi-channel agent setup), but the deliverable is durable: a dynamic fallback
 that does not depend on any external engine, does not break the size story,
-and gives a defensible answer to "what about eval" in partner conversations.
+and gives a defensible architectural answer to "what about eval" for
+adopters evaluating the compiler.
 
 ## Architecture
 
@@ -138,8 +138,8 @@ Briefly: register-based dispatch produces fewer opcodes per source operation
 than stack-based, the accumulator pattern reduces operand encoding overhead,
 and Wasm-locals map directly to virtual registers in the dispatch function.
 Stack-based dispatch was considered and rejected on the dispatch-loop
-performance grounds documented in Titzer 2022 (_A fast in-place interpreter
-for WebAssembly_, OOPSLA).
+performance grounds documented in Titzer 2022 (*A fast in-place interpreter
+for WebAssembly*, OOPSLA).
 
 ### Component 3: Dispatch loop (TypeScript)
 
@@ -178,7 +178,7 @@ approach (QuickJS, Engine262, V8 Ignition port). Those would all require
 adapter layers at the boundary, with the attendant identity-semantics
 breakage that has been documented for the host-import path in #1066.
 
-Built-ins (Array.prototype._, String.prototype._, Object._, Reflect._, etc.)
+Built-ins (Array.prototype.*, String.prototype.*, Object.*, Reflect.*, etc.)
 are implemented once in TypeScript against the boxed representation. The AOT
 path calls them directly via type-specialized wrappers when types allow, or
 generically when not. The interpreter calls them generically via the
@@ -186,21 +186,21 @@ generically when not. The interpreter calls them generically via the
 
 For ECMA-262 compliance, built-in implementations follow the Engine262 source
 as a reference — Engine262's spec-direct implementations port mechanically to
-TypeScript against our boxing API. This is _not_ a compilation of Engine262;
+TypeScript against our boxing API. This is *not* a compilation of Engine262;
 it is an implementation guided by the same source the TC39 reference uses.
 
 ### What's unified, what's separate
 
-| Concern                               | Unified                     | Separate                                |
-| ------------------------------------- | --------------------------- | --------------------------------------- |
-| Value representation (JSValue, boxes) | ✓                           |                                         |
-| Built-in library                      | ✓                           |                                         |
-| Object shape / hidden-class layout    | ✓                           |                                         |
-| Garbage collection                    | ✓ (Wasm GC)                 |                                         |
-| Frontend (parser → IR)                | ✓ (TS parser at build time) |                                         |
-| Backend (IR → output)                 |                             | AOT to Wasm GC vs. bytecode emission    |
-| Execution                             |                             | direct Wasm execution vs. dispatch loop |
-| Linked module size                    |                             | optional Acorn + interpreter            |
+| Concern | Unified | Separate |
+|---|---|---|
+| Value representation (JSValue, boxes) | ✓ | |
+| Built-in library | ✓ | |
+| Object shape / hidden-class layout | ✓ | |
+| Garbage collection | ✓ (Wasm GC) | |
+| Frontend (parser → IR) | ✓ (TS parser at build time) | |
+| Backend (IR → output) | | AOT to Wasm GC vs. bytecode emission |
+| Execution | | direct Wasm execution vs. dispatch loop |
+| Linked module size | | optional Acorn + interpreter |
 
 ## Scope
 
@@ -233,7 +233,7 @@ it is an implementation guided by the same source the TC39 reference uses.
 
 ## Phasing
 
-**Phase 1 (target: end of 3-month outreach window)**
+**Phase 1**
 
 - Acorn compiled via js2wasm (deliverable proves #1058 viability)
 - ~30 opcodes covering arithmetic, control flow, variable access, function
@@ -250,7 +250,7 @@ B) for static cases, host-import fallback (#1006 / #1066) for hosted
 environments, **and** a Wasm-GC-native bytecode interpreter for cases neither
 covers.
 
-**Phase 2 (post-outreach)**
+**Phase 2**
 
 - Direct eval with caller scope capture. Requires may-contain-eval tracking
   in the AOT path, promoting capturable locals into Wasm-GC scope objects.
@@ -378,22 +378,22 @@ covers.
 
 - The strategy is consciously a **self-hosted** strategy. Acorn-via-js2wasm
   doubles as a #1058 conformance test; the interpreter being authored in
-  TypeScript and compiled by the same compiler doubles as a velocity
-  demonstration for the agentic engineering workflow.
+  TypeScript and compiled by the same compiler doubles as a stress test
+  for the compilation pipeline on a realistic workload.
 - Built-ins authored against the boxed representation benefit both paths
-  equally. This is the lever that makes the proposal viable in a 3-month
-  window: most of the engineering surface area (built-ins) is shared work
-  that needed to happen for AOT conformance anyway.
+  equally. This is the lever that makes the proposal viable within
+  practical time budgets: most of the engineering surface area (built-ins)
+  is shared work that needed to happen for AOT conformance anyway.
 - Reference engines studied during design: V8 Ignition (register-based
   dispatch with accumulator, feedback vectors, suspend/resume encoding), Lua
   5 (clean register-based VM), Hermes (production register-based JS
   interpreter at scale). All are referenced in the ADR as prior art, none
   are ported.
-- This issue does not commit to shipping an interpreter in Phase 1 of any
-  partner conversation. The decision to start the work is contingent on:
+- This issue does not commit to a specific delivery milestone. The
+  decision to start the work is contingent on:
   (a) #1058 reaching a state where self-hosting Acorn is plausible, and
   (b) a test262 cluster analysis confirming that genuinely-dynamic eval is
-  the binding constraint for partner conversations, not built-in coverage.
+  a binding constraint for compatibility, not built-in coverage.
   Both gating conditions are tracked separately.
 
 ## Implementation Plan

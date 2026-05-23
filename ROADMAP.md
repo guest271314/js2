@@ -14,7 +14,10 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ### Conformance
 
-- **17,252 / 48,088** test262 tests passing (**35.9%** of the full ECMAScript conformance suite)
+<!-- AUTO:conformance-start -->
+**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
+<!-- AUTO:conformance-end -->
+
 - Automated conformance tracking with historical trend data and a public [conformance report](https://loopdive.github.io/js2wasm/benchmarks/report.html)
 - 195 project-level equivalence tests validating JS↔Wasm output parity
 

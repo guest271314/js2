@@ -12,7 +12,7 @@
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
 import { ts } from "../ts-api.js";
-import { mapTsTypeToWasm } from "../checker/type-mapper.js";
+import { isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -168,6 +168,24 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
     }
   }
 
+  // (#1151 Gap A1) Detector fallback for async calls the decl-modifier check
+  // above misses: a callee with no reachable declaration / no `async` modifier
+  // but whose call signature returns `Promise<T>`. Covers callbacks typed
+  // `() => Promise<T>`, variables holding async refs whose declared type is the
+  // function type (not the `async function` decl), and anonymous IIFEs. A
+  // function that *returns a Promise* must still convert a synchronous throw
+  // into a rejection (same contract), so wrapping these is correct.
+  //
+  // Excluded by construction:
+  //   - constructors — `getCallSignatures()` returns CALL signatures only, not
+  //     construct signatures, so `new Foo()` callees contribute nothing here.
+  //   - async generators — their call signatures return AsyncGenerator, not
+  //     Promise, so `isPromiseType` is already false for them.
+  const calleeType = ctx.checker.getTypeAtLocation(expr.expression);
+  for (const callSig of calleeType.getCallSignatures()) {
+    if (isPromiseType(callSig.getReturnType())) return true;
+  }
+
   return false;
 }
 
@@ -262,7 +280,7 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
       body: inner,
       catches: [],
       catchAll,
-    } as unknown as Instr);
+    });
     return;
   }
   const rejectIdx = ensureLateImport(ctx, "Promise_reject", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -280,7 +298,7 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
     body: inner,
     catches: [],
     catchAll,
-  } as unknown as Instr);
+  });
 }
 
 /**
@@ -560,7 +578,7 @@ function compileExpressionBody(
           const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }]);
           if (boxSymIdx !== undefined) {
             flushLateImportShifts(ctx, fctx);
-            fctx.body.push({ op: "call", funcIdx: boxSymIdx } as unknown as Instr);
+            fctx.body.push({ op: "call", funcIdx: boxSymIdx });
             return expectedType;
           }
         }

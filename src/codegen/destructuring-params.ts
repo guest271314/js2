@@ -10,8 +10,15 @@ import { popBody, pushBody } from "./context/bodies.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { shiftLateImportIndices } from "./expressions/late-imports.js";
-import { addUnionImports, ensureStructForType, resolveWasmType } from "./index.js";
+import {
+  addUnionImports,
+  ensureLetConstBindingPatternTdzFlags,
+  ensureStructForType,
+  resolveWasmType,
+} from "./index.js";
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -54,6 +61,46 @@ import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
  */
 function isPatternEmptyOnly(pattern: ts.ArrayBindingPattern): boolean {
   return pattern.elements.length === 0;
+}
+
+/**
+ * Destructuring mode for the param-destructure helpers (#1553a).
+ *
+ * - `"param"` (default): function-parameter destructuring; emits no TDZ flags.
+ * - `"catch"`: catch-clause destructuring; behaves like `"param"` today
+ *   (centralised here so #1552's catch helper can opt in later).
+ * - `"decl"`: declaration-form (`let`/`const`/`var`) destructuring; emits
+ *   `emitLocalTdzInit` after every binding `local.set`, and (for `let`/`const`)
+ *   calls `ensureLetConstBindingPatternTdzFlags` at entry so each bound
+ *   identifier has a TDZ flag local before its sibling defaults run.
+ */
+export type DestructureMode = "param" | "catch" | "decl";
+
+/**
+ * Caller-declared binding kind. Only meaningful when `mode === "decl"`:
+ *
+ * - `"let"` / `"const"`: requires per-binding TDZ flags.
+ * - `"var"`: `emitLocalTdzInit` is a no-op (no flag was allocated by the
+ *   pre-pass), so behaviour is correct without an extra branch.
+ * - `"param"`: catch-mode + param-mode default; the helper ignores it.
+ */
+export type BindingKind = "let" | "const" | "var" | "param";
+
+export interface DestructureOpts {
+  mode?: DestructureMode;
+  bindingKind?: BindingKind;
+}
+
+/** Internal: should this caller emit TDZ flag init after a binding `local.set`? */
+function isDeclMode(opts: DestructureOpts | undefined): boolean {
+  return opts?.mode === "decl";
+}
+
+/** Internal: should we pre-allocate let/const TDZ flags at helper entry? */
+function shouldEnsureLetConstFlags(opts: DestructureOpts | undefined): boolean {
+  if (opts?.mode !== "decl") return false;
+  const k = opts.bindingKind;
+  return k === "let" || k === "const";
 }
 
 /**
@@ -142,9 +189,29 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   const msg = "Cannot destructure 'null' or 'undefined'";
   addStringConstantGlobal(ctx, msg);
   const strIdx = ctx.stringGlobalMap.get(msg)!;
-  // Prefer host import so caller sees a genuine JS TypeError (constructor-matching
-  // tests such as `({constructor}) => constructor === TypeError` pass). Fall back
-  // to wasm throw+tag when a FunctionContext isn't available for late-import flush.
+  // #1473 — no JS host (wasi / standalone): build a TypeError INSTANCE via the
+  // in-module `__new_TypeError` constructor so `e instanceof TypeError`
+  // works under wasmtime, with no `__throw_type_error` host import. The
+  // constructor is registered in funcMap as an internal function, so
+  // ensureLateImport resolves it without adding an import (no index shift).
+  if (ctx.wasi || ctx.standalone) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+    const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+    const tagIdx = ensureExnTag(ctx);
+    if (newTypeErrorIdx !== undefined) {
+      return [
+        { op: "global.get", index: strIdx } as Instr,
+        { op: "call", funcIdx: newTypeErrorIdx } as Instr,
+        { op: "throw", tagIdx } as Instr,
+      ];
+    }
+    // Degrade to throwing the raw string with the same tag.
+    return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+  }
+  // JS-host: prefer the host import so the caller sees a genuine JS TypeError
+  // (constructor-matching tests such as `({constructor}) => constructor ===
+  // TypeError` pass). Fall back to wasm throw+tag when a FunctionContext isn't
+  // available for late-import flush.
   const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
   if (throwIdx !== undefined && fctx) {
     flushLateImportShifts(ctx, fctx);
@@ -187,7 +254,12 @@ export function destructureParamObjectExternref(
   fctx: FunctionContext,
   paramIdx: number,
   pattern: ts.ObjectBindingPattern,
+  opts: DestructureOpts = {},
 ): void {
+  const isDecl = isDeclMode(opts);
+  if (shouldEnsureLetConstFlags(opts)) {
+    ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
+  }
   // Ensure __extern_get is available
   let getIdx = ctx.funcMap.get("__extern_get");
   if (getIdx === undefined) {
@@ -236,6 +308,7 @@ export function destructureParamObjectExternref(
       fctx.body.push({ op: "global.get", index: excludedStrIdx });
       fctx.body.push({ op: "call", funcIdx: restObjIdx });
       fctx.body.push({ op: "local.set", index: restIdx });
+      if (isDecl) emitLocalTdzInit(fctx, restName);
       continue;
     }
 
@@ -319,11 +392,13 @@ export function destructureParamObjectExternref(
             { op: "local.set", index: localIdx! } as Instr,
           ],
         });
+        if (isDecl) emitLocalTdzInit(fctx, localName);
       } else {
         if (localType && !valTypesMatch(elemType, localType)) {
           coerceType(ctx, fctx, elemType, localType);
         }
         fctx.body.push({ op: "local.set", index: localIdx });
+        if (isDecl) emitLocalTdzInit(fctx, localName);
       }
     } else if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
       const nestedLocal = allocLocal(fctx, `__ext_dparam_nested_${fctx.locals.length}`, elemType);
@@ -375,9 +450,9 @@ export function destructureParamObjectExternref(
       }
 
       if (ts.isObjectBindingPattern(element.name)) {
-        destructureParamObjectExternref(ctx, fctx, nestedLocal, element.name);
+        destructureParamObjectExternref(ctx, fctx, nestedLocal, element.name, opts);
       } else {
-        destructureParamArray(ctx, fctx, nestedLocal, element.name, elemType);
+        destructureParamArray(ctx, fctx, nestedLocal, element.name, elemType, opts);
       }
     }
   }
@@ -415,7 +490,12 @@ export function destructureParamObject(
   paramIdx: number,
   pattern: ts.ObjectBindingPattern,
   paramType: ValType,
+  opts: DestructureOpts = {},
 ): void {
+  const isDecl = isDeclMode(opts);
+  if (shouldEnsureLetConstFlags(opts)) {
+    ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
+  }
   if (paramType.kind !== "ref" && paramType.kind !== "ref_null") {
     // externref parameters: convert to struct ref before destructuring (#647)
     if (paramType.kind === "externref") {
@@ -505,19 +585,19 @@ export function destructureParamObject(
         fctx.body.push({ op: "local.get", index: anyTmp });
         fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
         fctx.body.push({ op: "local.set", index: tmpLocal });
-        destructureParamObject(ctx, fctx, tmpLocal, pattern, convertedType);
+        destructureParamObject(ctx, fctx, tmpLocal, pattern, convertedType, opts);
         fctx.body = savedBody;
 
         // Else branch: cast would fail (primitive/different struct) — use __extern_get (#852)
         const elseInstrs: Instr[] = [];
         fctx.body = elseInstrs;
-        destructureParamObjectExternref(ctx, fctx, paramIdx, pattern);
+        destructureParamObjectExternref(ctx, fctx, paramIdx, pattern, opts);
         fctx.body = savedBody;
 
         fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs, else: elseInstrs });
       } else {
         // No struct type found — use __extern_get for all properties (#852)
-        destructureParamObjectExternref(ctx, fctx, paramIdx, pattern);
+        destructureParamObjectExternref(ctx, fctx, paramIdx, pattern, opts);
       }
       return;
     }
@@ -591,9 +671,9 @@ export function destructureParamObject(
           }
         }
         if (ts.isObjectBindingPattern(element.name)) {
-          destructureParamObject(ctx, fctx, tmpLocal, element.name, fieldType);
+          destructureParamObject(ctx, fctx, tmpLocal, element.name, fieldType, opts);
         } else {
-          destructureParamArray(ctx, fctx, tmpLocal, element.name, fieldType);
+          destructureParamArray(ctx, fctx, tmpLocal, element.name, fieldType, opts);
         }
       }
       continue;
@@ -618,6 +698,7 @@ export function destructureParamObject(
     // ref.null for refs), evaluate the initializer instead. (#823)
     if (element.initializer) {
       emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, element.initializer);
+      if (isDecl) emitLocalTdzInit(fctx, localName);
     } else {
       // Coerce struct field type to local's declared type if they differ (#658)
       const objLocalType = getLocalType(fctx, localIdx);
@@ -625,6 +706,7 @@ export function destructureParamObject(
         coerceType(ctx, fctx, fieldType, objLocalType);
       }
       fctx.body.push({ op: "local.set", index: localIdx });
+      if (isDecl) emitLocalTdzInit(fctx, localName);
     }
   }
 
@@ -658,7 +740,12 @@ export function destructureParamArray(
   paramIdx: number,
   pattern: ts.ArrayBindingPattern,
   paramType: ValType,
+  opts: DestructureOpts = {},
 ): void {
+  const isDecl = isDeclMode(opts);
+  if (shouldEnsureLetConstFlags(opts)) {
+    ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
+  }
   if (paramType.kind !== "ref" && paramType.kind !== "ref_null") {
     // externref parameters: convert to vec struct before destructuring (#647)
     // The externref may wrap any vec type at runtime (e.g. __vec_f64 from [1,2,3]
@@ -750,7 +837,7 @@ export function destructureParamArray(
           fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
           fctx.body.push({ op: "ref.cast", typeIdx: ti });
           fctx.body.push({ op: "local.set", index: tupleLocal });
-          destructureParamArray(ctx, fctx, tupleLocal, pattern, tupType);
+          destructureParamArray(ctx, fctx, tupleLocal, pattern, tupType, opts);
           fctx.body.push({ op: "i32.const", value: 1 } as Instr);
           fctx.body.push({ op: "local.set", index: dstrDoneLocal });
         } finally {
@@ -924,7 +1011,7 @@ export function destructureParamArray(
           // len = i32(__extern_length(materialized))
           { op: "local.get", index: fbMatTmp } as Instr,
           { op: "call", funcIdx: fbLenFn } as Instr,
-          { op: "i32.trunc_sat_f64_s" } as unknown as Instr,
+          { op: "i32.trunc_sat_f64_s" },
           { op: "local.set", index: fbLenTmp } as Instr,
           // arr = array.new_default(len)
           { op: "local.get", index: fbLenTmp } as Instr,
@@ -1009,7 +1096,7 @@ export function destructureParamArray(
       }
 
       // Now destructure from the converted vec_externref.
-      destructureParamArray(ctx, fctx, resultLocal, pattern, convertedType);
+      destructureParamArray(ctx, fctx, resultLocal, pattern, convertedType, opts);
 
       // Close the #862 tuple-struct fast-path gate: wrap everything since the
       // dstrDone sentinel was initialised in `if dstrDone == 0 { ... }` and
@@ -1087,9 +1174,9 @@ export function destructureParamArray(
             }
           }
           if (ts.isObjectBindingPattern(element.name)) {
-            destructureParamObject(ctx, fctx, tmpLocal, element.name, fieldType);
+            destructureParamObject(ctx, fctx, tmpLocal, element.name, fieldType, opts);
           } else {
-            destructureParamArray(ctx, fctx, tmpLocal, element.name, fieldType);
+            destructureParamArray(ctx, fctx, tmpLocal, element.name, fieldType, opts);
           }
           continue;
         }
@@ -1114,6 +1201,7 @@ export function destructureParamArray(
           const effType = localType || fieldType;
           emitNestedBindingDefault(ctx, fctx, localIdx, effType, element.initializer);
         }
+        if (isDecl) emitLocalTdzInit(fctx, localName);
       }
 
       // Close null guard — throw TypeError when null (JS spec)
@@ -1136,6 +1224,7 @@ export function destructureParamArray(
             fctx.body = nullDefaultInstrs;
             compileExpression(ctx, fctx, element.initializer, localType);
             fctx.body.push({ op: "local.set", index: localIdx });
+            if (isDecl) emitLocalTdzInit(fctx, localName);
             fctx.body = prevBody;
           }
           fctx.body.push({ op: "local.get", index: paramIdx });
@@ -1222,7 +1311,7 @@ export function destructureParamArray(
           emitNestedBindingDefault(ctx, fctx, emptyTmp, externType, element.initializer);
         }
         // Recurse with externref so the empty short-circuit fires.
-        destructureParamArray(ctx, fctx, emptyTmp, element.name as ts.ArrayBindingPattern, externType);
+        destructureParamArray(ctx, fctx, emptyTmp, element.name as ts.ArrayBindingPattern, externType, opts);
         continue;
       }
       const tmpLocal = allocLocal(fctx, `__dparam_${fctx.locals.length}`, elemType);
@@ -1241,9 +1330,9 @@ export function destructureParamArray(
         }
       }
       if (ts.isObjectBindingPattern(element.name)) {
-        destructureParamObject(ctx, fctx, tmpLocal, element.name, elemType);
+        destructureParamObject(ctx, fctx, tmpLocal, element.name, elemType, opts);
       } else {
-        destructureParamArray(ctx, fctx, tmpLocal, element.name, elemType);
+        destructureParamArray(ctx, fctx, tmpLocal, element.name, elemType, opts);
       }
       continue;
     }
@@ -1307,13 +1396,14 @@ export function destructureParamArray(
         }
         const restLocal = fctx.localMap.get(restName)!;
         fctx.body.push({ op: "local.set", index: restLocal });
+        if (isDecl) emitLocalTdzInit(fctx, restName);
       } else if (ts.isArrayBindingPattern(element.name)) {
         // Nested rest with array pattern: function([...[a, b]])
         // The freshly-created struct is a non-null vec matching the outer vec type.
         const nestedType: ValType = { kind: "ref", typeIdx: vecTypeIdx };
         const nestedTmpLocal = allocLocal(fctx, `__rest_nested_${fctx.locals.length}`, nestedType);
         fctx.body.push({ op: "local.set", index: nestedTmpLocal });
-        destructureParamArray(ctx, fctx, nestedTmpLocal, element.name, nestedType);
+        destructureParamArray(ctx, fctx, nestedTmpLocal, element.name, nestedType, opts);
       } else if (ts.isObjectBindingPattern(element.name)) {
         // Nested rest with object pattern: function([...{length}]) or [...{0:v}]
         // The rest array is array-like: destructure "length" from vec field 0
@@ -1344,6 +1434,7 @@ export function destructureParamArray(
             fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
             coerceType(ctx, fctx, { kind: "i32" }, localType);
             fctx.body.push({ op: "local.set", index: localIdx });
+            if (isDecl) emitLocalTdzInit(fctx, localName);
             continue;
           }
           const numKey = Number(key);
@@ -1357,6 +1448,7 @@ export function destructureParamArray(
             emitBoundsCheckedArrayGetUndef(ctx, fctx, arrTypeIdx, elemWasmType);
             coerceType(ctx, fctx, elemWasmType, localType);
             fctx.body.push({ op: "local.set", index: localIdx });
+            if (isDecl) emitLocalTdzInit(fctx, localName);
           }
         }
       } else {
@@ -1389,6 +1481,7 @@ export function destructureParamArray(
       coerceType(ctx, fctx, elemType, vecLocalType);
     }
     fctx.body.push({ op: "local.set", index: localIdx });
+    if (isDecl) emitLocalTdzInit(fctx, localName);
   }
 
   // Close null guard — throw TypeError when null (JS spec)

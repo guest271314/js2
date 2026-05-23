@@ -24,6 +24,7 @@
 
 import { ts } from "../ts-api.js";
 
+import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
 import { ensureNativeStringHelpers } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../codegen/registry/imports.js";
@@ -52,6 +53,8 @@ import type {
   IrType,
   IrTypeRef,
 } from "./nodes.js";
+import { analyzeEscape } from "./analysis/escape.js";
+import { analyzeOwnership } from "./analysis/ownership.js";
 import { constantFold } from "./passes/constant-fold.js";
 import { deadCode } from "./passes/dead-code.js";
 import { inlineSmall } from "./passes/inline-small.js";
@@ -61,6 +64,9 @@ import { UnionStructRegistry } from "./passes/tagged-union-types.js";
 import { taggedUnions } from "./passes/tagged-unions.js";
 import { planIrCompilation, type IrSelection } from "./select.js";
 import { verifyIrFunction } from "./verify.js";
+import { AllocSiteRegistry } from "./alloc-registry.js";
+import { analyzeEncoding } from "./analysis/encoding.js";
+import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
 
 export interface IrIntegrationReport {
@@ -111,6 +117,12 @@ export function compileIrPathFunctions(
 
   const compiled: string[] = [];
   const errors: { func: string; message: string }[] = [];
+
+  // #1586: one allocation-site registry per module compile. Threaded into the
+  // builder (mints ids on value-creating instrs) and every pass (preserve /
+  // fork / retire discipline). `alloc` ids are inert at lowering, so wiring the
+  // registry does not change emitted Wasm.
+  const allocRegistry = new AllocSiteRegistry();
 
   // Single shared union-struct registry across all IR-path functions in this
   // compilation. Registering a union once produces one WasmGC struct type;
@@ -187,6 +199,7 @@ export function compileIrPathFunctions(
         // of the IR resolver. Replaces the per-feature `nativeStrings:
         // boolean` + `anyStrTypeIdx: number` shortcuts that #1183 added.
         resolver: fromAstResolver,
+        allocRegistry,
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
@@ -283,6 +296,7 @@ export function compileIrPathFunctions(
             calleeTypes,
             classShapes,
             resolver: fromAstResolver,
+            allocRegistry,
           });
           const mainErrors = verifyIrFunction(result.main);
           if (mainErrors.length > 0) {
@@ -323,7 +337,7 @@ export function compileIrPathFunctions(
   // 2a. Per-function hygiene (CF → DCE → simplifyCFG to fixpoint).
   const afterHygiene: BuiltFn[] = [];
   for (const entry of built) {
-    const optimized = runHygienePasses(entry.fn);
+    const optimized = runHygienePasses(entry.fn, allocRegistry);
     const postErrors = verifyIrFunction(optimized);
     if (postErrors.length > 0) {
       for (const e of postErrors) {
@@ -331,6 +345,9 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    // #1586: alloc-provenance gate (debug-only). A pass that loses provenance
+    // throws here at the same boundary that already catches malformed SSA.
+    assertAllocProvenance(optimized, allocRegistry);
     afterHygiene.push({
       name: entry.name,
       fn: optimized,
@@ -341,9 +358,19 @@ export function compileIrPathFunctions(
 
   if (afterHygiene.length === 0) return { compiled, errors };
 
+  // #1588: string-encoding analysis. Read-only over the hygiene-stable IR;
+  // writes `encoding` annotations onto string allocation sites in the
+  // registry (`ALLOC_NAMESPACES.encoding`). Annotations are advisory and
+  // inert at lowering, so the emitted Wasm is unchanged. Later passes
+  // (inline/mono) preserve or alias the alloc ids, so an annotation written
+  // here travels to the canonical site via the registry's alias merge.
+  for (const entry of afterHygiene) {
+    analyzeEncoding(entry.fn, allocRegistry);
+  }
+
   // 2b. Module-scope inlining (#1167b).
   const modIn: IrModule = { functions: afterHygiene.map((e) => e.fn) };
-  const modOut = inlineSmall(modIn);
+  const modOut = inlineSmall(modIn, allocRegistry);
 
   // 2c. Re-run hygiene on functions the inline pass actually rewrote; verify.
   const afterInline: BuiltFn[] = [];
@@ -351,7 +378,7 @@ export function compileIrPathFunctions(
     const before = afterHygiene[i]!;
     const after = modOut.functions[i]!;
     const changed = after !== before.fn;
-    const final = changed ? runHygienePasses(after) : after;
+    const final = changed ? runHygienePasses(after, allocRegistry) : after;
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
@@ -359,6 +386,7 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    assertAllocProvenance(final, allocRegistry);
     afterInline.push({
       name: before.name,
       fn: final,
@@ -379,7 +407,7 @@ export function compileIrPathFunctions(
   // lowerer's resolver can map the clone's `IrFuncRef` to a concrete index.
   // -------------------------------------------------------------------------
   const monoIn: IrModule = { functions: afterInline.map((e) => e.fn) };
-  const monoResult = monomorphize(monoIn);
+  const monoResult = monomorphize(monoIn, allocRegistry);
   const originalNames = new Set<string>(afterInline.map((e) => e.name));
 
   // -------------------------------------------------------------------------
@@ -403,7 +431,7 @@ export function compileIrPathFunctions(
     const before = afterInlineByName.get(fn.name);
     const wasCloned = before === undefined;
     const changed = wasCloned || fn !== before.fn;
-    const final = changed ? runHygienePasses(fn) : fn;
+    const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
@@ -411,6 +439,7 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    assertAllocProvenance(final, allocRegistry);
     // Slice 3 (#1169c): clones from monomorphize don't have synthesized
     // info from the build phase; treat them as synthesized iff the
     // pre-mono entry was synthesized OR the function is brand-new (a
@@ -424,6 +453,37 @@ export function compileIrPathFunctions(
   }
 
   if (readyForLower.length === 0) return { compiled, errors };
+
+  // -------------------------------------------------------------------------
+  // 2g. Ownership + access-semantics analysis (#1587) — gated, default OFF.
+  //
+  // Runs on the final (post-mono/TU) IR shape, writing inferred ownership /
+  // access annotations to the registry `ownership` namespace. The analysis is
+  // purely an optimization aid: it does NOT mutate the IR and registry
+  // annotations are inert at lowering, so emitted Wasm is byte-identical
+  // whether or not this runs (ADR-0014). Consumers query the per-function
+  // `OwnershipResult` (the demonstration consumer in `analysis/stack-alloc.ts`
+  // is likewise gated and annotation-only). Behind `JS2WASM_IR_OWNERSHIP=1`
+  // for the rollout period.
+  // -------------------------------------------------------------------------
+  //
+  // 2h. Escape analysis (#747) — gated, default OFF. When
+  // `JS2WASM_IR_ESCAPE=1`, classifies each allocation
+  // (local/returned/stored/captured/opaque) on top of the ownership result and
+  // writes it to the registry `escape` namespace. Enabling escape implies
+  // running ownership (its oracle). Both are inert — no IR mutation, byte-
+  // identical Wasm — so scalar replacement / stack allocation stays a
+  // follow-up consumer.
+  const wantOwnership = ownershipAnalysisEnabled();
+  const wantEscape = escapeAnalysisEnabled();
+  if (wantOwnership || wantEscape) {
+    for (const entry of readyForLower) {
+      const ownershipResult = analyzeOwnership(entry.fn, allocRegistry);
+      if (wantEscape) {
+        analyzeEscape(entry.fn, allocRegistry, ownershipResult);
+      }
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Register monomorphized clones in `ctx` — append a placeholder
@@ -642,6 +702,24 @@ function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
 }
 
 /**
+ * #1587 rollout gate. The ownership analysis is default-OFF: it only runs the
+ * extra (inert) analysis pass when explicitly enabled, so production builds pay
+ * nothing and emitted Wasm is unchanged until a consumer opts in.
+ */
+function ownershipAnalysisEnabled(): boolean {
+  return process.env.JS2WASM_IR_OWNERSHIP === "1" || process.env.JS2WASM_IR_OWNERSHIP === "true";
+}
+
+/**
+ * #747 rollout gate. Escape analysis is default-OFF and inert; enabling it runs
+ * the ownership pass (its oracle) too. Stack allocation / scalar replacement
+ * consuming the classification is a follow-up — Phase 1 only annotates.
+ */
+function escapeAnalysisEnabled(): boolean {
+  return process.env.JS2WASM_IR_ESCAPE === "1" || process.env.JS2WASM_IR_ESCAPE === "true";
+}
+
+/**
  * Run the Phase 3a IR hygiene pipeline to fixpoint.
  *
  * Pipeline order (spec #1167a):
@@ -654,12 +732,12 @@ function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
  * loop strictly removes instructions or blocks, so real code converges
  * in a handful of rounds.
  */
-function runHygienePasses(fn: IrFunction): IrFunction {
+function runHygienePasses(fn: IrFunction, registry?: AllocSiteRegistry): IrFunction {
   const MAX_ITERS = 10;
   let cur = fn;
   for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const afterCF = constantFold(cur);
-    const afterDCE = deadCode(afterCF);
+    const afterCF = constantFold(cur, registry);
+    const afterDCE = deadCode(afterCF, registry);
     const afterCFG = simplifyCFG(afterDCE);
     if (afterCFG === cur) return cur;
     cur = afterCFG;
@@ -1004,6 +1082,21 @@ function makeResolver(
     // -------------------------------------------------------------------
     ensureExnTag(): number {
       return ensureExnTag(ctx);
+    },
+    // -------------------------------------------------------------------
+    // Async / Promise dispatch (#1373b Slice 1).
+    //
+    // Lazily registers (or retrieves) the standalone `$Promise` WasmGC
+    // struct type. The struct layout matches the canonical registration
+    // in `src/codegen/async-scheduler.ts`:
+    //   { state: i32, value: externref, callbacks: externref }
+    //
+    // Lower's `async.return` / `async.throw` / `await` arms call this
+    // to construct or inspect Promise values without going through the
+    // JS-host `Promise.resolve` / `Promise.reject` imports.
+    // -------------------------------------------------------------------
+    resolvePromiseType(): number {
+      return getOrRegisterPromiseType(ctx);
     },
   };
 }

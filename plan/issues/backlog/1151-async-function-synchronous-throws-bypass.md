@@ -469,7 +469,39 @@ spec §5: ≤ 10 regressions, no single bucket > 50. Net target: **−5 ≤ Δ �
 
 | Gap | Owner | Status |
 |-----|-------|--------|
-| B — `closures.ts:1170` binding-pattern coercion | dev (1-line + mirror) | ready, ship first |
-| A1 — `expressions.ts:154` detector broadening | dev (~15 LOC) | ready, ship second |
+| B — `closures.ts:1170` binding-pattern coercion | dev (1-line + mirror) | DONE (landed on main; guard at closures.ts:1229) |
+| A1 — `expressions.ts:154` detector broadening | dev (~15 LOC) | DONE (dev-1587, this PR) |
 | A2 — body-wrap safety net | defer | open sub-issue only if residual traps remain |
 | C — `src/ir/lower.ts` comment + assertion | senior-dev | bundled with #1373b gate flip |
+
+## Gap A1 implementation (dev-1587, 2026-05-23)
+
+Shipped the detector broadening in `src/codegen/expressions.ts`
+`isAsyncCallExpression`. After the existing identifier + decl-modifier checks,
+added a fallback: inspect the callee type's CALL signatures
+(`ctx.checker.getTypeAtLocation(expr.expression).getCallSignatures()`) and
+return true if any return type satisfies `isPromiseType(...)`. Construct
+signatures are excluded by `getCallSignatures()` (so `new Foo()` callees never
+match); async generators return AsyncGenerator (not Promise) so they remain
+excluded.
+
+**Reproduction (verified on current main before the fix):** a callback param
+typed `() => Promise<T>` whose body throws synchronously **trapped** at the
+wasm boundary — `isAsyncCallExpression` returned false (anonymous signature, no
+`async` decl modifier) so `wrapAsyncCallInTryCatch` never fired. After the fix,
+the call is recognised as async and the throw surfaces as a rejected Promise.
+
+**Tests:** `tests/issue-1151-gap-a1.test.ts` (4 cases): Promise-returning
+callback param, variable-aliased async fn, sync-fn-returns-Promise (still
+wrapped — correct per spec), and a negative guard (non-Promise callback NOT
+wrapped).
+
+**Regression check:** local async/promise equivalence suites have pre-existing
+failures (the `assertEquivalent` harness cannot await Wasm Promise returns) —
+verified identical fail set on clean main; my change reduced failed files 5→4
+(net-neutral-to-positive). `effectiveRetType`, `wrapAsyncCallInTryCatch`, and
+the `await asyncCall()` fast-path were NOT touched, per the critical rules.
+
+**Not in scope / deferred:** Gap A2 (body-wrap safety net) — open only if a
+residual sync-throw cluster remains after CI measures A1. Gap C (`src/ir/lower.ts`
+`IrInstrAsyncThrow`) — bundled with the #1373b gate flip (senior-dev).

@@ -36,12 +36,14 @@ import {
   type IrUnop,
   type IrValueId,
 } from "../nodes.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { retireAllocsIn } from "./alloc-discipline.js";
 
 /**
  * Fold constant `prim`/`br_if` instructions. Returns the same reference
  * when no changes are made.
  */
-export function constantFold(fn: IrFunction): IrFunction {
+export function constantFold(fn: IrFunction, registry?: AllocSiteRegistry): IrFunction {
   // Seed the const-def map from every existing `const` instruction. The
   // seed is global across blocks — inter-block constant references are
   // valid in Phase 2+ IR, so folding needs to see them.
@@ -61,6 +63,14 @@ export function constantFold(fn: IrFunction): IrFunction {
       const rewritten = tryFoldInstr(instr, constDefs);
       if (rewritten !== instr) {
         changed = true;
+        // Rule 3 (retire): if the fold dropped an allocation the original
+        // carried (e.g. a folded-away string), the value no longer allocates —
+        // retire its id so the replacement `const` (which carries none) is
+        // consistent. Today CF only folds binary/unary (non-alloc), so this is
+        // a no-op guard that future alloc-folding rewrites inherit for free.
+        if (instr.alloc !== undefined && rewritten.alloc === undefined) {
+          retireAllocsIn(instr, registry);
+        }
         // A fold turned a binary/unary into a const — record the new def
         // so subsequent ops in the same or later blocks see it folded.
         if (rewritten.kind === "const" && rewritten.result !== null) {

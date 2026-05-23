@@ -270,6 +270,26 @@ export function registerEnsureAnyHelpers(fn: EnsureAnyHelpersFn): void {
   _ensureAnyHelpers = fn;
 }
 
+// ── addUnionImports (lazy binding to avoid index.ts ↔ late-imports.ts cycle) ──
+// #1471: late-imports.ts needs to route box/unbox/typeof/is_truthy helper
+// names to the in-module native funcs under no-JS-host mode, but
+// addUnionImports lives in index.ts which already imports ensureLateImport.
+// Break the cycle the same way ensureAnyHelpers does.
+
+type AddUnionImportsFn = (ctx: CodegenContext) => void;
+
+let _addUnionImports: AddUnionImportsFn = () => {
+  throw new Error("addUnionImports not yet registered");
+};
+
+export function registerAddUnionImports(fn: AddUnionImportsFn): void {
+  _addUnionImports = fn;
+}
+
+export function addUnionImportsViaRegistry(ctx: CodegenContext): void {
+  _addUnionImports(ctx);
+}
+
 export function ensureAnyHelpers(ctx: CodegenContext): void {
   _ensureAnyHelpers(ctx);
 }
