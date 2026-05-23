@@ -1,7 +1,7 @@
 ---
 id: 1587
 title: "Static analysis pass: ownership and access semantics on IR values"
-status: ready
+status: in-progress
 sprint: 55
 created: 2026-05-23
 updated: 2026-05-23
@@ -277,3 +277,44 @@ tracking, integration with #1588's encoding tracking.
   allocations, and inter-procedural adds significant implementation
   surface (summary computation, summary serialization, summary
   invalidation on recompilation).
+
+## Implementation (Phase 1 — landed)
+
+Files added:
+- `src/ir/analysis/lattice.ts` — `Ownership` total order
+  (`owned ⊑ borrowed ⊑ shared ⊑ escaped`) with `joinOwnership` / `ownershipLeq`;
+  `AccessSet` powerset over `{read,write,mutate,identity,escape}` with union/subset;
+  `OwnershipAnnotation` + component-wise `joinAnnotations` + `topAnnotation`.
+- `src/ir/analysis/ownership.ts` — `analyzeOwnership(fn, registry?)`: monotone
+  worklist over the CFG. Allocations seed `owned`/{}, params/captures/globals
+  seed `shared`/{read}; per-op transfer widens operands (field read→read,
+  field write→write+value escapes, opaque call/return/capture→escape);
+  join at merges + branch-args; meet-over-paths final result. Writes the
+  `ownership` namespace on the registry and returns an `OwnershipResult` with
+  `of` / `ownershipOf` / `accessOf` / `isStackAllocatable` query API.
+- `src/ir/analysis/stack-alloc.ts` — demonstration consumer
+  `findStackAllocCandidates`: proven-`owned`-non-`escaped` small allocations
+  (object/refcell/box) → candidate list + inert `stackCandidate` marker.
+- `docs/adr/0014-ownership-access-analysis.md` — ADR (lattices, joins,
+  conservative-defaults guarantee, Rust-framing disclaimer, gating, phasing).
+
+Pipeline wiring (`src/ir/integration.ts`, step 2g): runs after mono/TU on the
+final IR shape, **gated behind `JS2WASM_IR_OWNERSHIP=1`, default OFF**. The pass
+does not mutate the IR and registry annotations are inert at lowering.
+
+## Test Results
+
+`tests/ir/ownership-analysis.test.ts` — 14 tests, all pass. Covers the lattices
+and all 7 required IR fragments: simple allocation, escape via return, escape
+via store-to-heap, escape via opaque call, mutation via field store, conditional
+escape via branching, loop-carried allocation; plus registry write-back, param
+seeding, and both demonstration-consumer cases.
+
+Inertness verified: compiling `make(){ const o={x:1}; o.x=2; return o.x }` with
+the flag OFF vs ON yields **byte-identical Wasm** (642 bytes both). `tsc --noEmit`
+and `biome lint` clean on all new/changed files. The 4 pre-existing
+`tests/ir/passes.test.ts` failures (`__box_number requires a callable`) reproduce
+on clean origin/main and are unrelated to this change.
+
+Phases 2 (inter-procedural summaries) and 3 (precision: loops, conditional
+refinement, escape-via-exception, join with #1588) are follow-up issues.
