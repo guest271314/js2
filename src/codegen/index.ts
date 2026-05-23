@@ -791,7 +791,15 @@ export function generateModule(
     // #1047 — register __register_prototype host import before any local function
     // is created so `emitLazyProtoGet` can look it up from funcMap without
     // triggering late-import index shifts mid-expression compilation.
-    if (sourceContainsClass(ast.sourceFile)) {
+    //
+    // #1472 Phase A — these two imports exist solely so the JS-host Proxy
+    // wrapper can present a spec-correct own-key set for class prototypes /
+    // class objects. There is no Proxy (and no JS host) in --target standalone,
+    // so we skip registering them. `emitLazyProtoGet` / `emitLazyClassObjectGet`
+    // gate their `call` emission on the import being present in funcMap, so
+    // skipping registration cleanly drops the host notification while the
+    // struct-backed prototype/class globals still work natively.
+    if (sourceContainsClass(ast.sourceFile) && !ctx.standalone) {
       const regProtoTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
       addImport(ctx, "env", "__register_prototype", { kind: "func", typeIdx: regProtoTypeIdx });
       // (#1395) Same rationale for the class-object registry — must be
