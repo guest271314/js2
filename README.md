@@ -46,7 +46,9 @@ Projects in this category usually take years to reach meaningful semantic covera
 
 Current public milestone:
 
-- **~60% Test262 compliance**
+<!-- AUTO:conformance-start -->
+**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
+<!-- AUTO:conformance-end -->
 
 See the [Playground](https://loopdive.github.io/js2wasm/playground/) and [Roadmap](./ROADMAP.md) for the current public surface.
 

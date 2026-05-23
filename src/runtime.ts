@@ -2540,6 +2540,58 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+/** Per-instance state shared across imports inside one `buildImports()`
+ *  call. Currently used by the `web_storage` intent so localStorage /
+ *  sessionStorage resolve to a stable per-instance polyfill in standalone
+ *  mode (Node, Bun, WASI). */
+interface InstanceState {
+  webStorage: { local?: any; session?: any };
+}
+
+function makeWebStoragePolyfill(): any {
+  const store = new Map<string, string>();
+  return {
+    get length(): number {
+      return store.size;
+    },
+    clear(): void {
+      store.clear();
+    },
+    getItem(k: any): string | null {
+      const key = String(k);
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(k: any, v: any): void {
+      store.set(String(k), String(v));
+    },
+    removeItem(k: any): void {
+      store.delete(String(k));
+    },
+    key(i: any): string | null {
+      const idx = Number(i);
+      if (!Number.isFinite(idx) || idx < 0) return null;
+      let n = 0;
+      for (const k of store.keys()) {
+        if (n === idx) return k;
+        n++;
+      }
+      return null;
+    },
+  };
+}
+
+let _warnedTimerCallbackUnresolvable = false;
+function _warnTimerCallbackUnresolvable(mode: "timeout" | "interval"): void {
+  if (_warnedTimerCallbackUnresolvable) return;
+  _warnedTimerCallbackUnresolvable = true;
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[js2wasm] ${mode === "interval" ? "setInterval" : "setTimeout"} callback could not be wrapped as a JS function ` +
+      `(WasmGC closure bridge unavailable — likely missing __call_fn_0 export, see #1382). ` +
+      `The call is being dropped to avoid a host coercion error. Provide a real JS function via deps to test in the meantime.`,
+  );
+}
+
 /**
  * #1492 — Adapt a raw Node-builtin function into the JS-host calling
  * convention used by compiled Wasm.
@@ -2623,6 +2675,7 @@ function resolveImport(
   deps?: Record<string, any>,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
   globalSandbox?: Record<string, any>,
+  instanceState?: InstanceState,
 ): Function {
   switch (intent.type) {
     case "string_literal":
@@ -3372,10 +3425,16 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           if (typeof exports?.[`__sget_${strKey}`] === "function") {
             try {
-              const v = exports[`__sget_${strKey}`](obj);
-              if (v != null) return 1;
+              // (#1589A) HasProperty (spec §7.3.12) is true for any own
+              // property regardless of value — including null/undefined. A
+              // struct getter that returns *at all* (even null) proves the
+              // field exists on this struct shape. Only a throw means "this
+              // field is not defined on this struct variant" (opaque-struct
+              // access error), so we fall through to `return 0` in that case.
+              exports[`__sget_${strKey}`](obj);
+              return 1;
             } catch {
-              /* not a field on this variant */
+              /* getter not defined for this struct variant — fall through */
             }
           }
           return 0;
@@ -3407,10 +3466,14 @@ assert._isSameValue = isSameValue;
             const exports = callbackState?.getExports();
             if (typeof exports?.[`__sget_${key}`] === "function") {
               try {
-                const v = exports[`__sget_${key}`](obj);
-                if (v !== undefined) return 1;
+                // (#1589A) Mirror __extern_has_idx: a getter that returns at
+                // all (even null/undefined) proves the field exists on this
+                // struct shape — HasProperty (§7.3.12) is value-independent.
+                // Only a throw signals "field not defined on this variant".
+                exports[`__sget_${key}`](obj);
+                return 1;
               } catch {
-                /* not a field on this variant */
+                /* getter not defined for this struct variant — fall through */
               }
             }
           }
@@ -5400,40 +5463,148 @@ assert._isSameValue = isSameValue;
         }
         return [arr]; // Fallback: wrap single value
       };
-      // (#1368) Spec-compliant Promise combinators.
+      // (#1368, #1465) Spec-compliant Promise combinators.
       //
-      // Signature changed from `(iterable)` to `(thisArg, iterable)` so that:
-      //   1. `Sub.all(iter)` (subclass) routes thisArg = Sub through the helper.
-      //   2. `Promise.all.call(C, iter)` is detected in codegen and forwarded
+      // Signature is `(thisArg, iterable)`:
+      //   1. Direct call `Promise.all(iter)` passes thisArg = null → helper
+      //      defaults to global Promise (codegen emits `ref.null.extern`).
+      //   2. `Sub.all(iter)` (subclass) routes thisArg = Sub through the helper
+      //      (blocked on #1382 — wasm class identifiers don't bridge to JS yet).
+      //   3. `Promise.all.call(C, iter)` is detected in codegen and forwarded
       //      with thisArg = C.
       //
       // We delegate to the native engine's `Promise.all.call(C, …)` etc., which
       // are spec-compliant for `[[AlreadyCalled]]`, `IteratorClose`, custom-this
-      // resolve/reject capability, and `thisArg.resolve` lookup. The runtime
-      // helper validates that `thisArg` is a constructor and converts the wasm
-      // vec or externref iterable into a real iterable that the native engine
-      // will iterate exactly once (matters for IteratorClose semantics).
+      // resolve/reject capability, `Get(C, "resolve")` lookup, and the full
+      // GetIterator protocol when given any JS iterable (string, arguments,
+      // Set, Map, custom Symbol.iterator).
+      //
+      // Per spec (PerformPromiseAll step 4): GetIterator(iterable) MUST drive
+      // the iterator protocol. So we must NOT silently wrap non-iterables in
+      // an array — `Promise.all(123)` must reject with TypeError, not resolve
+      // to [123]. The previous `_vecToArray` fallback violated this.
+      //
+      // (#1465) Iterable handling:
+      //   - null/undefined → pass through; native rejects with TypeError (spec).
+      //   - string → pass through; native iterates code units.
+      //   - JS Array / object with Symbol.iterator → pass through.
+      //   - WasmGC vec (detected via __vec_len/__vec_get accessors) → convert
+      //     to a real JS array so native can iterate it.
+      //   - Other primitives (number, boolean, symbol) → pass through; native
+      //     rejects with TypeError per spec.
       const _toIterable = (iter: any): any => {
-        if (iter == null) return [];
-        // If it's already a JS-iterable (array, generator, custom iterator), pass through.
-        if (typeof iter === "object" && Symbol.iterator in iter) return iter;
-        if (Array.isArray(iter)) return iter;
-        // Otherwise treat as Wasm vec — materialize into an array.
-        return _vecToArray(iter);
+        // null/undefined: per spec, GetIterator throws TypeError. Native does
+        // this when given undefined — pass through and let it reject.
+        if (iter == null) return iter;
+        // Strings are iterable per spec (yield code units).
+        if (typeof iter === "string") return iter;
+        // Already JS-iterable: array, generator, custom Symbol.iterator,
+        // arguments object, Set, Map, TypedArray, etc.
+        if (typeof iter === "object") {
+          // Real JS Array — fast path.
+          if (Array.isArray(iter)) return iter;
+          // Detect WasmGC vec first via accessors (they return 0/null for
+          // non-vec externrefs, so we materialize only when the round-trip
+          // looks sane). We MUST attempt this before Symbol.iterator because
+          // a wasm vec externref is an opaque host object — `Symbol.iterator
+          // in vec` either throws or returns false, and we want to convert
+          // it to a real JS array rather than fail.
+          const exports = callbackState?.getExports();
+          if (exports) {
+            const vecLen = exports.__vec_len as Function | undefined;
+            const vecGet = exports.__vec_get as Function | undefined;
+            if (typeof vecLen === "function" && typeof vecGet === "function") {
+              // `__vec_len(non-vec)` returns 0 by design — that's
+              // indistinguishable from an empty vec, so we use a sentinel
+              // probe: if the externref is a vec, calling vecLen+vecGet
+              // succeeds without throwing; if it's a plain JS object that
+              // also happens to be iterable (Set/Map/generator/custom), we
+              // need to NOT convert. Strategy: only materialize when
+              // (a) vecLen > 0 (real non-empty vec), OR
+              // (b) vecLen === 0 AND the object has no Symbol.iterator
+              //     (so it isn't a JS iterable we should preserve).
+              try {
+                const len = vecLen(iter) as number;
+                if (typeof len === "number" && len > 0) {
+                  const result: any[] = new Array(len);
+                  for (let i = 0; i < len; i++) {
+                    result[i] = vecGet(iter, i);
+                  }
+                  return result;
+                }
+                if (len === 0) {
+                  // Could be empty wasm vec or a non-iterable host object.
+                  // Peek at Symbol.iterator under try/catch — if present,
+                  // it's a JS iterable, pass through.
+                  let hasIter = false;
+                  try {
+                    hasIter = Symbol.iterator in iter;
+                  } catch {
+                    hasIter = false;
+                  }
+                  if (!hasIter) return [];
+                }
+              } catch {
+                // Not a vec (vecLen threw) — fall through.
+              }
+            }
+          }
+          // Has Symbol.iterator — pass through. Guard with try/catch since
+          // Proxy targets can throw on `has`.
+          try {
+            if (Symbol.iterator in iter) return iter;
+          } catch {
+            // Fall through to native rejection.
+          }
+          // Object that isn't iterable and isn't a vec: pass through; native
+          // throws TypeError per spec.
+          return iter;
+        }
+        // Non-object, non-string primitives (number, boolean, symbol, bigint):
+        // pass through; native `Promise.all(123)` throws TypeError per spec.
+        return iter;
       };
       const _resolveCtor = (thisArg: any, directCall: number): any => {
         // Step 1 of spec algorithm: `Let C be the this value`.
-        // (#1116) The codegen passes `directCall=1` when the user wrote
+        // (#1116, #1465) The codegen passes `directCall=1` when the user wrote
         // `Promise.METHOD(iter)` (no explicit thisArg) — substitute
-        // globalThis.Promise so the existing behavior is preserved.
+        // globalThis.Promise so the natural call site works.
         // For `directCall=0` (user wrote `.call(thisArg, iter)`), pass the
         // value through unchanged: V8's `Promise.METHOD.call(thisArg, …)`
         // then performs spec §27.2.4.X step 2 (`If Type(C) is not Object,
         // throw a TypeError exception`) — which is what test262
-        // `ctx-non-object.js` files exercise for undefined/null/primitive.
+        // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
+        // undefined/null/primitive/non-constructor values.
         if (directCall) return Promise;
         return thisArg;
       };
+      // (#1116b) Synthesize (and cache) a JS subclass of Promise for a
+      // Wasm-compiled `class MyPromise extends Promise`. The instance is
+      // already a real host Promise (built via __new_Promise); this JS
+      // constructor only needs to be [[Construct]]-able and carry a distinct
+      // .prototype so the combinators' NewPromiseCapability + @@species
+      // resolution work. Keyed on class name. Synthesized from the lexical
+      // (intrinsic) `Promise`, never a user-shadowed global.
+      if (name === "__promise_subclass_ctor") {
+        const _promiseSubclassCtors = new Map<string, any>();
+        return (classNameRef: any): any => {
+          const className = String(classNameRef);
+          let C = _promiseSubclassCtors.get(className);
+          if (C === undefined) {
+            // Cast the base to a plain constructor: `class extends Promise {}`
+            // trips TS2508 (Promise's lib.d.ts type is generic) but is valid
+            // JS — the emitted runtime subclasses the intrinsic Promise.
+            C = class extends (Promise as unknown as { new (...args: any[]): any }) {};
+            try {
+              Object.defineProperty(C, "name", { value: className, configurable: true });
+            } catch {
+              /* Function.name redefinition is best-effort; non-fatal. */
+            }
+            _promiseSubclassCtors.set(className, C);
+          }
+          return C;
+        };
+      }
       if (name === "Promise_all")
         return (thisArg: any, arr: any, directCall: number) => {
           const C = _resolveCtor(thisArg, directCall);
@@ -6465,6 +6636,78 @@ assert._isSameValue = isSameValue;
       }
       return () => {};
     }
+    case "web_storage": {
+      // #1502 — Browser Storage interface (localStorage / sessionStorage).
+      // Prefer the real host global (works in browser + jsdom); fall back to
+      // an in-memory Map-based polyfill for Node / Bun / WASI so compiled
+      // code that uses these globals still runs end-to-end. The polyfill is
+      // memoised per `buildImports()` call so repeated reads / writes share
+      // a single store and `localStorage` / `sessionStorage` remain
+      // distinct stores (mirroring browser semantics).
+      const which = intent.which;
+      return () => {
+        const cached = instanceState?.webStorage[which];
+        if (cached !== undefined) return cached;
+        // deps override allows tests / runners to inject a custom Storage.
+        const depKey = which === "local" ? "localStorage" : "sessionStorage";
+        const depVal = deps?.[depKey];
+        if (depVal !== undefined) {
+          if (instanceState) instanceState.webStorage[which] = depVal;
+          return depVal;
+        }
+        // Prefer the real host global when available (browser / jsdom).
+        const g: any = globalThis as any;
+        const real = g?.[depKey];
+        if (real !== undefined && real !== null) {
+          if (instanceState) instanceState.webStorage[which] = real;
+          return real;
+        }
+        // Standalone fallback.
+        const polyfill = makeWebStoragePolyfill();
+        if (instanceState) instanceState.webStorage[which] = polyfill;
+        return polyfill;
+      };
+    }
+    case "timer_set": {
+      // #1501 — Bind setTimeout / setInterval as host imports.
+      //
+      // Callback may be a real JS function (e.g. host-injected via deps) or
+      // a WasmGC closure struct (compiled code captures + passes a lambda).
+      // For the closure case, `_wrapWasmClosure` materialises a JS callable
+      // that dispatches through the module's `__call_fn_0` export. When the
+      // bridge is not yet available (e.g. exports not wired, see #1382),
+      // the call is logged once and dropped — no throw, no silent
+      // "[object Object]" coerce — so a compiled program calling
+      // `setTimeout(cb, ms)` doesn't crash the host.
+      const host = intent.mode === "interval" ? setInterval : setTimeout;
+      const intentMode = intent.mode;
+      return (cb: any, ms: any) => {
+        let fn: ((...args: any[]) => any) | null = typeof cb === "function" ? cb : null;
+        if (!fn) {
+          fn = _wrapWasmClosure(cb, 0, callbackState);
+        }
+        if (!fn) {
+          _warnTimerCallbackUnresolvable(intentMode);
+          return 0;
+        }
+        return host(fn, Number(ms));
+      };
+    }
+    case "timer_clear": {
+      // #1501 — Bind clearTimeout / clearInterval. Pass the externref handle
+      // straight through; the host accepts numbers (browser) and Timeout
+      // objects (Node 18+) interchangeably.
+      const host = intent.mode === "interval" ? clearInterval : clearTimeout;
+      return (h: any) => {
+        try {
+          host(h);
+        } catch {
+          // Defensive: invalid handle (e.g. undefined from a failed
+          // setTimeout where the closure bridge wasn't available). The
+          // browser also silently ignores invalid handles.
+        }
+      };
+    }
     case "node_dirname": {
       // #1494 — `__dirname` for compiled modules. Prefer an explicit override
       // from `deps`, then fall back to the host's ambient CJS `__dirname` when
@@ -6792,6 +7035,7 @@ export function buildWasiPolyfill(options?: { env?: Record<string, string | unde
   fd_write: (fd: number, iovs: number, iovs_len: number, nwritten: number) => number;
   fd_read: (fd: number, iovs: number, iovs_len: number, nread: number) => number;
   proc_exit: (code: number) => void;
+  poll_oneoff: (in_ptr: number, out_ptr: number, nsubs: number, nevents_out: number) => number;
   environ_sizes_get: (countPtr: number, bufSizePtr: number) => number;
   environ_get: (envPtrsPtr: number, envBufPtr: number) => number;
   clock_time_get: (clockid: number, precision: bigint, out_ptr: number) => number;
@@ -6895,6 +7139,29 @@ export function buildWasiPolyfill(options?: { env?: Record<string, string | unde
         process.exit(code);
       }
       throw new Error(`WASI proc_exit(${code})`);
+    },
+
+    // #1484 — Minimal poll_oneoff shim for vitest-driven tests.
+    //
+    // Real wasmtime semantics: read `nsubs` subscription_t records from `in_ptr`,
+    // suspend until the earliest event fires, then write the firing event(s) to
+    // `out_ptr` and the count to `nevents_out`. The compiled `__wasi_sleep_ms`
+    // helper passes a single CLOCK_MONOTONIC subscription, so we acknowledge
+    // it synchronously (no real sleep — tests run instantly) and report 1 event
+    // fired with no error. Returns 0 (__WASI_ERRNO_SUCCESS).
+    poll_oneoff(_in_ptr: number, out_ptr: number, nsubs: number, nevents_out: number): number {
+      if (!memory) return -1;
+      const view = new DataView(memory.buffer);
+      // Zero the event buffer (32 bytes per event) so downstream code can read
+      // userdata/error/type/clock fields without observing stale memory.
+      const written = Math.min(nsubs, 1) | 0;
+      if (written > 0) {
+        for (let i = 0; i < 32; i++) {
+          view.setUint8(out_ptr + i, 0);
+        }
+      }
+      view.setUint32(nevents_out, written, true);
+      return 0;
     },
 
     // #1482: WASI environ_sizes_get — report `[count, total_buf_bytes]`. The
@@ -7026,6 +7293,9 @@ export function buildImports(
   const MAX_HOST_RECURSION_DEPTH = 100;
   let hostCallDepth = 0;
 
+  // Per-instance state for stateful imports (e.g. localStorage polyfill).
+  const instanceState: InstanceState = { webStorage: {} };
+
   for (const imp of manifest) {
     if (imp.module !== "env") continue;
     let fn: Function;
@@ -7037,7 +7307,7 @@ export function buildImports(
       continue;
     }
 
-    fn = resolveImport(imp.intent, deps, callbackState, options?.globalSandbox);
+    fn = resolveImport(imp.intent, deps, callbackState, options?.globalSandbox, instanceState);
 
     // DOM containment wrapping
     if (options?.domRoot) {

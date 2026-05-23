@@ -622,6 +622,15 @@ jobs:
       # the previous step). The landing page reads from there via raw URL.
       # Local devs running `pnpm build:pages` etc. fetch the same data from
       # the baselines repo at build time.
+      #
+      # NOTE (#1522): The original PR added a "Sync conformance numbers into docs"
+      # step plus extra `git add` lines (ROADMAP.md, plan/goals/goal-graph.md,
+      # README.md, CLAUDE.md) to this commit step. Since the commit step itself
+      # was removed by the merge_queue ruleset, the conformance-sync mechanism
+      # needs to be re-attached to a workflow that CAN push to main (e.g. the
+      # baselines-repo push or a follow-up scheduled workflow). Tracking issue
+      # remains open at plan/issues/backlog/1522-race-local-test262-vs-ci.md.
+
 
 
       - name: Audit forced baseline refresh

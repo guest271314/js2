@@ -48,7 +48,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
-import { registerAddStringImports } from "./shared.js";
+import { registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
@@ -726,6 +726,7 @@ export function generateModule(
     // WASI target: check for DOM-only globals and emit compile errors
     if (ctx.wasi) {
       checkWasiDomUsage(ctx, ast.sourceFile);
+      rejectTimersUnderWasi(ctx, ast.sourceFile);
     }
 
     // Scan lib files for DOM extern classes + globals (only if user code uses DOM)
@@ -790,7 +791,15 @@ export function generateModule(
     // #1047 — register __register_prototype host import before any local function
     // is created so `emitLazyProtoGet` can look it up from funcMap without
     // triggering late-import index shifts mid-expression compilation.
-    if (sourceContainsClass(ast.sourceFile)) {
+    //
+    // #1472 Phase A — these two imports exist solely so the JS-host Proxy
+    // wrapper can present a spec-correct own-key set for class prototypes /
+    // class objects. There is no Proxy (and no JS host) in --target standalone,
+    // so we skip registering them. `emitLazyProtoGet` / `emitLazyClassObjectGet`
+    // gate their `call` emission on the import being present in funcMap, so
+    // skipping registration cleanly drops the host notification while the
+    // struct-backed prototype/class globals still work natively.
+    if (sourceContainsClass(ast.sourceFile) && !ctx.standalone) {
       const regProtoTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
       addImport(ctx, "env", "__register_prototype", { kind: "func", typeIdx: regProtoTypeIdx });
       // (#1395) Same rationale for the class-object registry — must be
@@ -2517,6 +2526,10 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
+  // - Promise combinators (Promise_all / Promise_race / Promise_allSettled /
+  //   Promise_any) — runtime helper needs to materialise wasm vec iterables
+  //   into JS arrays so the native engine's GetIterator can drive them per
+  //   spec (#1465).
   // - #1504: wrapExports marshaling of compiled array returns to plain JS,
   //   which needs __vec_len / __vec_get unconditionally for any module that
   //   declares vec types.
@@ -2534,6 +2547,10 @@ function emitVecAccessExports(ctx: CodegenContext): void {
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
     !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("Promise_all") &&
+    !ctx.funcMap.has("Promise_race") &&
+    !ctx.funcMap.has("Promise_allSettled") &&
+    !ctx.funcMap.has("Promise_any") &&
     !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
     !ctx.funcMap.has("__extern_get") &&
     ctx.vecTypeMap.size === 0
@@ -3079,6 +3096,7 @@ export function generateMultiModule(
     if (ctx.wasi) {
       for (const sf of multiAst.sourceFiles) {
         checkWasiDomUsage(ctx, sf);
+        rejectTimersUnderWasi(ctx, sf);
       }
     }
 
@@ -3391,6 +3409,12 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   let needsConsoleStderr = false;
   let needsProcExit = false;
   let needsRandomGet = false;
+  // #1484 — emit poll_oneoff + __wasi_sleep_ms helper when source references
+  // setTimeout/setInterval/setImmediate. The bare-identifier call sites are
+  // currently rejected at compile time by `rejectTimersUnderWasi`; emitting
+  // the helper here keeps the infrastructure in place for the follow-up that
+  // lowers timer calls to synchronous sleeps via the async scheduler.
+  let needsPollOneoff = false;
   // #1482: process.env.X access — register environ_get / environ_sizes_get +
   // the JS-polyfill fast-path host import.
   let needsEnviron = false;
@@ -3445,6 +3469,15 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Date") {
       if (!node.arguments || node.arguments.length === 0) {
         needsClockTimeGet = true;
+      }
+    }
+    // #1484 — track setTimeout/setInterval/setImmediate to drive poll_oneoff
+    // helper emission. Only bare-identifier call positions count (member-name
+    // positions like `obj.setTimeout` are skipped).
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const callee = node.expression.text;
+      if (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate") {
+        needsPollOneoff = true;
       }
     }
     // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
@@ -3510,6 +3543,22 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsRandomGet) {
     const randomGetType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$wasi_random_get");
     addImport(ctx, "wasi_snapshot_preview1", "random_get", { kind: "func", typeIdx: randomGetType });
+  }
+
+  // #1484 — poll_oneoff(in: i32, out: i32, nsubs: i32, nevents_out: i32) -> errno (i32)
+  // Registered when the source contains setTimeout/setInterval/setImmediate so the
+  // (in-progress) __wasi_sleep_ms helper has its underlying import wired. Must be
+  // registered BEFORE any defined helpers so late-import shifts (CLAUDE.md
+  // "addUnionImports" note) don't break previously-recorded function indices.
+  if (needsPollOneoff) {
+    const pollType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_poll_oneoff",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "poll_oneoff", { kind: "func", typeIdx: pollType });
+    ctx.wasiPollOneoffIdx = ctx.funcMap.get("poll_oneoff")!;
   }
 
   // #1482: process.env access — register the WASI environ imports for protocol
@@ -3606,6 +3655,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsFdRead) {
     ctx.wasiPendingFdReadHelper = true;
   }
+  if (needsPollOneoff) {
+    ctx.wasiPendingSleepMsHelper = true;
+  }
 }
 
 /**
@@ -3630,6 +3682,13 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
     emitWasiClockHelpers(ctx);
   }
 
+  // #1484 — Register __wasi_sleep_ms(ms: i32) helper that builds a CLOCK
+  // subscription and calls poll_oneoff. Currently unused (timer call sites
+  // are rejected by rejectTimersUnderWasi); the follow-up issue wires the
+  // async scheduler to call this for setTimeout/await sleep().
+  if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
+    emitWasiSleepMsHelper(ctx);
+  }
   // #1481: register __wasi_read_stdin_all() -> ref NativeString helper
   if (ctx.wasiPendingFdReadHelper && !ctx.funcMap.has("__wasi_read_stdin_all")) {
     emitWasiReadStdinAllHelper(ctx);
@@ -3868,6 +3927,93 @@ function emitWasiWriteFileSyncHelper(ctx: CodegenContext): void {
     name: "__wasi_write_file_sync",
     typeIdx: funcTypeIdx,
     locals: [{ name: "openedFd", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  });
+}
+
+/**
+ * #1484 — Emit __wasi_sleep_ms(ms: i32) helper.
+ *
+ * Builds a single CLOCK subscription in the scratch zone and calls poll_oneoff
+ * to block for `ms` milliseconds. Synchronous; blocks the wasm thread. Matches
+ * wasmtime's single-threaded execution model.
+ *
+ * Scratch layout (offsets inside the reserved 0..1023 bump zone):
+ *   [64..111] = subscription_t (48 bytes)
+ *     [64..71]   userdata (u64)            = 0
+ *     [72]       tag                       = 0  (EVENTTYPE_CLOCK)
+ *     [73..79]   pad                       = 0
+ *     [80..83]   clockid                   = 1  (CLOCK_MONOTONIC)
+ *     [84..87]   pad to 8-byte align       = 0
+ *     [88..95]   timeout (u64 ns)          = ms * 1_000_000
+ *     [96..103]  precision (u64)           = 0
+ *     [104..105] flags (u16)               = 0  (relative)
+ *     [106..111] pad
+ *   [112..143] = event_t out buffer (32 bytes; per-spec)
+ *   [144..147] = nevents out (u32)
+ */
+function emitWasiSleepMsHelper(ctx: CodegenContext): void {
+  if (ctx.wasiPollOneoffIdx === undefined || ctx.wasiPollOneoffIdx < 0) {
+    return; // safety: only emit when poll_oneoff is registered
+  }
+  const SUB_OFFSET = 64;
+  const EVT_OFFSET = 112;
+  const NEVENTS_OFFSET = 144;
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__wasi_sleep_ms", funcIdx);
+
+  // Param 0 = ms (i32)
+  // Local 1 = timeout_ns (i64) computed once
+  const body: Instr[] = [
+    // userdata @ 64 = 0 (i64)
+    { op: "i32.const", value: SUB_OFFSET } as Instr,
+    { op: "i64.const", value: 0n } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // tag @ 72 = 0 (i8 EVENTTYPE_CLOCK) — store 0 over 8 bytes covers tag + pad
+    { op: "i32.const", value: SUB_OFFSET + 8 } as Instr,
+    { op: "i64.const", value: 0n } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // clockid @ 80 = 1 (CLOCK_MONOTONIC), pad @ 84 = 0 — combined as i64
+    { op: "i32.const", value: SUB_OFFSET + 16 } as Instr,
+    { op: "i64.const", value: 1n } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // timeout @ 88 = (i64) ms * 1_000_000
+    { op: "i32.const", value: SUB_OFFSET + 24 } as Instr,
+    { op: "local.get", index: 0 } as Instr,
+    { op: "i64.extend_i32_u" } as unknown as Instr,
+    { op: "i64.const", value: 1000000n } as unknown as Instr,
+    { op: "i64.mul" } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // precision @ 96 = 0
+    { op: "i32.const", value: SUB_OFFSET + 32 } as Instr,
+    { op: "i64.const", value: 0n } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // flags @ 104 = 0 (u16, relative), plus pad — clear 8 bytes
+    { op: "i32.const", value: SUB_OFFSET + 40 } as Instr,
+    { op: "i64.const", value: 0n } as unknown as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+
+    // poll_oneoff(in=64, out=112, nsubs=1, nevents_out=144) — errno dropped
+    { op: "i32.const", value: SUB_OFFSET } as Instr,
+    { op: "i32.const", value: EVT_OFFSET } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: NEVENTS_OFFSET } as Instr,
+    { op: "call", funcIdx: ctx.wasiPollOneoffIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: "__wasi_sleep_ms",
+    typeIdx: funcTypeIdx,
+    locals: [],
     body,
     exported: false,
   });
@@ -4503,6 +4649,9 @@ export function addStringImports(ctx: CodegenContext): void {
 // Register addStringImports so any-helpers.ts can call it via the delegate
 // (breaks circular dep: index.ts → any-helpers.ts → shared.ts ← index.ts)
 registerAddStringImports(addStringImports);
+// #1471: lets late-imports.ts route box/unbox/typeof/is_truthy names to the
+// in-module native funcs under no-JS-host mode without an import cycle.
+registerAddUnionImports(addUnionImports);
 
 /** Parse a RegExp literal text (e.g. "/\\d+/gi") into pattern and flags */
 export function parseRegExpLiteral(text: string): { pattern: string; flags: string } {
@@ -5665,13 +5814,14 @@ export function addUnionImports(ctx: CodegenContext): void {
   if (ctx.hasUnionImports) return;
   ctx.hasUnionImports = true;
 
-  // Under `--target wasi` (#1180): emit Wasm-native implementations of the
-  // box / unbox / typeof / is_truthy helpers instead of `env::*` host
-  // imports, since wasmtime cannot satisfy the env::* imports without a JS
-  // host. The native impls preserve the same name + signature so existing
-  // call sites (`ctx.funcMap.get("__unbox_number")` etc.) work unchanged.
+  // Under `--target wasi` (#1180) and `--standalone` (#1471): emit Wasm-native
+  // implementations of the box / unbox / typeof / is_truthy helpers instead of
+  // `env::*` host imports, since a pure-Wasm engine (wasmtime, wasmer) cannot
+  // satisfy the env::* imports without a JS host. The native impls preserve the
+  // same name + signature so existing call sites
+  // (`ctx.funcMap.get("__unbox_number")` etc.) work unchanged.
   // Same dual-mode pattern as #679 (strings) and #682 (RegExp).
-  if (ctx.wasi) {
+  if (ctx.wasi || ctx.standalone) {
     addUnionImportsAsNativeFuncs(ctx);
     return;
   }
@@ -6842,6 +6992,28 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
       wasmType = { kind: "externref" };
     }
     const callSigs = propType.getCallSignatures();
+    // (#1589A) When the property's TS type has zero own properties (an empty
+    // `{}` value) but resolveWasmType picked a `ref`/`ref_null` to a struct,
+    // widen the field to externref. An empty object literal is constructed at
+    // runtime as a host externref (`__new_plain_object`), not as a WasmGC
+    // struct instance — so coercing it into a `ref null <struct>` field fails
+    // the `ref.test` and stores `ref.null`. Reading the field back through
+    // `__sget_<i>` then yields null, which (a) loses the value and (b) makes
+    // `__extern_has_idx` report the property as absent, breaking spec
+    // HasProperty (§7.3.12) for `Array.prototype.indexOf.call`-style loops.
+    // Storing the value as externref preserves both the value and presence.
+    // (`__Date` is the i64-timestamp struct, never an empty object literal.)
+    if (
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      callSigs.length === 0 &&
+      propType.getProperties().length === 0
+    ) {
+      const refTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
+      const refStructName = ctx.typeIdxToStructName.get(refTypeIdx);
+      if (refStructName !== "__Date") {
+        wasmType = { kind: "externref" };
+      }
+    }
     // For valueOf/toString callable properties, store as eqref instead of externref
     // so coercion can recover the closure and call it via call_ref
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
@@ -8222,6 +8394,85 @@ function checkWasiDomUsage(ctx: CodegenContext, sourceFile: ts.SourceFile): void
           ctx,
           node,
           `Codegen error: DOM global '${node.text}' is not available in WASI target — DOM requires a browser host`,
+        );
+      }
+    }
+    forEachChild(node, visit);
+  };
+  for (const stmt of sourceFile.statements) {
+    forEachChild(stmt, visit);
+  }
+}
+
+/**
+ * Timer / event-loop globals that have no equivalent in standalone WASI.
+ * Reported as compile-time errors under `--target wasi` so users do not get
+ * silent runtime hangs or `unknown import` instantiation failures (#1484).
+ *
+ * NOTE: `requestAnimationFrame` / `cancelAnimationFrame` are already covered
+ * by DOM_ONLY_GLOBALS above, so they are not duplicated here.
+ */
+const WASI_REJECTED_TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask"]);
+
+/**
+ * In WASI mode, scan source for timer / event-loop globals (setTimeout etc.)
+ * and emit compile errors. WASI has no event loop, so these would either
+ * silently no-op (if shimmed) or fail to instantiate (env::setTimeout import
+ * unresolved). See #1484. The poll_oneoff-based `__wasi_sleep_ms` helper
+ * provides a synchronous-sleep building block but does not (yet) wire into
+ * setTimeout/setInterval call sites — until that lands, reject the calls.
+ */
+function rejectTimersUnderWasi(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+  const found = new Set<string>();
+  /**
+   * Returns true if the identifier appears in a non-expression "name slot"
+   * (a member name, declaration binding, property assignment key, etc.).
+   * Bare global-identifier references and call-site identifiers are NOT
+   * filtered by this predicate.
+   */
+  const isNameSlot = (id: ts.Identifier): boolean => {
+    const parent = id.parent as ts.Node | undefined;
+    if (!parent) return false;
+    // `obj.setTimeout` — the `.name` slot of a property access.
+    if (ts.isPropertyAccessExpression(parent) && parent.name === id) return true;
+    // `class C { setTimeout() {} }` — method/property/getter/setter name slot.
+    if (
+      (ts.isMethodDeclaration(parent) ||
+        ts.isMethodSignature(parent) ||
+        ts.isPropertyDeclaration(parent) ||
+        ts.isPropertySignature(parent) ||
+        ts.isGetAccessorDeclaration(parent) ||
+        ts.isSetAccessorDeclaration(parent) ||
+        ts.isPropertyAssignment(parent) ||
+        ts.isShorthandPropertyAssignment(parent) ||
+        ts.isEnumMember(parent) ||
+        ts.isBindingElement(parent) ||
+        ts.isParameter(parent) ||
+        ts.isVariableDeclaration(parent) ||
+        ts.isFunctionDeclaration(parent) ||
+        ts.isClassDeclaration(parent) ||
+        ts.isImportSpecifier(parent) ||
+        ts.isExportSpecifier(parent) ||
+        ts.isNamedImports(parent) ||
+        ts.isNamedExports(parent) ||
+        ts.isTypeReferenceNode(parent) ||
+        ts.isQualifiedName(parent)) &&
+      (parent as { name?: ts.Node }).name === id
+    ) {
+      return true;
+    }
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && WASI_REJECTED_TIMER_GLOBALS.has(node.text) && !isNameSlot(node)) {
+      if (!found.has(node.text)) {
+        found.add(node.text);
+        reportError(
+          ctx,
+          node,
+          `Codegen error: '${node.text}' is not available under --target wasi — WASI has no event loop. ` +
+            `Use a synchronous loop, or split work across discrete _start invocations. ` +
+            `(A poll_oneoff-based sleep helper is available internally but not yet wired into ${node.text}.)`,
         );
       }
     }

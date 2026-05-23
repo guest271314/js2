@@ -32,13 +32,15 @@ import {
   type IrTerminator,
   type IrValueId,
 } from "../nodes.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { retireAllocsIn } from "./alloc-discipline.js";
 
 /**
  * Run dead-code elimination on an IR function. Returns the same reference
  * when no changes are made (so integration.ts can detect fixpoint via
  * reference equality).
  */
-export function deadCode(fn: IrFunction): IrFunction {
+export function deadCode(fn: IrFunction, registry?: AllocSiteRegistry): IrFunction {
   // --- Phase 1: compute reachable blocks (BFS from entry). ---------------
   const reachable = computeReachable(fn);
 
@@ -59,6 +61,21 @@ export function deadCode(fn: IrFunction): IrFunction {
     if (willRemoveInstrs) break;
   }
   if (!willRemoveBlocks && !willRemoveInstrs) return fn;
+
+  // Rule 3 (retire): inform the registry of every allocation we are about to
+  // delete — both whole unreachable blocks and individually dead instrs — so
+  // downstream passes / the provenance checker do not see stale ids.
+  if (registry) {
+    for (let id = 0; id < fn.blocks.length; id++) {
+      const block = fn.blocks[id]!;
+      const blockReachable = reachable.has(id);
+      for (const instr of block.instrs) {
+        if (!blockReachable || !shouldKeep(instr, live)) {
+          retireAllocsIn(instr, registry);
+        }
+      }
+    }
+  }
 
   // --- Phase 4: rebuild blocks. ------------------------------------------
   // Sort reachable block IDs ascending, then remap old → new index.

@@ -621,6 +621,11 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#1472 Phase A) Set of dynamic-shape object/property host-import names
+   *  already refused under `--target standalone`, used to deduplicate the
+   *  compile-error so a single source construct emits at most one error per
+   *  import name. Lazily initialized in late-imports.ts. */
+  standaloneRefusedImports?: Set<string>;
   /**
    * (#1373b) When true, async functions flow through the IR's CPS lowering
    * (Phase C). When false (default), the IR selector buckets async functions
@@ -641,6 +646,7 @@ export interface CodegenContext {
   wasiProcExitIdx: number;
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
+  wasiPollOneoffIdx?: number;
   wasiBumpPtrGlobalIdx: number;
   /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
   wasiEnvironSizesGetIdx: number;
@@ -660,6 +666,8 @@ export interface CodegenContext {
   wasiClockHelpersPending?: boolean;
   /** (#1483 + #1481) Pending flag — emit `__wasi_read_stdin_all` after lib-globals scan. */
   wasiPendingFdReadHelper?: boolean;
+  /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
+  wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */

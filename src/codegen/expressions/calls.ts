@@ -88,7 +88,14 @@ import {
 import { compileOptionalCallExpression } from "./calls-optional.js";
 import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
-import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
+import {
+  emitThrowTypeError,
+  getFuncParamTypes,
+  getWasmFuncReturnType,
+  isEffectivelyVoidReturn,
+  noJsHost,
+  wasmFuncReturnsVoid,
+} from "./helpers.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
@@ -299,6 +306,129 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
  * Skips nested function/function-expression scopes (they have their own `arguments`),
  * but traverses arrow functions (which inherit the enclosing `arguments`).
  */
+/**
+ * (#1465) Emit an iterable argument for a host-bound Promise combinator
+ * (Promise.all / race / allSettled / any).
+ *
+ * The runtime helper delegates to native `Promise.METHOD.call(C, iter)` which
+ * drives the spec's `GetIterator(iter)` algorithm — strings, arguments,
+ * generators, custom Symbol.iterator objects, Set/Map/TypedArrays all "just
+ * work" when the host engine sees them as real iterables.
+ *
+ * The pain point is array literals: by default `[p1, p2]` compiles to a
+ * wasm vec or tuple struct, which is opaque to the host engine. Native
+ * GetIterator on an opaque externref throws "object is not iterable".
+ *
+ * Fix: when the iterable argument is a syntactic ArrayLiteralExpression,
+ * compile each element to externref and push it into a JS array via
+ * `__js_array_new` / `__js_array_push`. For any other shape (variables,
+ * function returns, spread, …) fall back to plain externref coercion and
+ * trust the runtime helper's `_toIterable` to dispatch (it handles strings,
+ * known JS iterables, and wasm vec via __vec_len/__vec_get).
+ */
+function emitIterableArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): void {
+  // Strip parens/as so `(p as any[])` and similar wrappers still match.
+  let inner: ts.Expression = argExpr;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+    inner = inner.expression;
+  }
+  if (ts.isArrayLiteralExpression(inner)) {
+    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+    if (arrNewIdx !== undefined && arrPushIdx !== undefined) {
+      // Build a JS array eagerly, push each element coerced to externref.
+      fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+      const jsArrLocal = allocLocal(fctx, `__promise_iter_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: jsArrLocal });
+      for (const el of inner.elements) {
+        // Spread inside the array literal: fall back to a generic coercion of
+        // the entire literal to externref. Native engine will iterate the
+        // spread source on our behalf.
+        if (ts.isSpreadElement(el)) {
+          fctx.body.push({ op: "drop" } as Instr);
+          compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: jsArrLocal });
+        // OmittedExpression (sparse array hole) — push undefined sentinel.
+        if (ts.isOmittedExpression(el)) {
+          emitUndefined(ctx, fctx);
+        } else {
+          const elType = compileExpression(ctx, fctx, el, { kind: "externref" });
+          if (elType && elType.kind !== "externref") {
+            // compileExpression with target externref should coerce already;
+            // belt-and-braces fallback.
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+      }
+      fctx.body.push({ op: "local.get", index: jsArrLocal });
+      return;
+    }
+  }
+  // Default: coerce to externref and let the runtime helper dispatch.
+  compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+}
+
+/**
+ * (#1116b) Resolve a Promise-combinator `thisArg`/receiver that names a
+ * Wasm-compiled `class X extends Promise`.
+ *
+ * Such a class is externref-backed (#1366a/b): its instances are real host
+ * Promises (built via `__new_Promise`), but the class *identifier itself* has
+ * no class-object singleton global, so `compileExpression(MyPromise)` yields
+ * `null`/opaque — and `Promise.all.call(MyPromise, iter)` then throws
+ * `[object Object] is not a constructor` in V8. The fix: resolve the
+ * identifier to a real JS-callable Promise subclass synthesized (and cached)
+ * by the `__promise_subclass_ctor` host import, keyed on the class name.
+ *
+ * Returns true if it emitted a JS-constructor externref for `argExpr`; false
+ * if the caller should fall back to plain `compileExpression`.
+ */
+function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): boolean {
+  // (E7) Standalone (WASI) mode has no JS host, so `__promise_subclass_ctor`
+  // is unsatisfiable. Never emit the import there.
+  if (isStandalonePromiseActive(ctx)) return false;
+  // Only fires for a bare identifier (or class-expr alias) naming a class.
+  if (!ts.isIdentifier(argExpr)) return false;
+  const resolved = ctx.classExprNameMap.get(argExpr.text) ?? argExpr.text;
+  // Walk the parent chain so a chained subclass (E3 — `class B extends A`,
+  // `class A extends Promise`) still resolves: `classBuiltinParentMap` only
+  // records the *immediate* builtin parent, so B maps to "A", not "Promise".
+  let cursor: string | undefined = resolved;
+  let extendsPromise = false;
+  const seen = new Set<string>();
+  while (cursor !== undefined && !seen.has(cursor)) {
+    seen.add(cursor);
+    if (ctx.classBuiltinParentMap.get(cursor) === "Promise") {
+      extendsPromise = true;
+      break;
+    }
+    cursor = ctx.classParentMap.get(cursor);
+  }
+  if (!extendsPromise) return false;
+  const importName = "__promise_subclass_ctor";
+  let funcIdx =
+    ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
+  if (funcIdx === undefined) return false;
+  // Push the class name (the synthesized subclass is cached per name). Use the
+  // same host-string mechanism as extern method dispatch so it works in both
+  // string backends.
+  addStringConstantGlobal(ctx, resolved);
+  const nameIdx = ctx.stringGlobalMap.get(resolved);
+  if (nameIdx !== undefined) {
+    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
+  } else {
+    compileStringLiteral(ctx, fctx, resolved);
+  }
+  fctx.body.push({ op: "call", funcIdx });
+  return true;
+}
+
 function usesArguments(node: ts.Node): boolean {
   if (ts.isIdentifier(node) && node.text === "arguments") return true;
   if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) {
@@ -694,6 +824,10 @@ function tryEvalAsRegExpPeephole(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
+  // #1474 — this peephole desugars `eval("/" + X + "/")` to a RegExp_new
+  // host call. RegExp has no Wasm-native engine yet, so refuse to register
+  // the host import in --target standalone (eval itself is also host-only).
+  if (ctx.standalone) return undefined;
   if (expr.arguments.length !== 1) return undefined;
 
   // Strip parens around the argument.
@@ -1133,6 +1267,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
   // flags undefined, an edge case we accept). Emit the RegExp_new host call
   // directly so the host constructor runs and validates modifier syntax,
   // throwing SyntaxError on invalid patterns. (#1055)
+  // #1474 — RegExp delegates to the JS host engine; refuse `RegExp(...)`
+  // (no `new`) in --target standalone (Phase 1: refuse-and-document).
+  if (
+    ctx.standalone &&
+    !expr.questionDotToken &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "RegExp"
+  ) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: RegExp(...) is not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone.",
+    );
+    return null;
+  }
+
   if (
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
@@ -3891,13 +4042,32 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     // helper can construct via `thisArg.call(...)` for subclass support.
     // Resolve/reject keep their original 1-arg signature (no thisArg needed).
     {
+      const isAggregatorMethod =
+        propAccess.name.text === "all" ||
+        propAccess.name.text === "race" ||
+        propAccess.name.text === "allSettled" ||
+        propAccess.name.text === "any";
+      // (#1116b, E1) `Sub.all(iter)` where `Sub` is a `class extends Promise`
+      // is a subclass static inherited from Promise. Recognise the subclass
+      // receiver here too so it reaches the aggregator lowering (the thisArg
+      // resolution below switches it to directCall=0).
+      const isPromiseSubclassReceiver =
+        ts.isIdentifier(propAccess.expression) &&
+        (() => {
+          const name = ctx.classExprNameMap.get(propAccess.expression.text) ?? propAccess.expression.text;
+          let cursor: string | undefined = name;
+          const seen = new Set<string>();
+          while (cursor !== undefined && !seen.has(cursor)) {
+            seen.add(cursor);
+            if (ctx.classBuiltinParentMap.get(cursor) === "Promise") return true;
+            cursor = ctx.classParentMap.get(cursor);
+          }
+          return false;
+        })();
       const isAggregator =
         ts.isIdentifier(propAccess.expression) &&
-        propAccess.expression.text === "Promise" &&
-        (propAccess.name.text === "all" ||
-          propAccess.name.text === "race" ||
-          propAccess.name.text === "allSettled" ||
-          propAccess.name.text === "any");
+        (propAccess.expression.text === "Promise" || isPromiseSubclassReceiver) &&
+        isAggregatorMethod;
       const isResolveReject =
         ts.isIdentifier(propAccess.expression) &&
         propAccess.expression.text === "Promise" &&
@@ -3921,18 +4091,33 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         flushLateImportShifts(ctx, fctx);
         funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
         if (funcIdx !== undefined) {
-          // Direct `Promise.METHOD(iter)` — no explicit thisArg.
-          // (Subclass `Sub.all(iter)` is handled below via the receiver-detection branch.)
-          fctx.body.push({ op: "ref.null.extern" });
+          // (#1116b, E1) Subclass static `Sub.all(iter)` — the receiver
+          // `Sub` is a `class extends Promise`. Resolve it to the synthesized
+          // JS subclass as thisArg and switch to directCall=0 so the runtime
+          // uses it instead of substituting globalThis.Promise.
+          const subclassThisArg = resolvePromiseSubclassThisArg(ctx, fctx, propAccess.expression);
+          if (!subclassThisArg) {
+            // Direct `Promise.METHOD(iter)` — no explicit thisArg.
+            fctx.body.push({ op: "ref.null.extern" });
+          }
           if (expr.arguments.length >= 1) {
-            compileExpression(ctx, fctx, expr.arguments[0]!, {
-              kind: "externref",
-            });
+            // (#1465) The runtime helper delegates to native
+            // `Promise.METHOD.call(C, iter)` which drives `GetIterator(iter)`
+            // per spec. For that to work the host engine must see a real JS
+            // iterable. Array literals tend to compile to a wasm tuple/vec
+            // struct that's opaque to the host, so materialise them into a
+            // JS array eagerly here. Other expressions fall back to plain
+            // externref coercion (the runtime helper handles strings, JS
+            // arrays, generators, custom iterables, and known wasm vec
+            // shapes via __vec_len/__vec_get).
+            emitIterableArg(ctx, fctx, expr.arguments[0]!);
           } else {
             fctx.body.push({ op: "ref.null.extern" });
           }
-          // directCall=1 — runtime substitutes globalThis.Promise.
-          fctx.body.push({ op: "i32.const", value: 1 });
+          // directCall=1 — runtime substitutes globalThis.Promise. When a
+          // subclass receiver was resolved (E1), directCall=0 so the runtime
+          // uses the synthesized thisArg ctor instead.
+          fctx.body.push({ op: "i32.const", value: subclassThisArg ? 0 : 1 });
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "externref" };
         }
@@ -4024,10 +4209,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (funcIdx !== undefined) {
         // arg0 = thisArg (user-provided — may be undefined/null/primitive,
         // in which case the runtime / V8 throws TypeError per spec §27.2.4.X step 2).
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
-        // arg1 = iterable (or ref.null if missing)
+        // (#1116b) When thisArg names a `class X extends Promise`, resolve it to
+        // a synthesized JS-callable Promise subclass; otherwise compile normally.
+        if (!resolvePromiseSubclassThisArg(ctx, fctx, expr.arguments[0]!)) {
+          compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        }
+        // arg1 = iterable (or ref.null if missing). #1465: materialise array
+        // literals to JS arrays so native GetIterator can drive them.
         if (expr.arguments.length >= 2) {
-          compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+          emitIterableArg(ctx, fctx, expr.arguments[1]!);
         } else {
           fctx.body.push({ op: "ref.null.extern" });
         }
@@ -5423,17 +5613,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               : "TypeError: Cannot convert a Symbol value to a number";
             addStringConstantGlobal(ctx, msg);
             const strIdx = ctx.stringGlobalMap.get(msg)!;
-            const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
-            if (throwIdx !== undefined) {
-              flushLateImportShifts(ctx, fctx);
-              const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+            // #1473 — no JS host: throw a TypeError INSTANCE via the in-module
+            // constructor (no `__throw_type_error` host import).
+            if (noJsHost(ctx)) {
+              emitThrowTypeError(ctx, fctx, msg);
               fctx.body.push({ op: "unreachable" } as Instr);
             } else {
-              const tagIdx = ensureExnTag(ctx);
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              fctx.body.push({ op: "throw", tagIdx } as Instr);
+              const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
+              if (throwIdx !== undefined) {
+                flushLateImportShifts(ctx, fctx);
+                const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+                fctx.body.push({ op: "unreachable" } as Instr);
+              } else {
+                const tagIdx = ensureExnTag(ctx);
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "throw", tagIdx } as Instr);
+              }
             }
             // After unreachable / throw, the wasm stack is polymorphic.
             // Push a sentinel matching the method's return type so any
@@ -6066,6 +6263,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Number(x) — ToNumber coercion
     if (funcName === "Number" && expr.arguments.length >= 1) {
+      // ToNumber(Symbol) must throw TypeError (§7.1.4). Symbols are lowered to
+      // i32 ids, so a numeric pass-through would silently leak the id; detect
+      // the symbol TS type and throw instead.
+      if (isSymbolType(ctx.checker.getTypeAtLocation(expr.arguments[0]!))) {
+        const t = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (t !== null) fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+        return { kind: "f64" };
+      }
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
         // BigInt → number: f64.convert_i64_s
@@ -6276,6 +6482,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "i32.ne" } as Instr);
         return { kind: "i32" };
       }
+      if (argType?.kind === "i64") {
+        // BigInt (§7.1.2 ToBoolean): 0n → false, any other BigInt → true.
+        // i64.eqz yields 1 for 0n; invert with i32.eqz so nonzero → 1.
+        // Must NOT route through f64.convert_i64_s — that loses precision
+        // for |x| > 2^53 and would misreport large BigInts.
+        fctx.body.push({ op: "i64.eqz" } as Instr);
+        fctx.body.push({ op: "i32.eqz" } as Instr);
+        return { kind: "i32" };
+      }
       // String: truthy if length > 0
       if (
         (argType?.kind === "ref" || argType?.kind === "ref_null") &&
@@ -6419,6 +6634,27 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const sigRetWasm = isVoidType(sigRetType) ? null : resolveWasmType(ctx, sigRetType);
         const sigParamWasmTypes: ValType[] = [];
         for (let i = 0; i < sigParamCount; i++) {
+          // (#820d) Destructuring-pattern parameters (e.g. `method({ x = 5 } = {})`)
+          // are compiled by the callee as a single `externref` slot — the binding
+          // pattern is destructured inside the body from that externref, and the
+          // param-default check uses `__extern_is_undefined`. Resolving the TS
+          // type of such a param to a concrete struct ref (which `resolveWasmType`
+          // does once the anonymous object type gets a registered struct) produces
+          // a funcref wrapper type that mismatches the actual method/trampoline
+          // signature. The closure call then casts the trampoline funcref to the
+          // wrong (struct-param) type and traps with `illegal cast` — and for an
+          // unresolvable default the spec-correct ReferenceError never gets a
+          // chance to throw. Force `externref` for binding-pattern params so the
+          // call site agrees with the compiled callee.
+          const paramDecl = sig.parameters[i]!.valueDeclaration;
+          if (
+            paramDecl &&
+            ts.isParameter(paramDecl) &&
+            (ts.isObjectBindingPattern(paramDecl.name) || ts.isArrayBindingPattern(paramDecl.name))
+          ) {
+            sigParamWasmTypes.push({ kind: "externref" });
+            continue;
+          }
           const paramType = ctx.checker.getTypeOfSymbol(sig.parameters[i]!);
           sigParamWasmTypes.push(resolveWasmType(ctx, paramType));
         }

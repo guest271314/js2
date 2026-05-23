@@ -40,6 +40,11 @@ import { asBlockId, type IrBlock, type IrBranch, type IrFunction, type IrTermina
  *       than a real restriction).
  */
 export function simplifyCFG(fn: IrFunction): IrFunction {
+  // #1586 alloc-site discipline: this pass only moves/merges whole blocks and
+  // rewrites terminator targets — it never creates, fuses, or deletes a
+  // value-creating instr. Therefore it needs no AllocSiteRegistry interaction
+  // (no preserve/alias/retire). If a future edit makes this pass drop or fuse
+  // instrs, it must thread the registry and follow the three rules.
   const predCount = computePredCount(fn);
 
   // Find the first eligible merge.

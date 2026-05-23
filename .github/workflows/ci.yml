@@ -70,6 +70,15 @@ jobs:
           # files. See PR #432 investigation 2026-05-23.
           pnpm exec vitest run tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
 
+      - name: IR alloc-provenance checker (#1586)
+        # Runs the AllocSiteRegistry + provenance tests with the debug-mode
+        # invariant checker enabled, so a pass that loses allocation-site
+        # provenance fails CI here.
+        run: pnpm run test:ir:alloc
+
+      - name: Conformance numbers in sync (#1522)
+        run: pnpm run sync:conformance:check
+
       - name: Fetch runs/index.json from baselines repo
         if: github.event_name == 'push'
         continue-on-error: true

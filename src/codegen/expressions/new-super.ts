@@ -1489,7 +1489,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // instead of a `env.__new_<Name>` host import that would leave the
       // module unsatisfiable at instantiation time. JS-host mode is unchanged.
       const importName = `__new_${ctorName}`;
-      if (ctx.wasi && isWasiErrorName(ctorName)) {
+      // #1473 — standalone mode also has no JS host; build the Error in-module.
+      if ((ctx.wasi || ctx.standalone) && isWasiErrorName(ctorName)) {
         emitWasiErrorConstructor(ctx, ctorName, 1);
         const internalFuncIdx = ctx.funcMap.get(importName);
         if (internalFuncIdx !== undefined) {
@@ -1991,6 +1992,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         className = mapped;
       }
     }
+  }
+
+  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
+  // regex engine yet. Refuse `new RegExp(...)` in --target standalone
+  // (Phase 1: refuse-and-document). Match either the resolved builtin name
+  // or the literal identifier (which is how `new RegExp(...)` appears).
+  if (
+    ctx.standalone &&
+    (className === "RegExp" || (ts.isIdentifier(expr.expression) && expr.expression.text === "RegExp"))
+  ) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: new RegExp(...) is not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone.",
+    );
+    return null;
   }
 
   // Check if the identifier resolves to a function declaration used as constructor

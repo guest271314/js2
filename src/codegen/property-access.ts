@@ -953,7 +953,7 @@ export function compilePropertyAccess(
   // $Error_struct) + struct.get`. If the receiver is already null at
   // runtime, `ref.cast` traps — but native JS has the same behaviour
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
-  if (ctx.wasi && (propName === "message" || propName === "name")) {
+  if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name")) {
     const lhsTsName = objType.getSymbol()?.name;
     const isErrorLhs =
       lhsTsName !== undefined &&

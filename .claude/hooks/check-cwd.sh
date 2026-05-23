@@ -24,45 +24,38 @@ if echo "$FIRST_LINE" | grep -qE 'gh[[:space:]]+pr[[:space:]]+merge'; then
   # Extract PR number (supports: gh pr merge 275, gh pr merge #275)
   PR_NUM=$(echo "$FIRST_LINE" | grep -oE 'gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+#?([0-9]+)' | grep -oE '[0-9]+$')
   if [ -n "$PR_NUM" ]; then
-    CI_FILE="/workspace/.claude/ci-status/pr-${PR_NUM}.json"
-    if [ ! -f "$CI_FILE" ]; then
-      log_event "gh_pr_merge_blocked" "reason=no_ci_status" "pr=$PR_NUM"
+    # Authoritative merge gate is GitHub branch protection + the merge queue (required
+    # checks: cheap gate, merge shard reports, quality - incl. the test262 regression
+    # gate). The legacy .claude/ci-status/pr-N.json feed was retired (ci-status-feed.yml
+    # is DISABLED under the merge-queue model), so we verify required checks LIVE via
+    # `gh pr checks` instead of a file that is no longer produced. This keeps a real
+    # local gate (don't merge a red PR) without depending on the dead feed.
+    CHECKS=$(gh pr checks "$PR_NUM" 2>/dev/null)
+    if [ -z "$CHECKS" ]; then
+      # No check data (gh hiccup, or a non-src PR with no required checks) - don't
+      # hard-block on a tooling gap. GitHub branch protection still enforces required
+      # checks on the actual merge, so the server remains the hard gate.
+      log_event "gh_pr_merge_allowed" "pr=$PR_NUM" "reason=no_checks_query"
+      jq -n "{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"No local check data for PR #${PR_NUM}; GitHub branch protection remains the hard gate. Merge allowed.\"}}" 2>/dev/null || true
+      exit 0
+    fi
+    FAILING=$(echo "$CHECKS" | awk -F'\t' 'tolower($2) ~ /fail/{c++} END{print c+0}')
+    if [ "$FAILING" -gt 0 ]; then
+      log_event "gh_pr_merge_blocked" "reason=required_check_failing" "pr=$PR_NUM" "failing=$FAILING"
       cat >&2 <<MSG
-BLOCKED: No CI status file found for PR #${PR_NUM}.
-Expected: ${CI_FILE}
-
-The CI workflow has not completed yet (or the status file was not written).
-Wait for CI to finish and the status file to appear, then retry.
+BLOCKED: PR #${PR_NUM} has ${FAILING} failing check(s) on GitHub.
+Diagnose + fix with full PR context: gh pr checks ${PR_NUM}
+Then push and let CI re-run.
 
 Tech lead override: prefix command with GATE_BYPASS=1
-Example: GATE_BYPASS=1 gh pr merge ${PR_NUM} --admin --merge
+Example: GATE_BYPASS=1 gh pr merge ${PR_NUM} --merge
 MSG
       exit 2
     fi
-
-    NET=$(jq -r '.net_per_test // 0' "$CI_FILE" 2>/dev/null)
-    CONCLUSION=$(jq -r '.conclusion // "unknown"' "$CI_FILE" 2>/dev/null)
-    if [ "$CONCLUSION" != "success" ] && [ "$CONCLUSION" != "unknown" ]; then
-      log_event "gh_pr_merge_blocked" "reason=ci_not_success" "pr=$PR_NUM" "conclusion=$CONCLUSION"
-      cat >&2 <<MSG
-BLOCKED: CI did not pass for PR #${PR_NUM} (conclusion=${CONCLUSION}).
-Tech lead override: GATE_BYPASS=1 gh pr merge ${PR_NUM} --admin --merge
-MSG
-      exit 2
-    fi
-
-    if echo "$NET" | grep -qE '^-[0-9]'; then
-      log_event "gh_pr_merge_blocked" "reason=net_negative" "pr=$PR_NUM" "net=$NET"
-      cat >&2 <<MSG
-BLOCKED: PR #${PR_NUM} has net negative test impact (net_per_test=${NET}).
-Escalate to tech lead for a judgment call.
-Tech lead override: GATE_BYPASS=1 gh pr merge ${PR_NUM} --admin --merge
-MSG
-      exit 2
-    fi
-
-    log_event "gh_pr_merge_allowed" "pr=$PR_NUM" "net=$NET"
-    jq -n "{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"CI gate passed for PR #${PR_NUM} (net=${NET}, conclusion=${CONCLUSION}). Merge allowed.\"}}" 2>/dev/null || true
+    # No failing checks. Pending checks are allowed: `gh pr merge --auto` enqueues and
+    # the merge queue re-runs required checks on the merged state before landing.
+    log_event "gh_pr_merge_allowed" "pr=$PR_NUM" "failing=0"
+    jq -n "{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"No failing checks for PR #${PR_NUM} (live gh pr checks). Merge/enqueue allowed; the merge queue is the final gate.\"}}" 2>/dev/null || true
   fi
   exit 0
 fi

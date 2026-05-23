@@ -39,6 +39,7 @@ import { ts, forEachChild } from "../ts-api.js";
 
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
 import { IrFunctionBuilder } from "./builder.js";
+import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { mathUnaryToIrOp } from "./select.js";
 import {
@@ -207,6 +208,13 @@ export interface AstToIrOptions {
   readonly resolver?: IrFromAstResolver;
   /** Optional-chain nullability check (#1281). When absent, `?.` / `?.()` throw to legacy. */
   readonly checker?: ts.TypeChecker;
+  /**
+   * #1586: module-global allocation-site registry. When supplied, the builder
+   * mints a stable `AllocSiteId` for every value-creating instr (object.new,
+   * closure.new, string.const, …). Optional — when absent, `alloc` fields stay
+   * unset, which is inert at lowering (byte-identical output).
+   */
+  readonly allocRegistry?: AllocSiteRegistry;
 }
 
 /**
@@ -293,7 +301,12 @@ export function lowerFunctionAstToIr(
   });
 
   // Slice 14 (#1228) — void functions have zero result types; pass `[]`.
-  const builder = new IrFunctionBuilder(name, returnType === null ? [] : [returnType], options.exported ?? false);
+  const builder = new IrFunctionBuilder(
+    name,
+    returnType === null ? [] : [returnType],
+    options.exported ?? false,
+    options.allocRegistry,
+  );
 
   // Single scope map for both params and let/const locals. Phase 1 forbids
   // shadowing (enforced by the selector) so there is no nesting to track.
@@ -366,6 +379,7 @@ export function lowerFunctionAstToIr(
     funcKind: isGenerator ? "generator" : "regular",
     generatorBufferSlot,
     checker: options.checker,
+    allocRegistry: options.allocRegistry,
   };
   // #1372 — emit destructuring preamble for binding-pattern params. Each
   // leaf becomes a `local` ScopeBinding via `lowerBindingPattern`; the
@@ -754,6 +768,11 @@ interface LowerCtx {
   readonly generatorBufferSlot?: number;
   /** Optional-chain nullability check (#1281). When absent, `?.` / `?.()` throw to legacy. */
   readonly checker?: ts.TypeChecker;
+  /**
+   * #1586: module-global allocation-site registry, threaded so lifted-closure
+   * builders mint stable ids on the same registry as the outer function.
+   */
+  readonly allocRegistry?: AllocSiteRegistry;
 }
 
 /**
@@ -3827,7 +3846,7 @@ function liftNestedFunction(
   captures: readonly NestedCapture[],
   cx: LowerCtx,
 ): IrFunction {
-  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false);
+  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false, cx.allocRegistry);
   const scope = new Map<string, ScopeBinding>();
 
   // Prepend capture params before the user's params.
@@ -3865,6 +3884,7 @@ function liftNestedFunction(
     // in slice 7a (the selector rejects `function*` nesting via
     // `isPhase1NestedFunc`).
     funcKind: "regular",
+    allocRegistry: cx.allocRegistry,
   };
   if (!fn.body) {
     throw new Error(`ir/from-ast: nested function ${innerName(fn)} has no body`);
@@ -3896,7 +3916,7 @@ function liftClosureBody(
   captureFieldTypes: readonly IrType[],
   cx: LowerCtx,
 ): IrFunction {
-  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false);
+  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false, cx.allocRegistry);
   const scope = new Map<string, ScopeBinding>();
 
   const selfType: IrType = { kind: "closure", signature };
@@ -3941,6 +3961,7 @@ function liftClosureBody(
     // Slice 7a (#1169f) — closures are never generator/async in 7a
     // (the selector rejects them in `isPhase1ClosureLiteral`).
     funcKind: "regular",
+    allocRegistry: cx.allocRegistry,
   };
 
   if (ts.isArrowFunction(expr) && !ts.isBlock(expr.body)) {
