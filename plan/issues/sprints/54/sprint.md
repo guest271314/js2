@@ -1,12 +1,25 @@
 ---
 sprint: 54
-status: planning
+status: closed
 created: 2026-05-21
 planned: 2026-05-21
-baseline_pass: 28233
-baseline_total: 43160
-baseline_pct: 65.5
+started: 2026-05-23
+ended: 2026-05-23
+baseline_pass: 28842
+baseline_total: 43159
+baseline_pct: 66.8
+final_pass: 29239
+final_total: 43159
+final_pct: 67.7
+begin_tag: sprint-54/begin
+end_tag: sprint/54
 authors: architect
+wrap_checklist:
+  status_closed: true
+  retro_written: true
+  diary_updated: false
+  end_tag_pushed: false
+  begin_tag_pushed: false
 ---
 
 # Sprint 54 Plan — Decompose, dispatch, deliver
@@ -296,3 +309,132 @@ to-be-written:
 (PO po-s54), `backlog/1563-...md` (architect spec-gap inventory),
 `sprints/53/async-cluster-architect-spec.md`, `sprints/53/779b-...md`,
 `sprints/53/ir-fallback-analysis-2026-05-21.md`, `plan/log/dependency-graph.md`.*
+
+---
+
+## Closeout (2026-05-23 — compressed retroactive cycle)
+
+Sprint 54 effectively ran as a single-day compressed cycle on 2026-05-23,
+directly after sprint 53 closed at PR #408 (commit `de610f41d`,
+11:12Z). The 3-wave structure described above was not enforced —
+work instead flowed as a wide opportunistic merge wave (~25 PRs)
+covering CI infrastructure, conflict resolution, a single regression
+revert, planning, and a handful of issue PRs that landed alongside the
+infra work.
+
+### Test262 movement
+
+| Metric | Start (sprint-54/begin) | End (sprint/54) | Delta |
+|--------|------------------------:|----------------:|------:|
+| pass   | 28,842 | 29,239 | **+397** |
+| total  | 43,159 | 43,159 | 0 |
+| pct    | 66.8%  | 67.7%  | +0.9 pp |
+
+(Baselines: start = sharded baseline at sprint 53 close; end = latest
+sharded baseline after today's merge wave. Net is +397 after one
+regression revert mid-cycle — see `#440 / #516` below.)
+
+### Total issues / done / deferred
+
+- **Total in plan**: 24 issues across waves 1–3 (W4 stretch unscheduled).
+- **Done this cycle (issue-file PRs only)**: 6 — see "Issue PRs" below.
+- **Deferred to S55**: 5 carry-over issues moved from sprint 53
+  (#1553b, #1553c, #1553d, #820d, #1580) plus the bulk of the W1–W3
+  plan that was not attempted as a structured wave (the cycle's
+  realised work was dominated by infra + conflict resolution rather
+  than the planned spec-compliance harvest).
+
+### Key landed PRs (merged on `main` between sprint-54/begin and sprint/54)
+
+**Issue PRs (compiler / spec-completeness):**
+- #415 issue-1531 JSX parsing
+- #416 issue-1526 BigInt-Promise TypeErrors
+- #429 issue-1540 JSX runtime
+- #433 issue-1550 dstr init skipped
+- #434 issue-1552 catch dstr
+- #437 issue-846 class static prototype
+- #438 issue-1551 super-call eval
+- #436 issue-1116 promise resolution
+- #443 issue-1543/1544 (path B)
+- #454 issue-1553e decl-dstr (carry from S53)
+- #457 issue-1559 resolver bare-package import
+- #441 issue-1373b IR async CPS
+- #474 issue-106 default standard pass rate
+- #483 issue-1525 branch protection v2
+- #391 issue-1480 WASI console stderr
+
+**Regression revert:**
+- #440 issue-1542 class-dstr-default — landed a -1,219 test262 regression
+- #516 revert — backed #440 out within ~90 min once the regression bucket
+  was identified
+
+**CI infrastructure (the dominant work category today):**
+- #503 bump shards from 50 to 115
+- #505 slow-lane shard (sort shard test list by descending duration)
+- #485 fix local 16-shards
+- #491 promote-baseline writes only to js2wasm-baselines repo
+- #492 disable failing push-to-main steps in 4 workflows
+- #493 revert workflow repo-check back to loopdive/js2
+- #494 docs+scripts repo refs updated to loopdive/js2
+- #495 re-enable auto-refresh-prs.yml on push:main
+- #496 skip test262 on github-actions[bot] synchronize
+- #497 fix(#496) restore gate firing on bot synchronize
+- #499 disable auto-refresh-prs push trigger
+- #506 (auto-retry / staleness adjacent — landed in cluster)
+- #511 per-ref CI concurrency + auto-retry on compile_timeout
+- #513/#514/#517/#518/#519/#520 — auxiliary CI flag/policy chasing
+- #482 issue-1580 string-hash perf (CI side)
+
+**Planning & scope:**
+- #498 issue-1584 Wasm-GC-native bytecode interpreter strategy doc
+- #500 sprint 55 planning worktree (added issues #1586/#1587/#1588 to s55)
+- #501 (planning artifact)
+- #507 (planning artifact)
+- #1589A hot-spot diagnosis + skips (post-#440 triage)
+- #521 close sprint 53, move 5 issues to sprint 54 (the prerequisite PR
+  for this closeout — in the merge queue at the time sprint 54 closed)
+
+**Agent-driven conflict resolution wave (13 PRs in parallel):**
+- #502 conflict resolve 502
+- #509 conflict resolve 509
+- #408 issue-1470 no-js-host-string-ops (sprint 53 cap PR)
+- #404 issue-1504 browser-export-interop
+- #403 conflict resolve 403
+- #379 conflict resolve 379
+- #392 conflict resolve 392
+- #394 conflict resolve 394
+- #395 conflict resolve 395
+- #396 conflict resolve 396
+- #397 conflict resolve 397
+- #398 conflict resolve 398
+- #430 conflict resolve 430
+- #425 conflict resolve 425
+- #428 conflict resolve 428
+- #419 conflict resolve 419
+
+### Notes on what wasn't done
+
+The W1–W3 plan above was largely _not executed_ as designed. The cycle
+was dominated by CI infra and conflict resolution rather than the
+spec-compliance harvest. Specifically:
+
+- #779b Phase 1 — not landed this cycle (carry to S55)
+- #821 BindingElement null-guard — not landed
+- #1522 type-coercion boundaries — not landed
+- #1471/#1472 host-indep series — not landed
+- #1042 async-cps.ts skeleton — not landed
+- All easy spec batches (A/B/C) — not landed
+
+The +397 test262 delta came from the issue PRs listed above plus the
+incidental fixes inside the conflict-resolution wave. The retro
+(`plan/log/retrospectives/sprint-54.md`) discusses why the structured
+wave plan did not materialise and what S55 should do differently.
+
+### Tag handling
+
+- `sprint-54/begin` is created locally at `de610f41d` (PR #408 merge,
+  sprint 53 close); **not pushed** — tech lead to push.
+- `sprint/54` is created locally at HEAD; **not pushed** — tech lead to
+  push.
+- Sprint 53 also has its end-tag local-only (`sprint/53`); the begin
+  tag for s53 was never created (noted in s53 retro).
