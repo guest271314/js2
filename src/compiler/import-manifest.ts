@@ -128,6 +128,11 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Used by Array.prototype.includes on array-like receivers (#1360).
   if (name === "__same_value_zero") return { type: "same_value_zero" };
 
+  // Node-specific module-scope values (#1494)
+  if (name === "__get_dirname") return { type: "node_dirname" };
+  if (name === "__get_filename") return { type: "node_filename" };
+  if (name === "__get_import_meta_url") return { type: "node_import_meta_url" };
+
   // Node builtin module functions — typed function imports (#1491)
   // e.g. `__node_fs_readFileSync` → { moduleName: "fs", name: "readFileSync" }
   if (name.startsWith("__node_fs_")) {
@@ -142,6 +147,21 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__timer_set_interval") return { type: "timer_set", mode: "interval" };
   if (name === "__timer_clear_timeout") return { type: "timer_clear", mode: "timeout" };
   if (name === "__timer_clear_interval") return { type: "timer_clear", mode: "interval" };
+
+  // #1492 — Node builtin function host imports (e.g. `crypto.randomUUID`).
+  // Format: `__nodefn__<module>__<fnName>`. Both module and fnName must be
+  // non-empty; we split on the first `__` boundary inside the payload.
+  if (name.startsWith("__nodefn__")) {
+    const payload = name.slice("__nodefn__".length);
+    const sepIdx = payload.indexOf("__");
+    if (sepIdx > 0) {
+      const moduleName = payload.slice(0, sepIdx);
+      const fnName = payload.slice(sepIdx + 2);
+      if (fnName.length > 0) {
+        return { type: "node_builtin_fn", moduleName, name: fnName };
+      }
+    }
+  }
 
   // JSX runtime imports (#1540) — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV` after
   // TypeScript desugars JSX with `jsx: react-jsx`. The host binding is

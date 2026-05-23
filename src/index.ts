@@ -34,6 +34,9 @@ export type ImportIntent =
   | { type: "node_builtin_fn"; moduleName: string; name: string }
   | { type: "timer_set"; mode: "timeout" | "interval" }
   | { type: "timer_clear"; mode: "timeout" | "interval" }
+  | { type: "node_dirname" }
+  | { type: "node_filename" }
+  | { type: "node_import_meta_url" }
   | {
       // (#1540) JSX runtime binding — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV`
       // emitted by TypeScript when `jsx: react-jsx` is set. The host binding
@@ -107,8 +110,12 @@ export interface CompileOptions {
   sourceMap?: boolean;
   /** Source map URL to embed in the wasm binary (default: "module.wasm.map") */
   sourceMapUrl?: string;
-  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory), or "wasi" (WASI-compatible GC) */
-  target?: "gc" | "linear" | "wasi";
+  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory),
+   *  "wasi" (WASI-compatible GC), or "standalone" (pure WasmGC, no JS host
+   *  and no WASI runtime — #1470). `target: "standalone"` implies
+   *  `nativeStrings: true` and refuses to emit any `wasm:js-string` or
+   *  `env` JS-host string imports. */
+  target?: "gc" | "linear" | "wasi" | "standalone";
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
   /** Use WasmGC-native strings (array i16) instead of wasm:js-string imports.

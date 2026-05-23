@@ -1427,7 +1427,7 @@ function compileForOfAssignDestructuring(
   if (hasUnresolvable && isStrictContext(stmt)) {
     const tagIdx = ensureExnTag(ctx);
     fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "throw", tagIdx } as unknown as Instr);
+    fctx.body.push({ op: "throw", tagIdx });
     return;
   }
   if (ts.isObjectLiteralExpression(expr)) {
@@ -1760,8 +1760,8 @@ function compileForOfAssignDestructuring(
           const tmpVal = allocLocal(fctx, `__forof_dflt_v_${fctx.locals.length}`, innerElemType);
           fctx.body.push({ op: "local.tee", index: tmpVal });
           if (innerElemType.kind === "f64") {
-            fctx.body.push({ op: "i64.reinterpret_f64" } as unknown as Instr);
-            fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den } as unknown as Instr);
+            fctx.body.push({ op: "i64.reinterpret_f64" });
+            fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
             fctx.body.push({ op: "i64.eq" });
           } else if (innerElemType.kind === "externref") {
             const undefIdx = ensureExternIsUndefined(ctx, fctx);
@@ -1790,19 +1790,19 @@ function compileForOfAssignDestructuring(
             blockType: { kind: "val", type: valType },
             then: thenInstrs,
             else: elseInstrs,
-          } as unknown as Instr);
+          });
           fctx.body.push({
             op: "struct.set",
             typeIdx: boxedCapVec.refCellTypeIdx,
             fieldIdx: 0,
-          } as unknown as Instr);
+          });
           if (vecSyncGlobalIdx !== undefined) {
             fctx.body.push({ op: "local.get", index: targetLocal });
             fctx.body.push({
               op: "struct.get",
               typeIdx: boxedCapVec.refCellTypeIdx,
               fieldIdx: 0,
-            } as unknown as Instr);
+            });
             fctx.body.push({ op: "global.set", index: vecSyncGlobalIdx });
           }
           continue;
@@ -2029,7 +2029,7 @@ function compileForOfAssignDestructuringExternref(
         op: "struct.set",
         typeIdx: boxedCap.refCellTypeIdx,
         fieldIdx: 0,
-      } as unknown as Instr);
+      });
       if (extSyncGlobalIdx !== undefined) {
         // Re-load through the cell for global sync
         fctx.body.push({ op: "local.get", index: targetLocal });
@@ -2037,7 +2037,7 @@ function compileForOfAssignDestructuringExternref(
           op: "struct.get",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
         fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
       }
       continue;
@@ -2093,13 +2093,13 @@ function compileForOfAssignDestructuringExternref(
         blockType: { kind: "val", type: valType },
         then: thenInstrs,
         else: elseInstrs,
-      } as unknown as Instr);
+      });
       // Now stack: [box-ref, value:valType]
       fctx.body.push({
         op: "struct.set",
         typeIdx: boxedCap.refCellTypeIdx,
         fieldIdx: 0,
-      } as unknown as Instr);
+      });
       if (extSyncGlobalIdx !== undefined) {
         // Re-load through the cell for global sync
         fctx.body.push({ op: "local.get", index: targetLocal });
@@ -2107,7 +2107,7 @@ function compileForOfAssignDestructuringExternref(
           op: "struct.get",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
         fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
       }
       continue;
@@ -2791,14 +2791,14 @@ function compileForOfIteratorAssignDestructuring(
           op: "struct.set",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
         if (iterArrSyncGlobalIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: targetLocal });
           fctx.body.push({
             op: "struct.get",
             typeIdx: boxedCap.refCellTypeIdx,
             fieldIdx: 0,
-          } as unknown as Instr);
+          });
           fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
         }
         continue;
@@ -2839,19 +2839,19 @@ function compileForOfIteratorAssignDestructuring(
           blockType: { kind: "val", type: valType },
           then: thenInstrs,
           else: elseInstrs,
-        } as unknown as Instr);
+        });
         fctx.body.push({
           op: "struct.set",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
         if (iterArrSyncGlobalIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: targetLocal });
           fctx.body.push({
             op: "struct.get",
             typeIdx: boxedCap.refCellTypeIdx,
             fieldIdx: 0,
-          } as unknown as Instr);
+          });
           fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
         }
         continue;
@@ -3077,7 +3077,7 @@ function compileForOfDirectIterator(
       { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
     ],
     else: [],
-  } as unknown as Instr);
+  });
 
   // Get value: elem = result.value
   fctx.body.push({ op: "local.get", index: resultLocal });
@@ -3153,7 +3153,7 @@ function compileForOfDirectIterator(
         { op: "drop" } as Instr,
       ],
       else: [],
-    } as unknown as Instr);
+    });
   }
 
   return true;
@@ -3375,7 +3375,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
               { op: "call", funcIdx: capturedReturnIdx } as Instr,
             ],
             else: [],
-          } as unknown as Instr,
+          },
         ]),
       breakStackLen: iterCloseBreakStackLen,
       continueStackLen: iterCloseContinueStackLen,
@@ -3413,7 +3413,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
     ],
     else: [],
-  } as unknown as Instr);
+  });
 
   // Get value: elem = __iterator_value(result)
   fctx.body.push({ op: "local.get", index: resultLocal });
@@ -3462,7 +3462,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // The block/loop body; wrapped in try/catch_all when __iterator_return is available
   // to call iterator.return() on throw (#851 via-throw).
-  const blockLoop = {
+  const blockLoop: Instr = {
     op: "block",
     blockType: { kind: "empty" },
     body: [
@@ -3489,7 +3489,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       body: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
       catches: [],
       catchAll: [], // suppress any error from GetMethod / return() per spec step 6
-    } as unknown as Instr;
+    };
     const catchAllBody: Instr[] = [
       { op: "local.get", index: doneFlag } as Instr,
       { op: "i32.eqz" } as Instr,
@@ -3498,8 +3498,8 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
         blockType: { kind: "empty" },
         then: [innerCloseTry],
         else: [],
-      } as unknown as Instr,
-      { op: "rethrow", depth: 0 } as unknown as Instr,
+      },
+      { op: "rethrow", depth: 0 },
     ];
     fctx.body.push({
       op: "try",
@@ -3507,9 +3507,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       body: [blockLoop],
       catches: [],
       catchAll: catchAllBody,
-    } as unknown as Instr);
+    });
   } else {
-    fctx.body.push(blockLoop as unknown as Instr);
+    fctx.body.push(blockLoop);
   }
 
   // Iterator close protocol (#851): call iterator.return() on break (post-loop check).
@@ -3522,7 +3522,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       blockType: { kind: "empty" },
       then: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
       else: [],
-    } as unknown as Instr);
+    });
   }
 }
 
