@@ -32,6 +32,7 @@ export type ImportIntent =
   | { type: "proxy_create" }
   | { type: "node_builtin"; moduleName: string }
   | { type: "node_builtin_fn"; moduleName: string; name: string }
+  | { type: "web_storage"; which: "local" | "session" }
   | { type: "timer_set"; mode: "timeout" | "interval" }
   | { type: "timer_clear"; mode: "timeout" | "interval" }
   | { type: "node_dirname" }
