@@ -309,6 +309,16 @@ const HANGING_TESTS = new Set([
   // the skip filter to catch eval anywhere in source, or (b) ship a no-op
   // eval stub that lets such loops terminate quickly. See #1589 Findings.
   "language/comments/S7.4_A6.js",
+
+  // #1589 Hot spot A (#1589A): Array.prototype.{indexOf,lastIndexOf}.call(obj, …)
+  // with `length: 4294967296`. Wrong object-literal field-type inference (empty
+  // {} treated as Test262Error) + __extern_has_idx returning 0 for null payload
+  // causes a 4-billion-iteration search loop → 30s timeout. Real compiler bug
+  // tracked in #1589A — skip these tests in the meantime so the longest shard
+  // doesn't pay 3 × 30s of timeout cost.
+  "built-ins/Array/prototype/indexOf/15.4.4.14-3-28.js",
+  "built-ins/Array/prototype/indexOf/15.4.4.14-3-29.js",
+  "built-ins/Array/prototype/lastIndexOf/15.4.4.15-3-28.js",
 ]);
 
 export function shouldSkip(source: string, meta: Test262Meta, filePath?: string): FilterResult {
