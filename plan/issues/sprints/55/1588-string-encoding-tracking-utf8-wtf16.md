@@ -1,7 +1,7 @@
 ---
 id: 1588
 title: "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop"
-status: ready
+status: in-progress
 sprint: 55
 created: 2026-05-23
 updated: 2026-05-23
@@ -362,3 +362,47 @@ Strings.
 - Naming: "UTF-8 guaranteed" is the term used here for clarity; the
   ADR may settle on a different internal name (`wellformed`, `scalar`,
   etc.) once the analysis is implemented.
+
+## Phase 1 implementation status (2026-05-23)
+
+Landed:
+
+- **Lattice + analysis pass** — `src/ir/analysis/encoding.ts`. Exports
+  `Encoding` (`ascii | utf8-guaranteed | wtf16`), `joinEncoding`,
+  `classifyLiteral`, and `analyzeEncoding(fn, registry)`. The pass is a
+  single read-only forward pass over the IR; it writes annotations to the
+  `AllocSiteRegistry` `encoding` namespace (`ALLOC_NAMESPACES.encoding`,
+  reserved by #1586) and never mutates the IR. Re-exported from
+  `src/ir/index.ts`.
+- **Origin rule** — string literals (`string.const`): `ascii` if all code
+  units ≤ 0x7F; `utf8-guaranteed` if well-formed but non-ASCII; `wtf16` if a
+  lone surrogate is present (cannot be valid UTF-8).
+- **Propagation rule** — `s1 + s2` (`string.concat`): join the operands'
+  encodings per the lattice. Untracked operands (params, call results)
+  default to `wtf16`, which conservatively forces the result to `wtf16`.
+- **Pipeline wiring** — `compileIrPathFunctions` runs `analyzeEncoding` over
+  every hygiene-stable IR function (`src/ir/integration.ts`, after the 2a
+  hygiene loop). Annotations are inert at lowering, so emitted Wasm is
+  unchanged. Inline/mono passes preserve or alias the `alloc` ids, and the
+  registry's `alias` merges annotations onto the canonical site.
+- **ADR-0015** — `docs/adr/0015-string-encoding-tracking.md` (numbered 0015
+  to avoid colliding with #1587's reserved ADR-0014).
+- **Tests** — `tests/ir/encoding-analysis.test.ts` (11 cases): lattice join,
+  literal classifier incl. surrogate edge cases, pass annotation for
+  literals + concat, conservative-default for untracked operands, read-only
+  + idempotent invariants.
+
+Deferred to Phase 2 (require IR changes outside this issue's landed surface):
+
+- **Call-result origins** (`JSON.parse`, `JSON.stringify`,
+  `TextDecoder.decode`, `fetch().text()`) — their IR results
+  (`call`/`extern.call`) do not yet carry a string `alloc` id, so there is
+  no attachment point. Minting string alloc ids on those results is a
+  prerequisite.
+- **Method propagation** (`.toUpperCase`/`.toLowerCase`/`.trim`/`.slice`/
+  `.repeat`/`.padStart`/`.padEnd`/`.split`/`.replace`) — same prerequisite.
+- **Component Model boundary lowering** + **dual storage** (`(array i8)` for
+  proven-UTF-8 sites) + **benchmark** — these consume the annotation and
+  touch shared codegen / require a benchmark harness; the analysis lands
+  first so the boundary work has data to read. See ADR-0015 §"Component
+  Model boundary integration".
