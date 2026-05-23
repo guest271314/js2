@@ -6172,8 +6172,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Already a string — return as-is
           return { kind: "externref" };
         }
-        // Other externref — try extern_toString if available
-        const toStrIdx = ctx.funcMap.get("extern_toString");
+        // Other externref — coerce via __extern_toString, which routes
+        // through the runtime's `_toPrimitive` walker (valueOf/toString
+        // per §7.1.1.1 with hint "string"). Pre-#1525 this looked up
+        // "extern_toString" — missing the leading underscores that the
+        // runtime actually exposes — so the call was silently dropped
+        // and `String(obj)` returned the unchanged externref. The
+        // explicit hint also keeps the dispatch table in
+        // `__extern_method_call` honest for wasmGC structs that V8
+        // can't introspect natively.
+        const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
         if (toStrIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: toStrIdx });
         }

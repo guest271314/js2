@@ -827,7 +827,14 @@ function compileAndCoerceConcatOperand(ctx: CodegenContext, fctx: FunctionContex
       fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
     }
   } else if (valType.kind === "ref" || valType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" });
+    // #1525 — string concat is an explicit ToPrimitive("string") site, so
+    // walk @@toPrimitive("string") → toString() per §7.1.1.1. Routing through
+    // coerceType with an explicit hint reuses the dispatch table built in
+    // type-coercion.ts (ref → externref hint="string"). Without the hint,
+    // coerceType emits a bare `extern.convert_any`, and the wasm:js-string
+    // `concat` polyfill then calls V8 native String concat on the opaque
+    // struct, throwing "Cannot convert object to primitive value".
+    coerceType(ctx, fctx, valType, { kind: "externref" }, "string");
   }
 }
 
@@ -1121,10 +1128,27 @@ export function compileStringBinaryOp(
       fctx.body.push({ op: "drop" });
       addStringConstantGlobal(ctx, "undefined");
       fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
+    } else if (!isStringType(leftTsType)) {
+      // #1525 — string concat is a ToPrimitive("string") site (§7.1.1.1).
+      // For externref operands that aren't statically known to be strings
+      // (e.g. `const obj: any = {...}; obj + "x"`), route through
+      // `__extern_toString` so the runtime walks valueOf/toString on
+      // wasmGC structs before handing a value to `wasm:js-string concat`.
+      // Without this, the concat polyfill calls V8's native string concat
+      // on an opaque struct and throws "Cannot convert object to
+      // primitive value" before our spec-conformant walker runs.
+      const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (toStrIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: toStrIdx });
+      }
     }
   } else if (op === ts.SyntaxKind.PlusToken && leftType && (leftType.kind === "ref" || leftType.kind === "ref_null")) {
-    // Struct ref → externref for concat (e.g. object toString → "[object Object]")
-    fctx.body.push({ op: "extern.convert_any" });
+    // Struct ref → externref for concat. #1525 — route through coerceType
+    // with hint "string" so the dispatch table walks @@toPrimitive("string")
+    // / toString() rather than emitting a bare `extern.convert_any` that
+    // would let `wasm:js-string concat` throw on the opaque struct.
+    coerceType(ctx, fctx, leftType, { kind: "externref" }, "string");
   }
   // For equality/inequality ops: String wrapper objects (new String("x")) are externrefs
   // but NOT wasm:js-string strings — the `equals` builtin would throw a WebAssembly trap.
@@ -1174,14 +1198,27 @@ export function compileStringBinaryOp(
       fctx.body.push({ op: "drop" });
       addStringConstantGlobal(ctx, "undefined");
       fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
+    } else if (!isStringType(rightTsType)) {
+      // #1525 — see left-operand branch above. Route opaque externref
+      // operands through `__extern_toString` so wasmGC structs ride
+      // through the runtime ToPrimitive walker before reaching
+      // `wasm:js-string concat`.
+      const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (toStrIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: toStrIdx });
+      }
     }
   } else if (
     op === ts.SyntaxKind.PlusToken &&
     rightType &&
     (rightType.kind === "ref" || rightType.kind === "ref_null")
   ) {
-    // Struct ref → externref for concat
-    fctx.body.push({ op: "extern.convert_any" });
+    // Struct ref → externref for concat. #1525 — route through coerceType
+    // with hint "string" so toString()/@@toPrimitive("string") run rather
+    // than emitting a raw `extern.convert_any` that crashes the concat
+    // polyfill on opaque wasmGC structs.
+    coerceType(ctx, fctx, rightType, { kind: "externref" }, "string");
   }
   // Unwrap right-side String wrapper for equality/inequality (same as left above)
   const isRightStringWrapper =

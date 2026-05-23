@@ -4448,11 +4448,18 @@ assert._isSameValue = isSameValue;
                   const realDv = new DataView(bytes.buffer, viewOffset, viewLength);
                   const nativeFn = (realDv as any)[method];
                   if (typeof nativeFn === "function") {
+                    // #1525 — args may include wasmGC structs whose `valueOf` /
+                    // `toString` live in opaque struct fields. V8's native
+                    // DataView setter runs ToIndex/ToNumber on the args, which
+                    // calls ToPrimitive. Use `wrappedArgs` (built above) so
+                    // the proxy `get` trap exposes those methods as callable
+                    // JS functions; otherwise V8 throws "Cannot convert object
+                    // to primitive value" before walking valueOf/toString.
                     // #1515: BigInt setters require the value (2nd arg) to be
                     // a BigInt per spec §25.3.1.16/.17 step 8 — coerce numeric
                     // values via ToBigInt to match. The native setter would
                     // otherwise throw with the wrong error shape.
-                    let callArgs = args ?? [];
+                    let callArgs = wrappedArgs ?? [];
                     if (dvMatch[1] === "set" && (dvMatch[2] === "BigInt64" || dvMatch[2] === "BigUint64")) {
                       const v = callArgs[1];
                       if (typeof v !== "bigint" && v !== undefined) {
@@ -4471,7 +4478,8 @@ assert._isSameValue = isSameValue;
                           callArgs[1] = BigInt(v); // throws SyntaxError if invalid
                         } else if (typeof v === "object" && v !== null) {
                           // Object → ToPrimitive(number) → ToBigInt. Let native handle this.
-                          // Leave as-is; native setBigInt64 will run ToBigInt itself.
+                          // Leave as-is; native setBigInt64 will run ToBigInt itself
+                          // (the Proxy wrapper exposes valueOf/toString on wasmGC structs).
                         } else {
                           // null/undefined/symbol → TypeError per spec.
                           throw new TypeError("Cannot convert " + (v === null ? "null" : typeof v) + " to a BigInt");
