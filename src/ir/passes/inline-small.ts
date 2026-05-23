@@ -74,6 +74,8 @@ import {
   type IrTerminator,
   type IrValueId,
 } from "../nodes.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { forkAllocInInstr } from "./alloc-discipline.js";
 
 const MAX_CALLEE_INSTRS = 10;
 const CALLER_SIZE_BUDGET_MULTIPLIER = 4;
@@ -82,7 +84,7 @@ const CALLER_SIZE_BUDGET_MULTIPLIER = 4;
  * Inline small, non-recursive, single-block callees across the module.
  * Returns the same `IrModule` reference when no function changes.
  */
-export function inlineSmall(mod: IrModule): IrModule {
+export function inlineSmall(mod: IrModule, registry?: AllocSiteRegistry): IrModule {
   const byName = new Map<string, IrFunction>();
   for (const fn of mod.functions) byName.set(fn.name, fn);
 
@@ -91,7 +93,7 @@ export function inlineSmall(mod: IrModule): IrModule {
   const newFunctions: IrFunction[] = [];
   let anyChanged = false;
   for (const fn of mod.functions) {
-    const inlined = inlineIntoFunction(fn, byName, recursiveSet);
+    const inlined = inlineIntoFunction(fn, byName, recursiveSet, registry);
     if (inlined !== fn) anyChanged = true;
     newFunctions.push(inlined);
   }
@@ -107,6 +109,7 @@ function inlineIntoFunction(
   caller: IrFunction,
   byName: ReadonlyMap<string, IrFunction>,
   recursiveSet: ReadonlySet<string>,
+  registry?: AllocSiteRegistry,
 ): IrFunction {
   const originalSize = countInstrs(caller);
   let nextValueId = caller.valueCount;
@@ -182,7 +185,12 @@ function inlineIntoFunction(
       // never need to recurse into nested body buffers here — see
       // canInline's #1374 comment.
       for (const inst of body.instrs) {
-        newInstrs.push(renameAllInInstr(inst, calleeRename));
+        // Rule 1 / fork: a spliced copy is a genuinely distinct runtime
+        // allocation, so fork a fresh AllocSiteId off the callee's site rather
+        // than sharing it (inlining the same callee twice must not conflate
+        // the two allocations — #747 escape analysis depends on this).
+        const renamed = renameAllInInstr(inst, calleeRename);
+        newInstrs.push(forkAllocInInstr(renamed, registry));
       }
 
       // The call's result becomes the renamed return value for all downstream

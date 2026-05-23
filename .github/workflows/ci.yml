@@ -57,6 +57,12 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: IR alloc-provenance checker (#1586)
+        # Runs the AllocSiteRegistry + provenance tests with the debug-mode
+        # invariant checker enabled, so a pass that loses allocation-site
+        # provenance fails CI here.
+        run: pnpm run test:ir:alloc
+
       - name: Conformance numbers in sync (#1522)
         run: pnpm run sync:conformance:check
 

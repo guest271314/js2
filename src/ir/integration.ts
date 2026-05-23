@@ -62,6 +62,8 @@ import { UnionStructRegistry } from "./passes/tagged-union-types.js";
 import { taggedUnions } from "./passes/tagged-unions.js";
 import { planIrCompilation, type IrSelection } from "./select.js";
 import { verifyIrFunction } from "./verify.js";
+import { AllocSiteRegistry } from "./alloc-registry.js";
+import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
 
 export interface IrIntegrationReport {
@@ -112,6 +114,12 @@ export function compileIrPathFunctions(
 
   const compiled: string[] = [];
   const errors: { func: string; message: string }[] = [];
+
+  // #1586: one allocation-site registry per module compile. Threaded into the
+  // builder (mints ids on value-creating instrs) and every pass (preserve /
+  // fork / retire discipline). `alloc` ids are inert at lowering, so wiring the
+  // registry does not change emitted Wasm.
+  const allocRegistry = new AllocSiteRegistry();
 
   // Single shared union-struct registry across all IR-path functions in this
   // compilation. Registering a union once produces one WasmGC struct type;
@@ -188,6 +196,7 @@ export function compileIrPathFunctions(
         // of the IR resolver. Replaces the per-feature `nativeStrings:
         // boolean` + `anyStrTypeIdx: number` shortcuts that #1183 added.
         resolver: fromAstResolver,
+        allocRegistry,
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
@@ -284,6 +293,7 @@ export function compileIrPathFunctions(
             calleeTypes,
             classShapes,
             resolver: fromAstResolver,
+            allocRegistry,
           });
           const mainErrors = verifyIrFunction(result.main);
           if (mainErrors.length > 0) {
@@ -324,7 +334,7 @@ export function compileIrPathFunctions(
   // 2a. Per-function hygiene (CF → DCE → simplifyCFG to fixpoint).
   const afterHygiene: BuiltFn[] = [];
   for (const entry of built) {
-    const optimized = runHygienePasses(entry.fn);
+    const optimized = runHygienePasses(entry.fn, allocRegistry);
     const postErrors = verifyIrFunction(optimized);
     if (postErrors.length > 0) {
       for (const e of postErrors) {
@@ -332,6 +342,9 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    // #1586: alloc-provenance gate (debug-only). A pass that loses provenance
+    // throws here at the same boundary that already catches malformed SSA.
+    assertAllocProvenance(optimized, allocRegistry);
     afterHygiene.push({
       name: entry.name,
       fn: optimized,
@@ -344,7 +357,7 @@ export function compileIrPathFunctions(
 
   // 2b. Module-scope inlining (#1167b).
   const modIn: IrModule = { functions: afterHygiene.map((e) => e.fn) };
-  const modOut = inlineSmall(modIn);
+  const modOut = inlineSmall(modIn, allocRegistry);
 
   // 2c. Re-run hygiene on functions the inline pass actually rewrote; verify.
   const afterInline: BuiltFn[] = [];
@@ -352,7 +365,7 @@ export function compileIrPathFunctions(
     const before = afterHygiene[i]!;
     const after = modOut.functions[i]!;
     const changed = after !== before.fn;
-    const final = changed ? runHygienePasses(after) : after;
+    const final = changed ? runHygienePasses(after, allocRegistry) : after;
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
@@ -360,6 +373,7 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    assertAllocProvenance(final, allocRegistry);
     afterInline.push({
       name: before.name,
       fn: final,
@@ -380,7 +394,7 @@ export function compileIrPathFunctions(
   // lowerer's resolver can map the clone's `IrFuncRef` to a concrete index.
   // -------------------------------------------------------------------------
   const monoIn: IrModule = { functions: afterInline.map((e) => e.fn) };
-  const monoResult = monomorphize(monoIn);
+  const monoResult = monomorphize(monoIn, allocRegistry);
   const originalNames = new Set<string>(afterInline.map((e) => e.name));
 
   // -------------------------------------------------------------------------
@@ -404,7 +418,7 @@ export function compileIrPathFunctions(
     const before = afterInlineByName.get(fn.name);
     const wasCloned = before === undefined;
     const changed = wasCloned || fn !== before.fn;
-    const final = changed ? runHygienePasses(fn) : fn;
+    const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
@@ -412,6 +426,7 @@ export function compileIrPathFunctions(
       }
       continue;
     }
+    assertAllocProvenance(final, allocRegistry);
     // Slice 3 (#1169c): clones from monomorphize don't have synthesized
     // info from the build phase; treat them as synthesized iff the
     // pre-mono entry was synthesized OR the function is brand-new (a
@@ -655,12 +670,12 @@ function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
  * loop strictly removes instructions or blocks, so real code converges
  * in a handful of rounds.
  */
-function runHygienePasses(fn: IrFunction): IrFunction {
+function runHygienePasses(fn: IrFunction, registry?: AllocSiteRegistry): IrFunction {
   const MAX_ITERS = 10;
   let cur = fn;
   for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const afterCF = constantFold(cur);
-    const afterDCE = deadCode(afterCF);
+    const afterCF = constantFold(cur, registry);
+    const afterDCE = deadCode(afterCF, registry);
     const afterCFG = simplifyCFG(afterDCE);
     if (afterCFG === cur) return cur;
     cur = afterCFG;

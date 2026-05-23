@@ -25,6 +25,7 @@ The format follows Michael Nygard's 2011 ADR template: **Context**,
 | 010 | Accepted | [Dynamic eval() via host import](./0010-eval-host-import.md)                  |
 | 011 | Accepted | [Implementation language: TypeScript with the `typescript` package as the frontend](./0011-implementation-language.md) |
 | 012 | Accepted | [Intermediate representation: multi-stage typed IR](./0012-intermediate-representation.md) |
+| 013 | Accepted | [Explicit allocation sites in the IR](./0013-ir-allocation-sites.md)          |
 
 ## Reading order
 
