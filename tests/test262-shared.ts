@@ -65,6 +65,33 @@ function resolveFixtures(source: string, testFilePath: string): string[] {
   return [...new Set(fixtures)];
 }
 
+// ── Slow-test priority map ─────────────────────────────────────────
+// Maps test path (relative to test262/, e.g. "test/built-ins/Array/.../foo.js")
+// to its measured compile+exec wall time in ms. Used inside `runTest262Chunk`
+// to sort each shard's test list by descending duration so the slow tests run
+// FIRST. This evens out wall time across the 115 shards: a slow test in
+// position 0 finishes while the shard cruises through the fast tests behind
+// it; in position N it pushes the shard's tail past everyone else. Tests
+// absent from the map sort to 0 (they keep their natural order behind the
+// timed ones, since the sort is stable).
+//
+// Source: benchmarks/results/test262-current.jsonl (committed baseline).
+// Refresh by regenerating from a fresh baseline run.
+const SLOW_TESTS_PATH = join(import.meta.dirname ?? ".", "test262-slow-tests.json");
+const slowTestDurationMs: Map<string, number> = (() => {
+  try {
+    const raw = readFileSync(SLOW_TESTS_PATH, "utf-8");
+    const doc = JSON.parse(raw) as { tests?: Record<string, number> };
+    const map = new Map<string, number>();
+    for (const [k, v] of Object.entries(doc.tests ?? {})) {
+      if (typeof v === "number" && v > 0) map.set(k, v);
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+})();
+
 // ── Cache setup (for disk cache side-effect) ───────────────────────
 
 const CACHE_DIR = join(import.meta.dirname ?? ".", "..", ".test262-cache");
@@ -272,6 +299,19 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   }
 
   const myTests = allTests.filter((_, i) => i % totalChunks === chunkIndex);
+
+  // Sort within the shard by descending known duration (slow tests first).
+  // Tests absent from `slowTestDurationMs` get 0 and keep their natural order
+  // behind the timed ones (Array.prototype.sort is stable on Node ≥ 12).
+  // Effect: a shard's worst-case wall time is dominated by max(timed test)
+  // rather than max + sum-of-tail. See tests/test262-slow-tests.json for the
+  // source of truth and how to refresh.
+  const durationOf = (filePath: string): number => {
+    const relPath = filePath.replace(/.*test262\//, "");
+    return slowTestDurationMs.get(relPath) ?? 0;
+  };
+  myTests.sort((a, b) => durationOf(b.filePath) - durationOf(a.filePath));
+
   const byCategory = new Map<string, string[]>();
   for (const { category, filePath } of myTests) {
     let arr = byCategory.get(category);
