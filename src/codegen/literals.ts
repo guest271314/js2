@@ -55,16 +55,40 @@ import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coer
 
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
- * undefined keyword, identifier `undefined`, or void expression.
+ * undefined keyword, identifier `undefined`, void expression, or any of the
+ * above wrapped in transparent expressions (`as T`, `<T>x`, `satisfies T`,
+ * parentheses, non-null assertion `!`).
+ *
  * Used to emit sNaN sentinels in tuple/array contexts so destructuring
- * default checks trigger correctly (#1024).
+ * default checks trigger correctly (#1024, #1553e).
  */
 function _isUndefinedLike(node: ts.Node): boolean {
+  // Unwrap transparent expressions so `undefined as any`, `(undefined)`,
+  // `<any>undefined`, `undefined satisfies T`, `undefined!` all count.
+  // (#1553e — explicit `undefined as any` is the common pattern in test262
+  // for forcing the destructuring-default path on numeric arrays.)
+  let n: ts.Node = node;
+  while (
+    ts.isAsExpression(n) ||
+    ts.isTypeAssertionExpression(n) ||
+    ts.isSatisfiesExpression(n) ||
+    ts.isParenthesizedExpression(n) ||
+    ts.isNonNullExpression(n)
+  ) {
+    n = (
+      n as
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.SatisfiesExpression
+        | ts.ParenthesizedExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
   return (
-    ts.isOmittedExpression(node) ||
-    node.kind === ts.SyntaxKind.UndefinedKeyword ||
-    (ts.isIdentifier(node) && node.text === "undefined") ||
-    ts.isVoidExpression(node)
+    ts.isOmittedExpression(n) ||
+    n.kind === ts.SyntaxKind.UndefinedKeyword ||
+    (ts.isIdentifier(n) && n.text === "undefined") ||
+    ts.isVoidExpression(n)
   );
 }
 
@@ -2160,20 +2184,46 @@ export function compileArrayLiteral(
   // Check if any element is a spread
   const hasSpread = expr.elements.some((el) => ts.isSpreadElement(el));
 
-  // Determine element type from first non-omitted, non-spread element, or from spread source
+  // Determine element type from first non-omitted, non-spread element, or from spread source.
+  // (#1553e) Prefer a non-undefined-like, non-omitted element so a literal like
+  // `[undefined, 2, 3]` infers f64 from `2` rather than externref from `undefined`.
+  // The sentinel-emit path below relies on `elemWasm.kind === "f64"` to fire the
+  // destructuring default for explicit `undefined` (or `undefined as any`) entries.
   let elemWasm: ValType;
   // biome-ignore lint/style/useConst: reassigned in branches below
   let elemKind: string;
-  const firstSignificantElem = expr.elements.find((el) => !ts.isOmittedExpression(el));
+  const isRealElem = (el: ts.Expression): boolean => !ts.isOmittedExpression(el) && !_isUndefinedLike(el);
+  const firstSignificantElem =
+    expr.elements.find(isRealElem) ?? expr.elements.find((el) => !ts.isOmittedExpression(el));
   const firstElem = firstSignificantElem ?? expr.elements[0]!;
   if (ts.isSpreadElement(firstElem)) {
     const spreadType = ctx.checker.getTypeAtLocation(firstElem.expression);
     const typeArgs = ctx.checker.getTypeArguments(spreadType as ts.TypeReference);
     const innerType = typeArgs[0];
     elemWasm = innerType ? resolveWasmType(ctx, innerType) : { kind: "f64" };
-  } else if (ts.isOmittedExpression(firstElem)) {
-    // All elements are omitted — use externref (undefined)
+  } else if (ts.isOmittedExpression(firstElem) || _isUndefinedLike(firstElem)) {
+    // All elements are omitted or undefined-like — consult the contextual type
+    // to choose an element kind so destructuring defaults fire correctly (#1553e).
+    // Falls back to externref (undefined) when no contextual hint is available.
     elemWasm = { kind: "externref" };
+    const ctxType = ctx.checker.getContextualType(expr);
+    if (ctxType) {
+      const ctxSym = (ctxType as ts.TypeReference).symbol ?? ctxType.symbol;
+      if (ctxSym?.name === "Array" || ctxSym?.name === "ReadonlyArray") {
+        const typeArgs = ctx.checker.getTypeArguments(ctxType as ts.TypeReference);
+        if (typeArgs[0]) {
+          const ctxElemWasm = resolveWasmType(ctx, typeArgs[0]);
+          // Only adopt the contextual element type if it's a primitive numeric
+          // kind — for ref types, mixing undefined-like (externref-undefined)
+          // with a struct ref is messy. The sentinel sNaN technique only helps
+          // for f64. For i32, we keep externref (no reliable sentinel exists,
+          // see emitDefaultValueCheck).
+          if (ctxElemWasm.kind === "f64") {
+            elemWasm = ctxElemWasm;
+          }
+        }
+      }
+    }
   } else {
     const firstElemType = ctx.checker.getTypeAtLocation(firstElem);
     elemWasm = resolveWasmType(ctx, firstElemType);
