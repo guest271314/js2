@@ -1,6 +1,6 @@
 ---
 id: 1473
-sprint: 52
+sprint: 55
 title: "host-independence: eliminate JS host error/exception ops for standalone Wasm"
 status: ready
 created: 2026-05-20

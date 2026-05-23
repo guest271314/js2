@@ -34,6 +34,12 @@ export interface CodegenOptions {
   testRuntime?: boolean;
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
   wasi?: boolean;
+  /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
+   *  runtime. Implies `nativeStrings: true` and refuses to emit any
+   *  `wasm:js-string` namespace or `env::__concat_*` / `__extern_toString` /
+   *  `__unbox_string` JS-host string imports. Used so the compiled module is
+   *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
+  standalone?: boolean;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
    * (see `src/ir/`). Defaults to off. Leave off in production until the IR
@@ -600,6 +606,12 @@ export interface CodegenContext {
   methodClosureGlobals: Map<string, number>;
   /** Whether targeting WASI */
   wasi: boolean;
+  /** Whether targeting standalone (no JS host, no WASI runtime — #1470).
+   *  When true, the emitter MUST NOT add `wasm:js-string` namespace imports
+   *  or JS-host string helpers (`__concat_N`, `__extern_toString`,
+   *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
+   *  `__str_extern_len`). Implies `nativeStrings === true`. */
+  standalone: boolean;
   /**
    * (#1373b) When true, async functions flow through the IR's CPS lowering
    * (Phase C). When false (default), the IR selector buckets async functions
@@ -621,6 +633,12 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiBumpPtrGlobalIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
+  wasiEnvironSizesGetIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_get import index (-1 = not registered) */
+  wasiEnvironGetIdx: number;
+  /** #1482: env::__wasi_env_get_str late import index for JS-polyfill fast path (-1 = not registered) */
+  wasiEnvGetStrIdx: number;
   /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
   wasiClockTimeGetIdx?: number;
   /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */
