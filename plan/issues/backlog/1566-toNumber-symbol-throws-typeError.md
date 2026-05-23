@@ -1,7 +1,8 @@
 ---
 id: 1566
 title: "ToNumber: Symbol argument must throw TypeError (§7.1.4)"
-status: ready
+status: done
+sprint: 55
 priority: medium
 feasibility: easy
 reasoning_effort: low

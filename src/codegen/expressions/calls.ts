@@ -6263,6 +6263,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Number(x) — ToNumber coercion
     if (funcName === "Number" && expr.arguments.length >= 1) {
+      // ToNumber(Symbol) must throw TypeError (§7.1.4). Symbols are lowered to
+      // i32 ids, so a numeric pass-through would silently leak the id; detect
+      // the symbol TS type and throw instead.
+      if (isSymbolType(ctx.checker.getTypeAtLocation(expr.arguments[0]!))) {
+        const t = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (t !== null) fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+        return { kind: "f64" };
+      }
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
         // BigInt → number: f64.convert_i64_s
@@ -6471,6 +6480,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // i32: truthy if != 0
         fctx.body.push({ op: "i32.const", value: 0 });
         fctx.body.push({ op: "i32.ne" } as Instr);
+        return { kind: "i32" };
+      }
+      if (argType?.kind === "i64") {
+        // BigInt (§7.1.2 ToBoolean): 0n → false, any other BigInt → true.
+        // i64.eqz yields 1 for 0n; invert with i32.eqz so nonzero → 1.
+        // Must NOT route through f64.convert_i64_s — that loses precision
+        // for |x| > 2^53 and would misreport large BigInts.
+        fctx.body.push({ op: "i64.eqz" } as Instr);
+        fctx.body.push({ op: "i32.eqz" } as Instr);
         return { kind: "i32" };
       }
       // String: truthy if length > 0
