@@ -8,8 +8,69 @@
  */
 import type { Instr, ValType } from "../../ir/types.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { reportErrorNoNode } from "../context/errors.js";
 import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
+
+/**
+ * #1472 Phase A — open-object / dynamic-shape property operations have no
+ * Wasm-native runtime yet (that's Phase B). Under `--target standalone` there
+ * is no JS host to satisfy these imports, so instead of leaking an
+ * `env::__extern_*` / `env::__object_*` import that fails at instantiation with
+ * an opaque "unknown import" linker error, we refuse at compile time with a
+ * message that points the user at the supported fast path (typed object
+ * literals / class instances compile to `struct.get`/`struct.set` with zero
+ * host calls) and at the follow-up issue.
+ *
+ * Closed-shape struct access never reaches this gate — it emits struct ops
+ * directly and never calls ensureLateImport for these names.
+ */
+const STANDALONE_REFUSED_IMPORT = (name: string): boolean =>
+  name.startsWith("__extern_") ||
+  name.startsWith("__object_") ||
+  name.startsWith("__for_in_") ||
+  name.startsWith("__defineProperty") ||
+  name.startsWith("__defineProperties") ||
+  name.startsWith("__getOwn") ||
+  name.startsWith("__getPrototypeOf") ||
+  name.startsWith("__proto_method_call") ||
+  name.startsWith("__get_builtin") ||
+  name.startsWith("__register_prototype") ||
+  name.startsWith("__register_class_object") ||
+  name.startsWith("__proxy_") ||
+  name === "__new_plain_object" ||
+  name === "__delete_property" ||
+  name === "__hasOwnProperty" ||
+  name === "__propertyIsEnumerable" ||
+  name === "__isPrototypeOf" ||
+  name === "__object_hasOwn";
+
+/**
+ * Emit the #1472 Phase A standalone refusal for a dynamic-shape object/property
+ * operation, deduplicated per import name so a single source construct doesn't
+ * spam the error list. Returns true if the import was refused (caller should
+ * still proceed so codegen doesn't crash; the queued error — prefixed with
+ * "Codegen error:" — forces `success: false` and an empty module in
+ * compiler.ts).
+ */
+function refuseStandaloneObjectImport(ctx: CodegenContext, name: string): boolean {
+  if (!ctx.standalone || !STANDALONE_REFUSED_IMPORT(name)) return false;
+  if (!ctx.standaloneRefusedImports) ctx.standaloneRefusedImports = new Set<string>();
+  if (ctx.standaloneRefusedImports.has(name)) return true;
+  ctx.standaloneRefusedImports.add(name);
+  // Prefix with "Codegen error:" so compiler.ts treats this as a hard failure
+  // (success: false, empty module) rather than a warning that leaves a
+  // half-working module with a leaked host import (#1472 acceptance criteria:
+  // "no silent fall-back to a half-working runtime").
+  reportErrorNoNode(
+    ctx,
+    `Codegen error: '${name}' (dynamic-shape object/property operation) is not ` +
+      `yet supported in --target standalone (#1472 Phase B). Use a typed object ` +
+      `literal or class instance for fast-path codegen, which compiles to ` +
+      `struct.get/struct.set with no JS host imports.`,
+  );
+  return true;
+}
 
 /**
  * Shift function indices after a late import addition. This must update all
@@ -141,6 +202,12 @@ export function ensureLateImport(
 ): number | undefined {
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
+  // #1472 Phase A — refuse dynamic-shape object/property host imports under
+  // --target standalone with a clear compile error. We still register the
+  // import below so downstream codegen (which dereferences the returned
+  // funcIdx) doesn't crash; the queued error makes the compile fail and the
+  // module is never instantiated.
+  refuseStandaloneObjectImport(ctx, name);
   // Record importsBefore on the FIRST deferred addition in this batch
   if (ctx.pendingLateImportShift === null) {
     ctx.pendingLateImportShift = { importsBefore: ctx.numImportFuncs };
