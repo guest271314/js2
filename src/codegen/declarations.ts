@@ -273,7 +273,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // ── collectStringMethodImports (also uses call+propertyAccess) ──
     if (isStringType(receiverType) && Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)) {
       state.stringMethodNeeded.add(methodName);
-      // Track if the method is called with a RegExp arg (replace, replaceAll, split, match, search)
+      // Track if the method is called with a non-string arg (RegExp or
+      // custom object with Symbol.replace/Symbol.match/etc). For those we
+      // need the host import in addition to any native helper because the
+      // native helpers only handle string search values and we need JS
+      // semantics for @@replace / @@match / @@search / @@split dispatch
+      // (#1443).
       if (
         (methodName === "replace" ||
           methodName === "replaceAll" ||
@@ -284,8 +289,20 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         node.arguments.length > 0
       ) {
         const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-        const symName = argType.getSymbol()?.getName();
-        if (symName === "RegExp") {
+        const isStringLike = (t: ts.Type): boolean => {
+          if ((t.flags & ts.TypeFlags.String) !== 0) return true;
+          if ((t.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
+          if ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String") return true;
+          return false;
+        };
+        let needsHost = false;
+        if ((argType.flags & ts.TypeFlags.Union) !== 0) {
+          const union = argType as ts.UnionType;
+          needsHost = !union.types.every(isStringLike);
+        } else {
+          needsHost = !isStringLike(argType);
+        }
+        if (needsHost) {
           state.stringRegexpMethodNeeded.add(methodName);
         }
       }
@@ -513,12 +530,29 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   }
   // (#1239) Object literals carrying get/set accessor declarations also
   // route through `__make_getter_callback` via compileObjectLiteralWithAccessors.
-  if (
-    !state.getterCallbackFound &&
-    ts.isObjectLiteralExpression(node) &&
-    node.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))
-  ) {
-    state.getterCallbackFound = true;
+  //
+  // (#1433) Same path is used for `[Symbol.dispose]` / `[Symbol.asyncDispose]`
+  // methods so the disposer is installed as a real JS function under the
+  // matching Symbol property.
+  if (!state.getterCallbackFound && ts.isObjectLiteralExpression(node)) {
+    for (const p of node.properties) {
+      if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
+        state.getterCallbackFound = true;
+        break;
+      }
+      if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
+        const inner = p.name.expression;
+        if (
+          ts.isPropertyAccessExpression(inner) &&
+          ts.isIdentifier(inner.expression) &&
+          inner.expression.text === "Symbol" &&
+          (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
+        ) {
+          state.getterCallbackFound = true;
+          break;
+        }
+      }
+    }
   }
   // ── getterCallbackFound: Object.defineProperty / Reflect.defineProperty with accessor descriptor (#929) ──
   // Also covers Object.defineProperties(obj, { p1: desc1, p2: desc2, ... }) (#1027)
@@ -1002,7 +1036,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
-      const params: ValType[] = isAggregator ? [{ kind: "externref" }, { kind: "externref" }] : [{ kind: "externref" }];
+      // (#1116) Aggregators take (thisArg, iterable, directCall) so the runtime
+      // can distinguish a codegen-default thisArg from an explicit user-provided
+      // one (which may need to throw TypeError per spec).
+      const params: ValType[] = isAggregator
+        ? [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }]
+        : [{ kind: "externref" }];
       const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
     }
@@ -2186,6 +2225,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const name = stmt.name ? stmt.name.text : "default";
       // Register the function's .name value for ES-spec compliance
       ctx.functionNameMap.set(name, name);
+      // #1463 — capture source text for Function.prototype.toString() so that
+      // `someFn.toString()` returns the original declaration text instead of
+      // the `function () { [native code] }` placeholder. Only top-level
+      // declarations are captured; class methods, arrow functions, and
+      // function expressions fall back to the placeholder.
+      try {
+        const sourceText = stmt.getText(sourceFile);
+        if (sourceText) ctx.funcSourceText.set(name, sourceText);
+      } catch {
+        // Synthetic nodes lacking source positions — skip silently.
+      }
       const sig = ctx.checker.getSignatureFromDeclaration(stmt);
       if (!sig) continue;
 

@@ -7,6 +7,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Run a specific test file: `npm test -- tests/issue-277.test.ts`
 - Run equivalence tests only: `npm test -- tests/equivalence.test.ts`
 - Test262: `pnpm run test:262` — vitest-based runner, creates its own worktree, writes to `benchmarks/results/`. Default 3 workers.
+- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/backlog/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
 
 ## Dev scratch
 - **All ad-hoc probe / debug / repro files go in `.tmp/`** — gitignored, not picked up by vitest, doesn't pollute `git status`.
@@ -26,6 +27,10 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 ## Architecture Principles
 - **Dual-mode: JS host optional** — the compiler supports two modes: JS host mode (uses host imports for performance/completeness) and standalone mode (pure Wasm, no JS runtime). New features should have Wasm-native implementations for standalone mode; JS host imports are acceptable as a fast path when a JS runtime is available. Don't add new host imports without a standalone fallback.
 - This follows the pattern of #679 (dual string backend) and #682 (dual RegExp backend).
+- **Two orthogonal axes in codegen** (see #1527):
+  - **Backend lowering**: `src/codegen/` (WasmGC) vs `src/codegen-linear/` (linear memory). These are **alternatives, not one superseding the other** — the choice depends on target (browser/WasmGC vs WASI/linear) and tradeoffs. Both stay.
+  - **Front-end**: direct AST→Wasm (legacy, accumulated hacks) vs IR (`src/ir/`, typed representation). IR **replaces the hacks**; it does **not** compete with the backend choice. IR adopts AST node kinds step by step, only for parts that do not yet need to decide between linear and WasmGC lowering. IR-path failures currently demote to a warning channel (#1530 phases this fallback out).
+  - Full discussion: [docs/architecture/codegen-axes.md](docs/architecture/codegen-axes.md). Per-AST-kind adoption status: [plan/log/ir-adoption.md](plan/log/ir-adoption.md).
 
 ## Project Structure
 - Codegen: `src/codegen/expressions.ts`, `src/codegen/index.ts`, `src/codegen/statements.ts`, `src/codegen/type-coercion.ts`, `src/codegen/peephole.ts`
@@ -80,21 +85,28 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 
 | File | Lives in | Authoritative for | Refreshed by | Validated by |
 |------|----------|-------------------|--------------|--------------|
-| `benchmarks/results/test262-current.jsonl` | main repo (committed, ~15MB) | `dev-self-merge` Step 4 bucket-by-path regression analysis | `refresh-committed-baseline.yml` (after every `Test262 Sharded` push to main) | `test262-baseline-validate.yml` spot-checks 50 random `pass` entries on every PR (#1218); fails the PR if any sampled entry no longer passes on main HEAD |
 | `benchmarks/results/test262-current.json` | main repo (committed, ~kB) | landing-page summary, pass/total badges | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
-| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run) | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run); `dev-self-merge` Step 4 bucket-by-path regression analysis (#1528) | `test262-sharded.yml` `promote-baseline` job (every push to main) | `test262-baseline-validate.yml` spot-checks 50 random `pass` entries on every PR (#1218); fails the PR if any sampled entry no longer passes on main HEAD |
 | `benchmarks/results/playground-benchmark-sidebar.json` | main repo (committed, ~1KB) | landing-page sidebar wasm/js perf chart; `benchmark-refresh.yml` regression diff baseline | `benchmark-refresh.yml` auto-commit step on every push to main (#1216) | (none) |
 
-The committed JSONL must be kept in sync with the JSON; otherwise the dev-self-merge bucket analysis reads stale "pass" entries and silently miscounts regressions. `refresh-committed-baseline.yml` is the dedicated workflow for that sync — it downloads the merged JSONL artifact from the most-recent successful `Test262 Sharded` run on main and commits it back with `[skip ci]`.
+**Baseline JSONL is no longer committed to the main repo (#1528).** It lives only in `loopdive/js2wasm-baselines` and is fetched on demand by `scripts/fetch-baseline-jsonl.mjs` to `.test262-cache/test262-current.jsonl` (gitignored). Consumers (validator, `dev-self-merge` bucket analysis, regression triage, sprint wrap-up harvest) either call the helper directly or accept the cache path via fallback. This removes the ~15 MB blob from every clone and retired the dedicated `refresh-committed-baseline.yml` workflow.
 
-To validate the committed JSONL on demand, run `pnpm run test:262:validate-baseline` (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to `refresh-committed-baseline.yml`.
+To validate the baseline on demand, run `pnpm run test:262:validate-baseline` — the validator calls the fetch helper itself, then spot-checks 50 random `pass` entries against current HEAD (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to the fetch helper for forcing a refresh.
 
-## IR Fallback Budget (#1376)
+## IR Fallback Budget (#1376) — being phased out (#1530)
 
 The IR retirement gate `pnpm run check:ir-fallbacks` walks every `.ts` file
 under `playground/examples/` with `trackFallbacks: true` and aggregates
 rejection reasons against `scripts/ir-fallback-baseline.json`. CI fails when
 any **unintended** bucket grows.
+
+**Direction**: this budget is a transitional safety net, not a permanent
+ceiling. #1530 prioritises ratcheting the unintended buckets to zero so the
+IR path becomes the only path for the affected node kinds. Once a bucket
+hits zero, the rejection reason gets added to `STRICT_IR_REASONS` in
+`src/codegen/index.ts`, which promotes any future regression of that
+reason from a silent legacy fallback to a hard compile error. Per-bucket
+ownership + target dates live in `plan/log/ir-adoption.md`.
 
 | Reason                       | Category   | Reduces with                         |
 |------------------------------|------------|--------------------------------------|
@@ -117,6 +129,13 @@ Refresh the baseline on PRs that intentionally retire a bypass:
 pnpm run check:ir-fallbacks -- --update
 git add scripts/ir-fallback-baseline.json
 ```
+
+**Ratchet** (#1530): `pnpm run check:ir-fallbacks -- --update-on-decrease`
+auto-writes the new (lower) counts to `scripts/ir-fallback-baseline.json`
+when a PR shrinks any unintended bucket. Growth still fails. The
+post-merge CI job is the intended caller of this mode so improvements
+bank automatically; use `--verbose` on either mode to print the per-file
+rejection breakdown.
 
 ## CLI Flags
 - `--target wasi` — emit WASI imports (fd_write, proc_exit) instead of JS host
@@ -152,7 +171,12 @@ Spawn dedicated agents when:
 - The role needs sustained back-and-forth with the user (e.g., PO during planning)
 - The role accumulates context that's hard to capture in a skill (e.g., SM during retro discussion)
 
-**IMPORTANT: Always use teammates, not subagents.** Spawn agents via `TeamCreate` + `Agent` with `team_name` parameter. Never use bare `Agent` spawns — subagents can't coordinate, causing OOM from concurrent test runs and duplicate work. Teammates communicate via `SendMessage` to serialize test runs and coordinate on file conflicts.
+**Pick the right spawn mode (this matters for lifecycle):**
+
+- **Teammates** (`Agent` with `team_name: "js2wasm"`) — long-running, lead-orchestrated. Use for **dev agents** that pull from the TaskList, receive mid-task redirects via SendMessage, or need to coordinate file locks with other agents. Teammates do **not** self-terminate — the tech lead sends `shutdown_request` when they're idle.
+- **Subagents** (`Agent` without `team_name`) — fire-and-forget. Use for **one-shot architects, research agents, spec writers** that read inputs, write an output file, and return a summary. Subagents auto-cleanup when their task returns — no pane management needed.
+
+Default rule: if the agent's job is "produce one document and exit," it's a subagent. If the agent's job is "stay on the task queue and grab the next thing," it's a teammate. Misusing teammates for one-shot work causes pane exhaustion because they idle forever waiting for orchestration that never comes (confirmed via Claude Code docs — see [[feedback_agent_self_termination]]).
 
 **IMPORTANT: Always use team name `"js2wasm"`** — this is the single permanent team. Never create ad-hoc team names (e.g. `"wasi-conflicts"`, `"s52-wave2"`). One team, one task queue, always.
 
@@ -178,8 +202,8 @@ Spawn dedicated agents when:
 | Planning agents done, user not talking to them | Write context summary → terminate |
 | Planning agents done, user IS talking to them | Keep alive until user signals done |
 | Dev between tasks | Keep alive — wait for CI, self-merge if green, then claim next task from TaskList |
-| Dev sending idle_notification pings | **Do NOT shut down.** Respond: ask if they have a PR to check on, or direct them to claim the next task from TaskList. |
-| Dev idle, no tasks available | Keep alive if more tasks expected soon. Terminate only if sprint is explicitly wrapping up. |
+| Dev sending idle_notification pings | If TaskList has unowned work: redirect them to it. Otherwise: send `shutdown_request` — that's the correct lifecycle exit, not a punishment. |
+| Dev idle, no tasks available | Send `shutdown_request` immediately. Idle teammates burn pane slots and block new spawns. Re-spawn when work appears. |
 | End of sprint | All agents write context summaries → terminate → run `/sprint-wrap-up` |
 
 ### Roles and interactions
@@ -245,7 +269,7 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 ### Agent work dispatch
 - **Tech lead populates TaskList** — devs self-serve from it. No per-task dispatch messages needed.
 - **Dev loop**: claim task from TaskList → implement → push PR → wait for CI → self-merge if green → mark completed → claim next task.
-- **Dev self-merge**: when `.claude/ci-status/pr-<N>.json` has matching SHA, `net_per_test > 0`, ratio <10%, no bucket >50 — run `gh pr merge <N> --admin --merge`. Escalate to tech lead only when criteria fail. See `.claude/skills/dev-self-merge.md`.
+- **Dev self-merge**: when `.claude/ci-status/pr-<N>.json` has matching SHA, `net_per_test > 0`, ratio <10%, no bucket >50 — run `gh pr merge <N> --merge --auto` (queues for the merge queue; queue re-runs required checks on the merged state and lands the PR). Escalate to tech lead only when criteria fail. `--admin --merge` is reserved for workflow-only / hotfix bypass. See `.claude/skills/dev-self-merge.md`.
 - **Tech lead reading ci-status files**: always verify `head_sha` matches current PR HEAD (`gh pr view N --json headRefOid`) before interpreting `net_per_test` or regression counts. A SHA mismatch means CI ran on a stale commit — the numbers are misleading. Also check `baseline_staleness_commits` > 0 as a secondary signal.
 - **Devs contact tech lead for**: TaskList empty, blocked >30 min, CI ESCALATE result (immediately — do not wait to be asked), net < 0 result.
 - Dev agents do NOT run full test262 locally — scoped checks only, CI validates conformance.
@@ -261,6 +285,14 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 ### Merge protocol (PR + CI, devs self-merge)
 
+**Authoritative ruleset**: see [`docs/ci-policy.md`](docs/ci-policy.md) for
+the required-checks list, reviewer rules, force-push policy, linear-history
+mode, and the admin script (`scripts/enable-branch-protection.sh`) that
+applies them. Required checks today: `cheap gate (main-ancestor + lint)`
+(test262-sharded.yml), `merge shard reports` (test262-sharded.yml),
+`quality` (ci.yml). The dev-self-merge skill is a UX layer on top —
+GitHub branch protection is the hard block.
+
 **Devs do NOT run local test262.** Branch validation happens in GitHub Actions:
 
 1. **Dev merges `origin/main` INTO their branch** — `git merge origin/main` (not rebase), BEFORE opening a PR
@@ -268,10 +300,13 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
    - Compiler source conflicts (`src/**/*.ts`) → create a priority `[CONFLICT]` TaskList item; assign to `senior-developer` (Opus); do NOT resolve inline
 2. **Dev runs scoped local checks** — issue-targeted compile/run checks for confidence
 3. **Dev pushes the branch to origin and opens a PR against `main`**
-4. **Dev waits for CI** — monitors `.claude/ci-status/pr-<N>.json` until it appears with a SHA matching HEAD (idle wait, no token burn)
-5. **Dev self-merges** — if `net_per_test > 0`, SHA matches, ratio <10%, no bucket >50: `gh pr merge <N> --admin --merge`
-6. **If regressions**: dev fixes on branch, pushes again, loops back to step 4
-7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed
+4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
+5. **On CI completion**:
+   - **All required checks green** → run `/dev-self-merge`; if MERGE, `gh pr merge <N> --merge --auto`, then proceed to step 8
+   - **Drift detected** (mergeable_state becomes "behind") → `git merge origin/main` in the worktree, resolve conflicts with full PR context, push again, loop back to step 4
+   - **CI failure** (any required check failed) → diagnose with full PR context (the agent KNOWS what it changed), fix locally, push again, loop back to step 4
+6. **If regressions per `/dev-self-merge`**: dev fixes on branch, pushes again, loops back to step 4
+7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed. **Drift and ordinary CI failures are NOT escalations — dev handles them with full context.**
 8. **After merge**: dev marks task `completed`, claims next task
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
