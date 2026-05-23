@@ -47,6 +47,7 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
+import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { registerAddStringImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
 
@@ -1024,6 +1025,11 @@ export function generateModule(
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
 
+    // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
+    // _start wrapper (which appends a drain call) can find its funcIdx.
+    // Idempotent + no-op when the queue was never registered.
+    exportDrainMicrotasksIfRegistered(ctx);
+
     // WASI: export _start entry point (before dead import elimination adjusts indices)
     if (ctx.wasi) {
       addWasiStartExport(ctx);
@@ -1067,7 +1073,10 @@ export function generateModule(
   return { module: mod, errors: ctx.errors };
 }
 
-/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122) */
+/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122).
+ *  When the async microtask queue was registered (#1326c Phase 1C-A), append a
+ *  call to `__drain_microtasks` after the entry function so any scheduled
+ *  microtasks fire before WASI process exit. */
 function addWasiStartExport(ctx: CodegenContext): void {
   // Prefer __module_init — it's always () -> void and handles all top-level code
   let targetIdx: number | undefined;
@@ -1099,6 +1108,15 @@ function addWasiStartExport(ctx: CodegenContext): void {
     const startTypeIdx = addFuncType(ctx, [], [], "$wasi_start_type");
     const startFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     const body: Instr[] = [{ op: "call", funcIdx: targetIdx }];
+
+    // #1326c Phase 1C-A — auto-drain the microtask queue after the entry
+    // function returns. Only emits the call when the async scheduler
+    // actually registered the queue helpers; otherwise leaves the body
+    // unchanged (no perf cost for modules that never schedule microtasks).
+    const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
+    if (drainFuncIdx !== null) {
+      body.push({ op: "call", funcIdx: drainFuncIdx });
+    }
 
     ctx.mod.functions.push({
       name: "_start",
@@ -3038,6 +3056,11 @@ export function generateMultiModule(
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
+
+    // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
+    // _start wrapper (which appends a drain call) can find its funcIdx.
+    // Idempotent + no-op when the queue was never registered.
+    exportDrainMicrotasksIfRegistered(ctx);
 
     // WASI: export _start entry point (before dead import elimination adjusts indices)
     if (ctx.wasi) {
