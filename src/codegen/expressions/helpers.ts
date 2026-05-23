@@ -16,7 +16,18 @@ import { getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../registry/imports.js";
+import { emitWasiErrorConstructor } from "../registry/error-types.js";
 import { coerceType, ensureLateImport, flushLateImportShifts, valTypesMatch } from "../shared.js";
+
+/**
+ * #1473 — No-JS-host predicate. Both `--target wasi` and `--target standalone`
+ * run without a JS runtime, so neither can rely on host imports such as
+ * `__throw_type_error` / `__new_TypeError` resolving to JS constructors. In
+ * these modes the compiler emits Wasm-native Error constructors instead.
+ */
+export function noJsHost(ctx: CodegenContext): boolean {
+  return ctx.wasi || ctx.standalone;
+}
 
 /**
  * Emit a Wasm throw instruction with a string error message.
@@ -91,6 +102,13 @@ export function resolveDeclaringClassForPrivateName(
  * mode, but the throw is observable and the caller still aborts.
  */
 export function emitThrowTypeError(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
+  // #1473 — in no-JS-host mode, register the in-module `__new_TypeError`
+  // constructor (emitWasiErrorConstructor) BEFORE resolving the funcIdx, so
+  // `ensureLateImport` finds the in-module function in funcMap and does NOT
+  // add an unsatisfiable `env::__new_TypeError` host import.
+  if (noJsHost(ctx)) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+  }
   addStringConstantGlobal(ctx, message);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
   const newTypeErrorIdx = ensureLateImport(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -101,6 +119,42 @@ export function emitThrowTypeError(ctx: CodegenContext, fctx: FunctionContext, m
   // If the import isn't available, the message externref is still on the
   // stack — degrade to throwing a string. Both paths produce the same
   // exception tag.
+  const tagIdx = ensureExnTag(ctx);
+  fctx.body.push({ op: "throw", tagIdx });
+}
+
+/**
+ * #1473 — Emit a throw of a ReferenceError INSTANCE for TDZ / unresolved
+ * identifier references. Mirrors `emitThrowTypeError`.
+ *
+ * In no-JS-host mode (`--target wasi` / `--target standalone`), the
+ * ReferenceError is built via the in-module `__new_ReferenceError` function
+ * (emitted by `emitWasiErrorConstructor`), so no `env::__new_ReferenceError`
+ * host import is required. In JS-host mode the same import name resolves to
+ * the JS `ReferenceError` constructor.
+ *
+ * Either way the throw is observable in the user's catch block via the
+ * shared `$exc` tag, and `e instanceof ReferenceError` works through the
+ * `$Error_struct` `$tag` field discrimination.
+ */
+export function emitThrowReferenceError(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
+  if (noJsHost(ctx)) {
+    emitWasiErrorConstructor(ctx, "ReferenceError", 1);
+  }
+  addStringConstantGlobal(ctx, message);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
+  const newRefErrorIdx = ensureLateImport(
+    ctx,
+    "__new_ReferenceError",
+    [{ kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (newRefErrorIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: newRefErrorIdx });
+  }
+  // If the constructor isn't available, the message externref is still on the
+  // stack — degrade to throwing a string. Both paths produce the same tag.
   const tagIdx = ensureExnTag(ctx);
   fctx.body.push({ op: "throw", tagIdx });
 }

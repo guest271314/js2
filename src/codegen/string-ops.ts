@@ -12,7 +12,7 @@ import { pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
-import { getFuncParamTypes } from "./expressions/helpers.js";
+import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
 import { addStringImports, addUnionImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
 import { ensureNativeStringExternBridge } from "./native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
@@ -1305,6 +1305,13 @@ function emitTypeErrorThrow(ctx: CodegenContext, fctx: FunctionContext, msg: str
   // to externref. In JS-host mode pull it from the imported string-constants
   // global so JS sees the same intern as `String.raw`-style literals.
   addStringConstantGlobal(ctx, msg);
+  // #1473 — no JS host: throw a TypeError INSTANCE via the in-module
+  // constructor (no `__throw_type_error` host import).
+  if (noJsHost(ctx)) {
+    emitThrowTypeError(ctx, fctx, msg);
+    fctx.body.push({ op: "unreachable" } as Instr);
+    return;
+  }
   const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
     compileNativeStringLiteral(ctx, fctx, msg);

@@ -424,9 +424,16 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
     }
     catches = [{ tagIdx, body: fctx.body }];
 
+    // #1473 — in no-JS-host mode (wasi / standalone) there is no JS sidecar and
+    // no engine-raised exception that doesn't come through our `$exc` tag (Wasm
+    // traps are not catchable). The `catch_all` + `__get_caught_exception`
+    // branch is therefore dead code — omit it so the module needs no
+    // `env::__get_caught_exception` host import.
+    const skipCatchAll = ctx.wasi || ctx.standalone;
+
     // Build "catch_all" body: no value on stack from catch_all itself.
     // Call __get_caught_exception host import to retrieve the foreign JS exception.
-    {
+    if (!skipCatchAll) {
       // Track tryBody and catch bodies in savedBodies so late imports
       // (e.g. __get_caught_exception) shift their function indices too.
       fctx.savedBodies.push(tryBody);

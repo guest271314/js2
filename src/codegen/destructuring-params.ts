@@ -17,6 +17,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
@@ -188,9 +189,29 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   const msg = "Cannot destructure 'null' or 'undefined'";
   addStringConstantGlobal(ctx, msg);
   const strIdx = ctx.stringGlobalMap.get(msg)!;
-  // Prefer host import so caller sees a genuine JS TypeError (constructor-matching
-  // tests such as `({constructor}) => constructor === TypeError` pass). Fall back
-  // to wasm throw+tag when a FunctionContext isn't available for late-import flush.
+  // #1473 — no JS host (wasi / standalone): build a TypeError INSTANCE via the
+  // in-module `__new_TypeError` constructor so `e instanceof TypeError`
+  // works under wasmtime, with no `__throw_type_error` host import. The
+  // constructor is registered in funcMap as an internal function, so
+  // ensureLateImport resolves it without adding an import (no index shift).
+  if (ctx.wasi || ctx.standalone) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+    const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+    const tagIdx = ensureExnTag(ctx);
+    if (newTypeErrorIdx !== undefined) {
+      return [
+        { op: "global.get", index: strIdx } as Instr,
+        { op: "call", funcIdx: newTypeErrorIdx } as Instr,
+        { op: "throw", tagIdx } as Instr,
+      ];
+    }
+    // Degrade to throwing the raw string with the same tag.
+    return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+  }
+  // JS-host: prefer the host import so the caller sees a genuine JS TypeError
+  // (constructor-matching tests such as `({constructor}) => constructor ===
+  // TypeError` pass). Fall back to wasm throw+tag when a FunctionContext isn't
+  // available for late-import flush.
   const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
   if (throwIdx !== undefined && fctx) {
     flushLateImportShifts(ctx, fctx);

@@ -22,9 +22,72 @@ import { coerceType, compileExpression } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
-import { isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
+import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
+import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
+import { allocLocal } from "../context/locals.js";
+import { emitThrowReferenceError, noJsHost } from "./helpers.js";
+
+/**
+ * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
+ * `instanceof <ctorName>` test in no-JS-host mode. For `instanceof Error` this
+ * is every Error subtype tag; for `instanceof TypeError` it is TypeError's own
+ * tag plus any descendant (none today). Mirrors `isBuiltinSubtype` over the
+ * error portion of the BUILTIN_TYPE_TAGS registry.
+ */
+function collectErrorInstanceOfTags(ctorName: string): number[] {
+  const errorNames = [
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "URIError",
+    "EvalError",
+    "ReferenceError",
+    "AggregateError",
+  ] as const;
+  const tags: number[] = [];
+  for (const n of errorNames) {
+    if (isBuiltinSubtype(n, ctorName)) {
+      tags.push(BUILTIN_TYPE_TAGS[n]);
+    }
+  }
+  return tags;
+}
 
 export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, name: string, flagIdx: number): void {
+  const msg = `${name} is not defined`;
+  // #1473 — no JS host: build the TDZ flag check and emit a ReferenceError
+  // INSTANCE throw inside the `then` branch via the in-module constructor
+  // helper (no `__throw_reference_error` host import).
+  if (noJsHost(ctx)) {
+    const boxed = fctx.boxedTdzFlags?.get(name);
+    if (boxed) {
+      fctx.body.push({ op: "local.get", index: boxed.localIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+    } else {
+      fctx.body.push({ op: "local.get", index: flagIdx });
+    }
+    fctx.body.push({ op: "i32.eqz" });
+    // emitThrowReferenceError appends to fctx.body; capture into the `then`
+    // branch by swapping in a temporary body (tracked in savedBodies so any
+    // late-import index shift reaches it).
+    const savedBody = fctx.body;
+    fctx.savedBodies.push(savedBody);
+    fctx.body = [];
+    emitThrowReferenceError(ctx, fctx, msg);
+    fctx.body.push({ op: "unreachable" });
+    const then = fctx.body;
+    const si = fctx.savedBodies.lastIndexOf(savedBody);
+    if (si >= 0) fctx.savedBodies.splice(si, 1);
+    fctx.body = savedBody;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then,
+      else: [],
+    });
+    return;
+  }
   const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
   flushLateImportShifts(ctx, fctx);
   // If the flag has been boxed in an i32 ref cell (captured by a closure —
@@ -40,7 +103,6 @@ export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, na
   fctx.body.push({ op: "i32.eqz" });
   let then: Instr[];
   if (throwRefErrIdx !== undefined) {
-    const msg = `${name} is not defined`;
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
     then = [
@@ -307,10 +369,16 @@ function analyzeTdzAccessByPos(ctx: CodegenContext, varName: string, callNode: t
 
 /** Emit a static TDZ throw (guaranteed violation — no flag check needed). */
 export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, name: string): void {
+  const msg = `${name} is not defined`;
+  // #1473 — no JS host: throw a ReferenceError INSTANCE built in-module.
+  if (noJsHost(ctx)) {
+    emitThrowReferenceError(ctx, fctx, msg);
+    fctx.body.push({ op: "unreachable" });
+    return;
+  }
   const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
   flushLateImportShifts(ctx, fctx);
   if (throwRefErrIdx !== undefined) {
-    const msg = `${name} is not defined`;
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
     fctx.body.push({ op: "global.get", index: strIdx } as Instr);
@@ -579,22 +647,29 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // lib.d.ts and should use the fallback default instead.
   const sym = ctx.checker.getSymbolAtLocation(id);
   if (!sym) {
-    // Truly undeclared variable — throw a proper ReferenceError instance
-    // via the `__throw_reference_error` host import. The previous emission
-    // was a raw `throw ref.null.extern`, which surfaced to JS as `null` so
-    // `e instanceof ReferenceError` was false (#1380, S11.9.1_A2.1_T3).
+    // Truly undeclared variable — throw a proper ReferenceError instance.
+    // The previous emission was a raw `throw ref.null.extern`, which surfaced
+    // to JS as `null` so `e instanceof ReferenceError` was false (#1380,
+    // S11.9.1_A2.1_T3).
+    const msg = `${name} is not defined`;
+    // #1473 — no JS host: build the ReferenceError instance in-module so
+    // `e instanceof ReferenceError` works under wasmtime, with no
+    // `__throw_reference_error` host import.
+    if (noJsHost(ctx)) {
+      emitThrowReferenceError(ctx, fctx, msg);
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
+    }
     const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
     flushLateImportShifts(ctx, fctx);
     if (throwRefErrIdx !== undefined) {
-      const msg = `${name} is not defined`;
       addStringConstantGlobal(ctx, msg);
       const strIdx = ctx.stringGlobalMap.get(msg)!;
       fctx.body.push({ op: "global.get", index: strIdx } as Instr);
       fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
       fctx.body.push({ op: "unreachable" });
     } else {
-      // Standalone/WASI mode without `__throw_reference_error`: fall back to
-      // the raw exception-tag throw (no JS host to construct a ReferenceError).
+      // Fallback: raw exception-tag throw (no JS host to construct a ReferenceError).
       const tagIdx = ensureExnTag(ctx);
       fctx.body.push({ op: "ref.null.extern" } as Instr);
       fctx.body.push({ op: "throw", tagIdx });
@@ -807,6 +882,62 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   const staticResult = tryStaticInstanceOf(ctx, expr, ctorName);
   if (staticResult !== undefined) {
     return emitConstantInstanceOf(ctx, fctx, expr, staticResult);
+  }
+
+  // #1473 — no JS host: `e instanceof TypeError` (and other Error subtypes)
+  // where the LHS is a dynamic value (any/externref). The caught value is the
+  // `$Error_struct` externref produced by emitWasiErrorConstructor; discriminate
+  // by reading its `$tag` field (fieldIdx 0) and comparing against the set of
+  // tags compatible with `ctorName`. No `__instanceof` host import.
+  if (noJsHost(ctx) && (ctorName === "Error" || isWasiErrorName(ctorName))) {
+    const compatTags = collectErrorInstanceOfTags(ctorName);
+    const structIdx = getOrRegisterErrorStructType(ctx);
+    const leftType = compileExpression(ctx, fctx, expr.left);
+    if (leftType && leftType.kind !== "externref") {
+      // Numeric / boolean primitives are never Error instances.
+      if (leftType.kind === "i32" || leftType.kind === "f64" || leftType.kind === "i64") {
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
+      }
+      coerceType(ctx, fctx, leftType, { kind: "externref" });
+    } else if (!leftType) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    // externref -> anyref, store in temp, ref.test $Error_struct, then read tag.
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    const anyLocalIdx = allocLocal(fctx, `__err_instanceof_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+    fctx.body.push({ op: "local.set", index: anyLocalIdx });
+    const elseBody: Instr[] = [
+      { op: "local.get", index: anyLocalIdx },
+      { op: "ref.cast", typeIdx: structIdx } as Instr,
+      { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+    ];
+    if (compatTags.length === 1) {
+      elseBody.push({ op: "i32.const", value: compatTags[0]! });
+      elseBody.push({ op: "i32.eq" });
+    } else {
+      const tagLocalIdx = allocLocal(fctx, `__err_tag_${fctx.locals.length}`, { kind: "i32" });
+      elseBody.push({ op: "local.set", index: tagLocalIdx });
+      elseBody.push({ op: "local.get", index: tagLocalIdx });
+      elseBody.push({ op: "i32.const", value: compatTags[0]! });
+      elseBody.push({ op: "i32.eq" });
+      for (let i = 1; i < compatTags.length; i++) {
+        elseBody.push({ op: "local.get", index: tagLocalIdx });
+        elseBody.push({ op: "i32.const", value: compatTags[i]! });
+        elseBody.push({ op: "i32.eq" });
+        elseBody.push({ op: "i32.or" });
+      }
+    }
+    fctx.body.push({ op: "local.get", index: anyLocalIdx });
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: elseBody,
+      else: [{ op: "i32.const", value: 0 }],
+    });
+    return { kind: "i32" };
   }
 
   // Ensure the __instanceof host import exists

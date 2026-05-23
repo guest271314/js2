@@ -88,7 +88,14 @@ import {
 import { compileOptionalCallExpression } from "./calls-optional.js";
 import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
-import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
+import {
+  emitThrowTypeError,
+  getFuncParamTypes,
+  getWasmFuncReturnType,
+  isEffectivelyVoidReturn,
+  noJsHost,
+  wasmFuncReturnsVoid,
+} from "./helpers.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
@@ -5497,17 +5504,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               : "TypeError: Cannot convert a Symbol value to a number";
             addStringConstantGlobal(ctx, msg);
             const strIdx = ctx.stringGlobalMap.get(msg)!;
-            const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
-            if (throwIdx !== undefined) {
-              flushLateImportShifts(ctx, fctx);
-              const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+            // #1473 — no JS host: throw a TypeError INSTANCE via the in-module
+            // constructor (no `__throw_type_error` host import).
+            if (noJsHost(ctx)) {
+              emitThrowTypeError(ctx, fctx, msg);
               fctx.body.push({ op: "unreachable" } as Instr);
             } else {
-              const tagIdx = ensureExnTag(ctx);
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              fctx.body.push({ op: "throw", tagIdx } as Instr);
+              const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
+              if (throwIdx !== undefined) {
+                flushLateImportShifts(ctx, fctx);
+                const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+                fctx.body.push({ op: "unreachable" } as Instr);
+              } else {
+                const tagIdx = ensureExnTag(ctx);
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "throw", tagIdx } as Instr);
+              }
             }
             // After unreachable / throw, the wasm stack is polymorphic.
             // Push a sentinel matching the method's return type so any
