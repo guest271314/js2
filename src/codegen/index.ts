@@ -3445,17 +3445,17 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
     // userdata @ 64 = 0 (i64)
     { op: "i32.const", value: SUB_OFFSET } as Instr,
     { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // tag @ 72 = 0 (i8 EVENTTYPE_CLOCK) — store 0 over 8 bytes covers tag + pad
     { op: "i32.const", value: SUB_OFFSET + 8 } as Instr,
     { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // clockid @ 80 = 1 (CLOCK_MONOTONIC), pad @ 84 = 0 — combined as i64
     { op: "i32.const", value: SUB_OFFSET + 16 } as Instr,
     { op: "i64.const", value: 1n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // timeout @ 88 = (i64) ms * 1_000_000
     { op: "i32.const", value: SUB_OFFSET + 24 } as Instr,
@@ -3463,17 +3463,17 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
     { op: "i64.extend_i32_u" } as unknown as Instr,
     { op: "i64.const", value: 1000000n } as unknown as Instr,
     { op: "i64.mul" } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // precision @ 96 = 0
     { op: "i32.const", value: SUB_OFFSET + 32 } as Instr,
     { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // flags @ 104 = 0 (u16, relative), plus pad — clear 8 bytes
     { op: "i32.const", value: SUB_OFFSET + 40 } as Instr,
     { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as Instr,
+    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
 
     // poll_oneoff(in=64, out=112, nsubs=1, nevents_out=144) — errno dropped
     { op: "i32.const", value: SUB_OFFSET } as Instr,
