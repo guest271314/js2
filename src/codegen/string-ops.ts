@@ -1915,6 +1915,34 @@ export function compileNativeStringMethodCall(
     return compileExpression(ctx, fctx, propAccess.expression);
   }
 
+  // #1474 — These host-routed string methods build/consume a JS RegExp under
+  // the hood. There is no Wasm-native regex engine yet, so refuse in
+  // --target standalone (Phase 1: refuse-and-document).
+  //   - match / matchAll / search: the spec coerces the (string) argument to a
+  //     RegExp, so they always route through the host regex engine.
+  //   - replace / replaceAll / split: only when the first argument is
+  //     statically a RegExp (string-arg forms use the native helpers above and
+  //     never reach this fall-through).
+  if (ctx.standalone) {
+    const argIsRegExp = (): boolean => {
+      if (expr.arguments.length === 0) return false;
+      const argType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+      return argType.getSymbol()?.getName() === "RegExp";
+    };
+    const alwaysRegExp = method === "match" || method === "matchAll" || method === "search";
+    const regexArgForm = (method === "replace" || method === "replaceAll" || method === "split") && argIsRegExp();
+    if (alwaysRegExp || regexArgForm) {
+      reportError(
+        ctx,
+        expr,
+        `Codegen error: String.prototype.${method}(...) with a RegExp is not supported in ` +
+          "--target standalone (#1474). Pass a string pattern instead, or " +
+          "recompile without --target standalone.",
+      );
+      return null;
+    }
+  }
+
   // Other methods: marshal native->extern, call host, marshal extern->native
   const importName = `string_${method}`;
   const funcIdx = ctx.funcMap.get(importName);
