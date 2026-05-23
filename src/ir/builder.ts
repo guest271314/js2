@@ -181,7 +181,12 @@ export class IrFunctionBuilder {
       result = this.allocator.fresh();
       this.valueTypes.set(result, resultType);
     }
-    this.pushInstr({ kind: "call", target, args: [...args], result, resultType });
+    // #1588 Phase 2: a call that produces a string is a string allocation site.
+    // Minting the id is inert at lowering (the encoding analysis reads it; the
+    // emitted Wasm is unchanged), and gives the analysis an attachment point
+    // for call-result origin rules (JSON.parse, string methods, …).
+    const alloc = resultType?.kind === "string" ? this.allocId("string", resultType) : undefined;
+    this.pushInstr({ kind: "call", target, args: [...args], result, resultType, alloc });
     return result;
   }
 
@@ -628,6 +633,9 @@ export class IrFunctionBuilder {
       result = this.allocator.fresh();
       this.valueTypes.set(result, resultType);
     }
+    // #1588 Phase 2: string-returning extern call (e.g. TextDecoder.decode) is
+    // a string allocation site — inert id for the encoding analysis.
+    const alloc = resultType?.kind === "string" ? this.allocId("string", resultType) : undefined;
     this.pushInstr({
       kind: "extern.call",
       className,
@@ -636,6 +644,7 @@ export class IrFunctionBuilder {
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }

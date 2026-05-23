@@ -139,11 +139,83 @@ function classifyInstr(
       // the lattice already forces `wtf16` whenever either operand is.)
       record(instr.result, instr.alloc, joinEncoding(enc(instr.lhs), enc(instr.rhs)));
       return;
+    case "call":
+      // String-returning calls (Phase 2): origin rules for built-ins that
+      // produce UTF-8 by construction, propagation rules for string methods
+      // whose result preserves the receiver's encoding. Only fires when the
+      // builder minted a string `alloc` id (i.e. resultType is string).
+      if (instr.alloc !== undefined) {
+        record(instr.result, instr.alloc, classifyCall(instr.target.name, instr.args, enc));
+      }
+      return;
+    case "extern.call":
+      // Extern-class string-returning calls (Phase 2), e.g.
+      // `TextDecoder.decode` → utf8-guaranteed (WHATWG Encoding spec).
+      if (instr.alloc !== undefined) {
+        record(instr.result, instr.alloc, classifyExternCall(instr.className, instr.method, enc(instr.receiver)));
+      }
+      return;
     default:
-      // Any other string-producing instr (and there are none in Phase 1 that
-      // carry a string `alloc` id beyond the two above) defaults to `wtf16`.
-      // We still record nothing here so the value stays absent from the map,
-      // which `enc` reads back as `wtf16`.
+      // Any other string-producing instr defaults to `wtf16`. We record
+      // nothing so the value stays absent from the map, which `enc` reads
+      // back as `wtf16`.
       return;
   }
+}
+
+/**
+ * Method names (after the `string_` / `__str_` backend prefix) whose result
+ * preserves the receiver's encoding: case folding and trimming cannot turn a
+ * non-surrogate scalar into a surrogate, so a UTF-8/ASCII receiver yields a
+ * UTF-8/ASCII result. `slice`/`substring`/`charAt` are deliberately NOT here
+ * — code-unit-indexed slicing can split a surrogate pair, so they
+ * conservatively drop to `wtf16` (refining slice with statically-known
+ * code-point boundaries is a later refinement).
+ */
+const ENCODING_PRESERVING_METHODS: ReadonlySet<string> = new Set([
+  "toUpperCase",
+  "toLowerCase",
+  "trim",
+  "trimStart",
+  "trimEnd",
+  "normalize",
+  "padStart",
+  "padEnd",
+  "repeat",
+]);
+
+/**
+ * Built-in functions whose string result is UTF-8 by construction:
+ *   - `JSON.stringify` escapes lone surrogates per ES2019+ (§24.5.2.2).
+ *   - `JSON.parse` result strings are UTF-8 (RFC 8259 restricts JSON text).
+ * These lower to host-import calls named `JSON_stringify` / `JSON_parse`.
+ */
+const UTF8_ORIGIN_FUNCS: ReadonlySet<string> = new Set(["JSON_stringify", "JSON_parse"]);
+
+/** Strip the string-backend prefix (`string_` host, `__str_` native) if present. */
+function stripStringMethodPrefix(name: string): string | null {
+  if (name.startsWith("string_")) return name.slice("string_".length);
+  if (name.startsWith("__str_")) return name.slice("__str_".length);
+  return null;
+}
+
+/** Origin/propagation rule for a `call` instr that produces a string. */
+function classifyCall(name: string, args: readonly IrValueId[], enc: (v: IrValueId) => Encoding): Encoding {
+  if (UTF8_ORIGIN_FUNCS.has(name)) return "utf8-guaranteed";
+  const method = stripStringMethodPrefix(name);
+  if (method !== null && ENCODING_PRESERVING_METHODS.has(method)) {
+    // String methods lower with the receiver as the first argument.
+    return args.length > 0 ? enc(args[0]!) : "wtf16";
+  }
+  // `__str_concat` carries no alloc on its own (string.concat does); any other
+  // string-returning call is conservatively WTF-16.
+  return "wtf16";
+}
+
+/** Origin rule for an `extern.call` instr that produces a string. */
+function classifyExternCall(className: string, method: string, _receiver: Encoding): Encoding {
+  // TextDecoder.decode yields UTF-8 by construction (WHATWG Encoding spec
+  // forbids the decoder from producing unpaired surrogates).
+  if (className === "TextDecoder" && method === "decode") return "utf8-guaranteed";
+  return "wtf16";
 }
