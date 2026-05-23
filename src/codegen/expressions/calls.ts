@@ -3955,10 +3955,30 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
+    // (#1483) performance.now() under --target wasi → clock_time_get
+    // (CLOCK_MONOTONIC). In JS-host mode we leave existing behaviour (declared
+    // global) alone so this branch only fires when a WASI helper exists.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "performance" &&
+      propAccess.name.text === "now" &&
+      ctx.wasi &&
+      ctx.funcMap.has("__wasi_performance_now")
+    ) {
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_performance_now")! } as Instr);
+      return { kind: "f64" };
+    }
+
     // Handle Date.now() and Date.UTC() — pure Wasm static methods
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Date") {
       const method = propAccess.name.text;
       if (method === "now") {
+        // (#1483) Under --target wasi, route to clock_time_get instead of the
+        // env::__date_now host import (which wasmtime does not provide).
+        if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+          return { kind: "f64" };
+        }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);

@@ -6470,12 +6470,19 @@ export function buildWasiPolyfill(): {
   fd_write: (fd: number, iovs: number, iovs_len: number, nwritten: number) => number;
   fd_read: (fd: number, iovs: number, iovs_len: number, nread: number) => number;
   proc_exit: (code: number) => void;
+  clock_time_get: (clockid: number, precision: bigint, out_ptr: number) => number;
   setMemory: (mem: WebAssembly.Memory) => void;
   setStdin: (data: Uint8Array | string) => void;
 } {
   let memory: WebAssembly.Memory | undefined;
   // Partial line buffer per fd for data not ending in newline
   const lineBuffers: Record<number, string> = {};
+  // (#1483) Monotonic baseline so CLOCK_MONOTONIC values start near zero and
+  // never go backwards within a single instance lifetime.
+  const monotonicStartNs = (() => {
+    const perf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance : undefined;
+    return perf ? BigInt(Math.round(perf.now() * 1_000_000)) : BigInt(Date.now()) * 1_000_000n;
+  })();
   // Buffered stdin bytes; consumed by fd_read until EOF (length 0).
   // Tests/harnesses can preload bytes via setStdin().
   let stdinBuf: Uint8Array = new Uint8Array(0);
@@ -6557,6 +6564,36 @@ export function buildWasiPolyfill(): {
         process.exit(code);
       }
       throw new Error(`WASI proc_exit(${code})`);
+    },
+
+    /**
+     * (#1483) clock_time_get(clockid, precision, out_ptr) -> errno
+     *
+     * Writes the current time in nanoseconds as a little-endian u64 to
+     * out_ptr in the module's linear memory. Supports:
+     *   - CLOCK_REALTIME   (0) → Date.now() (wall-clock ms → ns)
+     *   - CLOCK_MONOTONIC  (1) → performance.now() (sub-ms, monotonic)
+     *
+     * `precision` is advisory — we always report ns granularity from
+     * whichever JS clock is available.
+     */
+    clock_time_get(clockid: number, _precision: bigint, out_ptr: number): number {
+      if (!memory) return 28; // EINVAL — memory not set
+      let nowNs: bigint;
+      if (clockid === 1) {
+        // CLOCK_MONOTONIC — sub-ms via performance.now if available.
+        const perf =
+          typeof performance !== "undefined" && typeof performance.now === "function" ? performance : undefined;
+        nowNs = perf ? BigInt(Math.round(perf.now() * 1_000_000)) : BigInt(Date.now()) * 1_000_000n;
+        nowNs -= monotonicStartNs;
+        if (nowNs < 0n) nowNs = 0n;
+      } else {
+        // CLOCK_REALTIME (0) and unknown clock ids fall through to wall-clock ms.
+        nowNs = BigInt(Date.now()) * 1_000_000n;
+      }
+      const view = new DataView(memory.buffer);
+      view.setBigUint64(out_ptr, nowNs, true);
+      return 0;
     },
   };
 }

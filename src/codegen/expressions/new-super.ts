@@ -1654,6 +1654,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
 
     if (args.length === 0) {
+      // (#1483) Under --target wasi, route `new Date()` (no args) to
+      // clock_time_get via the __wasi_date_now helper (registered up front in
+      // registerWasiImports).
+      if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
       const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
       if (dateNowIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);

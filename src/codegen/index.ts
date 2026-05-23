@@ -756,6 +756,12 @@ export function generateModule(
     // where direct addImport calls do not shift defined-function indices).
     emitToUint32Helper(ctx);
 
+    // (#1483) Emit deferred WASI helper functions for the same reason —
+    // `__wasi_write_string` / `__wasi_date_now` etc. reference imports via
+    // funcMap, and addImport callers earlier in this pipeline (lib-globals
+    // scan adding `eval` / `parseInt`) do not shift defined-func entries.
+    emitDeferredWasiHelpers(ctx);
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -2948,6 +2954,9 @@ export function generateMultiModule(
     // Emit __toUint32 Wasm helper after all imports registered.
     emitToUint32Helper(ctx);
 
+    // (#1483) Emit deferred WASI helper functions for the same reason.
+    emitDeferredWasiHelpers(ctx);
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -3211,6 +3220,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   let needsConsoleStderr = false;
   let needsProcExit = false;
   let needsRandomGet = false;
+  // (#1483) Detect Date.now / performance.now / new Date() — all routed to
+  // WASI clock_time_get under --target wasi.
+  let needsClockTimeGet = false;
   let needsFdRead = false;
 
   // ctx.wasiNodeFsFuncs is populated from the original source before import preprocessing
@@ -3245,6 +3257,20 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         propAccess.name.text === "random"
       ) {
         needsRandomGet = true;
+      }
+      // (#1483) Date.now() / performance.now()
+      if (
+        ts.isIdentifier(propAccess.expression) &&
+        (propAccess.expression.text === "Date" || propAccess.expression.text === "performance") &&
+        propAccess.name.text === "now"
+      ) {
+        needsClockTimeGet = true;
+      }
+    }
+    // (#1483) `new Date()` (no args) defaults to current time → clock_time_get.
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Date") {
+      if (!node.arguments || node.arguments.length === 0) {
+        needsClockTimeGet = true;
       }
     }
     // #1481: readStdin() builtin → triggers fd_read import + helper
@@ -3298,6 +3324,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     addImport(ctx, "wasi_snapshot_preview1", "random_get", { kind: "func", typeIdx: randomGetType });
   }
 
+  // (#1483) clock_time_get(clockid: i32, precision: i64, out_ptr: i32) -> errno (i32)
+  // Used by Date.now() / performance.now() / new Date() under --target wasi.
+  // Registered BEFORE any defined helpers so its late-import-shift discipline
+  // matches `random_get` (see CLAUDE.md "addUnionImports" note).
+  if (needsClockTimeGet) {
+    const clockType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i64" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_clock_time_get",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "clock_time_get", { kind: "func", typeIdx: clockType });
+    ctx.wasiClockTimeGetIdx = ctx.funcMap.get("clock_time_get")!;
+  }
+
   // path_open(fd: i32, dirflags: i32, path: i32, path_len: i32, oflags: i32,
   //           rights_base: i64, rights_inheriting: i64, fdflags: i32, fd_out: i32) -> i32
   if (needsPathOpen) {
@@ -3326,24 +3367,140 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     ctx.wasiFdCloseIdx = ctx.funcMap.get("fd_close")!;
   }
 
-  // Register a helper function: __wasi_write_string(strPtr: i32, strLen: i32) -> void
-  // This writes to stdout (fd=1) using fd_write
+  // (#1483) Stash pending-helper flags. We emit WASI helper *functions*
+  // AFTER `collectExternDeclarations` has registered any lib.es5.d.ts globals
+  // (eval / parseInt / etc.) — emitting them earlier would seed funcMap with
+  // entries pointing at indices that the subsequent direct `addImport` calls
+  // silently shift past, corrupting later lookups (e.g. `__wasi_write_string`
+  // referenced by `ensureWasiWriteI32Helper` during user-code compilation).
   if (needsFdWrite) {
+    ctx.wasiPendingFdWriteHelper = true;
+  }
+  if (needsConsoleStderr) {
+    ctx.wasiPendingConsoleStderrHelper = true;
+  }
+  if (needsPathOpen) {
+    ctx.wasiPendingPathOpenHelper = true;
+  }
+  if (needsClockTimeGet) {
+    ctx.wasiClockHelpersPending = true;
+  }
+  if (needsFdRead) {
+    ctx.wasiPendingFdReadHelper = true;
+  }
+}
+
+/**
+ * (#1483) Emit deferred WASI helper functions. Called after
+ * `collectExternDeclarations` (and any other direct-`addImport` callers)
+ * have registered all module imports, so the funcMap entries written here
+ * are stable for subsequent lookups by lazily-registered helpers.
+ */
+export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
+  if (!ctx.wasi) return;
+  if (ctx.wasiPendingFdWriteHelper && !ctx.funcMap.has("__wasi_write_string")) {
     emitWasiWriteStringHelper(ctx);
     // #1493: also register __wasi_write_string_stderr (fd=2) for console.warn/error.
-    if (needsConsoleStderr) {
+    if (ctx.wasiPendingConsoleStderrHelper) {
       emitWasiWriteStringStderrHelper(ctx);
     }
   }
-
-  // Register __wasi_write_file_sync(pathPtr, pathLen, dataPtr, dataLen) helper
-  if (needsPathOpen) {
+  if (ctx.wasiPendingPathOpenHelper && !ctx.funcMap.has("__wasi_write_file_sync")) {
     emitWasiWriteFileSyncHelper(ctx);
+  }
+  if (ctx.wasiClockHelpersPending && !ctx.funcMap.has("__wasi_date_now")) {
+    emitWasiClockHelpers(ctx);
   }
 
   // #1481: register __wasi_read_stdin_all() -> ref NativeString helper
-  if (needsFdRead) {
+  if (ctx.wasiPendingFdReadHelper && !ctx.funcMap.has("__wasi_read_stdin_all")) {
     emitWasiReadStdinAllHelper(ctx);
+  }
+}
+
+/**
+ * (#1483) Emit __wasi_date_now() -> f64 and __wasi_performance_now() -> f64
+ * helpers. Both wrap `clock_time_get` from wasi_snapshot_preview1.
+ *
+ * Memory scratch layout (after the path_open / fd_write 0..15 region):
+ *   [16..23] = i64 nanosecond timestamp for CLOCK_REALTIME (Date.now)
+ *   [24..31] = i64 nanosecond timestamp for CLOCK_MONOTONIC (performance.now)
+ */
+function emitWasiClockHelpers(ctx: CodegenContext): void {
+  const helperTypeIdx = addFuncType(ctx, [], [{ kind: "f64" }]);
+
+  /**
+   * Build the body that, after `clock_time_get` has written an i64 LE
+   * nanosecond count at `outPtr`, recombines it into a single i64 on the
+   * stack via two unsigned i32 loads. (We avoid `i64.load` because the
+   * current binary emitter does not support it.)
+   *
+   * Stack effect: pushes i64 ns.
+   */
+  function buildI64NsFromMem(outPtr: number): Instr[] {
+    return [
+      // hi32 << 32
+      { op: "i32.const", value: outPtr + 4 } as Instr,
+      { op: "i32.load", align: 2, offset: 0 } as Instr,
+      { op: "i64.extend_i32_u" } as Instr,
+      { op: "i64.const", value: 32n } as unknown as Instr,
+      { op: "i64.shl" } as Instr,
+      // | lo32
+      { op: "i32.const", value: outPtr } as Instr,
+      { op: "i32.load", align: 2, offset: 0 } as Instr,
+      { op: "i64.extend_i32_u" } as Instr,
+      { op: "i64.or" } as Instr,
+    ];
+  }
+
+  // __wasi_date_now() — CLOCK_REALTIME (0). Out-ptr lives at scratch[16..23].
+  {
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__wasi_date_now", funcIdx);
+    const body: Instr[] = [
+      // clock_time_get(CLOCK_REALTIME=0, precision=1_000_000ns=1ms, out_ptr=16) -> errno
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "i64.const", value: 1000000n } as unknown as Instr,
+      { op: "i32.const", value: 16 } as Instr,
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
+      { op: "drop" } as Instr, // ignore errno
+      ...buildI64NsFromMem(16),
+      // i64 ns → f64 ms (signed convert OK: i64 ns range is good for ~292y past 1970)
+      { op: "f64.convert_i64_s" } as Instr,
+      { op: "f64.const", value: 1e6 } as Instr,
+      { op: "f64.div" } as Instr,
+    ];
+    ctx.mod.functions.push({
+      name: "__wasi_date_now",
+      typeIdx: helperTypeIdx,
+      locals: [],
+      body,
+      exported: false,
+    });
+  }
+
+  // __wasi_performance_now() — CLOCK_MONOTONIC (1). Out-ptr lives at scratch[24..31].
+  {
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.funcMap.set("__wasi_performance_now", funcIdx);
+    const body: Instr[] = [
+      { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
+      { op: "i64.const", value: 1000n } as unknown as Instr, // precision = 1us
+      { op: "i32.const", value: 24 } as Instr,
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
+      { op: "drop" } as Instr,
+      ...buildI64NsFromMem(24),
+      { op: "f64.convert_i64_s" } as Instr,
+      { op: "f64.const", value: 1e6 } as Instr,
+      { op: "f64.div" } as Instr,
+    ];
+    ctx.mod.functions.push({
+      name: "__wasi_performance_now",
+      typeIdx: helperTypeIdx,
+      locals: [],
+      body,
+      exported: false,
+    });
   }
 }
 
