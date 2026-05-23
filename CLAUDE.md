@@ -286,10 +286,13 @@ GitHub branch protection is the hard block.
    - Compiler source conflicts (`src/**/*.ts`) → create a priority `[CONFLICT]` TaskList item; assign to `senior-developer` (Opus); do NOT resolve inline
 2. **Dev runs scoped local checks** — issue-targeted compile/run checks for confidence
 3. **Dev pushes the branch to origin and opens a PR against `main`**
-4. **Dev waits for CI** — monitors `.claude/ci-status/pr-<N>.json` until it appears with a SHA matching HEAD (idle wait, no token burn)
-5. **Dev self-merges** — if `net_per_test > 0`, SHA matches, ratio <10%, no bucket >50: `gh pr merge <N> --merge --auto` (enqueues; queue does the final verification)
-6. **If regressions**: dev fixes on branch, pushes again, loops back to step 4
-7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed
+4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
+5. **On CI completion**:
+   - **All required checks green** → run `/dev-self-merge`; if MERGE, `gh pr merge <N> --merge --auto`, then proceed to step 8
+   - **Drift detected** (mergeable_state becomes "behind") → `git merge origin/main` in the worktree, resolve conflicts with full PR context, push again, loop back to step 4
+   - **CI failure** (any required check failed) → diagnose with full PR context (the agent KNOWS what it changed), fix locally, push again, loop back to step 4
+6. **If regressions per `/dev-self-merge`**: dev fixes on branch, pushes again, loops back to step 4
+7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed. **Drift and ordinary CI failures are NOT escalations — dev handles them with full context.**
 8. **After merge**: dev marks task `completed`, claims next task
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
