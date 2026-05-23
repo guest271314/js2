@@ -7388,6 +7388,119 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return { kind: "externref" };
       }
 
+      // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
+      // protocol dispatch. `regex[Symbol.replace](str, replaceValue)` is the
+      // ECMAScript §22.2.5 mechanism that `String.prototype.replace` and
+      // friends delegate to. The receiver is an externref (RegExp lives in
+      // the host), so a direct call_ref on the property access would deref
+      // a null pointer — there's no Wasm function bound to the symbol key
+      // on a host object. Route to `__regex_symbol_call(regex, id, arg0, arg1)`
+      // which performs `regex[Symbol.X](arg0[, arg1])` in JS land.
+      {
+        const REGEX_SYMBOL_METHODS: Record<string, number> = {
+          "@@match": 7,
+          "@@replace": 8,
+          "@@search": 9,
+          "@@split": 10,
+          "@@matchAll": 15,
+        };
+        const protocolId = REGEX_SYMBOL_METHODS[methodName];
+        if (protocolId !== undefined) {
+          // Receiver must be RegExp (or `any` when types aren't resolved).
+          // Keep the dispatch narrow to RegExp to avoid catching unrelated
+          // `obj[Symbol.iterator]`-style calls (already handled above) or
+          // user classes that define their own @@match etc.
+          const recvSym = receiverType.getSymbol()?.name;
+          const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
+          if (isRegExpRecv) {
+            // Push receiver as externref (already a RegExp host object)
+            const recvType = compileExpression(ctx, fctx, elemAccess.expression);
+            if (recvType) {
+              if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+              } else if (recvType.kind === "f64") {
+                const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+              } else if (recvType.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+                const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+              }
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // symbol ID
+            fctx.body.push({ op: "i32.const", value: protocolId });
+            // arg0 (the string operand) — coerce to externref
+            if (expr.arguments.length > 0) {
+              const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+              if (a0) {
+                if (a0.kind === "ref" || a0.kind === "ref_null") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                } else if (a0.kind === "f64") {
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else if (a0.kind === "i32") {
+                  fctx.body.push({ op: "f64.convert_i32_s" });
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                }
+              } else {
+                fctx.body.push({ op: "ref.null.extern" });
+              }
+            } else {
+              // Spec: ToString(undefined) → "undefined" — but at the host
+              // boundary an `undefined` externref roundtrip is fine because
+              // the host method does its own ToString coercion.
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // arg1 (replaceValue / limit) — coerce to externref, default null
+            if (expr.arguments.length > 1) {
+              const a1 = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+              if (a1) {
+                if (a1.kind === "ref" || a1.kind === "ref_null") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                } else if (a1.kind === "f64") {
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else if (a1.kind === "i32") {
+                  fctx.body.push({ op: "f64.convert_i32_s" });
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                }
+              } else {
+                fctx.body.push({ op: "ref.null.extern" });
+              }
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // Drop any extra arguments (evaluate for side effects)
+            for (let i = 2; i < expr.arguments.length; i++) {
+              const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
+              if (extra !== null) fctx.body.push({ op: "drop" });
+            }
+            const callIdx = ensureLateImport(
+              ctx,
+              "__regex_symbol_call",
+              [{ kind: "externref" }, { kind: "i32" }, { kind: "externref" }, { kind: "externref" }],
+              [{ kind: "externref" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            if (callIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: callIdx });
+            } else {
+              // Shouldn't happen, but be defensive
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            return { kind: "externref" };
+          }
+        }
+      }
+
       // Try class instance method: ClassName_methodName
       let receiverClassName = receiverType.getSymbol()?.name;
       if (receiverClassName && !ctx.classSet.has(receiverClassName)) {

@@ -1634,6 +1634,7 @@ const _symbolToWasm: Map<symbol, string> = new Map([
   [Symbol.asyncIterator, "@@asyncIterator"],
   [_disposeSym, "@@dispose"],
   [_asyncDisposeSym, "@@asyncDispose"],
+  [Symbol.matchAll, "@@matchAll"],
 ]);
 
 /**
@@ -1658,6 +1659,7 @@ const _symbolIdToKeys: Map<number, { wasm: string; sym: symbol }> = new Map([
   [12, { wasm: "@@asyncIterator", sym: Symbol.asyncIterator }],
   [13, { wasm: "@@dispose", sym: _disposeSym }],
   [14, { wasm: "@@asyncDispose", sym: _asyncDisposeSym }],
+  [15, { wasm: "@@matchAll", sym: Symbol.matchAll }],
 ]);
 
 /**
@@ -4492,6 +4494,83 @@ assert._isSameValue = isSameValue;
           }
           const ret = fn.apply(wrappedObj, wrappedArgs);
           return ret === wrappedObj ? obj : _unwrapForHost(ret);
+        };
+      // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
+      // protocol invocation. The compiler resolves `regex[Symbol.replace]` to
+      // an `i32.const 8` (well-known symbol ID), so a direct call would
+      // null-deref since RegExp is an externref (not a WasmGC struct) and
+      // no Wasm function corresponds to the symbol key. Route the call
+      // here: look up the symbol from `_symbolIdToKeys` and invoke
+      // `regex[Symbol.X](arg0[, arg1])`. Wasm closures (the replaceValue
+      // function arg of @@replace) are wrapped via `_wrapWasmClosure` so
+      // V8's RegExp protocol can call them as regular JS functions.
+      // Signature: (regex, symbolId, arg0, arg1) -> externref.
+      if (name === "__regex_symbol_call")
+        return (regex: any, symbolId: number, arg0: any, arg1: any): any => {
+          if (regex == null) {
+            throw new TypeError("Cannot read properties of " + (regex === null ? "null" : "undefined"));
+          }
+          const entry = _symbolIdToKeys.get(symbolId);
+          if (!entry) return undefined;
+          const sym = entry.sym;
+          const fn = regex[sym];
+          if (typeof fn !== "function") {
+            throw new TypeError("regex[" + entry.wasm + "] is not a function");
+          }
+          // Unwrap any wasm closure / wasmGC struct args for callbacks &
+          // ToPrimitive coercion (e.g. @@replace fn, custom toString objects).
+          const exports = callbackState?.getExports();
+          // Wrap a wasmGC arg into a JS-callable function when it's a
+          // closure, OR into a property-exposing proxy when it's a regular
+          // struct. Tries multiple arities for closures since the user
+          // function may declare 1–4 params (replace callback spec passes
+          // (match, ...captures, offset, string)).
+          const wrapCallable = (a: any): any => {
+            if (a == null) return a;
+            if (!_isWasmStruct(a)) return a;
+            // Try arities 4 → 1; pick the first emitted dispatcher.
+            const exps = callbackState?.getExports();
+            if (exps) {
+              for (const ar of [4, 3, 2, 1] as const) {
+                if (typeof exps[`__call_fn_${ar}`] === "function") {
+                  // Confirm the struct is actually a closure by trying the
+                  // wrap — _wrapWasmClosure returns null only when callbacks
+                  // are absent, so a non-null return means we can dispatch.
+                  const wrapped = _wrapWasmClosure(a, ar, callbackState);
+                  if (wrapped) return wrapped;
+                }
+              }
+            }
+            return _wrapForHost(a, exports);
+          };
+          // Always wrap arg0 if it's a wasmGC struct so the spec's
+          // ToString(arg) coercion finds the struct's toString/valueOf
+          // closures via the host proxy.
+          const wrappedArg0 = _isWasmStruct(arg0) ? _wrapForHost(arg0, exports) : arg0;
+          // @@match/@@matchAll/@@search are 1-arg (string).
+          // @@replace is 2-arg: (string, replaceValue) — replaceValue may
+          //   be a function or a string.
+          // @@split is 2-arg: (string, limit) — limit is a number.
+          if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
+            return fn.call(regex, wrappedArg0);
+          }
+          if (symbolId === 8) {
+            // Treat missing arg1 (null from ref.null.extern padding) as
+            // undefined → ToString gives "undefined" per spec, matching
+            // `regex[Symbol.replace](str)` with no replaceValue.
+            if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+          }
+          if (symbolId === 10) {
+            // split: missing limit (null padding) → call without second arg
+            // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
+            // would coerce null to 0 and return [] — wrong.
+            if (arg1 == null) return fn.call(regex, wrappedArg0);
+            return fn.call(regex, wrappedArg0, arg1);
+          }
+          // Generic fallback
+          if (arg1 == null) return fn.call(regex, wrappedArg0);
+          return fn.call(regex, wrappedArg0, arg1);
         };
       // Type.prototype.method.call(receiver, ...args) dispatch for built-in types.
       // Used when e.g. Array.prototype.every.call(functionObj, fn) — the receiver
