@@ -26,6 +26,7 @@ The format follows Michael Nygard's 2011 ADR template: **Context**,
 | 011 | Accepted | [Implementation language: TypeScript with the `typescript` package as the frontend](./0011-implementation-language.md) |
 | 012 | Accepted | [Intermediate representation: multi-stage typed IR](./0012-intermediate-representation.md) |
 | 013 | Accepted | [Explicit allocation sites in the IR](./0013-ir-allocation-sites.md)          |
+| 014 | Accepted | [Ownership and access-semantics analysis on IR values](./0014-ownership-access-analysis.md) |
 
 ## Reading order
 

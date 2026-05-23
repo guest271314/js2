@@ -9,6 +9,7 @@
  * `PlusPlusToken` / `MinusMinusToken` cases.
  */
 import { ts } from "../../ts-api.js";
+import { isSymbolType } from "../../checker/type-mapper.js";
 import type { ValType } from "../../ir/types.js";
 import { emitToInt32 } from "../binary-ops.js";
 import { reportError } from "../context/errors.js";
@@ -16,6 +17,7 @@ import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureAnyHelpers, ensureI32Condition, isAnyValue } from "../index.js";
 import { coerceType, compileExpression } from "../shared.js";
+import { emitThrowTypeError } from "./helpers.js";
 import { tryStaticToNumber } from "./misc.js";
 import { compileMemberIncDec, compilePostfixUnary, compilePrefixUpdate } from "./unary-updates.js";
 
@@ -27,6 +29,15 @@ function compilePrefixUnary(
   switch (expr.operator) {
     case ts.SyntaxKind.PlusToken: {
       // Unary + is ToNumber coercion
+      // ToNumber(Symbol) must throw TypeError (§7.1.4). Symbols are lowered
+      // to i32 ids, so a numeric coercion would silently turn the id into a
+      // number; detect the symbol TS type and throw instead.
+      if (isSymbolType(ctx.checker.getTypeAtLocation(expr.operand))) {
+        const t = compileExpression(ctx, fctx, expr.operand);
+        if (t !== null) fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+        return { kind: "f64" };
+      }
       // Try static resolution first (handles objects with valueOf, {}, NaN, etc.)
       const staticVal = tryStaticToNumber(ctx, expr.operand);
       if (staticVal !== undefined) {

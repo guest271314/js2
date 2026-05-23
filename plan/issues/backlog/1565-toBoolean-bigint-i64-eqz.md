@@ -1,7 +1,8 @@
 ---
 id: 1565
 title: "ToBoolean BigInt: must use i64.eqz, not f64.convert_i64_s (§7.1.2)"
-status: ready
+status: done
+sprint: 55
 priority: medium
 feasibility: easy
 reasoning_effort: low
