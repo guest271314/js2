@@ -131,6 +131,9 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
+    // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
+    // expose a CLI/option flag once the CPS lowering is parity-tested.
+    supportsAsyncIr: false,
     wasiFdWriteIdx: -1,
     wasiProcExitIdx: -1,
     wasiPathOpenIdx: -1,
