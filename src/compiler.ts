@@ -363,6 +363,7 @@ export function compileSource(
         nodeBuiltins: preprocessed.nodeBuiltins,
         wasiNodeFsFuncs,
         allowFs: options.allowFs ?? false,
+        jsxRuntime: preprocessed.jsxRuntime,
       });
       mod = result.module;
       // Propagate codegen errors with source locations
