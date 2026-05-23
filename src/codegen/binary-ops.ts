@@ -599,14 +599,14 @@ export function compileBinaryExpression(
           flushLateImportShifts(ctx, fctx);
           const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
           if (rightResult && rightResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           if (rightResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
           }
           const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
           if (leftResult && leftResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           if (leftResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
@@ -682,14 +682,14 @@ export function compileBinaryExpression(
           // Push obj (RHS) then key (LHS) — runtime signature is (obj, key).
           const rightResult = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
           if (rightResult && rightResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           if (rightResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
           }
           const leftResult = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
           if (leftResult && leftResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           if (leftResult === null) {
             fctx.body.push({ op: "ref.null.extern" });
@@ -1304,28 +1304,28 @@ export function compileBinaryExpression(
           // Stack: [leftAnyref]. Save and probe.
           const tmpLeftAny = allocTempLocal(fctx, { kind: "anyref" });
           fctx.body.push({ op: "local.tee", index: tmpLeftAny });
-          fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE_BR } as unknown as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE_BR });
           fctx.body.push({
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [
               { op: "local.get", index: tmpRightAny } as Instr,
-              { op: "ref.test", typeIdx: EQ_HEAP_TYPE_BR } as unknown as Instr,
+              { op: "ref.test", typeIdx: EQ_HEAP_TYPE_BR },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
                 then: [
                   { op: "local.get", index: tmpLeftAny } as Instr,
-                  { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR } as unknown as Instr,
+                  { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR },
                   { op: "local.get", index: tmpRightAny } as Instr,
-                  { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR } as unknown as Instr,
+                  { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR },
                   { op: "ref.eq" } as Instr,
                 ],
                 else: [{ op: "i32.const", value: 0 } as Instr],
-              } as unknown as Instr,
+              },
             ],
             else: [{ op: "i32.const", value: 0 } as Instr],
-          } as unknown as Instr);
+          });
           releaseTempLocal(fctx, tmpLeftAny);
           releaseTempLocal(fctx, tmpRightAny);
           if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });

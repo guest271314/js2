@@ -1115,6 +1115,12 @@ export function generateModule(
     emitClosureCallExport3(ctx);
     emitClosureCallExport4(ctx);
 
+    // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
+    // can discriminate a closure struct return from a vec/struct return
+    // (necessary because __vec_len returns 0 for both empty arrays and
+    // non-vec structs — JS cannot tell them apart without this probe).
+    emitIsClosureExport(ctx);
+
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
 
@@ -1422,7 +1428,7 @@ function emitStructFieldNamesExport(
       blockType: { kind: "val", type: { kind: "externref" } },
       then: thenBranch,
       else: fallback,
-    } as unknown as Instr;
+    };
 
     fallback = [{ op: "local.get", index: anyLocal } as Instr, { op: "ref.test", typeIdx } as Instr, ifInstr];
   }
@@ -1850,7 +1856,7 @@ function emitClosureCallExport1(ctx: CodegenContext): void {
         const unboxIdx = ctx.funcMap.get("__unbox_number");
         if (unboxIdx !== undefined) {
           argConversion.push({ op: "call", funcIdx: unboxIdx } as Instr);
-          argConversion.push({ op: "i32.trunc_f64_s" } as unknown as Instr);
+          argConversion.push({ op: "i32.trunc_f64_s" });
         }
       }
       // externref → externref: no conversion
@@ -2108,7 +2114,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
-            ops.push({ op: "i32.trunc_f64_s" } as unknown as Instr);
+            ops.push({ op: "i32.trunc_f64_s" });
           }
         }
         // externref: no conversion
@@ -2210,6 +2216,76 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   mod.exports.push({
     name: exportName,
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
+ * Emit __is_closure(externref) -> i32 (#1504). Returns 1 if the value is a
+ * registered Wasm closure struct, 0 otherwise. Used by the JS-side
+ * `wrapExports` to discriminate closures from named structs / vecs so it can
+ * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
+ * (#1504). No-op when the module has no closures.
+ */
+function emitIsClosureExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect base wrapper struct types (deduped). Concrete closure subtypes
+  // share their funcref signature with the base wrapper post-V8 canonicalisation,
+  // so ref.test against the base catches all of them.
+  const baseTypeIdxs: number[] = [];
+  const seenBase = new Set<number>();
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (!info) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    // Walk up to the root struct in the chain.
+    let root = typeIdx;
+    let cur = typeDef;
+    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
+      const superIdx: number = cur.superTypeIdx;
+      const parent = mod.types[superIdx];
+      if (!parent || parent.kind !== "struct") break;
+      root = superIdx;
+      cur = parent;
+    }
+    if (!seenBase.has(root)) {
+      seenBase.add(root);
+      baseTypeIdxs.push(root);
+    }
+  }
+  if (baseTypeIdxs.length === 0) return;
+
+  const isClosureTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_closure_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // body: convert extern→any, then chained ref.test → return 1 on first match.
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: 1 } as Instr,
+  ];
+  for (const closureType of baseTypeIdxs) {
+    body.push({ op: "local.get", index: 1 } as Instr);
+    body.push({ op: "ref.test", typeIdx: closureType } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: 0 } as Instr);
+
+  mod.functions.push({
+    name: "__is_closure",
+    typeIdx: isClosureTypeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__is_closure",
     desc: { kind: "func", index: funcIdx },
   });
 }
@@ -2341,32 +2417,31 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
 
       const thenInstrs: Instr[] = [];
       if (entry.mode === "standalone") {
-        thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.typeIdx } as unknown as Instr,
-          { op: "call", funcIdx: entry.funcIdx } as Instr,
-        );
+        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
+          op: "call",
+          funcIdx: entry.funcIdx,
+        } as Instr);
         boxResult(entry.resultType, thenInstrs);
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
-        thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.typeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
-        );
+        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
+          op: "struct.get",
+          typeIdx: entry.typeIdx,
+          fieldIdx: entry.fieldIdx,
+        } as Instr);
         // The struct.get returns the field type (eqref or ref). Store in eqref local.
         const closureLocal = 2; // eqref local
         thenInstrs.push(
           { op: "local.set", index: closureLocal } as Instr,
           // Cast eqref to closure struct type for the self-param
           { op: "local.get", index: closureLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.closureTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           // Get funcref from closure field 0
           { op: "local.get", index: closureLocal } as Instr,
-          { op: "ref.cast", typeIdx: entry.closureTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "ref.cast", typeIdx: ci.funcTypeIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: ci.funcTypeIdx },
           { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
         );
         const retType = ci.returnType ?? { kind: "externref" as const };
@@ -2380,7 +2455,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
 
       return [
         { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.test", typeIdx: entry.typeIdx } as unknown as Instr,
+        { op: "ref.test", typeIdx: entry.typeIdx },
         {
           op: "if",
           blockType: { kind: "val" as const, type: { kind: "externref" as const } },
@@ -2443,22 +2518,29 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
   // - for-of iteration on non-array types (__iterator)
   // - JSON.stringify on arrays of structs (JSON_stringify)
+  // - #1504: wrapExports marshaling of compiled array returns to plain JS,
+  //   which needs __vec_len / __vec_get unconditionally for any module that
+  //   declares vec types.
   // - host-import paths that coerce a vec wrapper to externref and look up
   //   `.constructor` — the runtime extern_get handler uses `__vec_len` to
   //   identify vec wrappers and report `constructor === Array`
   //   (#1441, #1057, #779c). Without the export, `["a","b"].constructor ===
   //   Array` is silently false for split/map/filter/etc. results in modules
-  //   that don't otherwise use for-of or JSON.stringify. The `__extern_get`
-  //   constructor path calls `__vec_len` to positively distinguish vec
-  //   wrappers from other null-prototype WasmGC structs.
+  //   that don't otherwise use for-of or JSON.stringify. When `__extern_get`
+  //   is imported, the property-access lowering may need this discrimination
+  //   for `vec.constructor` lookups: the constructor path calls `__vec_len`
+  //   to positively distinguish vec wrappers from other null-prototype
+  //   WasmGC structs.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
     !ctx.funcMap.has("__make_iterable") &&
     !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
-    !ctx.funcMap.has("__extern_get")
-  )
+    !ctx.funcMap.has("__extern_get") &&
+    ctx.vecTypeMap.size === 0
+  ) {
     return;
+  }
   try {
     _emitVecAccessExportsInner(ctx);
   } catch {
@@ -2738,21 +2820,21 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 1 },
       { op: "local.get", index: 1 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 },
           { op: "return" } as Instr,
         ],
         else: [],
-      } as unknown as Instr,
+      },
       { op: "i32.const", value: -1 } as Instr,
     ];
     mod.functions.push({
@@ -2776,23 +2858,23 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 2 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: 1 } as Instr,
-          { op: "array.get", typeIdx: arrTypeIdx } as unknown as Instr,
+          { op: "array.get", typeIdx: arrTypeIdx },
           { op: "return" } as Instr,
         ],
         else: [],
-      } as unknown as Instr,
+      },
       { op: "i32.const", value: 0 } as Instr,
     ];
     mod.functions.push({
@@ -2816,23 +2898,23 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 3 },
       { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: byteVecTypeIdx } as unknown as Instr,
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 3 } as Instr,
-          { op: "ref.cast", typeIdx: byteVecTypeIdx } as unknown as Instr,
-          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 } as unknown as Instr,
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: 1 } as Instr,
           { op: "local.get", index: 2 } as Instr,
-          { op: "array.set", typeIdx: arrTypeIdx } as unknown as Instr,
+          { op: "array.set", typeIdx: arrTypeIdx },
         ],
         else: [],
-      } as unknown as Instr,
+      },
     ];
     mod.functions.push({
       name: "__dv_byte_set",
@@ -2885,7 +2967,7 @@ function buildNestedIfElse(
       blockType: { kind: "val", type: blockRetType },
       then: thenBranch,
       else: current,
-    } as unknown as Instr;
+    };
 
     current = [
       { op: "local.get", index: anyLocal } as Instr,
@@ -2929,7 +3011,7 @@ function buildGetterExtract(
     if (ft.kind === "i32") {
       // Already i32
     } else if (ft.kind === "f64") {
-      then.push({ op: "i32.trunc_sat_f64_s" } as unknown as Instr);
+      then.push({ op: "i32.trunc_sat_f64_s" });
     } else {
       then.push({ op: "drop" } as Instr);
       then.push({ op: "i32.const", value: 0 } as Instr);
@@ -3151,6 +3233,9 @@ export function generateMultiModule(
     // Emit __call_fn_1 export for calling one-arg closures from JS (#1090, #1308).
     emitClosureCallExport1(ctx);
 
+    // #1504: emit __is_closure for wrapExports discrimination.
+    emitIsClosureExport(ctx);
+
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
 
@@ -3314,6 +3399,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the helper here keeps the infrastructure in place for the follow-up that
   // lowers timer calls to synchronous sleeps via the async scheduler.
   let needsPollOneoff = false;
+  // #1482: process.env.X access — register environ_get / environ_sizes_get +
+  // the JS-polyfill fast-path host import.
+  let needsEnviron = false;
   // (#1483) Detect Date.now / performance.now / new Date() — all routed to
   // WASI clock_time_get under --target wasi.
   let needsClockTimeGet = false;
@@ -3374,6 +3462,20 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
       const callee = node.expression.text;
       if (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate") {
         needsPollOneoff = true;
+      }
+    }
+    // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
+    // and `process.env["X"]` (ElementAccessExpression). The outer node may be
+    // either form; we detect the inner `process.env` chain.
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const obj = node.expression;
+      if (
+        ts.isPropertyAccessExpression(obj) &&
+        ts.isIdentifier(obj.expression) &&
+        obj.expression.text === "process" &&
+        obj.name.text === "env"
+      ) {
+        needsEnviron = true;
       }
     }
     // #1481: readStdin() builtin → triggers fd_read import + helper
@@ -3441,6 +3543,36 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     );
     addImport(ctx, "wasi_snapshot_preview1", "poll_oneoff", { kind: "func", typeIdx: pollType });
     ctx.wasiPollOneoffIdx = ctx.funcMap.get("poll_oneoff")!;
+  }
+
+  // #1482: process.env access — register the WASI environ imports for protocol
+  // compliance (a wasmtime host can satisfy these) AND register the JS-polyfill
+  // fast-path host import. The codegen path emits a `call $__wasi_env_get_str`
+  // because reconstructing a NativeString from a `KEY=VALUE` byte run inside
+  // pure Wasm requires considerable scaffolding; the host-import shortcut keeps
+  // the MVP scope tight. The environ_* imports stay declared so a future
+  // pure-WASI implementation can swap in without changing the manifest.
+  if (needsEnviron) {
+    // environ_sizes_get(count_ptr: i32, buf_size_ptr: i32) -> errno (i32)
+    const envSizesType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_environ_sizes_get",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "environ_sizes_get", { kind: "func", typeIdx: envSizesType });
+    ctx.wasiEnvironSizesGetIdx = ctx.funcMap.get("environ_sizes_get")!;
+
+    // environ_get(envPtrs: i32, buf: i32) -> errno (i32)
+    const envGetType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$wasi_environ_get");
+    addImport(ctx, "wasi_snapshot_preview1", "environ_get", { kind: "func", typeIdx: envGetType });
+    ctx.wasiEnvironGetIdx = ctx.funcMap.get("environ_get")!;
+
+    // env::__wasi_env_get_str(key: externref) -> externref
+    // JS-polyfill fast path. The polyfill maps this to `process.env[key]`.
+    const envGetStrType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$wasi_env_get_str_t");
+    addImport(ctx, "env", "__wasi_env_get_str", { kind: "func", typeIdx: envGetStrType });
+    ctx.wasiEnvGetStrIdx = ctx.funcMap.get("__wasi_env_get_str")!;
   }
 
   // (#1483) clock_time_get(clockid: i32, precision: i64, out_ptr: i32) -> errno (i32)
@@ -3740,8 +3872,8 @@ function emitWasiWriteFileSyncHelper(ctx: CodegenContext): void {
     { op: "local.get", index: 0 } as Instr, // path ptr
     { op: "local.get", index: 1 } as Instr, // path len
     { op: "i32.const", value: 9 } as Instr, // oflags = O_CREAT(1) | O_TRUNC(8) = 9
-    { op: "i64.const", value: 64n } as unknown as Instr, // rights_base = RIGHT_FD_WRITE(64)
-    { op: "i64.const", value: 0n } as unknown as Instr, // rights_inheriting = 0
+    { op: "i64.const", value: 64n }, // rights_base = RIGHT_FD_WRITE(64)
+    { op: "i64.const", value: 0n }, // rights_inheriting = 0
     { op: "i32.const", value: 0 } as Instr, // fdflags = 0
     { op: "i32.const", value: 12 } as Instr, // fd_out ptr at memory[12]
     { op: "call", funcIdx: ctx.wasiPathOpenIdx } as Instr,
@@ -4000,7 +4132,7 @@ function emitWasiReadStdinAllHelper(ctx: CodegenContext): void {
             { op: "i32.const", value: STDIN_BUF_START } as Instr,
             { op: "local.get", index: I } as Instr,
             { op: "i32.add" } as Instr,
-            { op: "i32.load8_u", align: 0, offset: 0 } as unknown as Instr,
+            { op: "i32.load8_u", align: 0, offset: 0 },
             { op: "local.set", index: B } as Instr,
 
             // dataArr[i] = b
@@ -4357,6 +4489,16 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
 /** Register wasm:js-string builtin imports (called on demand when strings are used) */
 export function addStringImports(ctx: CodegenContext): void {
   if (ctx.hasStringImports) return;
+  // #1470: standalone target must never register the wasm:js-string namespace.
+  // The nativeStrings path is the standalone alternative and is forced on for
+  // ctx.standalone in createCodegenContext. If a caller still reaches this
+  // path under standalone (e.g. via a missed gate), no-op so the resulting
+  // module remains JS-host-free. WASI mode keeps the historical no-op
+  // behavior via the same nativeStrings forcing.
+  if (ctx.standalone || ctx.wasi) {
+    ctx.hasStringImports = true;
+    return;
+  }
   ctx.hasStringImports = true;
 
   // Record import count before adding so we can shift function indices
@@ -4880,7 +5022,7 @@ export function emitToUint32Helper(ctx: CodegenContext): void {
     { op: "f64.eq" },
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
     { op: "local.get", index: 0 },
-    { op: "i64.trunc_sat_f64_s" } as unknown as Instr,
+    { op: "i64.trunc_sat_f64_s" },
     { op: "i32.wrap_i64" },
   ];
   ctx.mod.functions.push({
@@ -5926,7 +6068,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_number", f64ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxNumStructIdx },
-    { op: "extern.convert_any" } as unknown as Instr,
+    { op: "extern.convert_any" },
   ]);
 
   // 4. __unbox_number(externref) -> f64
@@ -5947,7 +6089,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       },
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       // if (ref.test $box_number_struct any) return any.value
       { op: "ref.test", typeIdx: boxNumStructIdx },
@@ -5956,7 +6098,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxNumStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
           { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -5971,7 +6113,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_boolean", i32ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxBoolStructIdx },
-    { op: "extern.convert_any" } as unknown as Instr,
+    { op: "extern.convert_any" },
   ]);
 
   // 6. __unbox_boolean(externref) -> i32
@@ -5994,7 +6136,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       { op: "ref.test", typeIdx: boxBoolStructIdx },
       {
@@ -6002,7 +6144,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxBoolStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
           { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -6030,7 +6172,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       },
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       // boxed number? → value !== 0 && value === value
       { op: "ref.test", typeIdx: boxNumStructIdx },
@@ -6039,7 +6181,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxNumStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
           { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
           { op: "local.tee", index: 2 },
           // value !== 0
@@ -6061,7 +6203,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: boxBoolStructIdx } as unknown as Instr,
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
           { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
           { op: "return" },
         ],
@@ -6085,7 +6227,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as unknown as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: boxNumStructIdx },
   ]);
 
@@ -6099,7 +6241,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as unknown as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: boxBoolStructIdx },
   ]);
 
@@ -6117,7 +6259,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "ref.test", typeIdx: strTypeIdx },
     ]);
   } else {
@@ -6144,7 +6286,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as unknown as Instr,
+      { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
       { op: "ref.test", typeIdx: boxNumStructIdx },
       {
@@ -6174,7 +6316,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     per tag; defer until a wasi caller needs the typeof RESULT as a
   //     string (today's callers compare against literal tags via the
   //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" } as unknown as Instr]);
+  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
 }
 
 /**

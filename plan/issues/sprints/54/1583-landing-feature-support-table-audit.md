@@ -1,7 +1,8 @@
 ---
 id: 1583
+sprint: 54
 title: Audit landing-page feature support table (ES editions section)
-status: in-progress
+status: done
 priority: medium
 feasibility: medium
 reasoning_effort: medium

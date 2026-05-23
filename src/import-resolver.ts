@@ -49,6 +49,32 @@ export const NODE_BUILTIN_MODULES = new Set([
   "console",
 ]);
 
+/**
+ * #1492 — Typed stubs for known Node.js builtin functions that are exposed
+ * as named imports. The MVP covers `crypto.randomBytes` and `crypto.randomUUID`
+ * (the most-requested standalone-host-bridge functions for backend code).
+ *
+ * When the user writes `import { randomBytes } from "node:crypto"` and calls
+ * `randomBytes(n)`, `preprocessImports` substitutes a declare-function host
+ * import named `__nodefn__crypto__randomBytes` (typed `(number) => Uint8Array`)
+ * plus a thin TS wrapper `function randomBytes(n) { return
+ * __nodefn__crypto__randomBytes(n); }`. The codegen registers the host import
+ * via the standard declare-function path; `compiler/import-manifest.ts` then
+ * classifies the `__nodefn__*` prefix into the `node_builtin_fn` ImportIntent
+ * so `runtime.ts:resolveImport` can bind it at runtime.
+ *
+ * Adding a new module/function: extend this table.
+ */
+const NODE_BUILTIN_FN_TYPED_STUBS: Record<
+  string,
+  Record<string, { params: string; returns: string; passthrough: string }>
+> = {
+  crypto: {
+    randomBytes: { params: "size: number", returns: "Uint8Array", passthrough: "size" },
+    randomUUID: { params: "", returns: "string", passthrough: "" },
+  },
+};
+
 /** Returns true if `spec` is a recognized Node.js builtin (with or without `node:` prefix). */
 export function isNodeBuiltin(spec: string): boolean {
   return NODE_BUILTIN_MODULES.has(spec.replace(/^node:/, ""));
@@ -483,9 +509,32 @@ export function preprocessImports(source: string): PreprocessResult {
   // Default and named imports → declare stubs
   for (const imp of otherImports) {
     const lines: string[] = [];
+    // #1492 — when a Node builtin is imported by named bindings (e.g.
+    // `import { randomBytes, randomUUID } from "node:crypto"`), emit a typed
+    // host-import stub for each known function instead of a plain
+    // `declare function ...(a0: any): any`. The stub name uses the
+    // `__nodefn__<module>__<fn>` prefix so the import-manifest classifier
+    // can route it to a `node_builtin_fn` ImportIntent and the runtime
+    // resolver can bind it to `require("crypto")[fn]` (or the browser
+    // `globalThis.crypto` fallback).
+    const isBuiltin = isNodeBuiltin(imp.moduleSpec);
+    const moduleName = isBuiltin ? normalizeNodeBuiltin(imp.moduleSpec) : "";
+    const nodeBuiltinFnTypedStub = (name: string): string | null => {
+      if (!isBuiltin) return null;
+      const stub = NODE_BUILTIN_FN_TYPED_STUBS[moduleName]?.[name];
+      if (!stub) return null;
+      const hostName = `__nodefn__${moduleName}__${name}`;
+      return (
+        `declare function ${hostName}(${stub.params}): ${stub.returns};\n` +
+        `function ${name}(${stub.params}): ${stub.returns} { return ${hostName}(${stub.passthrough}); }`
+      );
+    };
 
     if (imp.defaultName && !definedNames.has(imp.defaultName)) {
-      if (calledAsFunction.has(imp.defaultName)) {
+      const typed = nodeBuiltinFnTypedStub(imp.defaultName);
+      if (typed) {
+        lines.push(typed);
+      } else if (calledAsFunction.has(imp.defaultName)) {
         const argCount = maxCallArgs.get(imp.defaultName) ?? 0;
         const params = Array.from({ length: argCount }, (_, i) => `a${i}: any`).join(", ");
         lines.push(`declare function ${imp.defaultName}(${params}): any;`);
@@ -499,6 +548,11 @@ export function preprocessImports(source: string): PreprocessResult {
         // Skip if the name is already defined as a function/variable/class in source
         if (definedNames.has(name)) continue;
 
+        const typed = nodeBuiltinFnTypedStub(name);
+        if (typed) {
+          lines.push(typed);
+          continue;
+        }
         if (calledAsFunction.has(name)) {
           const argCount = maxCallArgs.get(name) ?? 0;
           const params = Array.from({ length: argCount }, (_, i) => `a${i}: any`).join(", ");

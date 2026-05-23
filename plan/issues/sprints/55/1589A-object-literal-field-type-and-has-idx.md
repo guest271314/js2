@@ -3,7 +3,7 @@ id: 1589A
 parent: 1589
 title: Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes
 status: ready
-sprint: 54
+sprint: 55
 priority: medium
 feasibility: hard
 type: bug
