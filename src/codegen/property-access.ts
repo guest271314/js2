@@ -1042,7 +1042,18 @@ export function compilePropertyAccess(
     expr.expression.name.text === "meta"
   ) {
     if (propName === "url") {
-      return compileStringLiteral(ctx, fctx, "module.wasm");
+      // #1494 — Bind to the host's `import.meta.url` (passed by the generated
+      // loader via deps.importMetaUrl). Falls back to undefined when no
+      // loader is present.
+      const funcIdx = ensureLateImport(ctx, "__get_import_meta_url", [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+      // Fallback when the host import couldn't be registered.
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
     }
     // For any other import.meta property, return undefined
     fctx.body.push({ op: "ref.null.extern" });

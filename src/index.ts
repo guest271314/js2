@@ -32,6 +32,9 @@ export type ImportIntent =
   | { type: "proxy_create" }
   | { type: "node_builtin"; moduleName: string }
   | { type: "node_builtin_fn"; moduleName: string; name: string }
+  | { type: "node_dirname" }
+  | { type: "node_filename" }
+  | { type: "node_import_meta_url" }
   | {
       // (#1540) JSX runtime binding — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV`
       // emitted by TypeScript when `jsx: react-jsx` is set. The host binding

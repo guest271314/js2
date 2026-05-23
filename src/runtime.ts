@@ -6367,6 +6367,37 @@ assert._isSameValue = isSameValue;
       }
       return () => {};
     }
+    case "node_dirname": {
+      // #1494 — `__dirname` for compiled modules. Prefer an explicit override
+      // from `deps`, then fall back to the host's ambient CJS `__dirname` when
+      // running inside a Node CommonJS module (otherwise undefined).
+      return () => {
+        if (deps && deps.__dirname !== undefined) return deps.__dirname;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g: any = globalThis as any;
+        if (typeof g.__dirname !== "undefined") return g.__dirname;
+        return undefined;
+      };
+    }
+    case "node_filename": {
+      // #1494 — `__filename` for compiled modules.
+      return () => {
+        if (deps && deps.__filename !== undefined) return deps.__filename;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const g: any = globalThis as any;
+        if (typeof g.__filename !== "undefined") return g.__filename;
+        return undefined;
+      };
+    }
+    case "node_import_meta_url": {
+      // #1494 — `import.meta.url` for compiled modules. The compiled Wasm has
+      // no intrinsic notion of its own URL, so the generated loader must pass
+      // it explicitly via deps.importMetaUrl.
+      return () => {
+        if (deps && deps.importMetaUrl !== undefined) return deps.importMetaUrl;
+        return undefined;
+      };
+    }
     case "node_builtin_fn": {
       // #1491 — Bind a named function of a Node.js builtin module as a host import.
       // E.g. `node_builtin_fn { moduleName: "fs", name: "readFileSync" }` resolves
