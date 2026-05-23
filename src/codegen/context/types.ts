@@ -53,6 +53,15 @@ export interface CodegenOptions {
   wasiNodeFsFuncs?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
+  /**
+   * Enforce dual-mode discipline (#1524): when set, `addImport` rejects any
+   * JS-host `env` import that is not on the
+   * `src/codegen/host-import-allowlist.ts` baseline. WASI builds enable this
+   * by default unless `allowHostImports` is set. Set this directly via
+   * `--no-host-imports` on the CLI or `strictNoHostImports: true` in
+   * `CompileOptions`.
+   */
+  strictNoHostImports?: boolean;
   /** JSX runtime import detected during preprocessing (#1540). */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
@@ -672,6 +681,14 @@ export interface CodegenContext {
   wasiNodeFsFuncs: Set<string>;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
   allowFs: boolean;
+  /**
+   * #1524 — When true, `addImport` rejects any JS-host `env` import that is
+   * not on the dual-mode allowlist (`src/codegen/host-import-allowlist.ts`).
+   * Auto-enabled when `wasi: true` (unless the caller passes
+   * `strictNoHostImports: false` explicitly). Drives the architectural gate
+   * documented under "Architecture Principles → JS host optional" in CLAUDE.md.
+   */
+  strictNoHostImports: boolean;
   /** Map from let/const module global variable name → TDZ flag global index */
   tdzGlobals: Map<string, number>;
   /** Set of let/const module global variable names */

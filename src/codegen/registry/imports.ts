@@ -7,9 +7,43 @@
  */
 import type { Import, Instr, TagDef } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
+import { buildStrictHostImportError, isHostImportAllowed } from "../host-import-allowlist.js";
 import { addFuncType } from "./types.js";
 
+/**
+ * Register an import (`module.name`) on the current module.
+ *
+ * Under `ctx.strictNoHostImports` (auto-on for `--target wasi`, controllable
+ * via `--no-host-imports` / `--allow-host-imports` on the CLI; see #1524),
+ * any `env`-module import that is not on the dual-mode allowlist
+ * (`src/codegen/host-import-allowlist.ts`) is rejected with a structured
+ * compile error referencing the tracking issue. The error is pushed onto
+ * `ctx.errors`; the import itself is silently dropped to avoid producing a
+ * module that references a nonexistent function index. Downstream code that
+ * attempts to `call` the dropped function will fail validation if the
+ * caller did not check `result.success` before consuming the binary.
+ *
+ * `wasi_snapshot_preview1` imports are always allowed; they are the canonical
+ * WASI ABI, not JS-host bindings.
+ *
+ * `wasm:js-string` / `string_constants` are JS-host bindings but are usually
+ * not requested under strict mode because `nativeStrings` is auto-enabled.
+ * If they ARE requested under strict mode, the gate rejects them with a
+ * dedicated error pointing the user at the nativeStrings option.
+ */
 export function addImport(ctx: CodegenContext, module: string, name: string, desc: Import["desc"]): void {
+  if (ctx.strictNoHostImports) {
+    const decision = isHostImportAllowed(module, name);
+    if (!decision.allowed) {
+      const message = buildStrictHostImportError(module, name);
+      ctx.errors.push({ message, line: 0, column: 0 });
+      // Skip registration. The caller will record a stale funcMap index if
+      // it tries to look the import up by name; `result.success` will be
+      // false thanks to the error above, and downstream emit/link will
+      // refuse to produce a final binary.
+      return;
+    }
+  }
   ctx.mod.imports.push({ module, name, desc });
   if (desc.kind === "func") {
     ctx.funcMap.set(name, ctx.numImportFuncs);
