@@ -6984,6 +6984,28 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
       wasmType = { kind: "externref" };
     }
     const callSigs = propType.getCallSignatures();
+    // (#1589A) When the property's TS type has zero own properties (an empty
+    // `{}` value) but resolveWasmType picked a `ref`/`ref_null` to a struct,
+    // widen the field to externref. An empty object literal is constructed at
+    // runtime as a host externref (`__new_plain_object`), not as a WasmGC
+    // struct instance — so coercing it into a `ref null <struct>` field fails
+    // the `ref.test` and stores `ref.null`. Reading the field back through
+    // `__sget_<i>` then yields null, which (a) loses the value and (b) makes
+    // `__extern_has_idx` report the property as absent, breaking spec
+    // HasProperty (§7.3.12) for `Array.prototype.indexOf.call`-style loops.
+    // Storing the value as externref preserves both the value and presence.
+    // (`__Date` is the i64-timestamp struct, never an empty object literal.)
+    if (
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      callSigs.length === 0 &&
+      propType.getProperties().length === 0
+    ) {
+      const refTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
+      const refStructName = ctx.typeIdxToStructName.get(refTypeIdx);
+      if (refStructName !== "__Date") {
+        wasmType = { kind: "externref" };
+      }
+    }
     // For valueOf/toString callable properties, store as eqref instead of externref
     // so coercion can recover the closure and call it via call_ref
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
