@@ -16,7 +16,7 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions } from "../ir/integration.js";
 import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation } from "../ir/select.js";
+import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -649,6 +649,58 @@ function valTypeToIrField(_ctx: CodegenContext, vt: import("../ir/types.js").Val
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// #1530 — IR fallback phase-out hooks.
+//
+// Two strict-mode sets that let later PRs close the legacy fallback path
+// for specific rejection / build-error classes. Both start empty so the
+// current behaviour is unchanged; the sets exist as a single, well-known
+// integration point so future PRs add one entry per retired bucket.
+//
+// `STRICT_IR_REASONS`     — selector-rejection reasons that must NOT show
+//                           up in any compilation. When non-empty, the
+//                           selector is run with `trackFallbacks: true` and
+//                           every matching reason is surfaced as a hard
+//                           compile error rather than silently flowing to
+//                           legacy. Add a reason here once its bucket in
+//                           `scripts/ir-fallback-baseline.json` hits zero.
+//
+// `STRICT_IR_BUILD_ERRORS` — substring patterns matched against the
+//                           per-function message returned by
+//                           `compileIrPathFunctions`. When any pattern
+//                           matches, the diagnostic is promoted from a
+//                           "warning" (legacy fallback) to an "error"
+//                           (hard fail). Add a pattern here once the
+//                           corresponding IR-build path is known to be
+//                           permanently fixed.
+//
+// See `plan/log/ir-adoption.md` for the per-bucket ownership + target
+// dates that drive this list.
+// ---------------------------------------------------------------------------
+const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReason>();
+// Empty as of #1530 — flip entries to "strict" in follow-up PRs once
+// their `scripts/ir-fallback-baseline.json` bucket reaches zero. The
+// intended order (cheapest first, see plan/log/ir-adoption.md):
+//   "param-type-not-resolvable",
+//   "call-graph-closure",
+//   "body-shape-rejected",
+
+const STRICT_IR_BUILD_ERRORS: ReadonlyArray<string> = [
+  // Empty as of #1530 — add substring patterns here when a known build
+  // error class is permanently fixed and a legacy fallback should no
+  // longer mask a real bug. Example for a future PR:
+  //   "post-hygiene verify:",
+  //   "class-method typeIdx parity mismatch",
+];
+
+function isStrictIrBuildError(message: string): boolean {
+  if (STRICT_IR_BUILD_ERRORS.length === 0) return false;
+  for (const pat of STRICT_IR_BUILD_ERRORS) {
+    if (message.includes(pat)) return true;
+  }
+  return false;
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -800,8 +852,32 @@ export function generateModule(
       // selector to track every top-level FunctionDeclaration that didn't
       // make it into `funcs` along with the rejection reason. Logged to
       // stderr at end of compile. Off by default (zero overhead).
-      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1";
+      // #1530 — `trackFallbacks` is also enabled when one or more
+      // selector-rejection reasons are in `STRICT_IR_REASONS`. The set
+      // starts empty (purely a hook for follow-up PRs); when populated,
+      // selector rejections of those reasons promote from a silent skip
+      // to a hard error so the IR path becomes the only path for the
+      // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
+      // continues to enable the histogram log; the strict set additionally
+      // forces collection.
+      const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
       const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
+      // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
+      // promote every fallback with that reason to a hard compile error
+      // instead of letting the legacy path silently catch it. The set
+      // starts empty; once a bucket hits zero against
+      // `scripts/ir-fallback-baseline.json`, that bucket's reason can be
+      // added here in a follow-up PR.
+      if (STRICT_IR_REASONS.size > 0 && selection.fallbacks) {
+        for (const fb of selection.fallbacks) {
+          if (STRICT_IR_REASONS.has(fb.reason)) {
+            reportErrorNoNode(
+              ctx,
+              `IR path strict mode: ${fb.name} rejected with reason "${fb.reason}" — this reason is required to be zero (see plan/log/ir-adoption.md).`,
+            );
+          }
+        }
+      }
       // Slice 4 (#1169d) — build the class-shape registry from the
       // legacy class collection (`ctx.classSet`, `ctx.structFields`,
       // `ctx.funcMap`). Done BEFORE override resolution so class-typed
@@ -899,12 +975,22 @@ export function generateModule(
       // gate. Cleaner long-term: thread an `IrPathReport` channel through
       // `CompileResult` separate from compile diagnostics; tracked as a
       // follow-up.
+      //
+      // #1530 — the demotion is gated by `STRICT_IR_BUILD_ERRORS`: if any
+      // pattern in that set matches the build-error message, the
+      // diagnostic is promoted to "error" instead. The set starts empty
+      // (non-behavioural change); once a build-error class is known to
+      // be permanently fixed in the IR path, the matching pattern is
+      // added here and the legacy fallback path is closed for that
+      // class. This is the per-kind scoping hook the long-term retire
+      // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
+        const isStrict = isStrictIrBuildError(err.message);
         ctx.errors.push({
           message: `IR path failed for ${err.func}: ${err.message}`,
           line: 0,
           column: 0,
-          severity: "warning",
+          severity: isStrict ? "error" : "warning",
         });
       }
       // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS=1, log a one-line

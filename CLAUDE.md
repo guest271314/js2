@@ -94,12 +94,20 @@ The committed JSONL must be kept in sync with the JSON; otherwise the dev-self-m
 
 To validate the committed JSONL on demand, run `pnpm run test:262:validate-baseline` (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to `refresh-committed-baseline.yml`.
 
-## IR Fallback Budget (#1376)
+## IR Fallback Budget (#1376) — being phased out (#1530)
 
 The IR retirement gate `pnpm run check:ir-fallbacks` walks every `.ts` file
 under `playground/examples/` with `trackFallbacks: true` and aggregates
 rejection reasons against `scripts/ir-fallback-baseline.json`. CI fails when
 any **unintended** bucket grows.
+
+**Direction**: this budget is a transitional safety net, not a permanent
+ceiling. #1530 prioritises ratcheting the unintended buckets to zero so the
+IR path becomes the only path for the affected node kinds. Once a bucket
+hits zero, the rejection reason gets added to `STRICT_IR_REASONS` in
+`src/codegen/index.ts`, which promotes any future regression of that
+reason from a silent legacy fallback to a hard compile error. Per-bucket
+ownership + target dates live in `plan/log/ir-adoption.md`.
 
 | Reason                       | Category   | Reduces with                         |
 |------------------------------|------------|--------------------------------------|
@@ -122,6 +130,13 @@ Refresh the baseline on PRs that intentionally retire a bypass:
 pnpm run check:ir-fallbacks -- --update
 git add scripts/ir-fallback-baseline.json
 ```
+
+**Ratchet** (#1530): `pnpm run check:ir-fallbacks -- --update-on-decrease`
+auto-writes the new (lower) counts to `scripts/ir-fallback-baseline.json`
+when a PR shrinks any unintended bucket. Growth still fails. The
+post-merge CI job is the intended caller of this mode so improvements
+bank automatically; use `--verbose` on either mode to print the per-file
+rejection breakdown.
 
 ## CLI Flags
 - `--target wasi` — emit WASI imports (fd_write, proc_exit) instead of JS host
