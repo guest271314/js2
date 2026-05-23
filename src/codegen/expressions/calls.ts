@@ -7003,11 +7003,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     }
   }
 
-  // Handle standalone super() calls (constructor chaining) — normally handled by
-  // compileClassBodies, but handle here as fallback
+  // Handle standalone super() calls (constructor chaining) — top-level super(...)
+  // statements are handled inline by compileClassBodies, which short-circuits the
+  // ExpressionStatement before it reaches this path. When `super(...)` appears
+  // nested inside control flow (try/catch, if/loop) inside the user constructor,
+  // the inline handler doesn't see it. To preserve §13.3.7.1 step 4 (ArgumentList­
+  // Evaluation + ReturnIfAbrupt) we evaluate every argument left-to-right here
+  // for side effects, dropping the resulting value. Parent-field assignment
+  // remains best-effort: nested-super field forwarding is handled by the
+  // inline path; this fallback ensures throws from arg expressions propagate
+  // to the user's try/catch (#1551).
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    // super() call in constructor — already handled by compileClassBodies inline
-    // Just return void since the work is done there
+    for (const arg of expr.arguments) {
+      const inner = ts.isSpreadElement(arg) ? arg.expression : arg;
+      const argResult = compileExpression(ctx, fctx, inner);
+      if (argResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+    }
     return null;
   }
 
