@@ -38,6 +38,11 @@ Options:
   --allow-fs        Allow node:fs JS-host imports (readFileSync, writeFileSync)
                     for non-WASI targets (#1491). Off by default to prevent
                     accidental capability leakage.
+  --utf8-storage    Dual i8/i16 string storage (#1588): store strings proven
+                    UTF-8 (literals, JSON, decoder results, ...) as i8-backed
+                    Utf8String for a cheaper Component Model boundary. Implies
+                    nativeStrings on the WasmGC backend. Off by default
+                    (byte-identical output when off).
   --wat             Emit only WAT (no binary)
   --no-wat          Skip WAT output
   --no-dts          Skip .d.ts output
@@ -76,6 +81,7 @@ let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
 let emitWit = false;
 let allowFs = false;
+let utf8Storage = false;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
@@ -102,6 +108,8 @@ for (let i = 0; i < args.length; i++) {
     emitWit = true;
   } else if (arg === "--allow-fs") {
     allowFs = true;
+  } else if (arg === "--utf8-storage") {
+    utf8Storage = true;
   } else if (arg === "-O" || arg === "--optimize") {
     optimize = true;
   } else if (/^-O[1-4]$/.test(arg)) {
@@ -159,6 +167,7 @@ const result = compile(source, {
   ...(target ? { target } : {}),
   ...(emitWit ? { wit: true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
+  ...(utf8Storage ? { utf8Storage: true } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
 });
 
