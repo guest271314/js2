@@ -5817,6 +5817,79 @@ assert._isSameValue = isSameValue;
       // ToUint32 for Math.clz32/imul — spec-correct conversion
       // (x >>> 0) applies the ToUint32 abstract operation per ES spec
       if (name === "__toUint32") return (x: number) => x >>> 0;
+      // (#1503) Web Crypto host imports — crypto.randomUUID() and
+      // crypto.getRandomValues(typedArray). Prefer globalThis.crypto
+      // (Web Crypto API; available in browsers + Node 19+); fall back to
+      // `require('node:crypto')` for older Node. Pure-standalone hosts
+      // (no crypto, no `require`) throw rather than silently degrading to
+      // `Math.random()` — see issue notes on the security trap that
+      // creates.
+      if (name === "__crypto_random_uuid")
+        return () => {
+          const gc: any = (globalThis as any).crypto;
+          if (gc && typeof gc.randomUUID === "function") {
+            return gc.randomUUID();
+          }
+          const req = _getNodeRequire();
+          if (req) {
+            try {
+              return req("node:crypto").randomUUID();
+            } catch {
+              /* fall through */
+            }
+          }
+          throw new Error("crypto.randomUUID is not available in this host");
+        };
+      if (name === "__crypto_get_random_values")
+        return (vec: any) => {
+          const exports = callbackState?.getExports();
+          // Prefer __vec_set_byte (handles all writable vec element types —
+          // f64-backed Uint8Array etc., plus i32_byte ArrayBuffer). Fall
+          // back to __dv_byte_set for i32_byte-only modules.
+          const vecLen = exports?.__vec_len as ((v: any) => number) | undefined;
+          const vecSet = exports?.__vec_set_byte as ((v: any, i: number, b: number) => void) | undefined;
+          const dvLen = exports?.__dv_byte_len as ((v: any) => number) | undefined;
+          const dvSet = exports?.__dv_byte_set as ((v: any, i: number, b: number) => void) | undefined;
+          let n: number;
+          let setByte: (v: any, i: number, b: number) => void;
+          if (typeof vecLen === "function" && typeof vecSet === "function") {
+            n = vecLen(vec);
+            setByte = vecSet;
+          } else if (typeof dvLen === "function" && typeof dvSet === "function") {
+            const m = dvLen(vec);
+            if (m < 0) {
+              throw new TypeError("crypto.getRandomValues: argument is not a Uint8Array / ArrayBufferView");
+            }
+            n = m;
+            setByte = dvSet;
+          } else {
+            throw new TypeError("crypto.getRandomValues: argument is not a typed-array (Uint8Array required)");
+          }
+          if (n < 0 || !Number.isFinite(n)) {
+            throw new TypeError("crypto.getRandomValues: argument is not a Uint8Array / ArrayBufferView");
+          }
+          const tmp = new Uint8Array(n);
+          const gc: any = (globalThis as any).crypto;
+          if (gc && typeof gc.getRandomValues === "function") {
+            gc.getRandomValues(tmp);
+          } else {
+            const req = _getNodeRequire();
+            let filled = false;
+            if (req) {
+              try {
+                req("node:crypto").randomFillSync(tmp);
+                filled = true;
+              } catch {
+                /* fall through to throw below */
+              }
+            }
+            if (!filled) {
+              throw new Error("crypto.getRandomValues: no secure RNG available in this host");
+            }
+          }
+          for (let i = 0; i < n; i++) setByte(vec, i, tmp[i]!);
+          return vec;
+        };
       // Native string marshaling (fast mode)
       if (name === "__str_extern_len") return (s: string) => s.length;
       if (name === "__str_from_mem") {
