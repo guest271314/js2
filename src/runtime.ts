@@ -5400,37 +5400,118 @@ assert._isSameValue = isSameValue;
         }
         return [arr]; // Fallback: wrap single value
       };
-      // (#1368) Spec-compliant Promise combinators.
+      // (#1368, #1465) Spec-compliant Promise combinators.
       //
-      // Signature changed from `(iterable)` to `(thisArg, iterable)` so that:
-      //   1. `Sub.all(iter)` (subclass) routes thisArg = Sub through the helper.
-      //   2. `Promise.all.call(C, iter)` is detected in codegen and forwarded
+      // Signature is `(thisArg, iterable)`:
+      //   1. Direct call `Promise.all(iter)` passes thisArg = null → helper
+      //      defaults to global Promise (codegen emits `ref.null.extern`).
+      //   2. `Sub.all(iter)` (subclass) routes thisArg = Sub through the helper
+      //      (blocked on #1382 — wasm class identifiers don't bridge to JS yet).
+      //   3. `Promise.all.call(C, iter)` is detected in codegen and forwarded
       //      with thisArg = C.
       //
       // We delegate to the native engine's `Promise.all.call(C, …)` etc., which
       // are spec-compliant for `[[AlreadyCalled]]`, `IteratorClose`, custom-this
-      // resolve/reject capability, and `thisArg.resolve` lookup. The runtime
-      // helper validates that `thisArg` is a constructor and converts the wasm
-      // vec or externref iterable into a real iterable that the native engine
-      // will iterate exactly once (matters for IteratorClose semantics).
+      // resolve/reject capability, `Get(C, "resolve")` lookup, and the full
+      // GetIterator protocol when given any JS iterable (string, arguments,
+      // Set, Map, custom Symbol.iterator).
+      //
+      // Per spec (PerformPromiseAll step 4): GetIterator(iterable) MUST drive
+      // the iterator protocol. So we must NOT silently wrap non-iterables in
+      // an array — `Promise.all(123)` must reject with TypeError, not resolve
+      // to [123]. The previous `_vecToArray` fallback violated this.
+      //
+      // (#1465) Iterable handling:
+      //   - null/undefined → pass through; native rejects with TypeError (spec).
+      //   - string → pass through; native iterates code units.
+      //   - JS Array / object with Symbol.iterator → pass through.
+      //   - WasmGC vec (detected via __vec_len/__vec_get accessors) → convert
+      //     to a real JS array so native can iterate it.
+      //   - Other primitives (number, boolean, symbol) → pass through; native
+      //     rejects with TypeError per spec.
       const _toIterable = (iter: any): any => {
-        if (iter == null) return [];
-        // If it's already a JS-iterable (array, generator, custom iterator), pass through.
-        if (typeof iter === "object" && Symbol.iterator in iter) return iter;
-        if (Array.isArray(iter)) return iter;
-        // Otherwise treat as Wasm vec — materialize into an array.
-        return _vecToArray(iter);
+        // null/undefined: per spec, GetIterator throws TypeError. Native does
+        // this when given undefined — pass through and let it reject.
+        if (iter == null) return iter;
+        // Strings are iterable per spec (yield code units).
+        if (typeof iter === "string") return iter;
+        // Already JS-iterable: array, generator, custom Symbol.iterator,
+        // arguments object, Set, Map, TypedArray, etc.
+        if (typeof iter === "object") {
+          // Real JS Array — fast path.
+          if (Array.isArray(iter)) return iter;
+          // Detect WasmGC vec first via accessors (they return 0/null for
+          // non-vec externrefs, so we materialize only when the round-trip
+          // looks sane). We MUST attempt this before Symbol.iterator because
+          // a wasm vec externref is an opaque host object — `Symbol.iterator
+          // in vec` either throws or returns false, and we want to convert
+          // it to a real JS array rather than fail.
+          const exports = callbackState?.getExports();
+          if (exports) {
+            const vecLen = exports.__vec_len as Function | undefined;
+            const vecGet = exports.__vec_get as Function | undefined;
+            if (typeof vecLen === "function" && typeof vecGet === "function") {
+              // `__vec_len(non-vec)` returns 0 by design — that's
+              // indistinguishable from an empty vec, so we use a sentinel
+              // probe: if the externref is a vec, calling vecLen+vecGet
+              // succeeds without throwing; if it's a plain JS object that
+              // also happens to be iterable (Set/Map/generator/custom), we
+              // need to NOT convert. Strategy: only materialize when
+              // (a) vecLen > 0 (real non-empty vec), OR
+              // (b) vecLen === 0 AND the object has no Symbol.iterator
+              //     (so it isn't a JS iterable we should preserve).
+              try {
+                const len = vecLen(iter) as number;
+                if (typeof len === "number" && len > 0) {
+                  const result: any[] = new Array(len);
+                  for (let i = 0; i < len; i++) {
+                    result[i] = vecGet(iter, i);
+                  }
+                  return result;
+                }
+                if (len === 0) {
+                  // Could be empty wasm vec or a non-iterable host object.
+                  // Peek at Symbol.iterator under try/catch — if present,
+                  // it's a JS iterable, pass through.
+                  let hasIter = false;
+                  try {
+                    hasIter = Symbol.iterator in iter;
+                  } catch {
+                    hasIter = false;
+                  }
+                  if (!hasIter) return [];
+                }
+              } catch {
+                // Not a vec (vecLen threw) — fall through.
+              }
+            }
+          }
+          // Has Symbol.iterator — pass through. Guard with try/catch since
+          // Proxy targets can throw on `has`.
+          try {
+            if (Symbol.iterator in iter) return iter;
+          } catch {
+            // Fall through to native rejection.
+          }
+          // Object that isn't iterable and isn't a vec: pass through; native
+          // throws TypeError per spec.
+          return iter;
+        }
+        // Non-object, non-string primitives (number, boolean, symbol, bigint):
+        // pass through; native `Promise.all(123)` throws TypeError per spec.
+        return iter;
       };
       const _resolveCtor = (thisArg: any, directCall: number): any => {
         // Step 1 of spec algorithm: `Let C be the this value`.
-        // (#1116) The codegen passes `directCall=1` when the user wrote
+        // (#1116, #1465) The codegen passes `directCall=1` when the user wrote
         // `Promise.METHOD(iter)` (no explicit thisArg) — substitute
-        // globalThis.Promise so the existing behavior is preserved.
+        // globalThis.Promise so the natural call site works.
         // For `directCall=0` (user wrote `.call(thisArg, iter)`), pass the
         // value through unchanged: V8's `Promise.METHOD.call(thisArg, …)`
         // then performs spec §27.2.4.X step 2 (`If Type(C) is not Object,
         // throw a TypeError exception`) — which is what test262
-        // `ctx-non-object.js` files exercise for undefined/null/primitive.
+        // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
+        // undefined/null/primitive/non-constructor values.
         if (directCall) return Promise;
         return thisArg;
       };
