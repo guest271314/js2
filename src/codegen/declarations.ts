@@ -1019,7 +1019,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
-      const params: ValType[] = isAggregator ? [{ kind: "externref" }, { kind: "externref" }] : [{ kind: "externref" }];
+      // (#1116) Aggregators take (thisArg, iterable, directCall) so the runtime
+      // can distinguish a codegen-default thisArg from an explicit user-provided
+      // one (which may need to throw TypeError per spec).
+      const params: ValType[] = isAggregator
+        ? [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }]
+        : [{ kind: "externref" }];
       const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
     }

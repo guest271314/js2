@@ -3661,14 +3661,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (isAggregator) {
         const methodName = propAccess.name.text;
         const importName = `Promise_${methodName}`;
-        // Two-arg signature: (thisArg, iterable) → result
+        // Three-arg signature: (thisArg, iterable, directCall) → result
+        // (#1116) directCall=1 means "no explicit `.call` was used; default to
+        // globalThis.Promise". directCall=0 means "user wrote `.call(thisArg, …)`;
+        // pass thisArg through unchanged so the runtime / V8 can apply the
+        // spec-mandated TypeError when thisArg is non-Object."
         let funcIdx =
           ctx.funcMap.get(importName) ??
-          ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+          ensureLateImport(
+            ctx,
+            importName,
+            [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+            [{ kind: "externref" }],
+          );
         flushLateImportShifts(ctx, fctx);
         funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
         if (funcIdx !== undefined) {
-          // thisArg = ref.null.extern → runtime defaults to globalThis.Promise.
+          // Direct `Promise.METHOD(iter)` — no explicit thisArg.
           // (Subclass `Sub.all(iter)` is handled below via the receiver-detection branch.)
           fctx.body.push({ op: "ref.null.extern" });
           if (expr.arguments.length >= 1) {
@@ -3678,6 +3687,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           } else {
             fctx.body.push({ op: "ref.null.extern" });
           }
+          // directCall=1 — runtime substitutes globalThis.Promise.
+          fctx.body.push({ op: "i32.const", value: 1 });
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "externref" };
         }
@@ -3754,13 +3765,21 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // `Promise.reject(r)` without `.call`) and does not apply here.
       const methodName = propAccess.expression.name.text;
       const importName = `Promise_${methodName}`;
+      // Three-arg signature: (thisArg, iterable, directCall) → result. See (#1116)
+      // comment at the direct-call branch above.
       let funcIdx =
         ctx.funcMap.get(importName) ??
-        ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+        ensureLateImport(
+          ctx,
+          importName,
+          [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+          [{ kind: "externref" }],
+        );
       flushLateImportShifts(ctx, fctx);
       funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
       if (funcIdx !== undefined) {
-        // arg0 = thisArg
+        // arg0 = thisArg (user-provided — may be undefined/null/primitive,
+        // in which case the runtime / V8 throws TypeError per spec §27.2.4.X step 2).
         compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
         // arg1 = iterable (or ref.null if missing)
         if (expr.arguments.length >= 2) {
@@ -3768,6 +3787,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         } else {
           fctx.body.push({ op: "ref.null.extern" });
         }
+        // directCall=0 — user invoked via `.call`, so thisArg is meaningful.
+        fctx.body.push({ op: "i32.const", value: 0 });
         fctx.body.push({ op: "call", funcIdx });
         return { kind: "externref" };
       }
