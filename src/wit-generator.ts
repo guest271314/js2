@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * WIT (WebAssembly Interface Types) generator.
  *
@@ -17,7 +18,7 @@
  *   T | null  -> option<T>
  */
 
-import ts from "typescript";
+import { ts } from "./ts-api.js";
 import type { TypedAST } from "./checker/index.js";
 
 export interface WitGeneratorOptions {

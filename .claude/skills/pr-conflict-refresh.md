@@ -33,8 +33,8 @@ UNKNOWN status is normal right after a merge — wait another 30s and re-check.
 The PR branch name is the strongest hint: `issue-NNNN-<slug>` or `worktree-issue-NNNN-<slug>` corresponds to dev-NNN in our team convention (the dev agent that was spawned for the issue). Cross-reference with:
 
 1. The PR author (`gh pr view <N> --json author`)
-2. The issue file frontmatter (`grep -l "#NNNN" plan/issues/ready/`)
-3. Active tmux panes / team registry in `plan/agent-sessions.md` if present
+2. The issue file frontmatter in `plan/issues/`
+3. Active tmux panes / team registry in `plan/method/agent-sessions.md` if present
 
 ## Step 4: Verify the PR had a positive pre-merge delta
 
@@ -42,9 +42,9 @@ Before asking a dev to refresh, check whether the PR was actually worth saving:
 
 ```bash
 run_id=$(gh pr view <N> --json statusCheckRollup --jq '.statusCheckRollup[] | select(.name=="merge shard reports") | .detailsUrl' | grep -oE 'runs/[0-9]+' | head -1 | cut -d/ -f2)
-mkdir -p /tmp/pr-<N>
-gh run download $run_id -n test262-merged-report -D /tmp/pr-<N> 2>/dev/null
-python3 -c "import json; d=json.load(open('/tmp/pr-<N>/test262-report-merged.json')); s=d['summary']; print('pre-merge pass=', s['pass'])"
+mkdir -p output/pr-<N>
+gh run download $run_id -n test262-merged-report -D output/pr-<N> 2>/dev/null
+python3 -c "import json; d=json.load(open('output/pr-<N>/test262-report-merged.json')); s=d['summary']; print('pre-merge pass=', s['pass'])"
 ```
 
 If the pre-merge delta was negative or marginal, **close the PR** instead of asking the dev to refresh. Don't waste their cycles.

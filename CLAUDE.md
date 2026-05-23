@@ -7,15 +7,30 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Run a specific test file: `npm test -- tests/issue-277.test.ts`
 - Run equivalence tests only: `npm test -- tests/equivalence.test.ts`
 - Test262: `pnpm run test:262` — vitest-based runner, creates its own worktree, writes to `benchmarks/results/`. Default 3 workers.
+- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/backlog/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
 
 ## Dev scratch
 - **All ad-hoc probe / debug / repro files go in `.tmp/`** — gitignored, not picked up by vitest, doesn't pollute `git status`.
 - If you spin up a quick `check-foo.ts`, `debug-bar.mts`, or `probe-*.test.ts` to investigate a bug, write it inside `.tmp/`, not at repo root or under `tests/`.
 - Root-level patterns like `check-*.ts`, `debug-*.ts`, `run-*.ts`, `test-*-debug.ts`, `tests/probe-*.test.ts`, `tests/*-debug*.test.ts` are also gitignored as a safety net, but the convention is `.tmp/`.
 
+## Working in worktrees
+- **All agent work happens in worktrees**, not in `/workspace` directly. The `check-cwd.sh` hook blocks `git commit`/`merge`/`push` from `/workspace` for non-tech-lead users.
+- **Canonical worktree path**: `/workspace/.claude/worktrees/<branch-name>/` — this is enforced by the `check-worktree-path.sh` hook on `git worktree add`. Worktrees outside this root (e.g. `/tmp/worktrees/`) are rejected.
+- **Persistent shell cwd resets between Bash invocations**: every Bash tool call starts from `/workspace` regardless of where the previous one ended. Trailers like `Shell cwd was reset to /workspace` confirm this. The agent must prefix git commands with `cd /workspace/.claude/worktrees/<branch> &&` for them to land on the right branch.
+  - Read/Edit/Write tools use absolute paths and are unaffected.
+  - The `pre-git-commit.sh` hook injects a "VERIFY BEFORE COMMITTING: pwd=/workspace branch=main" reminder; that's the hook reading the (reset) shell cwd, NOT the actual command's working dir. The reminder is informational — verify by reading the commit's branch in git output (`[issue-1183-string-forof-ir 0527c7c5]`-style line shows the real branch).
+- **Worktree creation**: `git worktree add /workspace/.claude/worktrees/issue-NNN-slug -b issue-NNN-slug origin/main`. Always branch from `origin/main` (post-fetch), never from local `main`.
+- **Push safety**: `.git/config` sets `push.default=current` — `git push` always pushes to the remote branch matching the local branch name, regardless of upstream tracking. This prevents the `git worktree add -b <branch> origin/main` trap where the inherited tracking ref routes pushes to origin/main.
+- **Worktree cleanup after merge**: after a dev self-merges their PR, they remove their own worktree (`git worktree remove /workspace/.claude/worktrees/<branch>`) before claiming the next task. Tech-lead only removes worktrees for suspended or abandoned branches.
+
 ## Architecture Principles
 - **Dual-mode: JS host optional** — the compiler supports two modes: JS host mode (uses host imports for performance/completeness) and standalone mode (pure Wasm, no JS runtime). New features should have Wasm-native implementations for standalone mode; JS host imports are acceptable as a fast path when a JS runtime is available. Don't add new host imports without a standalone fallback.
 - This follows the pattern of #679 (dual string backend) and #682 (dual RegExp backend).
+- **Two orthogonal axes in codegen** (see #1527):
+  - **Backend lowering**: `src/codegen/` (WasmGC) vs `src/codegen-linear/` (linear memory). These are **alternatives, not one superseding the other** — the choice depends on target (browser/WasmGC vs WASI/linear) and tradeoffs. Both stay.
+  - **Front-end**: direct AST→Wasm (legacy, accumulated hacks) vs IR (`src/ir/`, typed representation). IR **replaces the hacks**; it does **not** compete with the backend choice. IR adopts AST node kinds step by step, only for parts that do not yet need to decide between linear and WasmGC lowering. IR-path failures currently demote to a warning channel (#1530 phases this fallback out).
+  - Full discussion: [docs/architecture/codegen-axes.md](docs/architecture/codegen-axes.md). Per-AST-kind adoption status: [plan/log/ir-adoption.md](plan/log/ir-adoption.md).
 
 ## Project Structure
 - Codegen: `src/codegen/expressions.ts`, `src/codegen/index.ts`, `src/codegen/statements.ts`, `src/codegen/type-coercion.ts`, `src/codegen/peephole.ts`
@@ -26,14 +41,12 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Test262 runner (preferred): `pnpm run test:262` — vitest-based, auto-worktree, disk cache, default 3 forks. Use `TEST262_WORKERS=5` for solo runs (no dev agents).
 - Test262 runner history: `runs/index.json` is appended by the vitest runner after each run. `benchmarks/results/report.html` reads this for the trend graph.
 - Backlog: `plan/issues/backlog/backlog.md`
-- Sprints: `plan/sprints/sprint-{N}.md` — planning, task queue, results, retrospective (living doc updated during sprint)
-- Issues: `plan/issues/` — organized by state:
-  - `ready/` — no blockers, pick any to start (priority in `dependency-graph.md`)
-  - `blocked/` — waiting on a dependency
-  - `done/` — completed (with frontmatter + implementation summary)
-  - `backlog/` — large scope / future
+- Sprints: `plan/issues/sprints/{N}/sprint.md` — planning, task queue, results, retrospective (living doc updated during sprint)
+- Issues: `plan/issues/` — organized by sprint:
+  - `sprints/{N}/` — all issues for sprint N (status tracked via `status:` frontmatter field)
+  - `backlog/` — unscheduled issues (no sprint assigned yet)
   - `wont-fix/` — decided against implementing
-- Dependency graph: `plan/dependency-graph.md`
+- Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
   - Goals are not sequential milestones — they form a DAG and multiple can be active in parallel
   - Only work on issues from goals whose dependencies are met (active/activatable)
@@ -68,6 +81,48 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Issues #618-#634 cover current failure patterns (from 2026-03-19 error analysis)
 - parseInt import: `(externref, f64) -> f64` with NaN sentinel for missing radix
 
+### Baseline files (which is authoritative?)
+
+| File | Lives in | Authoritative for | Refreshed by | Validated by |
+|------|----------|-------------------|--------------|--------------|
+| `benchmarks/results/test262-current.jsonl` | main repo (committed, ~15MB) | `dev-self-merge` Step 4 bucket-by-path regression analysis | `refresh-committed-baseline.yml` (after every `Test262 Sharded` push to main) | `test262-baseline-validate.yml` spot-checks 50 random `pass` entries on every PR (#1218); fails the PR if any sampled entry no longer passes on main HEAD |
+| `benchmarks/results/test262-current.json` | main repo (committed, ~kB) | landing-page summary, pass/total badges | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `test262-current.jsonl` (in `loopdive/js2wasm-baselines`) | separate repo | PR regression-gate baseline (fetched fresh per CI run) | `test262-sharded.yml` `promote-baseline` job (every push to main) | (none) |
+| `benchmarks/results/playground-benchmark-sidebar.json` | main repo (committed, ~1KB) | landing-page sidebar wasm/js perf chart; `benchmark-refresh.yml` regression diff baseline | `benchmark-refresh.yml` auto-commit step on every push to main (#1216) | (none) |
+
+The committed JSONL must be kept in sync with the JSON; otherwise the dev-self-merge bucket analysis reads stale "pass" entries and silently miscounts regressions. `refresh-committed-baseline.yml` is the dedicated workflow for that sync — it downloads the merged JSONL artifact from the most-recent successful `Test262 Sharded` run on main and commits it back with `[skip ci]`.
+
+To validate the committed JSONL on demand, run `pnpm run test:262:validate-baseline` (uses a deterministic seed; pass `PR_NUMBER=N` to reproduce a specific CI run, or `SAMPLE_SIZE=10 SEED=12345` for a quicker check). Set `SAMPLE_SIZE=50` to match CI exactly. The validator fails fast on the first 5 most-affected entries with a pointer to `refresh-committed-baseline.yml`.
+
+## IR Fallback Budget (#1376)
+
+The IR retirement gate `pnpm run check:ir-fallbacks` walks every `.ts` file
+under `playground/examples/` with `trackFallbacks: true` and aggregates
+rejection reasons against `scripts/ir-fallback-baseline.json`. CI fails when
+any **unintended** bucket grows.
+
+| Reason                       | Category   | Reduces with                         |
+|------------------------------|------------|--------------------------------------|
+| `body-shape-rejected`        | unintended | #1370 (class methods), #1373 (async) |
+| `external-call`              | unintended | #1371 (whitelist Math.* / parseInt)  |
+| `call-graph-closure`         | unintended | #1370, #1373                         |
+| `param-shape-rejected`       | unintended | #1372 (destructuring params)         |
+| `param-type-not-resolvable`  | unintended | better TypeMap propagation           |
+| `return-type-not-resolvable` | unintended | better TypeMap propagation           |
+| `type-resolution-failure`    | unintended | better TypeMap propagation           |
+| `async-generator`            | deferred   | (out of scope long-term)             |
+| `deferred-feature`           | deferred   | (eval / Proxy / with — wont-fix)     |
+| `type-parameters`            | deferred   | (generics specialisation, future)    |
+| `non-export-modifier`        | deferred   | (`async` / declare-only — narrow)    |
+| `unnamed`                    | deferred   | (anonymous default exports)          |
+
+Refresh the baseline on PRs that intentionally retire a bypass:
+
+```bash
+pnpm run check:ir-fallbacks -- --update
+git add scripts/ir-fallback-baseline.json
+```
+
 ## CLI Flags
 - `--target wasi` — emit WASI imports (fd_write, proc_exit) instead of JS host
 - `--optimize` / `-O` — run Binaryen wasm-opt on compiled binary
@@ -76,13 +131,13 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 
 ## Team & Workflow
 
-See [plan/team-setup.md](plan/team-setup.md) for full team config, roles, memory budget, communication protocol, and merge lessons. Agent preferences and rules are in `.claude/memory/` (MEMORY.md index).
+See [plan/method/team-setup.md](plan/method/team-setup.md) for full team config, roles, memory budget, communication protocol, and merge lessons. Agent preferences and rules are in `.claude/memory/` (MEMORY.md index).
 
 **Checklists** (read at the right moment, not at spawn time):
-- `plan/session-start-checklist.md` — tech lead reads at session start
-- `plan/pre-commit-checklist.md` — devs read before every git add/commit
-- `plan/pre-completion-checklist.md` — devs read before signaling task completion
-- `plan/pre-merge-checklist.md` — tester reads before every merge to main
+- `plan/method/session-start-checklist.md` — tech lead reads at session start
+- `plan/method/pre-commit-checklist.md` — devs read before every git add/commit
+- `plan/method/pre-completion-checklist.md` — devs read before signaling task completion
+- `plan/method/pre-merge-checklist.md` — dev reads before merging to main
 
 **Skills** (on-demand role protocols — any agent can invoke these):
 - `/test-and-merge` — full tester pipeline: merge main into branch, equiv tests, ff-only merge
@@ -102,18 +157,24 @@ Spawn dedicated agents when:
 - The role needs sustained back-and-forth with the user (e.g., PO during planning)
 - The role accumulates context that's hard to capture in a skill (e.g., SM during retro discussion)
 
-**IMPORTANT: Always use teammates, not subagents.** Spawn agents via `TeamCreate` + `Agent` with `team_name` parameter. Never use bare `Agent` spawns — subagents can't coordinate, causing OOM from concurrent test runs and duplicate work. Teammates communicate via `SendMessage` to serialize test runs and coordinate on file conflicts.
+**Pick the right spawn mode (this matters for lifecycle):**
 
-**Key numbers**: 16GB RAM + 16GB swap (container, set in `.devcontainer/devcontainer.json`). `free -m` may report ~20GB but Docker enforces 16GB hard limit. Max 4 dev teammates at a time. Default 1 test262 fork. All agents use `bypassPermissions` mode + worktree isolation. Work driven by `plan/dependency-graph.md`.
+- **Teammates** (`Agent` with `team_name: "js2wasm"`) — long-running, lead-orchestrated. Use for **dev agents** that pull from the TaskList, receive mid-task redirects via SendMessage, or need to coordinate file locks with other agents. Teammates do **not** self-terminate — the tech lead sends `shutdown_request` when they're idle.
+- **Subagents** (`Agent` without `team_name`) — fire-and-forget. Use for **one-shot architects, research agents, spec writers** that read inputs, write an output file, and return a summary. Subagents auto-cleanup when their task returns — no pane management needed.
 
-**RAM monitoring**: Use `free -m` "available" column (not "free"). "free" excludes reclaimable disk cache. Example: "free" shows 1.5GB but "available" shows 7GB = the actual headroom. Hooks check "available" before allowing tests or agent spawns.
+Default rule: if the agent's job is "produce one document and exit," it's a subagent. If the agent's job is "stay on the task queue and grab the next thing," it's a teammate. Misusing teammates for one-shot work causes pane exhaustion because they idle forever waiting for orchestration that never comes (confirmed via Claude Code docs — see [[feedback_agent_self_termination]]).
+
+**IMPORTANT: Always use team name `"js2wasm"`** — this is the single permanent team. Never create ad-hoc team names (e.g. `"wasi-conflicts"`, `"s52-wave2"`). One team, one task queue, always.
+
+**Key numbers**: 16GB RAM + 16GB swap (container, set in `.devcontainer/devcontainer.json`). `free -m` may report ~20GB but Docker enforces 16GB hard limit. **Up to 8 dev teammates** (no local test262 — CI handles it). All agents use `bypassPermissions` mode + worktree isolation. Work driven by `plan/log/dependency-graph.md`.
+
+**RAM monitoring**: Use `free -m` "available" column (not "free"). "free" excludes reclaimable disk cache. Hooks check "available" before allowing agent spawns.
 
 **Memory budget** (measured peaks via `/proc/[pid]/status` VmHWM):
 - Fixed: Cursor ~1,400MB + system ~1,200MB + tech lead ~1,400MB = **~4,000MB**
-- Dev agent: ~350MB idle, ~500MB active, ~700MB peak
-- Equiv test: ~800MB (parent ~400MB + 1 fork ~400MB)
-- Test262 (1 fork): ~4,300MB peak (fork grows to ~4GB over 48K tests)
-- **Max 4 devs** with parallel equiv tests (~9GB). Max 2 devs during test262 (~9GB). Shut down devs for solo test262 runs.
+- Dev agent: ~700MB peak (no local test262)
+- Test262 (CI only): ~4,300MB peak per shard — runs in GitHub Actions, not locally
+- **Max 8 devs** (~9.6GB headroom). Check `free -m` available before spawning.
 
 ### Agent lifecycle — when to spawn, skill, or terminate
 
@@ -126,8 +187,9 @@ Spawn dedicated agents when:
 | Sprint retro (discussion with user) | Spawn SM agent |
 | Planning agents done, user not talking to them | Write context summary → terminate |
 | Planning agents done, user IS talking to them | Keep alive until user signals done |
-| Dev between tasks | Keep alive — claim next task from TaskList |
-| Dev idle, no tasks available | Keep alive if more tasks expected soon. Terminate if sprint is wrapping up. |
+| Dev between tasks | Keep alive — wait for CI, self-merge if green, then claim next task from TaskList |
+| Dev sending idle_notification pings | If TaskList has unowned work: redirect them to it. Otherwise: send `shutdown_request` — that's the correct lifecycle exit, not a punishment. |
+| Dev idle, no tasks available | Send `shutdown_request` immediately. Idle teammates burn pane slots and block new spawns. Re-spawn when work appears. |
 | End of sprint | All agents write context summaries → terminate → run `/sprint-wrap-up` |
 
 ### Roles and interactions
@@ -149,7 +211,7 @@ Scrum Master
 
 | Role | Agent | Owns | Reads from | Writes to |
 |------|-------|------|-----------|-----------|
-| **Product Owner** | `.claude/agents/product-owner.md` | Backlog, issue creation, priorities | test262 results, dependency graph | `plan/issues/`, `plan/dependency-graph.md` |
+| **Product Owner** | `.claude/agents/product-owner.md` | Backlog, issue creation, priorities | test262 results, dependency graph | `plan/issues/`, `plan/log/dependency-graph.md` |
 | **Architect** | `.claude/agents/architect.md` | Implementation specs | Issue files, compiler source | `## Implementation Plan` in issue files |
 | **Tech Lead** | (orchestrator) | Task queue, merges, test runs | Issue files, agent messages | `main` branch, task list |
 | **Developer** | `.claude/agents/developer.md` | Code changes in worktree | Issue file + impl spec, checklists | Source code, test files, issue status |
@@ -174,9 +236,9 @@ End of sprint:
 10. **PO** grooms backlog for next sprint
 
 **Tech lead discipline:**
+- **Populate TaskList** at sprint start from `plan/issues/sprints/{N}/` (current sprint dir) and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
 - Batch doc/plan commits on main AFTER all pending agent merges, not between them (doc commits force agents to re-merge main)
-- Verify equivalence tests passed (dev runs them via `/test-and-merge` skill)
-- Complete post-merge issue cleanup (move to done/, update dep graph) before dispatching next task
+- Complete post-merge issue cleanup (set `status: done` in sprint dir issue file, update dep graph) after each merge
 - **Tag sprints**: `git tag sprint-N/begin` when starting a sprint, `git tag sprint/N` when it finishes. Sprint stats (duration, commits, issues) are auto-generated from tags during `build:pages`.
 
 ### Sprint planning (PO + Architect + Tech Lead)
@@ -191,47 +253,47 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 6. **Tech lead dispatches** — assigns tasks to devs, manages the merge queue
 
 ### Agent work dispatch
-- PO creates the task queue at sprint start (tech lead dispatches to devs)
-- **Dev protocol: "pushed = done, claim next NOW — do NOT wait for merge."** As soon as a dev pushes their branch + opens a PR via `gh pr create`, they immediately mark their current task `completed` in TaskList and claim the next unowned task. They do NOT wait for CI to pass, tech lead review, tech lead merge, or a "merged, do next" message. The merge happens asynchronously; if CI fails the tech lead will ping to context-switch back — that is a rare exceptional event. Never block on merge confirmation.
-- **Dev self-merge: devs merge their OWN clean PRs without waiting for tech lead.** When the Option B CI Status Feed (`.claude/ci-status/pr-<N>.json`) reports the dev's PR with `delta > 0`, `regressions/improvements < 10%`, no single error-bucket >50 regressions, and a narrow ≤5-file scope — the dev runs `/dev-self-merge` and admin-merges their own PR directly. Escalate to tech lead only when criteria fail. See `.claude/skills/dev-self-merge.md` for the full checklist.
-- Dev agents self-serve: after pushing a task's PR, they check `TaskList` and claim the next unowned task
-- Dev agents do NOT exit after completing a task — they always check TaskList first
-- Dev agents do NOT run full test262 locally; they run scoped local checks, push their branch, and open a PR to trigger GitHub Actions
+- **Tech lead populates TaskList** — devs self-serve from it. No per-task dispatch messages needed.
+- **Dev loop**: claim task from TaskList → implement → push PR → wait for CI → self-merge if green → mark completed → claim next task.
+- **Dev self-merge**: when `.claude/ci-status/pr-<N>.json` has matching SHA, `net_per_test > 0`, ratio <10%, no bucket >50 — run `gh pr merge <N> --merge --auto` (queues for the merge queue; queue re-runs required checks on the merged state and lands the PR). Escalate to tech lead only when criteria fail. `--admin --merge` is reserved for workflow-only / hotfix bypass. See `.claude/skills/dev-self-merge.md`.
+- **Tech lead reading ci-status files**: always verify `head_sha` matches current PR HEAD (`gh pr view N --json headRefOid`) before interpreting `net_per_test` or regression counts. A SHA mismatch means CI ran on a stale commit — the numbers are misleading. Also check `baseline_staleness_commits` > 0 as a secondary signal.
+- **Devs contact tech lead for**: TaskList empty, blocked >30 min, CI ESCALATE result (immediately — do not wait to be asked), net < 0 result.
+- Dev agents do NOT run full test262 locally — scoped checks only, CI validates conformance.
 
 ### Controlling agents
 - **Pause (between tasks)**: create a task with `[PAUSE]` in the subject. Agents stop when they reach it and wait idle.
 - **Pause (immediate)**: send `PAUSE` via SendMessage. Agent stops current work, kills running tests, waits idle. Send `RESUME` to continue.
 - **Suspend**: send `SUSPEND` via SendMessage. Agent commits WIP, writes `## Suspended Work` to the issue file (worktree path, branch, resume steps), then **terminates**. A new agent resumes later from the issue file.
 - **Resume suspended work**: assign the issue to a new dev agent. It reads `status: suspended` and `## Suspended Work` in the issue file, enters the existing worktree, continues.
-- **Shutdown**: send `{"type": "shutdown_request"}` via SendMessage. Before sending: (1) confirm with user if they're talking to the agent, (2) ask the agent to write a context summary to `plan/agent-context/{name}.md` first. See `plan/agent-sessions.md` for the summary format.
-- **Session registry**: track active agent sessions in `plan/agent-sessions.md` so sessions can be resumed. When respawning, pass the context summary in the spawn prompt.
+- **Shutdown**: send `{"type": "shutdown_request"}` via SendMessage. Before sending: (1) confirm with user if they're talking to the agent, (2) ask the agent to write a context summary to `plan/agent-context/{name}.md` first. See `plan/method/agent-sessions.md` for the summary format.
+- **Session registry**: track active agent sessions in `plan/method/agent-sessions.md` so sessions can be resumed. When respawning, pass the context summary in the spawn prompt.
 - **Orphaned agents** (lost team context after crash): check worktrees for commits (`git -C <wt> log --oneline main..HEAD`) and uncommitted work (`git -C <wt> diff --stat`). Save any work, then kill the process. Write `## Suspended Work` in the issue file manually with the worktree path and state.
 
-### Merge protocol (PR + CI, devs don't run local test262)
+### Merge protocol (PR + CI, devs self-merge)
 
-**Devs do NOT run local test262.** Branch validation now happens in GitHub Actions:
+**Devs do NOT run local test262.** Branch validation happens in GitHub Actions:
 
-1. **Dev merges main INTO their branch** — `git merge main` (not rebase)
-2. **Dev runs scoped local checks only** — issue-targeted compile/run checks and any narrow local tests needed for confidence
-3. **Dev pushes the branch to origin**
-4. **Dev opens a PR against `main`**
-5. **GitHub Actions runs sharded test262 on the PR branch** and compares against the current `main` baseline
-6. **Tech lead approves/rejects based on PR CI** and any review findings
-7. **If approved**: merge the PR, then the same workflow runs again on `main` and refreshes the baseline
-8. **If rejected**: dev fixes on their branch, pushes again, and lets the PR workflow re-run
-9. **Never use `git merge` (without --ff-only) on main.** Main should move through reviewed PRs and protected checks.
+1. **Dev merges `origin/main` INTO their branch** — `git merge origin/main` (not rebase), BEFORE opening a PR
+   - Planning artifact conflicts (`dashboard/`, `plan/`, `public/`) → `git checkout --theirs` + regen
+   - Compiler source conflicts (`src/**/*.ts`) → create a priority `[CONFLICT]` TaskList item; assign to `senior-developer` (Opus); do NOT resolve inline
+2. **Dev runs scoped local checks** — issue-targeted compile/run checks for confidence
+3. **Dev pushes the branch to origin and opens a PR against `main`**
+4. **Dev waits for CI** — monitors `.claude/ci-status/pr-<N>.json` until it appears with a SHA matching HEAD (idle wait, no token burn)
+5. **Dev self-merges** — if `net_per_test > 0`, SHA matches, ratio <10%, no bucket >50: `gh pr merge <N> --merge --auto` (enqueues; queue does the final verification)
+6. **If regressions**: dev fixes on branch, pushes again, loops back to step 4
+7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed
+8. **After merge**: dev marks task `completed`, claims next task
+9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
-11. **Devs continue working on next task** while waiting for PR checks — they don't block.
 
-### Issue completion (tester post-merge)
-1. Move issue file from `plan/issues/ready/` to `plan/issues/done/`
-2. Update `plan/dependency-graph.md` — remove/strikethrough completed issue
-3. Update `plan/issues/backlog/backlog.md` — sprint priority
-4. Check for unblocked issues in `plan/issues/blocked/`
+### Issue completion (post-merge)
+1. Set `status: done` in the issue file at `plan/issues/sprints/{N}/{ID}.md`
+2. Update `plan/log/dependency-graph.md` — remove/strikethrough completed issue
+3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 ### Sprint History
 - **Sprint 1**: 550 → 1,509 pass (+174%), 167 fail, 5,700 CE. Issues #138-#173.
 - **Sprint 2**: 12 branches, 18 issues (#207-#224). Key: destructuring hoisting (~1200 CE), string comparison, .call(), member increment/decrement, labeled break. Equivalence tests: 86 → 170.
 - **Sprint 3**: 32 issues (#225-#256). Target: 0 runtime failures, ~1,500 CE reduction.
-- **Sprint 4+**: Transitioned to dependency-driven execution. See `plan/dependency-graph.md`.
+- **Sprint 4+**: Transitioned to dependency-driven execution. See `plan/log/dependency-graph.md`.
 - **2026-03-19 session**: 53 issues in one session. WASI target, native strings, WIT generator, tail calls, SIMD, peephole optimizer, type annotations, prototype chain, delete operator, TypedArray/ArrayBuffer support, and extensive test262 improvements.

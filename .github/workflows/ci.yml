@@ -5,15 +5,34 @@ on:
     branches: [main]
   push:
     branches: [main]
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Skip explicit base-ancestry check (handled by simulated merge / queue)
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        run: |
+          # GitHub Actions checks out refs/pull/N/merge (a simulated merge of
+          # the PR's HEAD into the PR's BASE) for pull_request, and the queue
+          # ref for merge_group. Both inherently include the base in history.
+          # The previous explicit "git merge-base --is-ancestor origin/main HEAD"
+          # check had a TOCTOU race (false positives when main moved between
+          # checkout and the check), and using PR base.sha tripped over the
+          # shallow checkout's missing ancestry graph. Both contexts already
+          # guarantee base-ancestry by construction — no extra check needed.
+          echo "✓ ${{ github.event_name }} ref already includes base by construction"
 
       - uses: actions/setup-node@v6
         with:
@@ -34,3 +53,47 @@ jobs:
 
       - name: Typecheck
         run: pnpm run typecheck
+
+      - name: IR fallback gate (#1376)
+        run: pnpm run check:ir-fallbacks
+
+      - name: Fetch runs/index.json from baselines repo
+        if: github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          # runs/index.json moved from LFS to js2wasm-baselines to avoid bandwidth exhaustion
+          git clone --depth=1 https://github.com/loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines 2>/dev/null || true
+          if [ -f /tmp/js2wasm-baselines/runs/index.json ]; then
+            mkdir -p benchmarks/results/runs
+            cp /tmp/js2wasm-baselines/runs/index.json benchmarks/results/runs/index.json
+          fi
+
+      - name: Regenerate planning artifacts
+        if: github.event_name == 'push'
+        run: |
+          if [ -d plan ] || [ -d dashboard ]; then
+            pnpm run build:planning-artifacts
+          else
+            echo "No private planning artifacts in this checkout; skipping regeneration."
+          fi
+
+      # DISABLED (post #491): The main branch ruleset enforces the merge
+      # queue, so direct `git push` from this workflow fails with
+      # `GH013: Changes must be made through the merge queue`. The whole
+      # auto-commit step is commented out; the typecheck/lint/format/IR
+      # gates above still RUN on every push and PR — only the
+      # auto-regeneration of planning artifacts back into main is disabled.
+      # Planning artifacts are regenerated locally by tech-lead-driven
+      # PRs (`pnpm run build:planning-artifacts`) instead.
+      # - name: Commit regenerated planning artifacts
+      #   if: github.event_name == 'push'
+      #   run: |
+      #     if [ -d plan ] || [ -d dashboard ]; then
+      #       if ! git diff --quiet -- plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json; then
+      #         git config user.name "github-actions[bot]"
+      #         git config user.email "github-actions[bot]@users.noreply.github.com"
+      #         git add -f plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json
+      #         git commit -m "chore(planning-artifacts): regen after merge [skip ci]"
+      #         git push
+      #       fi
+      #     fi

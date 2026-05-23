@@ -1,29 +1,23 @@
-import ts from "typescript";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { ts } from "../ts-api.js";
+import { getDefaultEnvironment } from "../env.js";
 
-function isBrowserLikeRuntime(): boolean {
-  return typeof window !== "undefined" || typeof (globalThis as any).WorkerGlobalScope !== "undefined";
-}
+// All Node builtin access goes through the environment adapter (#1096).
+// This module no longer probes `typeof window` / `typeof process` directly
+// and no longer uses top-level `await` to load `node:fs`, `node:path`,
+// `node:module`, `node:url` — `getDefaultEnvironment()` is fully synchronous,
+// which lets embedders import the checker without forcing the whole module
+// graph through async initialization.
 
 function getBundledLibFiles(): Record<string, string> | undefined {
-  const files = (globalThis as any).__js2wasmTsLibFiles ?? (globalThis as any).__ts2wasmTsLibFiles;
+  const files =
+    (globalThis as { __js2wasmTsLibFiles?: unknown; __ts2wasmTsLibFiles?: unknown }).__js2wasmTsLibFiles ??
+    (globalThis as { __ts2wasmTsLibFiles?: unknown }).__ts2wasmTsLibFiles;
   return files && typeof files === "object" ? (files as Record<string, string>) : undefined;
 }
 
-async function safeImport<T>(id: string): Promise<T | null> {
-  if (isBrowserLikeRuntime() && id.startsWith("node:")) {
-    return null;
-  }
-  try {
-    return (await import(/* @vite-ignore */ id)) as T;
-  } catch {
-    return null;
-  }
-}
-
-// Top-level await loads for all Node builtins — browsers get null silently.
-const _nodePathMod = await safeImport<typeof import("node:path")>("node:path");
 function getPath() {
-  return _nodePathMod;
+  return getDefaultEnvironment().path;
 }
 function dirname(p: string) {
   return getPath()?.dirname(p) ?? "";
@@ -31,20 +25,15 @@ function dirname(p: string) {
 function join(...args: string[]) {
   return getPath()?.join(...args) ?? args.join("/");
 }
-// Top-level await: resolve Node builtins once at module load.
-// In browsers, these silently resolve to null.
-const _nodeFsMod = await safeImport<typeof import("node:fs")>("node:fs");
-const _nodeModuleMod = await safeImport<typeof import("node:module")>("node:module");
-const _nodeUrlMod = await safeImport<typeof import("node:url")>("node:url");
 
 function getReadFileSync() {
-  return _nodeFsMod?.readFileSync ?? null;
+  return getDefaultEnvironment().fs?.readFileSync ?? null;
 }
 function getCreateRequire() {
-  return _nodeModuleMod?.createRequire ?? null;
+  return getDefaultEnvironment().module?.createRequire ?? null;
 }
 function getFileURLToPath() {
-  return _nodeUrlMod?.fileURLToPath ?? null;
+  return getDefaultEnvironment().url?.fileURLToPath ?? null;
 }
 // Custom type declarations not found in TS lib files
 // All lib types now loaded from the typescript package at runtime.
@@ -191,6 +180,17 @@ function getLibSource(name: string): string | undefined {
       "lib.es2021.promise.d.ts",
       "lib.es2021.string.d.ts",
       "lib.es2021.weakref.d.ts",
+      // ES2022
+      "lib.es2022.array.d.ts",
+      "lib.es2022.error.d.ts",
+      "lib.es2022.intl.d.ts",
+      "lib.es2022.object.d.ts",
+      "lib.es2022.regexp.d.ts",
+      "lib.es2022.string.d.ts",
+      // ES2023
+      "lib.es2023.array.d.ts",
+      "lib.es2023.collection.d.ts",
+      "lib.es2023.intl.d.ts",
       // ES2024
       "lib.es2024.collection.d.ts",
       // ESNext — Set methods (union, intersection, difference, etc.)
@@ -340,9 +340,40 @@ export interface MultiTypedAST {
   syntacticDiagnostics: readonly ts.Diagnostic[];
 }
 
+/** Script-file extensions we recognize in the multi-source pipeline. */
+const KNOWN_SCRIPT_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
+
+function stripKnownExt(name: string): string {
+  for (const ext of KNOWN_SCRIPT_EXTS) {
+    if (name.endsWith(ext)) return name.slice(0, -ext.length);
+  }
+  return name;
+}
+
+function hasKnownExt(name: string): boolean {
+  return KNOWN_SCRIPT_EXTS.some((ext) => name.endsWith(ext));
+}
+
+function scriptKindFor(name: string): ts.ScriptKind {
+  if (name.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (name.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  if (name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
+function tsExtensionFor(name: string): ts.Extension {
+  if (name.endsWith(".tsx")) return ts.Extension.Tsx;
+  if (name.endsWith(".jsx")) return ts.Extension.Jsx;
+  if (name.endsWith(".js")) return ts.Extension.Js;
+  if (name.endsWith(".mjs")) return ts.Extension.Mjs;
+  if (name.endsWith(".cjs")) return ts.Extension.Cjs;
+  return ts.Extension.Ts;
+}
+
 /**
  * Normalize a file path to a canonical form used as key in our in-memory file map.
- * Strips leading "./", resolves ".." segments, and ensures ".ts" extension.
+ * Strips leading "./", resolves ".." segments, preserves any known script extension,
+ * and defaults to ".ts" when no extension is present.
  */
 function normalizeFileName(name: string): string {
   let normalized = name.startsWith("./") ? name.slice(2) : name;
@@ -360,13 +391,42 @@ function normalizeFileName(name: string): string {
     }
   }
   normalized = resolved.join("/");
-  // Replace .js extension with .ts, or append .ts if no extension
-  if (normalized.endsWith(".js")) {
-    normalized = `${normalized.slice(0, -3)}.ts`;
-  } else if (!normalized.endsWith(".ts")) {
+  // Preserve explicit script extensions (.js/.mjs/.cjs/.jsx/.tsx/.ts); otherwise default to .ts
+  if (!hasKnownExt(normalized)) {
     normalized = `${normalized}.ts`;
   }
   return normalized;
+}
+
+/**
+ * Locate a file in the normalizedFiles map, probing for alternate extensions.
+ * Accepts e.g. "a" (user wrote `import "./a"`) and finds "a.js" / "a.ts" / "a/index.js".
+ */
+function probeFileKey(resolved: string, files: Map<string, string>): string | undefined {
+  if (files.has(resolved)) return resolved;
+  // Swap the trailing extension (e.g. normalized "a.ts" but file is "a.js")
+  if (hasKnownExt(resolved)) {
+    const stem = stripKnownExt(resolved);
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const cand = stem + ext;
+      if (cand !== resolved && files.has(cand)) return cand;
+    }
+    // Also try <stem>/index.<ext>
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const cand = `${stem}/index${ext}`;
+      if (files.has(cand)) return cand;
+    }
+  } else {
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const cand = resolved + ext;
+      if (files.has(cand)) return cand;
+    }
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const cand = `${resolved}/index${ext}`;
+      if (files.has(cand)) return cand;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -379,6 +439,8 @@ export function analyzeMultiSource(
   entryFile: string,
   /** Optional mapping from bare specifiers to file keys (e.g. { "lodash": "lodash/index.ts" }) */
   specifierMap?: Record<string, string>,
+  /** Compiler options (allowJs, skipSemanticDiagnostics, ...) */
+  analyzeOptions?: AnalyzeOptions,
 ): MultiTypedAST {
   const normalizedFiles = new Map<string, string>();
   for (const [name, content] of Object.entries(files)) {
@@ -391,12 +453,14 @@ export function analyzeMultiSource(
   // Explicit specifierMap entries take priority, then we auto-derive
   // mappings from file keys (e.g. "utils.ts" -> bare specifier "utils").
   const bareSpecifierLookup = new Map<string, string>();
-  // Auto-derive: for each file key, register its basename without extension
-  // and the full key without extension as potential bare specifiers.
   for (const normalized of normalizedFiles.keys()) {
     // "foo/bar.ts" -> bare specifiers "foo/bar" and "bar"
-    const withoutExt = normalized.replace(/\.ts$/, "");
+    const withoutExt = stripKnownExt(normalized);
     bareSpecifierLookup.set(withoutExt, normalized);
+    // Also register the exact extension form so `import "foo/bar.js"` works.
+    if (!bareSpecifierLookup.has(normalized)) {
+      bareSpecifierLookup.set(normalized, normalized);
+    }
     const basename = withoutExt.split("/").pop()!;
     if (basename && !bareSpecifierLookup.has(basename)) {
       bareSpecifierLookup.set(basename, normalized);
@@ -420,7 +484,7 @@ export function analyzeMultiSource(
     getSourceFile(name, languageVersion) {
       const userContent = normalizedFiles.get(name);
       if (userContent !== undefined) {
-        return ts.createSourceFile(name, userContent, languageVersion, true, ts.ScriptKind.TS);
+        return ts.createSourceFile(name, userContent, languageVersion, true, scriptKindFor(name));
       }
       const libSf = getLibSourceFile(name, languageVersion);
       if (libSf) return libSf;
@@ -448,12 +512,13 @@ export function analyzeMultiSource(
           // Bare specifier: check the lookup map first, then fall back to normalizeFileName
           resolved = bareSpecifierLookup.get(moduleName) ?? normalizeFileName(moduleName);
         }
-        if (normalizedFiles.has(resolved)) {
+        const key = probeFileKey(resolved, normalizedFiles) ?? resolved;
+        if (normalizedFiles.has(key)) {
           return {
             resolvedModule: {
-              resolvedFileName: resolved,
+              resolvedFileName: key,
               isExternalLibraryImport: false,
-              extension: ts.Extension.Ts,
+              extension: tsExtensionFor(key),
             },
           };
         }
@@ -462,32 +527,73 @@ export function analyzeMultiSource(
     },
   };
 
-  const program = ts.createProgram(
-    rootNames,
-    {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      strict: true,
-      noImplicitAny: false,
-      noEmit: true,
-    },
-    compilerHost,
-  );
+  const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    strict: true,
+    noImplicitAny: false,
+    noEmit: true,
+  };
+  if (analyzeOptions?.allowJs) {
+    compilerOptions.allowJs = true;
+    compilerOptions.checkJs = true;
+  }
+
+  const program = ts.createProgram(rootNames, compilerOptions, compilerHost);
 
   const syntacticDiagnostics = program.getSyntacticDiagnostics();
-  const semanticDiagnostics = program.getSemanticDiagnostics();
+  const semanticDiagnostics = analyzeOptions?.skipSemanticDiagnostics
+    ? ([] as ts.Diagnostic[])
+    : program.getSemanticDiagnostics();
   const diagnostics = [...syntacticDiagnostics, ...semanticDiagnostics];
 
   const entrySourceFile = program.getSourceFile(normalizedEntry)!;
+
+  // Order source files topologically: dependencies before importers, entry last.
+  // ES module evaluation runs each module's body after its imports' bodies, and
+  // we concatenate top-level statements into a single `__module_init` — so
+  // dependency files must appear earlier in `sourceFiles` than their importers
+  // (#1109). Cycles are tolerated by dropping back-edges (first-seen wins).
   const userSourceFiles: ts.SourceFile[] = [];
-  for (const name of rootNames) {
-    if (name !== normalizedEntry) {
+  {
+    const visited = new Set<string>();
+    const onStack = new Set<string>();
+    const visit = (name: string): void => {
+      if (visited.has(name) || onStack.has(name)) return;
       const sf = program.getSourceFile(name);
-      if (sf) userSourceFiles.push(sf);
+      if (!sf) return;
+      onStack.add(name);
+      for (const stmt of sf.statements) {
+        const spec =
+          (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt)) &&
+          stmt.moduleSpecifier &&
+          ts.isStringLiteral(stmt.moduleSpecifier)
+            ? stmt.moduleSpecifier.text
+            : undefined;
+        if (!spec) continue;
+        // Re-use the same resolver the program used so cycles are treated identically.
+        const resolved = ts.resolveModuleName(spec, name, compilerOptions, compilerHost).resolvedModule
+          ?.resolvedFileName;
+        if (resolved && resolved !== name) visit(resolved);
+      }
+      visited.add(name);
+      onStack.delete(name);
+      if (sf !== entrySourceFile) userSourceFiles.push(sf);
+    };
+    // Entry-anchored DFS; only files reachable from entry are emitted.
+    visit(normalizedEntry);
+    userSourceFiles.push(entrySourceFile);
+    // Append any additional user files that weren't reached via the entry's import graph
+    // (the previous behaviour was to emit every rootName, so we keep that for safety).
+    for (const name of rootNames) {
+      if (visited.has(name) || name === normalizedEntry) continue;
+      const sf = program.getSourceFile(name);
+      if (sf && sf !== entrySourceFile && !userSourceFiles.includes(sf)) {
+        userSourceFiles.splice(userSourceFiles.length - 1, 0, sf);
+      }
     }
   }
-  userSourceFiles.push(entrySourceFile);
 
   return {
     sourceFiles: userSourceFiles,

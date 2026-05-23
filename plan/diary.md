@@ -1,203 +1,184 @@
 # Project Diary
 
-Continuous log of learnings, progress, and incidents. Append new entries at the bottom with date/time.
+## 2026-05-20 — Sprint 51 close / Sprint 52 start
+
+**Sprint 51 closed** (2026-05-08 → 2026-05-20, 12 days including a week-long pause from context limit + Codex restructuring overlap).
+
+**Results**: 26,777 → 28,147 pass (**+1,370 net**, 65.2%). 70 PRs merged. 34/50 issues done. 16 carried to S52.
+
+**Key wins**: IR retirement gate (#1376) now enforced in CI. Spec-gap wave (#1358–#1382) closed array callbacks, string methods, iterator helpers, promise combinators, class builtins. IR slices #1370–#1374 retired class methods, extern whitelist, destructuring params. Branch audit recovered 10 unmerged PRs (#341–350) now in CI queue.
+
+**Process issues**: Codex force-pushed to origin/main mid-sprint (rolled back); sprint file status drift (4 issues marked wrong); 10 issue files existed only in labs. Labs migration done this session: js2wasm-labs/main now = labs/ (private) + public/ (subtree).
+
+**Sprint 52 started** (2026-05-20). Theme: spec-completeness continuation + wasm closure bridge. 7 dev agents dispatched day 1 on #1396 (+400 passes), #1431–#1434, #1437–#1438. 10 audit PRs in CI. Baseline: 28,147 / 43,160 (65.2%). Target: +1,500 → ~29,650.
+
+## 2026-05-07 — Sprint 49 close / Sprint 50 start
+
+**Sprint 49 closed.** 4-day sprint (2026-05-03 → 2026-05-07). 8 issues merged.
+
+**Landed**: #1290 TS7 forEachChild compat, #1296 dashboard Wasm dogfood, #1297 Hono Tier 5 (Application + middleware), #1299 virtual dispatch fix, #1300 closure outer-param fix, #1301 closure env field-type fix, #1304 typeof externref function fix. Plus #1241 triage.
+
+**Deferred to S50**: closure call dispatch wave 2 (#1298, #1306), lodash Tier 2 blocker cluster (#1302, #1303, #1305), #1126 IR Stage 3, #1292 lodash Tier 2 un-skip.
+
+**Demoted to backlog**: #1223 TDZ async/gen sharing (third deferral, no test262 leverage).
+
+**Sprint 50 started.** Theme: closure/call dispatch correctness wave 2 + #1126 IR Stage 3. Architect spec gating #1298+#1306; senior-dev on #1126 Stage 3. test262 baseline: 27,769 / 48,171 pass (57.7%).
+
+## 2026-05-03 — Sprint 47 close
+
+**Sprint 47 closed.** 3-day sprint (2026-05-01 → 2026-05-03). 631 commits, 50+ issues completed.
+
+**Key results:**
+- 26,247 / 43,088 = 60.9% pass (test suite trimmed from 46,632; ~2% net conformance gain)
+- **IR migration complete**: Slices 11–14 landed — switch/operators, element access/array literals, String+Array prototype methods, legacy codegen (`expressions.ts`/`statements.ts`) retired
+- **Performance**: escape-analysis scalarization, bounds-check elimination, i32 element specialization, pre-size dense arrays, struct field type inference Phase 2, eval/RegExp LRU cache
+- **npm library support**: CJS module.exports + require(), optional chaining, ESLint Tier 1/2/3 stress tests, Hono Tier 2/3 stress tests, WeakMap fix, extern round-trip identity fix
+- **TypeScript 7**: forEachChild compat helper + TS7 feature flag (#1288, #1290) — 132× cold parse speedup in test262 runner
+- **CI quality**: wasm-hash noise filter (#1222), differential test262 (#1246), baseline drift prevention (#1235), runner pool timeout fix (#1227) — 156 false compile_timeouts eliminated
+- **Conformance**: class/dstr defaults (408 failures), private fields, logical assignment, WeakMap dispatch, SameValue f64, OrdinaryToPrimitive TypeError, __any_eq i31ref vs HeapNumber
+
+**Carries to Sprint 48:**
+- #1223 TDZ async/gen writer+reader (blocked on #1177 Stage 1)
+- #1126 int32/uint32 inference (needs architect spec)
+- #1177 Stage 1 (needs senior-dev Opus)
+
+**Baseline**: 26,247 / 43,088 = 60.9%
+**Sprint 48 begins.** IR Slice 13d (Array methods), int32 inference, Function.bind, compile-timeout cluster, and standalone readiness are the headline priorities.
+
+## 2026-05-01 — Sprint 46 mid-sprint session
+
+**Sprint 46 active.** Started 2026-04-30; this session ran 2026-04-30 → 2026-05-01.
+Context at 73% / weekly budget at 19% when compacting.
+
+**PRs merged this session (PRs #94–#118):**
+
+| PR | Issue | Description |
+|---|---|---|
+| #94 | #1187 | test-runtime JS-string→native-string coercion helper |
+| #95 | #1211 | fib-recursive hosted Wasm validator fix |
+| #96 | #1210 | string-hash GC pressure (str_copy_tree O(n²) → buffer) |
+| #99 | #1169j | IR Slice 10 step B: TypedArray |
+| #100 | #1169l | IR Slice 10 step D: Date/Error/Map/Set |
+| #101 | #1169k | IR Slice 10 step C: ArrayBuffer + DataView |
+| #102 | #1169m | IR Slice 10 step E: Promise (best-effort) |
+| #103 | #1212 | Promise resolve/reject regression fix |
+| #104 | #1201 | Per-path test262 scores + landing page |
+| #105 | #1213 | refresh-benchmarks path fix (LFS migration) |
+| #106 | #1203 | Differential testing harness vs V8 |
+| #107 | #1204 | Methodology document |
+| #108 | #1214 | Benchmark CI runner-noise gate (informational only) |
+| #109 | #1215 | Array .join()/.toString() number_toString registration |
+| #110 | — | diff-test CI tsx fix |
+| #113 | #1198 | Pre-size dense arrays at allocation site (+15 tests) |
+| #118 | #1184 | __str_copy_tree depth-bounded worklist (nativeStrings fix) |
+
+**In CI / in progress at compact time:**
+- PR #112 (#1218): baseline validator — awaiting baseline refresh then re-run
+- PR #114 (#1220): Promise snapshot + prototype cleanup (+29 tests)
+- PR #115 (#1221): WasmException outer-catch fix (~256 flaky tests)
+- PR #117 (#1219): ArrayBindingPattern iter-close hang fix (26 CT tests)
+- dev-3 → #1196 (bounds-check elimination)
+- dev-4 → #1197 (i32 element specialization)
+- senior-dev-1210 → #1216 (auto-commit benchmark baseline)
+- dev-2 → #1217 (smoke-canary CI)
+- senior-dev-1205 → #1205 PR #98 (TDZ boxing, in-progress)
+
+**Key findings from investigation sprint:**
+- `compile_timeout` in test262 is a **runtime** timeout (combined compile+execute), not a compile-only timeout. The 30s timer in compiler-pool.ts covers both. ~26 are genuine runtime hangs (iter-close bug), ~70+ are load-induced flakes.
+- `[object WebAssembly.Exception]` flakiness (256 tests): fork-state poisoning. Outer catches in test262-worker.mjs missed instanceof WebAssembly.Exception → misclassified as compile_error. Fixed in PR #115.
+- `Promise.resolve is not a function` (26 tests): Promise missing from _STATIC_SNAPSHOTS → fork contamination. Fixed in PR #114.
+- `Cannot redefine property` (23 tests): mixed isolation bugs (3 fixable in PR #114) + real compiler bugs (instanceof TypeError, mapped arguments — deferred to S47).
+
+**Baseline at session compact:** ~27,000 pass (60.2% adjusted for drift); committed baseline shows 25,813 due to runner variance in the latest promoted run. PRs #114/#115/#117 expected to push real rate to ~61%+ once CI confirms.
+
+**Sprint 46 scope expanded mid-sprint:**
+- Added credibility track issues (#1201, #1203, #1204) that were originally deferred to S47
+- Added CI health issues (#1213, #1214, #1217, #1218, #1219, #1220, #1221) surfaced by investigation
+- Added perf issues (#1196, #1197, #1198, #1184, #1216) from sprint 47 to keep team loaded
+- Sprint = 1 week of token budget (new rule); pull next sprint's work when current issues drain
+
+**Drift pattern documented:** Every PR today showed the same drift signature: net positive, but 22-30% regression ratio from Promise flakes + Temporal/annexB skip-list baseline staleness. Physical-impossibility override approved for all (PRs #94, #106, #109, #110, #113, #118).
+
+## 2026-04-29 — Sprint 45 close
+
+**Sprint 45 closed.** 6-day sprint (2026-04-23 → 2026-04-29).
+
+**Key results:**
+- +554 net test262 tests (baseline 25,276 → 25,830 = 59.8%)
+- IR Phase 4 slices 6–10 all landed: generators (#1169f), destructuring (#1169g), try/catch (#1169h), RegExp/extern-class scaffolding (#1169i step A)
+- IrLowerResolver refactor (#1185) cleared the per-feature shortcut debt across the IR system
+- Competitive benchmark harness built in labs/ — 5 programs × 9 toolchain lanes; Javy static+dynamic split; Porffor and AssemblyScript lanes wired up
+- Architecture Decision Records (#1202) and landing page architecture section (#1208) shipped
+- CI baseline-drift hardening complete (#1076–#1080, #1192, #1191, #1193)
+- #1177 (TDZ closure captures) reverted after 14.7% regressions — deferred to S46
+- 3 new benchmark issues filed: #1209 (hosted ESM error), #1210 (string-hash GC timeout), #1211 (fib-recursive type mismatch)
+
+**Baseline**: 25,830 / 43,168 = 59.8%
+**Sprint 46 begins.** IR Slice 10 steps B–E, #1177 investigation, credibility track, and benchmark bug fixes are the headline priorities.
+
+## 2026-04-23 — Sprint 43 close / Sprint 44 setup
+
+**Sprint 43 closed.** Short 3-day sprint (2026-04-20 → 2026-04-23). 3 PRs merged:
+IR Phase 1 + 2 (#1131, PRs #231 + #258) and CI merge split (#1076, PR #160).
+Baseline held at 24,483 / 43,172 = 56.7% — all IR work is infrastructure.
+
+Also in this session:
+- **LFS migration** for `*.jsonl`, `*.log`, `*.wasm`, benchmark JSON files
+- **GitHub Pages fixed** after LFS migration broke CI checkout (added `lfs: true` to all 6 affected workflows)
+- **All GitHub Actions bumped** to Node.js 24-compatible versions (configure-pages v6, upload-pages-artifact v5, checkout v5, setup-node v6, download-artifact v7)
+- **labs remote** (`js2wasm-labs`) set up as private repo for experimental/commercial development; `labs/*` branches blocked from origin via pre-push hook
+- **Sprint 44 planned** with #1153 (compiler crashes) + #1168 (IR frontend widening) as headline priorities
+
+**Baseline**: 24,483 / 43,172 = 56.7%
+**Sprint 44 begins next.**
+
+## 2026-04-24 — Sprint 44 close
+
+**Sprint 44 closed.** 2-day sprint (2026-04-22 → 2026-04-24).
+
+**Key results:**
+- +793 net test262 tests (baseline 24,483 → 25,276 = 58.6%)
+- IR Phase 3 complete: monomorphize + tagged-unions (#1167c, PR #13)
+- IR infrastructure PRs (#1168, #1167a, #1167b, #1167c) all merged — 0 direct test gain but Phase 4 now unblocked
+- LFS budget exhausted mid-sprint → baseline promotion CI job failed; fixed with `continue-on-error` workaround (#1078)
+- Sprint grew too large (74 issues); 55 carried over to sprint 45
+
+**Baseline**: 25,276 / 43,172 = 58.6%
+**Sprint 45 begins with IR Phase 4 (#1169) now unblocked.**
 
 ---
 
-## 2026-03-29 16:25 — Sprint 30 started
-- Baseline: 18,284 pass / 48,088 total (38.0%)
-- Team: 3 devs + blog agent
-- Tasks: #848, #847, #846 (top 3 by impact, non-overlapping files)
+## Sprint 48 — 2026-05-03
 
-## 2026-03-29 16:40 — ff-only merge protocol validated
-- First merge attempt (#846) caught stale base — agent rebased, second attempt clean
-- Protocol works as designed: ff-only is a strict check, no silent breakage
+Single-day sprint running on ~15% remaining weekly budget. Focus: WebAssembly.Exception cascade (lodash/Hono), stress test tier expansion, CI infrastructure.
 
-## 2026-03-29 16:55 — Checklists created
-- Pre-commit, pre-completion, pre-merge, session-start checklists
-- Key insight: don't embed rules at spawn time — put them in files agents re-read at the moment of action
-- Context window drift is real: agents lose spawn instructions after 50K+ tokens
+**Landed**: #1233 (IR Slice 13d), #1236 (i32 saturation), #1269/#1280 (struct field inference Ph3/Ph3b), #1282 (ESLint Tier 1), #1291 (lodash Tier 1b), #1293 (Hono Tier 4), #1294/#1295 (WasmException reclassification + re-throw), #1290 (TS7 forEachChild helper), #1200 (LICM closed with measurement).
 
-## 2026-03-29 17:10 — Communication discipline defined
-- Broadcast only for file claims (others need to avoid conflicts)
-- Everything else goes to tech lead directly
-- Agents were flooding broadcasts with status updates nobody needed
+**Infrastructure**: agent idle counter in statusline; CI-wait fast-path for test-only PRs; variance escalation pattern calibrated.
 
-## 2026-03-29 17:15 — doc commits cause rebase churn
-- Every doc commit to main between merges forces agents to rebase again
-- Not worth batching (risk losing changes) — added final rebase check right before signaling instead
-- The gap between "rebase" and "signal" is where main moves
+**Deferred to S49**: lodash Tier 2 (#1292), closure/virtual-dispatch gap fixes (#1299–#1304), Hono Tier 5 (#1297), GitHub Pages Wasm dogfood (#1296). Hard issues (#1126 int32 inference, #1199 linear-memory) → backlog.
 
-## 2026-03-29 17:30 — dev-2 rebase problem pattern
-- dev-2 repeatedly signals completion, marks task done, moves to new tasks — ignores rebase requests
-- Root cause: agent treats "code done" as "task done" but merge hasn't happened
-- Retro item: "completed" must mean "merged to main", not "code done"
+---
 
-## 2026-03-29 17:40 — Stale dependency graph discovered
-- 3 issues in a row (#824, #857, #850) already fixed by prior work
-- Sprint-29 fixes resolved more issues than the dep graph tracked
-- Solution: audit remaining issues against current main before dispatching
+## Sprint 50 — 2026-05-07 → 2026-05-08
 
-## 2026-03-29 17:55 — verifyProperty harness diagnosis (high leverage)
-- dev-3 found that hundreds of test262 tests fail because the `verifyProperty` harness can't compile
-- Root cause: `Object.getOwnPropertyNames` returns externref at runtime but compiler expects WasmGC string array
-- This is a #822 sub-pattern — fixing it could unblock hundreds of tests in one shot
+Sprint 50 ran as a transition sprint: began as "closure/call dispatch wave 2" but pivoted into a large spec-completeness audit. Ended at ~28,140 test262 passes (~58.5%).
 
-## 2026-03-29 18:05 — Architect + Scrum Master roles defined
-- Architect bridges PO (what) and devs (how) — writes implementation specs in issue files
-- SM runs retrospectives after each sprint
-- Full role interaction flow documented in CLAUDE.md
+**Key work landed**:
+- #1311–#1319 wave: await passthrough, closure stack underflow, error message context, Symbol.toPrimitive, import.defer early error
+- #1321 Number.prototype formatting — pure Wasm (eliminated JS host)
+- #1322 Math.random() — WASI random_get in standalone mode
+- #1327 Landing page: per-feature test stats + playground deep-link
+- #1334 Spec compliance audit: architect-s51 reviewed all ECMAScript sections, filed 17 targeted spec-gap issues + 7 IR retirement tasks → becomes sprint 51 backbone
+- #1343 Boolean/Symbol coercion TypeErrors, #1344 Date formatters, #1347 for-of IteratorClose
+- Timeout raised 8s → 30s: eliminates ~36 false compile_timeout regressions per PR
 
-## 2026-03-29 18:20 — Sprint history reconstructed
-- Sprint historian created files for sprints 1-29 from git log + run history
-- Confirmed we're actually sprint 30 — numbering was correct
+**Infrastructure wins**:
+- Per-test compile timeout increased from 8s to 30s (eliminates false CI noise)
+- `sprint/50` tag pushed; `sprint-51/begin` tag pushed
 
-## 2026-03-29 18:35 — #822 REGRESSION: -3,999 pass, +8,400 compile errors
-- dev-1's #822 fix disabled return_call globally → broke compilation for ~8,400 tests
-- Pass count dropped from 18,284 to 14,285 (29.7%)
-- Root cause: dev ran "scoped tests" that passed, but didn't run equivalence tests or full test262
-- Tech lead (me) also skipped post-merge equivalence tests — violated own pre-merge checklist
-- **Learning: checklists only work if everyone follows them. Both dev and tech lead failed here.**
-- Reverted #822. Re-running test262 to confirm restoration.
-- dev-1 assigned to analyze the regression in their worktree without touching main
+**Carry-overs** (blocked or regressions):
+- #1311 (PR #264 -5 net), #1312 (PR #257 38 real regressions — function-index shift bug), #1324, #1325, #1326 (CI failures)
+- Structural issue #1382 filed: Wasm closures not JS-callable from host (blocks #1338, #1339, #1358)
 
-## 2026-03-29 18:45 — #822 revert confirmed, post-revert test262
-- After reverting #822: 17,670 pass / 48,088 total (36.7%)
-- Compile errors back to 2,107 (confirms revert fixed the CE spike)
-- 614 fewer passes than baseline (18,284) — likely cache invalidation from source changes
-- Sprint-30 net impact (excluding #822): modest improvements in specific areas, no regression in CEs
-- **Key learning: a single bad merge can wipe out an entire sprint's gains. Equivalence tests after every merge are non-negotiable.**
-
-## 2026-03-29 19:25 — #822 v2 clean fix merged
-- dev-1 analyzed regression: original commit included stale rebase deletions (statements.ts, closures.ts)
-- The return_call disable was unnecessary — #839 already handles tail-call safety
-- Clean fix: only stack-balance.ts + index.ts repair passes, no tail-call changes
-- Cherry-picked to main (couldn't ff-only due to diverged branch history)
-- Running test262 to verify no regression
-
-## 2026-03-29 21:15 — #822 root cause analysis
-- Both v1 and v2 used post-hoc repair passes (walk instruction stream, splice in coercions)
-- Repair passes are inherently fragile: they don't have semantic context, backward walks misidentify producers, splice shifts indices
-- `ref.cast_null` for different struct indices assumes same-shape-different-index, but often it's genuinely different structs → runtime trap
-- Expanded "safe coercion" set in sub-expressions corrupts the stack when insertion point is wrong
-- **Learning: fix type mismatches at generation time (in codegen), not in post-hoc repair passes. This is an architect-level design decision.**
-
-## 2026-03-29 21:03 — Sprint-30 final test262: 18,599 pass (38.7%)
-- Clean full run with all devs shut down (9.6GB free RAM)
-- +315 pass from session start (18,284 → 18,599)
-- -64 CE (2,108 → 2,044)
-- The earlier -614 was cache effects from #822 source churn, not real regression
-- **Sprint-30 net: modest code gains, major process improvements**
-
-## 2026-03-29 20:35 — Results archiving added
-- test262 runner now archives previous JSONL + report with datetime suffix before each run
-- Enables test-by-test regression analysis between any two runs
-- Previously data was overwritten, making it impossible to diagnose the -614 pass regression
-
-## 2026-03-29 20:00 — #822 v2 ALSO regressed, reverted again
-- v2 (clean fix, only stack-balance.ts + index.ts) still caused +6,822 CE (14,810 pass vs 17,670)
-- The ref.cast_null and repair passes are too aggressive — introducing more type mismatches than they fix
-- Both v1 and v2 reverted. #822 needs a fundamentally different approach.
-- **Learning: "targeted" doesn't mean "safe". Even without the return_call disable, the repair passes break compilation. This issue needs an architect to design the approach before a dev touches it.**
-
-## 2026-03-29 19:20 — origin/main vs local main confusion
-- dev-1 rebased onto origin/main (stale remote) instead of local main (29 commits ahead)
-- We haven't pushed this session — local main diverged significantly from origin
-- **Learning: agents in worktrees may resolve `main` to the wrong ref. Need to document that worktree `main` should track local, not origin.**
-
-## 2026-03-29 18:40 — Sprint documentation structure
-- Created plan/sprints/ with per-sprint .md files
-- Living documents: planning section filled at start, results/retro updated as sprint progresses
-- Sprint historian backfilled sprints 1-29 from git history
-
-## 2026-03-30 21:50 — TRUE BASELINE ESTABLISHED: 23,832 pass (49.6%)
-- Clean run: cache disabled, isolated worktree build, no agent contention
-- Current main = baseline (062a7da2) + #854
-- Previous numbers (17-18K) were ALL wrong from stale cache + workspace contention
-- The compiler is at ~50% conformance, not ~38%
-
-**CORRECTION (2026-03-31):** The 23,832 was the vitest pass count (includes 6,580 skips counted as pass). True conformance = 17,252. Later analysis found even that was inflated: old runner had a bug where negative tests always passed (both if/else branches said "pass"). After fixing that bug + accounting for sprint-31 reverts, honest baseline = **15,246 pass / 48,174 total (31.7%)**.
-
-## 2026-03-31 20:30 — Sprint 31 redo, test infra overhaul
-
-### Test infrastructure
-- Merged #889: unified fork architecture (compile+execute in one child_process.fork). 9 workers, 113MB peak each, 1.7GB total.
-- Fixed timestamped result files — test runs no longer overwrite each other.
-- Fixed dashboard field name mismatch (`compile_error` → `ce`) and runs/index.json path.
-- Single vitest invocation for all 16 chunks (was 16 sequential restarts, ~5 min waste).
-- Full test262 run: ~13 min at 62 tests/sec. 15,246 pass confirmed as deterministic baseline.
-
-### Sprint 31 team (6 devs + 1 tester)
-- Stale issue problem: 5 of first 12 dev assignments (#844, #835, #836, #841, #829-partial) already fixed on main. Need PO smoke-test before dispatch.
-- dev-4 built #891 (equiv test fork pool with flock) — waiting in tester queue behind #839 and #866.
-- Memory pressure: 19 concurrent vitest processes from devs ignoring "tester only" rule. Broadcast PAUSE, no OOM but hit 3.8GB available.
-- Tester bottleneck: merge queue growing (6 branches waiting). Single tester is serial, each equiv run ~3 min. Need #891 merged first to add flock + speed up tests.
-
-### Regression analysis
-- 18,284 → 15,246 fully explained: stale cache (~3K), negative test bug (~900), sprint-31 reverts (~2,100).
-- No new bugs from #889 unified fork merge.
-- Sprint-31 issues (#839, #866, #822, #826, #862) cover all recoverable tests.
-
-### Key learnings
-- **Devs must not run tests** — only tester. Without flock (#891), concurrent test runs eat memory.
-- **Smoke-test issues before dispatch** — too many stale assignments waste agent time.
-- **Tester is the bottleneck** — consider 2 testers or faster equiv tests when queue > 3.
-- **Dashboard needs correct field names** — `ce` not `compile_error`, `skip` required.
-
-## 2026-04-11 09:00–13:00 — Sprint 40/41 merge wave + context-discipline reset
-
-### Pass rate
-- Start: 20,711/43,164 (47.98%)
-- End: 21,190/43,164 (49.09%) — **+479 in one session**, 392 from the 50% goal
-
-### Merges (in order)
-- PR #43 #929 Object.defineProperty on wrapper objects (+258)
-- PR #68 #1022 Array.prototype method dispatch (+106)
-- PR #71 #1023 __unbox_number(null) ToNumber semantics (+56)
-- PR #64 #983 WasmGC opaque / live-mirror Proxy (+34)
-- PR #70 CI: dispatch Pages deploy after sharded baseline refresh
-- PR #73 close stale #984
-
-### Closed (did not merge)
-- PR #72 #1026 first attempt — catastrophic −18,504, over-broad __get_builtin rewrite broke the compiler
-- PR #75 #1025 first attempt — net −114, blanket `ref.is_null` → `__extern_is_undefined` replaced some genuine struct-ref null guards
-- PR #65 #1017 P3 yield* — marginal +2, orphaned by dev-1017 scale-down
-
-### New issues filed this session
-- #1025 BindingElement array-pattern audit — reopened after PR #75 close, scoped narrower
-- #1026 String/Number/Boolean.prototype globals access — priority raised, scope documents exact failing tests
-- #1027 Missing `__make_getter_callback` late-import in PR #43 path
-- #1028 TypedArray.prototype.toLocaleString element null path
-- #1029 Migrate to typescript-go (TS 7.x) — blocked on upstream API stability (microsoft/typescript-go#516)
-- **Not yet filed: #1030 Array.prototype "object is not a function" long tail (372 tests)** — highest-impact unclaimed work for next session
-
-### Sprint reassignments
-- Moved error fixes to Sprint 40 (#1025, #1026, #1027, #1028, #832)
-- Moved non-error work to Sprint 41 (#824, #1000, #1001, #1003, #1004, #1005, #1008, #1009, #1011, #1013)
-- #832 almost moved to Sprint 41 as "infra" but user caught it — TS 6 upgrade unblocks 82 test262 parse-fails, it's an error fix
-
-### Incidents
-- **OOM kill mid-session** at ~10:44 — 30+ claude processes from accumulated tmux panes + 13 concurrent vitest runs + a stray `/tmp/probe-998.mts` from dev-998 stuck at 93% CPU for 10 min. Recovered 1.3GB by killing the stray + duplicate vitest runs. New rule broadcast: one vitest per dev at a time, no stray probes.
-- **Team channel lost after kill** — tried resuming wrong session ID (dev-1022's jsonl) before identifying correct tech-lead session via `team-lead` string count (0ffbd21c, 721 matches).
-- **Stale landing page** — PR #67 merged but sharded baseline refresh committed with `[skip ci]`, blocking Pages deploy. Manually triggered redeploy + filed PR #70 for permanent fix.
-- **False-positive regressions** — PR #43's 12 "regressions" were `String.prototype.writable = true` tests that coincidentally "passed" on main because we compiled them to harmless `drop`. Tracked by #1026. Dev-929 caught this pattern.
-
-### Context / budget
-- Session burned ~43% of weekly token budget in one sitting. Primary drivers: long continuous context across triage + merge + planning + UI + infra phases; repeated full-file reads; leaked dev scratch (~50 untracked files) polluting every `git status`.
-- **Mitigations applied this session:**
-  - Moved all leaked scratch to `.tmp/` (gitignored, `b09a8d74`)
-  - Added root-level scratch patterns to `.gitignore` as safety net
-  - Documented convention in CLAUDE.md
-- **Rules saved to memory:**
-  - `feedback_compact_before_sprint.md` — /compact at sprint boundaries
-  - `feedback_context_discipline.md` — stop re-checking state, split planning/execution, write handoffs to `plan/agent-context/tech-lead.md` instead of --resume
-  - `feedback_team_comm_channels.md` — devs use TaskUpdate not verbose SendMessage; shutdown handoffs via agent-context files
-  - `feedback_token_budget_guardrails.md` — warn at 25%, force break at 40%, hard stop at 50%
-  - `feedback_dev_self_serve_tasklist.md` (earlier today) — devs claim next task from TaskList after merge, no re-dispatch
-
-### Key learnings
-- **Blanket `ref.is_null` → `__extern_is_undefined` replacements are dangerous** — some ref.is_null calls guard genuine WasmGC struct nulls, not JS undefined. PR #75 learned this the hard way (−114).
-- **File-pattern issue fixes need path-conditional logic** — PR #72 (#1026) globally intercepted any builtin identifier path, breaking the compiler. Narrow patches with clear is-this-really-the-thing-I-want guards are mandatory.
-- **"Regressions" on big-delta PRs are usually false positives** — when a PR flips 300+ tests pass, 20-30 new fails are almost always previously-coincidental passes being honestly exposed. Sample before blocking.
-- **Dev scratch at repo root costs real tokens** — every `git status` dumps the noise into context, compounding over the session. `.tmp/` convention fixed this permanently.
-- **Session resume is not free** — a `--resume` that brings back a compaction summary costs multi-thousand tokens every tool call forever. Write handoffs to disk instead.
+**Sprint 51 begins**: 25 issues, theme = spec-completeness wave + IR retirement gate. Target: +1,500–1,800 net passes.

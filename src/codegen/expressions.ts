@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Expression compilation dispatcher.
  *
@@ -10,17 +11,24 @@
  *   3. Provides emitCoercedLocalSet and coerceType (used by statements and index)
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
-import ts from "typescript";
-import { mapTsTypeToWasm, isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
+import { ts } from "../ts-api.js";
+import { mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
+import {
+  emitStandalonePromiseReject,
+  emitStandalonePromiseResolve,
+  getOrRegisterPromiseType,
+  isStandalonePromiseActive,
+  PROMISE_STATE_FULFILLED,
+  PROMISE_STATE_REJECTED,
+} from "./async-scheduler.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
-import { getLocalType } from "./context/locals.js";
+import { allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { ensureAnyHelpers, isAnyValue } from "./shared.js";
 import type { InnerResult } from "./shared.js";
 import {
-  getCol,
-  getLine,
+  ensureAnyHelpers,
+  isAnyValue,
   registerCompileExpression,
   registerEnsureLateImport,
   registerFlushLateImportShifts,
@@ -32,96 +40,30 @@ import { coerceType as coerceTypeImpl, pushDefaultValue } from "./type-coercion.
 
 // ── Sub-module imports ─────────────────────────────────────────────────
 
-import {
-  emitThrowString,
-  wasmFuncReturnsVoid,
-  wasmFuncTypeReturnsVoid,
-  getFuncParamTypes,
-  getWasmFuncReturnType,
-} from "./expressions/helpers.js";
+import { wasmFuncReturnsVoid, wasmFuncTypeReturnsVoid } from "./expressions/helpers.js";
 
-import {
-  shiftLateImportIndices,
-  ensureLateImport,
-  flushLateImportShifts,
-  emitUndefined,
-  ensureGetUndefined,
-  ensureExternIsUndefinedImport,
-  patchStructNewForAddedField,
-} from "./expressions/late-imports.js";
+import { emitUndefined, ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
 
-import {
-  compileIdentifier,
-  narrowTypeToUnbox,
-  resolveInstanceOfRHS,
-  compileHostInstanceOf,
-  analyzeTdzAccessByPos,
-} from "./expressions/identifiers.js";
+import { compileHostInstanceOf, compileIdentifier, resolveInstanceOfRHS } from "./expressions/identifiers.js";
+import { emitLazyClassObjectGet } from "./expressions/extern.js";
 
-import {
-  compileLogicalAnd,
-  compileLogicalOr,
-  compileNullishCoalescing,
-  emitMappedArgParamSync,
-  emitMappedArgReverseSync,
-} from "./expressions/logical-ops.js";
+import { compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js";
 
-import {
-  compileAssignment,
-  compileLogicalAssignment,
-  compileCompoundAssignment,
-  isCompoundAssignment,
-  compileDestructuringAssignment,
-  compileArrayDestructuringAssignment,
-  compilePropertyAssignment,
-  compileElementAssignment,
-  compileExternSetFallback,
-} from "./expressions/assignment.js";
+import { compileCallExpression } from "./expressions/calls.js";
 
-import { compilePrefixUnary, compilePostfixUnary, compileMemberIncDec } from "./expressions/unary.js";
+import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
 
-import { compileCallExpression, compileOptionalCallExpression, compileIIFE } from "./expressions/calls.js";
-
-import {
-  compileSuperMethodCall,
-  compileSuperElementMethodCall,
-  compileSuperPropertyAccess,
-  compileSuperElementAccess,
-  compileNewExpression,
-  compileClassExpression,
-  resolveEnclosingClassName,
-} from "./expressions/new-super.js";
-
-import {
-  findExternInfoForMember,
-  compileExternMethodCall,
-  emitLazyProtoGet,
-  patchStructNewForDynamicField,
-  patchStructNewInBody,
-  defaultValueInstrForType,
-  compileSpreadCallArgs,
-} from "./expressions/extern.js";
-
-import { compileConsoleCall, compileDateMethodCall, compileMathCall } from "./expressions/builtins.js";
-
-import {
-  compileConditionalExpression,
-  resolveStructName,
-  isGeneratorIteratorResultLike,
-  getIteratorResultValueType,
-  compileYieldExpression,
-  tryStaticToNumber,
-} from "./expressions/misc.js";
+import { compileConditionalExpression, compileYieldExpression } from "./expressions/misc.js";
 
 // Closures (used inside compileExpressionInner)
 import { compileArrowFunction } from "./closures.js";
 
 // Property access + binary ops (used inside compileExpressionInner)
 import { compileBinaryExpression } from "./binary-ops.js";
+import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
 import { compileElementAccess, compilePropertyAccess } from "./property-access.js";
-import { compileObjectLiteral, compileArrayLiteral } from "./literals.js";
-import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
+import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 
 // ── Public re-exports (preserves the external API) ────────────────────
 
@@ -136,8 +78,8 @@ export { compileNumericBinaryOp } from "./binary-ops.js";
 export { collectReferencedIdentifiers, collectWrittenIdentifiers } from "./closures.js";
 export { getWellKnownSymbolId, resolveComputedKeyExpression, resolveConstantExpression } from "./literals.js";
 export {
-  compileObjectDefineProperty,
   compileObjectDefineProperties,
+  compileObjectDefineProperty,
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
 } from "./object-ops.js";
@@ -163,40 +105,45 @@ export { coercionInstrs, defaultValueInstrs, pushDefaultValue, pushParamSentinel
 export { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
 // Re-exports from sub-modules
-export { emitThrowString, getFuncParamTypes } from "./expressions/helpers.js";
-export {
-  shiftLateImportIndices,
-  ensureLateImport,
-  flushLateImportShifts,
-  emitUndefined,
-  ensureGetUndefined,
-  ensureExternIsUndefinedImport,
-  patchStructNewForAddedField,
-} from "./expressions/late-imports.js";
-export { compileIdentifier, narrowTypeToUnbox, analyzeTdzAccessByPos } from "./expressions/identifiers.js";
-export { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 export {
   compileAssignment,
-  compileLogicalAssignment,
   compileCompoundAssignment,
+  compileLogicalAssignment,
   isCompoundAssignment,
 } from "./expressions/assignment.js";
-export { compilePrefixUnary, compilePostfixUnary, compileMemberIncDec } from "./expressions/unary.js";
-export { compileCallExpression, compileOptionalCallExpression, compileIIFE } from "./expressions/calls.js";
-export {
-  compileSuperPropertyAccess,
-  compileSuperElementAccess,
-  compileNewExpression,
-  compileClassExpression,
-  resolveEnclosingClassName,
-} from "./expressions/new-super.js";
+export { compileCallExpression, compileIIFE, compileOptionalCallExpression } from "./expressions/calls.js";
 export { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
+export { emitThrowString, getFuncParamTypes } from "./expressions/helpers.js";
 export {
-  resolveStructName,
-  isGeneratorIteratorResultLike,
+  analyzeTdzAccessByPos,
+  compileIdentifier,
+  computeElidableTopLevelTdzNames,
+  narrowTypeToUnbox,
+} from "./expressions/identifiers.js";
+export {
+  emitUndefined,
+  ensureExternIsUndefinedImport,
+  ensureGetUndefined,
+  ensureLateImport,
+  flushLateImportShifts,
+  patchStructNewForAddedField,
+  shiftLateImportIndices,
+} from "./expressions/late-imports.js";
+export { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
+export {
   getIteratorResultValueType,
+  isGeneratorIteratorResultLike,
+  resolveStructName,
   tryStaticToNumber,
 } from "./expressions/misc.js";
+export {
+  compileClassExpression,
+  compileNewExpression,
+  compileSuperElementAccess,
+  compileSuperPropertyAccess,
+  resolveEnclosingClassName,
+} from "./expressions/new-super.js";
+export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js";
 
 // ── Dispatcher helpers (used only within this file) ────────────────────
 
@@ -226,12 +173,50 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
 
 /**
  * Wrap the current stack value in Promise.resolve() for async function calls (#919).
+ *
+ * `resultType` is the TypeScript-level result from compileCallExpression; when
+ * the TS signature says `Promise<void>` that helper returns `VOID_RESULT` even
+ * though the underlying wasm function still leaves an externref on the stack.
+ * Check the last emitted call against the wasm type table — if a value is
+ * already on the stack, skip the `ref.null.extern` push (otherwise the later
+ * stack-balance pass would drop the Promise we just built).
  */
 function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType: InnerResult): ValType {
+  const lastInstr = fctx.body[fctx.body.length - 1];
+  let wasmStackHasValue = false;
+  if (lastInstr) {
+    const op = (lastInstr as any).op;
+    if (op === "call" && (lastInstr as any).funcIdx !== undefined) {
+      wasmStackHasValue = !wasmFuncReturnsVoid(ctx, (lastInstr as any).funcIdx);
+    } else if (op === "call_ref" && (lastInstr as any).typeIdx !== undefined) {
+      wasmStackHasValue = !wasmFuncTypeReturnsVoid(ctx, (lastInstr as any).typeIdx);
+    }
+  }
   if (resultType === null || resultType === VOID_RESULT) {
-    fctx.body.push({ op: "ref.null.extern" });
+    if (!wasmStackHasValue) fctx.body.push({ op: "ref.null.extern" });
   } else if (resultType.kind !== "externref") {
     coerceType(ctx, fctx, resultType, { kind: "externref" });
+  }
+  // (#1326 Phase 1B) In standalone (WASI) mode, replace
+  // `call $Promise_resolve_import` with a Wasm-native `$Promise`
+  // struct.new fulfilled with the value already on the stack. The host
+  // import `Promise_resolve` is unsatisfiable in WASI; this branch
+  // avoids the missing-import error at module instantiation.
+  //
+  // Wasm `struct.new` pops fields in declaration order (state | value |
+  // callbacks); the value is already on the stack but state must come
+  // BEFORE it. Stash via a temp local, then emit in the correct order.
+  if (isStandalonePromiseActive(ctx)) {
+    const valueLocal = allocTempLocal(fctx, { kind: "externref" });
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    fctx.body.push({ op: "local.set", index: valueLocal });
+    fctx.body.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+    fctx.body.push({ op: "local.get", index: valueLocal });
+    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+    releaseTempLocal(fctx, valueLocal);
+    return { kind: "externref" };
   }
   const resolveIdx = ensureLateImport(ctx, "Promise_resolve", [{ kind: "externref" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
@@ -239,6 +224,63 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
     fctx.body.push({ op: "call", funcIdx: resolveIdx });
   }
   return { kind: "externref" };
+}
+
+/**
+ * Splice instructions [start..end) from fctx.body and re-emit them inside a
+ * try/catch that converts synchronous throws into a rejected Promise. Used for
+ * async function calls so that a throw during default-param evaluation or body
+ * execution surfaces as `f().then(_, onRej)` rather than an uncaught wasm
+ * exception (#1150).
+ */
+function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, start: number): void {
+  // (#1326 Phase 1B) Standalone-mode rejection. The host
+  // `Promise_reject` import + `__get_caught_exception` are
+  // unsatisfiable in WASI; emit a Wasm-native rejected `$Promise`
+  // construction in the catch_all instead.
+  if (isStandalonePromiseActive(ctx)) {
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    const inner = fctx.body.splice(start);
+    // The thrown value is on the catch_all stack as externref (the
+    // `__exn` tag's externref payload); standalone catch_all consumes
+    // it and uses it as the rejection reason. We don't have access to
+    // the wasm exception payload op without `ensureExnTag`, so fall
+    // back to `ref.null.extern` as the reason — Phase 1B doesn't
+    // yet wire the catch-payload binding (Phase 1C will). Most async
+    // throws produce undefined-typed rejections at this stage, so
+    // null-extern is safe.
+    const catchAll: Instr[] = [
+      { op: "i32.const", value: PROMISE_STATE_REJECTED },
+      { op: "ref.null.extern" } as Instr,
+      { op: "ref.null.extern" },
+      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+      { op: "extern.convert_any" } as Instr,
+    ];
+    fctx.body.push({
+      op: "try",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      body: inner,
+      catches: [],
+      catchAll,
+    } as unknown as Instr);
+    return;
+  }
+  const rejectIdx = ensureLateImport(ctx, "Promise_reject", [{ kind: "externref" }], [{ kind: "externref" }]);
+  const getCaughtIdx = ensureLateImport(ctx, "__get_caught_exception", [], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (rejectIdx === undefined || getCaughtIdx === undefined) return;
+  const inner = fctx.body.splice(start);
+  const catchAll: Instr[] = [
+    { op: "call", funcIdx: getCaughtIdx } as Instr,
+    { op: "call", funcIdx: rejectIdx } as Instr,
+  ];
+  fctx.body.push({
+    op: "try",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    body: inner,
+    catches: [],
+    catchAll,
+  } as unknown as Instr);
 }
 
 /**
@@ -699,6 +741,20 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       const localDef = fctx.locals[selfIdx - fctx.params.length];
       return localDef?.type ?? { kind: "externref" };
     }
+    // (#1395) Static-context fallback: in a static field initializer or
+    // static method body (or in any closure spawned from one), `this`
+    // refers to the class constructor object per ECMA-262 §15.7.1.1
+    // step 5.b. We emit the lazy class-object singleton load — same
+    // singleton used when the class identifier appears as a value, so
+    // `C.f() === C` (when `static f = () => this`) holds. Note: the
+    // lazy-load is invariant (a global), so no closure-capture wiring
+    // is needed — the arrow's body re-emits the load and gets the
+    // exact same externref each time.
+    if (fctx.isStaticContext && fctx.enclosingClassName && ctx.classObjectGlobals?.has(fctx.enclosingClassName)) {
+      if (emitLazyClassObjectGet(ctx, fctx, fctx.enclosingClassName)) {
+        return { kind: "externref" };
+      }
+    }
     emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
@@ -711,6 +767,81 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
     if (expr.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
       const rhsResult = resolveInstanceOfRHS(ctx, expr.right);
       if (!rhsResult) {
+        return compileHostInstanceOf(ctx, fctx, expr);
+      }
+      // (#1366a) Externref-backed subclasses (extends Error / TypeError / ...)
+      // have instances that are real JS Error objects whose host-side
+      // [[Prototype]] is the BUILTIN parent (Error.prototype), not
+      // MyError.prototype. So `e instanceof MyError` cannot be answered by a
+      // host `__instanceof(value, "MyError")` call (globalThis.MyError does
+      // not exist). We resolve it statically using the TS type of LHS:
+      //
+      //   - LHS type ≡ MyError or a registered subclass → constant `true`
+      //   - LHS type ≡ unrelated user class → constant `false`
+      //   - otherwise (any / externref / parent builtin) → fall back to host
+      //     `__instanceof` against the BUILTIN parent name. (`e instanceof
+      //     MyError` where e is `any` is unanswerable here; we
+      //     conservatively return false to match host semantics.)
+      //
+      // The WasmGC struct-tag path is wrong for these instances anyway
+      // (any.convert_extern + ref.cast to a struct type fails), so we never
+      // dispatch to compileInstanceOf for an externref-backed RHS.
+      if (ctx.classExternrefBackedSet.has(rhsResult)) {
+        const lhsTsType = ctx.checker.getTypeAtLocation(expr.left);
+        let lhsName = lhsTsType.getSymbol()?.name;
+        // (#1455) TypeScript reports `__class` as the synthetic symbol name
+        // for anonymous class expressions (`const Sub = class extends Map {}`).
+        // Resolve via `typeToString` — for a const-bound class expression
+        // this returns the binding name, which we can look up in
+        // `classExprNameMap` to recover the synthetic class id.
+        if (lhsName === "__class") {
+          const typeStr = ctx.checker.typeToString(lhsTsType);
+          const mapped = ctx.classExprNameMap.get(typeStr);
+          if (mapped !== undefined) {
+            lhsName = mapped;
+          } else if (ctx.classTagMap.has(typeStr)) {
+            lhsName = typeStr;
+          }
+        }
+        // (#1455) Canonicalize class names through `classExprNameMap` so
+        // `const Sub = class extends Map {}` (where the binding name `Sub`
+        // and the synthetic name `__anonClass_N` both register independently
+        // as classes) compare equal.
+        const canon = (n: string | undefined): string | undefined =>
+          n === undefined ? undefined : (ctx.classExprNameMap.get(n) ?? n);
+        const canonLhs = canon(lhsName);
+        const canonRhs = canon(rhsResult);
+        let staticAnswer: boolean | undefined;
+        if (lhsName !== undefined && ctx.classTagMap.has(lhsName)) {
+          if (canonLhs === canonRhs) {
+            staticAnswer = true;
+          } else {
+            // LHS is a known user class. Walk its parent chain — true iff the
+            // RHS class is an ancestor of the LHS class.
+            let cur: string | undefined = lhsName;
+            const guard = new Set<string>();
+            while (cur && !guard.has(cur)) {
+              guard.add(cur);
+              if (cur === rhsResult) {
+                staticAnswer = true;
+                break;
+              }
+              cur = ctx.classParentMap.get(cur);
+            }
+            if (staticAnswer === undefined) staticAnswer = false;
+          }
+        }
+        if (staticAnswer !== undefined) {
+          // Compile LHS for side effects, drop, push constant.
+          const leftType = compileExpression(ctx, fctx, expr.left);
+          if (leftType) fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: staticAnswer ? 1 : 0 });
+          return { kind: "i32" };
+        }
+        // (#1455) LHS type could not be resolved statically (TS often infers
+        // `any` for `class Sub extends WeakRef {}` because WeakRef<T> requires
+        // type args). Fall through to the host runtime check, which consults
+        // the user-class tag registry attached at construction time.
         return compileHostInstanceOf(ctx, fctx, expr);
       }
     }
@@ -734,6 +865,7 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isCallExpression(expr)) {
+    const callStart = fctx.body.length;
     const callResult = compileCallExpression(ctx, fctx, expr);
     if (fctx.pendingCallbackWritebacks && fctx.pendingCallbackWritebacks.length > 0) {
       fctx.body.push(...fctx.pendingCallbackWritebacks);
@@ -749,8 +881,59 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => ({ ...instr })));
       // Do NOT clear — re-emit after every subsequent call
     }
+    // Skip async-call detection for `import.defer(...)` / `import.source(...)`:
+    // calling `getResolvedSignature` on these triggers a TypeScript Debug.assert
+    // ("Trying to get the type of `import.defer` in `import.defer(...)`") because
+    // the TS checker explicitly forbids type queries on these meta-properties as
+    // call callees. The compileCallExpression dispatcher (calls.ts) already
+    // reports a clean unsupported-feature error for these patterns; here we just
+    // bypass the async wrap. (#1315)
+    if (
+      ts.isMetaProperty(expr.expression) &&
+      expr.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (expr.expression.name.text === "defer" || expr.expression.name.text === "source")
+    ) {
+      return callResult;
+    }
     if (isAsyncCallExpression(ctx, expr)) {
-      return wrapAsyncReturn(ctx, fctx, callResult);
+      // (#1313) `await asyncCall()` would otherwise leave a Promise object
+      // on the stack — string concatenation / arithmetic / property access
+      // on the result then sees `[object Promise]` because js2wasm has no
+      // synchronous Promise unwrap (would need JSPI / stack-switching).
+      //
+      // Workaround: skip the `Promise.resolve(...)` wrap when the call's
+      // parent is an `AwaitExpression`. The wasm async function body
+      // (`closures.ts:1165`) already returns the raw `T` value (not
+      // `Promise<T>`), so leaving it on the stack matches what await's
+      // passthrough lowering expects. For non-await consumers
+      // (`asyncCall().then(...)`, `const p = asyncCall();`) the wrap still
+      // fires and produces a real Promise that JS host code can chain off.
+      //
+      // This is the asymmetric strategy 1 from the issue: await as
+      // raw-T consumer, every other consumer as Promise consumer. Both
+      // shapes are observable in test262 today; this PR keeps both
+      // working while eliminating the `[object Promise]` stringification.
+      let parent: ts.Node | undefined = expr.parent;
+      while (
+        parent &&
+        (ts.isParenthesizedExpression(parent) ||
+          ts.isAsExpression(parent) ||
+          ts.isNonNullExpression(parent) ||
+          ts.isTypeAssertionExpression(parent))
+      ) {
+        parent = parent.parent;
+      }
+      if (parent && ts.isAwaitExpression(parent)) {
+        // Skip the wrap; await's passthrough lowering will leave the raw
+        // value on the stack for the consumer.
+        return callResult;
+      }
+      const wrappedType = wrapAsyncReturn(ctx, fctx, callResult);
+      // Wrap the call+Promise.resolve in try/catch so synchronous throws from
+      // the async function body (e.g. TDZ ReferenceError during default param
+      // evaluation) become rejected Promises per spec (#1150).
+      wrapAsyncCallInTryCatch(ctx, fctx, callStart);
+      return wrappedType;
     }
     return callResult;
   }

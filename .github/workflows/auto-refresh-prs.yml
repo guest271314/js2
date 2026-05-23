@@ -1,0 +1,57 @@
+name: Auto-refresh open PR branches with main
+
+# DISABLED: GITHUB_TOKEN-authored commits do NOT trigger downstream
+# workflows (documented GitHub Actions limitation). So auto-refresh-prs's
+# update-branch calls create bot commits on PR branches but the resulting
+# synchronize events don't fire any CI workflows — PRs stay BLOCKED with
+# empty check sets after refresh. Net effect was harmful churn.
+#
+# Replaced by: drift watcher polling script (scripts/poll-pr-mentions.sh)
+# running in the tech lead's session. On detected drift, tech lead
+# manually dispatches an agent that pulls main, reviews the merge
+# semantically, and pushes. Authored by user, so synchronize events
+# trigger CI normally.
+#
+# Kept as workflow_dispatch for occasional manual emergency refreshes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you manually triggering this?"
+        required: false
+        default: "manual refresh"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refresh each open PR branch via GitHub update-branch API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          mapfile -t PRS < <(gh pr list --state open --limit 200 --json number --jq '.[].number')
+          ok=0; fail=0
+          for pr in "${PRS[@]}"; do
+            out=$(gh api "repos/${{ github.repository }}/pulls/$pr/update-branch" -X PUT 2>&1)
+            if echo "$out" | grep -qE 'Updating|no new commits|head branch is up'; then
+              ok=$((ok+1))
+            else
+              fail=$((fail+1))
+              echo "fail #$pr: $out" | head -c 200
+            fi
+          done
+          echo "ok=$ok / fail=$fail (of ${#PRS[@]})"

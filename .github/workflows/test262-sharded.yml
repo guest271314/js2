@@ -1,27 +1,58 @@
 name: Test262 Sharded
 
 on:
+  # Serial-queue model: full 32-shard test262 runs at PR-time AND in merge_group.
+  # Each PR is validated alone (no ALLGREEN hiding) and developers see test262
+  # regressions on PR push (not just at queue-time). Path filter restricts to
+  # src/test/config changes — docs-only PRs skip.
   pull_request:
     branches: [main]
+    paths: &test262-paths
+      - ".github/workflows/test262-sharded.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "tsconfig.json"
+      - "scripts/tsconfig.json"
+      - "vitest.config.ts"
+      - "src/**"
+      - "scripts/build-test262-report.mjs"
+      - "scripts/compiler-fork-worker.mjs"
+      - "scripts/compiler-pool.ts"
+      - "scripts/diff-test262.ts"
+      - "scripts/generate-editions.ts"
+      - "scripts/test262-worker.mjs"
+      - "tests/test262-chunk*.test.ts"
+      - "tests/test262-runner.ts"
+      - "tests/test262-scope-classification.test.ts"
+      - "tests/test262-shared.ts"
   push:
     branches: [main]
+    paths: *test262-paths
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       include_proposals:
         description: "Include proposal tests"
         required: false
-        default: false
+        default: true
         type: boolean
       compiler_pool_size:
         description: "Compiler workers per shard runner"
         required: false
-        default: "4"
+        default: "2"
         type: string
-      allow_regressions:
-        description: "Allow regressions and continue anyway"
+      force_baseline_refresh:
+        description: "Force promote merged report to baseline regardless of regressions. Requires confirm_force=YES."
         required: false
         default: false
         type: boolean
+      confirm_force:
+        description: "Type YES to confirm force baseline refresh (prevents accidental runs)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -30,23 +61,106 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
-  group: test262-sharded-${{ github.event.pull_request.number || github.ref }}
+  # GLOBAL serialization: only ONE test262-sharded workflow runs at a time
+  # across pull_request, push, merge_group, workflow_dispatch. With 50 shards
+  # consuming 50 of 60 runner slots, running multiple test262 in parallel
+  # starves sequential follow-up jobs (regression-gate, merge-report) leading
+  # to merge-queue check_response_timeout failures.
+  #
+  # Serializing keeps ~10 slots free for those follow-ups + other workflows
+  # (CI quality, cla-check). Per-event groups would parallelize but produce
+  # the contention pattern above. Sub-cost: pull_request pushes during an
+  # in-flight run queue rather than cancel-and-restart — accept the waste.
+  group: test262-sharded-global
   cancel-in-progress: false
 
 jobs:
+  gate:
+    name: cheap gate (main-ancestor + lint)
+    runs-on: ubuntu-latest
+    # Gate always runs on pull_request / merge_group / non-bot push. The
+    # PR-level test262 storm caused by auto-refresh-prs (github-actions[bot]
+    # doing 'Merge branch main into <branch>') is avoided by skipping JUST
+    # the heavy `test262-shard` matrix on bot synchronizes — NOT the gate.
+    # If the gate were also skipped, `test262-shard` and `merge-report` would
+    # cascade-skip (via `needs:`), and the required check "merge shard reports"
+    # would never be produced, permanently BLOCKING the PR under the strict
+    # required-checks policy. The companion workflow .github/workflows/
+    # test262-pr-stub.yml produces a cheap "merge shard reports" check name
+    # on bot synchronizes so PRs stay mergeable; the real workflow's gate
+    # still firing here keeps "cheap gate (main-ancestor + lint)" honest.
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'push' && github.actor != 'github-actions[bot]')
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Skip explicit base-ancestry check (handled by simulated merge / queue)
+        run: |
+          # See ci.yml for full reasoning. The simulated PR-merge HEAD and the
+          # merge_group ref both inherently include base by construction; no
+          # extra ancestry check needed and the previous one had TOCTOU + shallow
+          # checkout false-positive issues.
+          echo "✓ ${{ github.event_name }} ref already includes base by construction"
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck + lint
+        run: |
+          pnpm run typecheck 2>&1 | tail -50 || (echo "::error::typecheck failed"; exit 1)
+          # If lint script exists, run it (otherwise skip silently)
+          if grep -q '"lint"' package.json; then pnpm run lint 2>&1 | tail -50; fi
+
   test262-shard:
-    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+    # Heavy 16-shard test262 fires on all gate-relevant events:
+    #   pull_request → per-PR validation (serial queue model — each PR is
+    #     validated alone before entering the queue).
+    #   merge_group → final gate before merge (catches main-drift regressions).
+    #   push to main → baseline update.
+    #   workflow_dispatch → manual reruns.
+    # Cheap-gate must pass first (typecheck + lint). If shards fail, the
+    # regression-gate reports per-test transitions; bad PRs bounce back to
+    # their authors with actionable feedback rather than slipping into a
+    # batch.
+    if: |
+      (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
+      (github.event_name == 'pull_request' && github.actor != 'github-actions[bot]') ||
+      github.event_name == 'merge_group' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [gate]
     name: test262 shard ${{ matrix.chunk }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        # 50 shards — maximizes parallelism within the 60-runner budget while
+        # leaving headroom (~5) for cheap-gate, quality, cla-check, differential-test.
+        # With Test262 Differential dropped from merge_group + PR contexts, this
+        # is the sweet spot for one PR in flight. Per-shard work shrinks to ~860
+        # tests / ~8 min wall, vs ~13 min at 32 shards. Concurrent PRs will see
+        # ~50 of their shards queue (no priority queue in GH Actions).
+        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+                31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
 
     env:
-      COMPILER_POOL_SIZE: ${{ inputs.compiler_pool_size || '4' }}
-      TEST262_INCLUDE_PROPOSALS: ${{ inputs.include_proposals && '1' || '0' }}
+      COMPILER_POOL_SIZE: ${{ inputs.compiler_pool_size || '2' }}
+      TEST262_INCLUDE_PROPOSALS: ${{ github.event_name != 'workflow_dispatch' && '1' || (inputs.include_proposals && '1' || '0') }}
       RUN_TIMESTAMP: ${{ github.run_id }}-chunk${{ matrix.chunk }}
 
     steps:
@@ -75,10 +189,19 @@ jobs:
           path: |
             .test262-cache
             benchmarks/results/test262-cache.json
-          key: test262-cache-${{ hashFiles('src/**/*.ts') }}-chunk-${{ matrix.chunk }}
+          # vitest.config.ts is part of the hash so any change to concurrency,
+          # timeouts, or pool config busts the cache and forces a clean run
+          # instead of replaying stale `compile_timeout` results (issue #1171).
+          key: test262-cache-v2-${{ hashFiles('src/**/*.ts', 'scripts/test262-worker.mjs', 'scripts/compiler-fork-worker.mjs', 'vitest.config.ts') }}-chunk-${{ matrix.chunk }}
+          # #1521 — Cross-PR cache sharing. The first restore-keys line restores
+          # any cache for the same src+worker+config hash but a different chunk;
+          # the second line falls back to ANY recent cache (different src). Cache
+          # entries written by a different compiler bundle carry a stale
+          # `bundle_hash` field and are re-compiled on read (see
+          # scripts/test262-worker.mjs + scripts/precompile-tests.ts).
           restore-keys: |
-            test262-cache-${{ hashFiles('src/**/*.ts') }}-
-            test262-cache-
+            test262-cache-v2-${{ hashFiles('src/**/*.ts', 'scripts/test262-worker.mjs', 'scripts/compiler-fork-worker.mjs', 'vitest.config.ts') }}-
+            test262-cache-v2-
 
       - name: Build compiler bundles
         run: |
@@ -105,15 +228,24 @@ jobs:
         uses: actions/upload-artifact@v6
         if: always()
         with:
+          retention-days: 1
           name: test262-shard-${{ matrix.chunk }}
           path: |
             benchmarks/results/test262-results-${{ env.RUN_TIMESTAMP }}.jsonl
           if-no-files-found: warn
 
-  merge:
-    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+  merge-report:
+    # Aggregate the 16 shard artifacts into a single test262 report and gate
+    # on shard results. Produces the "merge shard reports" required check
+    # for all gate-relevant contexts. Serial-queue model: this is the same
+    # job whether the trigger is pull_request (PR-level validation) or
+    # merge_group (final pre-merge validation).
+    if: |
+      always() &&
+      (github.event_name != 'push' || github.actor != 'github-actions[bot]') &&
+      needs.test262-shard.result == 'success'
     name: merge shard reports
-    needs: test262-shard
+    needs: [test262-shard]
     runs-on: ubuntu-latest
 
     steps:
@@ -151,19 +283,135 @@ jobs:
           node scripts/build-test262-report.mjs \
             --input merged-reports/test262-results-merged.jsonl \
             --output merged-reports/test262-report-merged.json \
-            ${{ inputs.include_proposals && '--include-proposals' || '' }}
+            --baseline-sha "${{ github.sha }}" \
+            --baseline-generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            ${{ github.event_name != 'workflow_dispatch' && '--include-proposals' || (inputs.include_proposals && '--include-proposals' || '') }}
+
+      - name: Upload merged reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          retention-days: 1
+          name: test262-merged-report
+          path: |
+            merged-reports/**
+          if-no-files-found: warn
+
+  regression-gate:
+    # Runs after merge-report in all non-bot push contexts (merge_group / manual
+    # push / workflow_dispatch). Compares branch report against baseline.
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+    name: check for test262 regressions
+    needs: [merge-report]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch fresh baseline from baselines repo
+        id: fetch_baseline
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        run: |
+          # Clone the baselines repo to get the current baseline JSONL.
+          # This avoids LFS bandwidth on the main repo (all jsonl files are
+          # now stored in loopdive/js2wasm-baselines, not LFS-tracked here).
+          # Use depth=2 so we can read the most recent commit's timestamp for
+          # the #1235 staleness warning.
+          git clone --depth=2 https://github.com/loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines 2>/dev/null || true
+          if [ -f /tmp/js2wasm-baselines/test262-current.jsonl ]; then
+            mkdir -p benchmarks/results
+            cp /tmp/js2wasm-baselines/test262-current.jsonl benchmarks/results/test262-current.jsonl
+            echo "Baseline fetched from js2wasm-baselines repo."
+            # #1235 — capture baseline commit timestamp + sha for the staleness
+            # check below. The PR gate will warn if the baseline is older than
+            # the most recent main commit by more than a small threshold.
+            BASELINE_TS=$(git -C /tmp/js2wasm-baselines log -1 --format=%ct HEAD 2>/dev/null || echo 0)
+            BASELINE_SHA=$(git -C /tmp/js2wasm-baselines log -1 --format=%h HEAD 2>/dev/null || echo unknown)
+            echo "baseline_ts=$BASELINE_TS" >> "$GITHUB_OUTPUT"
+            echo "baseline_sha=$BASELINE_SHA" >> "$GITHUB_OUTPUT"
+            echo "Baseline commit: $BASELINE_SHA (unix=$BASELINE_TS)"
+          else
+            # Baselines repo not yet seeded — write empty JSONL so diff-test262
+            # gets a valid (empty) baseline and reports 0 regressions / N improvements.
+            # The fallback avoids LFS pointer text which would cause a parse error.
+            echo "Warning: baselines repo has no jsonl yet — using empty baseline."
+            mkdir -p benchmarks/results
+            echo -n "" > benchmarks/results/test262-current.jsonl
+            echo "baseline_ts=0" >> "$GITHUB_OUTPUT"
+            echo "baseline_sha=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check baseline staleness (#1235)
+        id: staleness
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.fetch_baseline.outputs.baseline_ts != '0'
+        run: |
+          # If the baselines-repo JSONL hasn't been refreshed since several
+          # commits landed on main, the regression-gate's wasm_change count
+          # is contaminated by drift — tests that flipped on main since the
+          # last baseline refresh appear as PR regressions even though the
+          # PR didn't cause them. Emit a warning so devs/tech-lead can read
+          # the regression report skeptically.
+          MAIN_HEAD_TS=$(git log -1 --format=%ct origin/main 2>/dev/null || git log -1 --format=%ct main 2>/dev/null || echo 0)
+          BASELINE_TS="${{ steps.fetch_baseline.outputs.baseline_ts }}"
+          BASELINE_SHA="${{ steps.fetch_baseline.outputs.baseline_sha }}"
+          if [ "$MAIN_HEAD_TS" = "0" ] || [ "$BASELINE_TS" = "0" ]; then
+            echo "stale_minutes=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          DIFF_S=$(( MAIN_HEAD_TS - BASELINE_TS ))
+          DIFF_M=$(( DIFF_S / 60 ))
+          # Threshold: baseline older than main HEAD by ≥ 30 minutes. Tunable.
+          if [ "$DIFF_M" -ge 30 ]; then
+            echo "::warning::Baseline drift: js2wasm-baselines JSONL is ${DIFF_M}m older than main HEAD (baseline=${BASELINE_SHA}). Some 'regressions' below may be drift, not real PR-caused failures. See #1235."
+            echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
+          else
+            echo "Baseline freshness OK: ${DIFF_M}m behind main HEAD."
+            echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download merged reports
+        uses: actions/download-artifact@v7
+        with:
+          path: merged-reports
+          pattern: test262-merged-report
+          merge-multiple: true
 
       - name: Compare against current main baseline
         id: regression_diff
         run: |
-          mkdir -p merged-reports
           BASELINE="benchmarks/results/test262-current.jsonl"
           if [ ! -f "$BASELINE" ]; then
             echo "Missing baseline JSONL: $BASELINE"
             exit 2
           fi
+          # Prefer the committed baseline JSON (test262-current.json) for age/SHA
+          # metadata; fall back to test262-report.json if the first doesn't exist.
+          BASELINE_META=""
+          if [ -f "benchmarks/results/test262-current.json" ]; then
+            BASELINE_META="benchmarks/results/test262-current.json"
+          elif [ -f "benchmarks/results/test262-report.json" ]; then
+            BASELINE_META="benchmarks/results/test262-report.json"
+          fi
+          META_ARGS=""
+          if [ -n "$BASELINE_META" ]; then
+            META_ARGS="--baseline-meta $BASELINE_META"
+          fi
           set +e
-          npx tsx scripts/diff-test262.ts "$BASELINE" merged-reports/test262-results-merged.jsonl --quiet \
+          npx tsx scripts/diff-test262.ts "$BASELINE" merged-reports/test262-results-merged.jsonl --quiet $META_ARGS \
             > merged-reports/test262-regressions.txt
           exit_code=$?
           set -e
@@ -178,26 +426,40 @@ jobs:
             echo "regressions=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fail on regressions
-        if: steps.regression_diff.outputs.regressions == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.allow_regressions)
-        run: |
-          echo "test262 regressions detected relative to benchmarks/results/test262-current.jsonl"
-          cat merged-reports/test262-regressions.txt
-          exit 1
-
-      - name: Upload merged reports
+      - name: Upload regressions report
         uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: test262-merged-report
-          path: |
-            merged-reports/**
+          retention-days: 1
+          name: test262-regressions-report
+          path: merged-reports/test262-regressions.txt
           if-no-files-found: warn
 
+      - name: Fail on regressions
+        if: steps.regression_diff.outputs.regressions == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
+        run: |
+          echo "test262 regressions detected relative to benchmarks/results/test262-current.jsonl"
+          cat merged-reports/test262-regressions.txt
+          # #1235 — append staleness footer so devs reading the failed-job log
+          # see the warning even when not scrolling up to the workflow-level
+          # ::warning::. The footer is informational; the gate still fails.
+          STALE_M="${{ steps.staleness.outputs.stale_minutes || '0' }}"
+          if [ "$STALE_M" -ge 30 ]; then
+            echo ""
+            echo "==============================================================="
+            echo "  ⚠️  BASELINE DRIFT WARNING (#1235)"
+            echo "  The js2wasm-baselines JSONL is ${STALE_M}m older than main HEAD."
+            echo "  Some 'regressions' above may be drift, not real PR-caused"
+            echo "  failures. Cross-check against another open PR's regression"
+            echo "  list — overlapping clusters across unrelated PRs are drift."
+            echo "==============================================================="
+          fi
+          exit 1
+
   promote-baseline:
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.actor != 'github-actions[bot]' && needs.merge.result == 'success'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.actor != 'github-actions[bot]'
     name: promote merged report to main baseline
-    needs: merge
+    needs: merge-report
     runs-on: ubuntu-latest
 
     steps:
@@ -206,7 +468,15 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Authenticate via SSH deploy key so the post-merge baseline-refresh
+          # commit can be pushed. The merge_queue ruleset blocks GITHUB_TOKEN
+          # pushes — MAIN_DEPLOY_KEY is in the ruleset's bypass_actors list.
+          ssh-key: ${{ secrets.MAIN_DEPLOY_KEY }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
 
       - name: Download merged reports
         uses: actions/download-artifact@v7
@@ -218,6 +488,8 @@ jobs:
       - name: Promote merged artifacts to stable baseline
         run: |
           mkdir -p benchmarks/results
+          mkdir -p /tmp/js2wasm-before-refresh
+          cp benchmarks/results/test262-current.json /tmp/js2wasm-before-refresh/test262-current.json 2>/dev/null || true
           rm -f benchmarks/results/test262-current.jsonl \
             benchmarks/results/test262-current.json \
             benchmarks/results/test262-report.json \
@@ -229,13 +501,59 @@ jobs:
           # Also update public/ so the landing page dev server picks up fresh data
           mkdir -p public/benchmarks/results
           cp shard-artifacts/test262-report-merged.json public/benchmarks/results/test262-report.json
+          cp shard-artifacts/test262-results-merged.jsonl public/benchmarks/results/test262-results.jsonl
 
-      - name: Append to runs/index.json (trend graph data)
+      - name: Regenerate edition buckets
+        run: node --experimental-strip-types scripts/generate-editions.ts --results benchmarks/results/test262-current.jsonl
+
+      - name: Push baseline artifacts to js2wasm-baselines repo
+        env:
+          BASELINE_DEPLOY_KEY: ${{ secrets.BASELINE_DEPLOY_KEY }}
         run: |
+          PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('shard-artifacts/test262-report-merged.json','utf8')).summary.pass)")
+          TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('shard-artifacts/test262-report-merged.json','utf8')).summary.total)")
+          # Sanity check: reject corrupt reports
+          if [ "$PASS" -lt 1000 ] || [ "$TOTAL" -lt 40000 ]; then
+            echo "ABORT: report looks corrupt (pass=$PASS total=$TOTAL). Not pushing."
+            exit 0
+          fi
+
+          # Set up SSH deploy key for baselines repo push
+          eval "$(ssh-agent -s)"
+          echo "$BASELINE_DEPLOY_KEY" | ssh-add -
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Clone baselines repo (shallow — only need latest state)
+          git clone --depth=1 git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+          cp /tmp/js2wasm-baselines/test262-current.jsonl /tmp/js2wasm-baselines/test262-current.before.jsonl 2>/dev/null || true
+
+          # Copy fresh artifacts. Editions + categories are produced by
+          # scripts/generate-editions.ts (run earlier) into benchmarks/results/.
+          cp shard-artifacts/test262-results-merged.jsonl /tmp/js2wasm-baselines/test262-current.jsonl
+          cp shard-artifacts/test262-report-merged.json   /tmp/js2wasm-baselines/test262-current.json
+          cp shard-artifacts/test262-report-merged.json   /tmp/js2wasm-baselines/test262-report.json
+          cp shard-artifacts/test262-results-merged.jsonl /tmp/js2wasm-baselines/test262-results.jsonl
+          [ -f benchmarks/results/test262-editions.json ] && \
+            cp benchmarks/results/test262-editions.json /tmp/js2wasm-baselines/test262-editions.json || true
+          [ -f benchmarks/results/test262-categories.json ] && \
+            cp benchmarks/results/test262-categories.json /tmp/js2wasm-baselines/test262-categories.json || true
+
+          if [ -f /tmp/js2wasm-baselines/test262-current.before.jsonl ] && \
+            node scripts/compare-test262-artifact.mjs \
+              --type jsonl \
+              --baseline /tmp/js2wasm-baselines/test262-current.before.jsonl \
+              --candidate /tmp/js2wasm-baselines/test262-current.jsonl; then
+            echo "Baseline JSONL semantic content unchanged — skipping baselines repo push."
+            exit 0
+          fi
+
+          # Update runs/index.json (trend graph history)
           node -e "
           const fs = require('fs');
-          const report = JSON.parse(fs.readFileSync('benchmarks/results/test262-current.json', 'utf8'));
-          const indexPath = 'benchmarks/results/runs/index.json';
+          const report = JSON.parse(fs.readFileSync('/tmp/js2wasm-baselines/test262-current.json', 'utf8'));
+          const indexPath = '/tmp/js2wasm-baselines/runs/index.json';
+          fs.mkdirSync('/tmp/js2wasm-baselines/runs', { recursive: true });
           const idx = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : [];
           const entry = {
             timestamp: new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').substring(0, 15),
@@ -248,7 +566,6 @@ jobs:
             strict_total: (report.strict_summary || {}).total || 0,
             gitHash: '${{ github.sha }}'.substring(0, 8),
           };
-          // Deduplicate: skip if last entry has same pass+total (same compiler state)
           const last = idx[idx.length - 1];
           if (!last || last.pass !== entry.pass || last.total !== entry.total) {
             idx.push(entry);
@@ -259,25 +576,33 @@ jobs:
           }
           "
 
-      - name: Commit refreshed baseline
-        run: |
+          # Commit and push to baselines repo
+          cd /tmp/js2wasm-baselines
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f benchmarks/results/test262-current.jsonl benchmarks/results/test262-current.json benchmarks/results/test262-report.json benchmarks/results/test262-results.jsonl public/benchmarks/results/test262-report.json benchmarks/results/runs/index.json
+          git add -A
           if git diff --cached --quiet; then
-            echo "No baseline changes to commit."
-            exit 0
+            echo "No baseline changes to push."
+          else
+            git commit -m "chore(test262): refresh baseline — ${PASS}/${TOTAL} pass (${{ github.sha }})"
+            git push
           fi
+
+      # Step removed (2026-05-22): the post-baseline commit to main was blocked
+      # by the merge_queue ruleset ('Changes must be made through the merge queue').
+      # Baseline data now lives only in loopdive/js2wasm-baselines (pushed by
+      # the previous step). The landing page reads from there via raw URL.
+      # Local devs running `pnpm build:pages` etc. fetch the same data from
+      # the baselines repo at build time.
+
+
+      - name: Audit forced baseline refresh
+        if: github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES'
+        run: |
+          echo "FORCED baseline refresh by ${{ github.actor }} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.pass)")
           TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.total)")
-          # Sanity check: reject corrupt reports (e.g. double-appended JSONL producing 11 pass)
-          if [ "$PASS" -lt 1000 ] || [ "$TOTAL" -lt 40000 ]; then
-            echo "ABORT: report looks corrupt (pass=$PASS total=$TOTAL). Not committing."
-            exit 0
-          fi
-          git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
-          git pull --rebase origin main || true
-          git push
+          echo "::warning::FORCED baseline refresh by ${{ github.actor }} — pass=$PASS total=$TOTAL"
 
       - name: Trigger Pages deploy after baseline refresh
         if: success()
