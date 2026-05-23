@@ -2,7 +2,7 @@
 id: 1471
 sprint: 55
 title: "host-independence: eliminate JS host boxing/unboxing for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -565,3 +565,57 @@ Cross-issue ordering:
   (anyref slots, vtable-driven dispatch). #1472 also needs
   `$__to_primitive_wasm` to land fully.
 - #1474 is independent (Phase 1 is just a compile-time error).
+
+## Implementation Notes (Phase 1 — landed)
+
+The `--target wasi` path already had a complete Wasm-native implementation
+of the box / unbox / typeof / is_truthy helpers
+(`addUnionImportsAsNativeFuncs` in `src/codegen/index.ts`, built on a
+`__box_number_struct` WasmGC struct — the `$BoxedNumber` shape from the
+spec). It registers `__box_number`, `__unbox_number`, `__box_boolean`,
+`__unbox_boolean`, `__is_truthy`, and the `__typeof_*` family in
+`ctx.funcMap` so the ~45 existing call sites
+(`ctx.funcMap.get("__unbox_number")` etc.) resolve to in-module funcs with
+no `env::*` host import.
+
+Phase 1 reuses that infrastructure rather than duplicating it:
+
+1. **`addUnionImports` gate** widened from `ctx.wasi` to
+   `ctx.wasi || ctx.standalone` — standalone now routes to the native funcs.
+2. **`ensureLateImport`** (`src/codegen/expressions/late-imports.ts`) now
+   detects the union-helper names (`UNION_NATIVE_HELPER_NAMES`) and, under
+   no-JS-host mode, routes them through `addUnionImports` instead of adding
+   an unsatisfiable `env::*` import. This closes the ~45 direct
+   `ensureLateImport(ctx, "__box_number", …)` call sites (array-methods,
+   expressions/calls, property-access, etc.) that previously bypassed the
+   native path even under WASI. The cross-module cycle
+   (late-imports → index) is broken with a lazy `registerAddUnionImports`
+   binding in `shared.ts`, mirroring the existing `ensureAnyHelpers`
+   pattern.
+
+Net effect: `--target standalone` (and, as a bonus, `--target wasi`) emit
+**zero** `env::__box_*` / `__unbox_*` / `__typeof*` / `__is_truthy` host
+imports for `any`/number/boolean/typeof/if-truthy programs.
+
+### Deferred to follow-ups (documented in the plan above)
+
+- **i31ref SMI fast path** — the IR `Instr` union and binary emitter do not
+  yet carry `ref.i31` / `i31.get_s`; Phase 1 uses the `$BoxedNumber` struct
+  for every number (correctness-complete, perf optimisation deferred).
+- **`__to_primitive`, `__box_symbol`, full `__typeof`-string result** —
+  these are separate import names not covered by `addUnionImports` and are
+  scoped to later phases per the issue's dependency ordering.
+
+## Test Results
+
+`tests/issue-1471.test.ts` — 8/8 pass:
+- integer / negative / float box+unbox round-trip through `any` (standalone)
+- truthy / falsy `any` in if-condition (native `__is_truthy`)
+- mixed `any` program emits **zero** box/unbox/typeof host imports
+- control: default JS-host mode still emits `__box_number`/`__unbox_number`
+
+Regression spot-check (vitest): `issue-865-wasi-polyfill`,
+`issue-1470-standalone-string-imports`, `native-strings-standalone`,
+`typeof-expression`, `union-narrowing`, `call-arg-type-coercion` — all
+green (34 tests). All standalone modules instantiate with an empty import
+object `{}`.
