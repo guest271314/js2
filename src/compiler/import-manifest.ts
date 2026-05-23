@@ -146,6 +146,12 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Node builtin modules (#1044) — module-shaped imports returning the whole module object
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
+  // #1501 — Timer host imports.
+  if (name === "__timer_set_timeout") return { type: "timer_set", mode: "timeout" };
+  if (name === "__timer_set_interval") return { type: "timer_set", mode: "interval" };
+  if (name === "__timer_clear_timeout") return { type: "timer_clear", mode: "timeout" };
+  if (name === "__timer_clear_interval") return { type: "timer_clear", mode: "interval" };
+
   // #1492 — Node builtin function host imports (e.g. `crypto.randomUUID`).
   // Format: `__nodefn__<module>__<fnName>`. Both module and fnName must be
   // non-empty; we split on the first `__` boundary inside the payload.
