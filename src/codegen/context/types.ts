@@ -47,6 +47,8 @@ export interface CodegenOptions {
   wasiNodeFsFuncs?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
+  /** JSX runtime import detected during preprocessing (#1540). */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 /** Info about an externally declared class. */
@@ -620,6 +622,20 @@ export interface CodegenContext {
   wasiFdCloseIdx: number;
   wasiPollOneoffIdx?: number;
   wasiBumpPtrGlobalIdx: number;
+  /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
+  wasiClockTimeGetIdx?: number;
+  /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */
+  wasiPendingFdWriteHelper?: boolean;
+  /** (#1483 + #1493) Pending flag — emit `__wasi_write_string_stderr` after lib-globals scan. */
+  wasiPendingConsoleStderrHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_write_file_sync` after lib-globals scan. */
+  wasiPendingPathOpenHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
+  wasiClockHelpersPending?: boolean;
+  /** (#1483 + #1481) Pending flag — emit `__wasi_read_stdin_all` after lib-globals scan. */
+  wasiPendingFdReadHelper?: boolean;
+  /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
+  wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
@@ -642,6 +658,16 @@ export interface CodegenContext {
   ensureStructPending: Set<ts.Type>;
   /** Node builtin modules registered as externref globals (#1044) */
   nodeBuiltinGlobals: Map<string, number>; // localName → funcIdx
+  /**
+   * JSX runtime import detected during preprocessing (#1540). The codegen
+   * intercepts call expressions whose callee identifier matches one of the
+   * recorded local names (`localJsx`/`localJsxs`/`localJsxDev`) and routes
+   * them to the matching `__jsx_runtime_*` host import. The `Fragment`
+   * binding is exposed as a no-arg externref-returning function under
+   * `nodeBuiltinGlobals` so identifier resolution treats it like any
+   * declared externref.
+   */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 export type { SourcePos };

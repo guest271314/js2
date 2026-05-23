@@ -1,12 +1,14 @@
 ---
 id: 747
 title: "Escape analysis for stack allocation"
-status: blocked
+status: ready
 created: 2026-03-22
-updated: 2026-04-28
+updated: 2026-05-23
+sprint: 55
 priority: medium
 feasibility: hard
 goal: performance
+depends_on: [1586, 1587]
 files:
   src/codegen/index.ts:
     new:

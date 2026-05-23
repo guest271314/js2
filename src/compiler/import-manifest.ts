@@ -137,6 +137,19 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Node builtin modules (#1044) — module-shaped imports returning the whole module object
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
 
+  // JSX runtime imports (#1540) — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV` after
+  // TypeScript desugars JSX with `jsx: react-jsx`. The host binding is
+  // either a user-supplied `deps.jsxRuntime` or a built-in React-shaped
+  // fallback. The `specifier` is recorded on the WasmModule by codegen
+  // (see `mod.jsxImportSource`); we default to `"react/jsx-runtime"`.
+  if (name.startsWith("__jsx_runtime_")) {
+    const method = name.slice("__jsx_runtime_".length);
+    const specifier = mod.jsxImportSource ?? "react/jsx-runtime";
+    if (method === "jsx" || method === "jsxs" || method === "Fragment" || method === "jsxDEV") {
+      return { type: "jsx_runtime", method, specifier };
+    }
+  }
+
   // Declared globals (like `declare const document: Document`)
   if (name.startsWith("global_")) return { type: "declared_global", name: name.slice(7) };
 

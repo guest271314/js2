@@ -151,6 +151,7 @@ export function createCodegenContext(
     funcConstructorMap: new Map(),
     ensureStructPending: new Set(),
     nodeBuiltinGlobals: new Map(),
+    jsxRuntime: options?.jsxRuntime,
   };
 
   getOrRegisterVecType(ctx, "externref", { kind: "externref" });
