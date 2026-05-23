@@ -64,7 +64,11 @@ jobs:
           # the budget test so the ratchet check accepts the growth.
           ALLOWLIST_GROW: ${{ contains(github.event.pull_request.body, '[allowlist-grow]') && '1' || '' }}
         run: |
-          pnpm test -- tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
+          # `pnpm test --` doesn't forward args correctly — pnpm consumes the
+          # trailing test filenames and vitest ends up running the entire suite
+          # (OOMs after ~9 min). Invoke vitest directly to scope it to the 2 gate
+          # files. See PR #432 investigation 2026-05-23.
+          pnpm exec vitest run tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
 
       - name: Fetch runs/index.json from baselines repo
         if: github.event_name == 'push'
