@@ -1142,9 +1142,18 @@ export function destructureParamArray(
       // Pre-allocate all binding locals
       ensureBindingLocals(ctx, fctx, pattern);
 
+      // Pre-warm the null-guard message before populating the detached
+      // `destructInstrs` buffer — see the vec path below for the rationale
+      // (#1553d). Avoids a post-hoc global-index fixup missing the buffer.
+      if (isNullable && pattern.elements.length > 0) {
+        addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
+      }
       const savedBody = fctx.body;
       const destructInstrs: Instr[] = [];
       if (isNullable) {
+        // Keep `destructInstrs` reachable to index fixups while it is the
+        // active emission buffer (#1553d — see vec path note below).
+        fctx.savedBodies.push(destructInstrs);
         fctx.body = destructInstrs;
       }
 
@@ -1206,6 +1215,7 @@ export function destructureParamArray(
 
       // Close null guard — throw TypeError when null (JS spec)
       if (isNullable) {
+        fctx.savedBodies.pop();
         fctx.body = savedBody;
         if (destructInstrs.length > 0) {
           // When param is null (e.g. empty array cast failed), apply element defaults
@@ -1263,9 +1273,30 @@ export function destructureParamArray(
   // Always treat as nullable — callers may pass empty/mismatched arrays that
   // compile to ref.null even when the declared type is non-nullable ref (#852).
   const isNullable = paramType.kind === "ref_null" || paramType.kind === "ref";
+  // Pre-register the null-guard TypeError message so that adding it does not
+  // trigger a global-index fixup AFTER the (detached) `destructInstrs` buffer
+  // is populated (#1553d). `buildDestructureNullThrow` calls
+  // `addStringConstantGlobal`, which inserts an import global and shifts every
+  // existing `global.get`/`global.set` index. When that fired during the
+  // null-guard close, `destructInstrs` was neither `fctx.body` nor in
+  // `fctx.savedBodies` (it lives only inside the not-yet-pushed `if.else`), so
+  // a default like `[x = g]` that reads a module global kept a stale index —
+  // it pointed at the freshly-added string-constant import (externref) instead
+  // of the intended f64 global. Warming the constant up front makes the close
+  // a no-op for global indices.
+  if (isNullable && pattern.elements.length > 0) {
+    addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
+  }
   const savedBody = fctx.body;
   const destructInstrs: Instr[] = [];
   if (isNullable) {
+    // Keep `destructInstrs` reachable to global/late-import index fixups while
+    // it is the active emission buffer. `fixupModuleGlobalIndices` and
+    // `shiftLateImportIndices` walk `ctx.currentFunc.body` (= the restored
+    // outer `savedBody`) plus `savedBodies`; a raw `fctx.body = destructInstrs`
+    // swap leaves the new buffer invisible to those walks, so a function-call
+    // default (`[x = f()]`, where `f` adds a late import) corrupts indices.
+    fctx.savedBodies.push(destructInstrs);
     fctx.body = destructInstrs;
   }
 
@@ -1462,6 +1493,19 @@ export function destructureParamArray(
     // Only allocate if not already pre-allocated by ensureBindingLocals
     if (!fctx.localMap.has(localName)) {
       allocLocal(fctx, localName, elemType);
+    } else if (isDecl && elemType.kind === "externref" && !!element.initializer) {
+      // #1553d — decl-mode parity with the retired externref-array path, which
+      // allocated each binding local with the *element* type (externref) rather
+      // than the TS-narrowed type. For an externref vec element the TS type can
+      // narrow to a numeric (`let [x] = [null]` → `x: number | null`), and
+      // coercing the externref into that numeric local unboxes a genuine `null`
+      // to `0`, losing the null identity (`x === null` must hold). Re-type the
+      // pre-allocated local to externref so the value survives unchanged. Param
+      // mode keeps its fixed signature type and is untouched.
+      const existing = getLocalType(fctx, fctx.localMap.get(localName)!);
+      if (existing && existing.kind !== "externref") {
+        allocLocal(fctx, localName, { kind: "externref" });
+      }
     }
     const localIdx = fctx.localMap.get(localName)!;
     fctx.body.push({ op: "local.get", index: paramIdx });
@@ -1487,6 +1531,7 @@ export function destructureParamArray(
   // Close null guard — throw TypeError when null (JS spec)
   // Skip for empty `[]` patterns (#225).
   if (isNullable) {
+    fctx.savedBodies.pop();
     fctx.body = savedBody;
     if (destructInstrs.length > 0 && pattern.elements.length > 0) {
       fctx.body.push({ op: "local.get", index: paramIdx });
