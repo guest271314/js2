@@ -2,7 +2,7 @@
 id: 1473
 sprint: 55
 title: "host-independence: eliminate JS host error/exception ops for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 priority: high
 feasibility: medium
@@ -496,3 +496,60 @@ Cross-issue ordering:
   WASI mode (uses the native-string bridge), so the gate is more
   about consistency than correctness.
 - #1473 is independent of #1472; can land in parallel.
+
+## Test Results (2026-05-23)
+
+Implemented the no-JS-host throw/catch/instanceof path for `--target standalone`
+(and extended the existing `--target wasi` Error infra to standalone). A
+`noJsHost(ctx) = ctx.wasi || ctx.standalone` predicate gates all changes; the
+JS-host (`gc`) code paths are untouched.
+
+Changes:
+- `expressions/helpers.ts`: added `noJsHost()` + `emitThrowReferenceError()`;
+  `emitThrowTypeError()` now registers the in-module `__new_TypeError`
+  constructor in noJsHost mode (so `ensureLateImport` resolves it without
+  adding a host import).
+- `expressions/identifiers.ts`: `emitLocalTdzCheck`, `emitStaticTdzThrow`, and
+  the undeclared-identifier site now build a ReferenceError instance via
+  `emitThrowReferenceError` in noJsHost mode. Added a Wasm-native
+  `e instanceof TypeError/Error/...` path that reads the `$Error_struct` `$tag`
+  field (no `__instanceof` host import) when the RHS is a builtin Error name.
+- `destructuring-params.ts` / `statements/destructuring.ts`: destructure-null
+  TypeError now uses the in-module constructor in noJsHost mode.
+- `expressions/calls.ts` / `string-ops.ts`: BigInt/Symbol→Number TypeError
+  throws use `emitThrowTypeError` in noJsHost mode.
+- `statements/exceptions.ts`: catch-with-binding omits the `catch_all` +
+  `__get_caught_exception` branch in noJsHost mode (dead code — all throws
+  come through the `$exc` tag; Wasm traps are uncatchable). The
+  finally-without-catch `catch_all` (finally + rethrow) is host-independent
+  and retained.
+- `declarations.ts`, `expressions/new-super.ts`, `property-access.ts`:
+  extended the `ctx.wasi` Error-constructor / `err.message` struct.get gating
+  to `ctx.wasi || ctx.standalone`.
+
+Validation (`tsc --noEmit` clean):
+- New `tests/issue-1473.test.ts` — 8/8 pass. Confirms a standalone build emits
+  none of the banned imports (`__throw_type_error`, `__throw_reference_error`,
+  `__get_caught_exception`, `__new_*`) and that, under Node WebAssembly with
+  only generic non-error stubs (`__box_number`, `__extern_get`), throw/catch
+  binds a real TypeError, `e instanceof TypeError`, subtype discrimination
+  (`RangeError` ∉ `TypeError`), `instanceof Error` for all subtypes, and
+  nested try/catch rethrow all behave per spec.
+- `tests/issue-1104-phase1.test.ts`, `issue-1104-phase2.test.ts`,
+  `issue-1128-dstr-tdz.test.ts` — 28/28 pass (no regression).
+- Exception/TDZ/instanceof suite (`try-catch`, `try-catch-throw`, `instanceof`,
+  `tdz-reference-error`, `issue-723-tdz`, `issue-728-null-typeerror`,
+  `null-property-access-throws`, `global-index-shift-trycatch`): 31 pass / 8
+  fail — IDENTICAL to the origin/main baseline (the 8 failures are
+  pre-existing default-mode equivalence-harness mismatches, not introduced by
+  this change).
+
+Known limitations (documented, out of scope / deferred):
+- `.stack` is left empty (spec note: no engine cooperation in standalone).
+- Stack-overflow surfaces as a wasmtime trap, not a catchable RangeError.
+- `e.message` still uses the `__extern_get` host import when the catch binding
+  is `any` (not banned by the acceptance criteria); when the catch variable is
+  typed as an Error subtype the existing struct.get fast path applies.
+- A `class extends TypeError {}` declaration triggers a pre-existing standalone
+  `__str_flatten` validation issue in the string backend — unrelated to
+  error/exception codegen.

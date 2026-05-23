@@ -1197,7 +1197,9 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     // constructors still emit host imports (they may resolve via user-supplied
     // imports at instantiation time, or fail loudly if missing). JS-host mode
     // is unchanged.
-    if (ctx.wasi && isWasiErrorName(name)) {
+    // #1473 — standalone mode has no JS host either, so it needs the same
+    // in-module Error constructors as WASI mode.
+    if ((ctx.wasi || ctx.standalone) && isWasiErrorName(name)) {
       emitWasiErrorConstructor(ctx, name, argCount);
       continue;
     }

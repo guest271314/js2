@@ -1489,7 +1489,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // instead of a `env.__new_<Name>` host import that would leave the
       // module unsatisfiable at instantiation time. JS-host mode is unchanged.
       const importName = `__new_${ctorName}`;
-      if (ctx.wasi && isWasiErrorName(ctorName)) {
+      // #1473 — standalone mode also has no JS host; build the Error in-module.
+      if ((ctx.wasi || ctx.standalone) && isWasiErrorName(ctorName)) {
         emitWasiErrorConstructor(ctx, ctorName, 1);
         const internalFuncIdx = ctx.funcMap.get(importName);
         if (internalFuncIdx !== undefined) {

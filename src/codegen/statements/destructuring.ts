@@ -20,6 +20,7 @@ import {
 import { resolveComputedKeyExpression } from "../literals.js";
 import { type BindingKind, buildDestructureNullThrow, destructureParamObject } from "../destructuring-params.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
+import { emitWasiErrorConstructor } from "../registry/error-types.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -522,13 +523,22 @@ export function compileObjectDestructuring(
     return;
   }
 
-  // Pre-trigger the late import shift for the null-throw host import that the
-  // helper's buildDestructureNullThrow will request. If we don't, the helper
-  // builds its else-branch (destructInstrs) BEFORE the import is added, and
-  // those instructions retain stale funcIdx values that the shift can't reach
-  // (destructInstrs is not yet attached to fctx.body when the shift fires).
-  ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
-  flushLateImportShifts(ctx, fctx);
+  // Pre-trigger the function-index resolution for the throw that the helper's
+  // buildDestructureNullThrow will emit. If we don't, the helper builds its
+  // else-branch (destructInstrs) BEFORE the function index is finalized, and
+  // those instructions retain stale funcIdx values that a later shift can't
+  // reach (destructInstrs is not yet attached to fctx.body when the shift fires).
+  //
+  // #1473 — in no-JS-host mode the helper uses the in-module `__new_TypeError`
+  // constructor instead of the `__throw_type_error` host import. Register that
+  // constructor now (it lands in funcMap as an internal function, after all
+  // current imports, so it introduces no late-import index shift).
+  if (ctx.wasi || ctx.standalone) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+  } else {
+    ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+  }
 
   // Stash RHS in a temp local matching the resolved struct type so the helper
   // can use struct.get directly. Use the resolved structTypeIdx (which may have
