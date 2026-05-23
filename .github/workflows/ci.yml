@@ -21,26 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Verify origin/main is merged into branch
+      - name: Skip explicit base-ancestry check (handled by simulated merge / queue)
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: |
-          git fetch origin main
-          if ! git merge-base --is-ancestor origin/main HEAD; then
-            missing_non_skip=$(git log HEAD..origin/main --oneline | grep -v '\[skip ci\]' | wc -l)
-            if [ "$missing_non_skip" -eq 0 ]; then
-              echo "✓ origin/main only has [skip ci] commits not in branch (auto-generated metadata, safe to skip)"
-              git log HEAD..origin/main --oneline
-            else
-              echo "::error::Branch is missing non-[skip ci] commits from origin/main. Run 'git merge origin/main' and push again."
-              exit 1
-            fi
-          else
-            echo "✓ origin/main is an ancestor of this branch"
-          fi
+          # GitHub Actions checks out refs/pull/N/merge (a simulated merge of
+          # the PR's HEAD into the PR's BASE) for pull_request, and the queue
+          # ref for merge_group. Both inherently include the base in history.
+          # The previous explicit "git merge-base --is-ancestor origin/main HEAD"
+          # check had a TOCTOU race (false positives when main moved between
+          # checkout and the check), and using PR base.sha tripped over the
+          # shallow checkout's missing ancestry graph. Both contexts already
+          # guarantee base-ancestry by construction — no extra check needed.
+          echo "✓ ${{ github.event_name }} ref already includes base by construction"
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 25
 
       - name: Setup pnpm via Corepack
         run: |
@@ -81,15 +77,23 @@ jobs:
             echo "No private planning artifacts in this checkout; skipping regeneration."
           fi
 
-      - name: Commit regenerated planning artifacts
-        if: github.event_name == 'push'
-        run: |
-          if [ -d plan ] || [ -d dashboard ]; then
-            if ! git diff --quiet -- plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add -f plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json
-              git commit -m "chore(planning-artifacts): regen after merge [skip ci]"
-              git push
-            fi
-          fi
+      # DISABLED (post #491): The main branch ruleset enforces the merge
+      # queue, so direct `git push` from this workflow fails with
+      # `GH013: Changes must be made through the merge queue`. The whole
+      # auto-commit step is commented out; the typecheck/lint/format/IR
+      # gates above still RUN on every push and PR — only the
+      # auto-regeneration of planning artifacts back into main is disabled.
+      # Planning artifacts are regenerated locally by tech-lead-driven
+      # PRs (`pnpm run build:planning-artifacts`) instead.
+      # - name: Commit regenerated planning artifacts
+      #   if: github.event_name == 'push'
+      #   run: |
+      #     if [ -d plan ] || [ -d dashboard ]; then
+      #       if ! git diff --quiet -- plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json; then
+      #         git config user.name "github-actions[bot]"
+      #         git config user.email "github-actions[bot]@users.noreply.github.com"
+      #         git add -f plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json
+      #         git commit -m "chore(planning-artifacts): regen after merge [skip ci]"
+      #         git push
+      #       fi
+      #     fi

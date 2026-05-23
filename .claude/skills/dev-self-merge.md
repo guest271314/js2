@@ -5,18 +5,49 @@ description: Algorithmic gate for self-merging a PR. Reads CI JSON, applies 4 ha
 
 # /dev-self-merge \<N\>
 
-## Waiting for CI — how to poll
+## Waiting for CI — synchronous, in-context
 
-The CI feed commits `pr-<N>.json` to **origin/main** (not your branch). Your
-worktree never sees it until you fetch. While waiting for CI, poll with:
+CI wall time is now ~2 min (115-shard parallel, sort-by-duration scheduling,
+parallel gate+shards — see PRs #503, #505, #506). The dev agent **blocks
+in-context** waiting for CI rather than terminating and handing off. Idle
+Sonnet polling is nearly free, and on-the-spot recovery from drift or CI
+failure with full PR context beats the complexity of fire-and-forget.
+
+```bash
+# Watch the run live (preferred — exits when the run finishes):
+run_id=$(gh pr view <N> --json statusCheckRollup \
+  --jq '[.statusCheckRollup[] | select(.detailsUrl) | .detailsUrl][0]' \
+  | grep -oE 'runs/[0-9]+' | cut -d/ -f2)
+gh run watch "$run_id" --exit-status
+
+# Or poll every 30s with a timeout:
+deadline=$(( $(date +%s) + 1200 ))   # 20 min hard cap
+while :; do
+  pending=$(gh pr checks <N> --json state \
+    --jq '[.[] | select(.state == "PENDING" or .state == "IN_PROGRESS")] | length')
+  [ "$pending" = "0" ] && break
+  [ "$(date +%s)" -gt "$deadline" ] && { echo "CI > 20 min — escalate"; exit 2; }
+  sleep 30
+done
+```
+
+After the run exits:
+
+| Outcome | Action |
+|---|---|
+| **All required checks green** | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) |
+| **Drift** (mergeable_state becomes `BEHIND` while waiting) | `git fetch origin && git merge origin/main` in the worktree, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI |
+| **CI failure** (any required check `FAILURE`) | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI |
+| **Long wait** (>10 min) | Emit a `TaskUpdate` noting the unusual wait but keep waiting |
+| **Very long wait** (>20 min) | Escalate to tech lead |
+
+The CI feed `pr-<N>.json` still drives the merge gate below — fetch it once
+CI completes:
 
 ```bash
 git fetch origin
 git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null
 ```
-
-Run this every few minutes. When output appears and the `head_sha` matches
-`git rev-parse HEAD`, CI is done — proceed to Step 0 below.
 
 Do NOT `git merge origin/main` just to check — `git show` reads the remote ref
 without touching your working tree.
@@ -105,6 +136,38 @@ is null (older CI feed).
 Field priority (use the first non-null):
 `regressions_wasm_change` → `regressions_real` → `regressions`
 
+### Step 1b — compile_timeout flake filter
+
+A `pass → compile_timeout` transition is **runner-load noise** unless the
+underlying compilation takes meaningfully long. Verified during the 2026-05-21
+post-wave investigation: 23 of 27 "regressions" turned out to be timeouts on
+tests that compile in <500ms locally. See
+`plan/issues/sprints/53/post-wave-regression-investigation.md` for the full
+investigation (headline number overstated ~6×).
+
+If `regressions_wasm_change` is null (older CI feed) or if the JSON has a
+breakdown by transition kind, the dev should subtract `pass → compile_timeout`
+transitions where `baseline_compile_ms < 5000` from the regression count
+before applying criterion 2.
+
+The cleanest field to use is `regressions_wasm_change` (introduced in #1222) —
+it already excludes `compile_timeout` AND byte-identical-binary flips. If the
+feed has it, prefer it. The filter chain stays:
+
+`regressions_wasm_change` → `regressions_real` → `regressions`
+
+If the CI feed somehow surfaces a `regressions` count that includes
+compile_timeout flakes (older format), and the feed has a `compile_timeout`
+field, compute:
+
+```bash
+flake=$(jq -r '.compile_timeout // 0' .claude/ci-status/pr-<N>.json)
+R_real=$((regressions - flake))
+```
+
+Use `R_real` for criterion 2. Document this in your ESCALATE message if
+relevant ("8 of 12 regressions are compile_timeout flake; effective R=4").
+
 ## Step 2 — SHA check
 
 ```bash
@@ -142,12 +205,17 @@ If `regressions` is `null` in the feed (older CI format without per-test trackin
 
 ## Step 4 — bucket regressions (only if regressions > 0)
 
-Download the merged report artifact:
+Download the merged report artifact and ensure the baseline JSONL is cached
+locally (#1528 — the baseline is no longer committed to the repo; it's
+fetched on demand from `loopdive/js2wasm-baselines`):
 
 ```bash
 run_id=$(jq -r '.run_url' .claude/ci-status/pr-<N>.json | grep -oE 'runs/[0-9]+' | cut -d/ -f2)
 mkdir -p output/sm-<N>
 gh run download "$run_id" -n test262-merged-report -D output/sm-<N>
+
+# Fetch the baseline JSONL to .test262-cache/ if not already present.
+node scripts/fetch-baseline-jsonl.mjs
 ```
 
 Bucket by path prefix:
@@ -158,7 +226,7 @@ import json
 from collections import Counter
 
 base = {}
-with open('benchmarks/results/test262-current.jsonl') as f:
+with open('.test262-cache/test262-current.jsonl') as f:
     for line in f:
         try: d = json.loads(line); base[d['file']] = d['status']
         except: pass
@@ -180,24 +248,47 @@ EOF
 
 Any bucket with count > 50 → **ESCALATE** with the bucket name and count (criterion 3 above).
 
-## Step 5 — merge
+## Step 5 — queue for merge
 
-All criteria passed. Run:
+All criteria passed. **Add the PR to the merge queue** (do NOT use `--admin` direct merge — main is now protected by a merge queue ruleset):
 
 ```bash
-gh pr merge <N> --merge --admin \
-  --body "Self-merged. net_per_test=+$(jq .net_per_test .claude/ci-status/pr-<N>.json) ($(jq .improvements .claude/ci-status/pr-<N>.json) improvements, $(jq .regressions .claude/ci-status/pr-<N>.json) regressions). Criteria: /dev-self-merge."
+gh pr merge <N> --merge --auto \
+  --body "Self-merged via queue. net_per_test=+$(jq .net_per_test .claude/ci-status/pr-<N>.json) ($(jq .improvements .claude/ci-status/pr-<N>.json) improvements, $(jq .regressions .claude/ci-status/pr-<N>.json) regressions). Criteria: /dev-self-merge."
 ```
 
-Then:
-1. Set `status: done` in the issue file:
+The `--auto` flag enqueues the PR. GitHub will:
+1. Place the PR on a temp branch (`gh-readonly-queue/main/pr-<N>-...`)
+2. Re-run the required checks (`cheap gate`, `merge shard reports`, `quality`) against that merged state via the `merge_group` event
+3. Fast-forward main if checks pass — usually within minutes of CI completing
+4. Trigger `auto-refresh-prs.yml` after the merge, which pushes a fresh `git merge origin/main` to every other open PR branch
+
+**Once queued, your job is done.** Do not wait for the actual merge. Proceed immediately:
+1. Optimistically set `status: done` in the issue file (queue rejections are rare — the gate already verified what the queue re-verifies):
    ```bash
    issue_num=$(echo "<branch>" | grep -oE '[0-9]+' | head -1)
    file=$(find /workspace/plan/issues -name "${issue_num}-*.md" | head -1)
    sed -i "s/^status: .*/status: done/" "$file"
    ```
 2. `TaskUpdate taskId=<your-task> status=completed`
-3. `TaskList` → claim next unowned task
+3. Remove your worktree: `git worktree remove /workspace/.claude/worktrees/<branch>`
+4. `TaskList` → claim next unowned task (or message tech lead if empty)
+
+### If the queue rejects your PR
+
+GitHub will comment on the PR if the final queue checks fail (rare — would mean something flipped between your CI run and the queue's re-run, likely main moved). In that case:
+- The auto-refresh workflow may have already pushed a merge of main into your branch — fetch and review
+- Re-evaluate /dev-self-merge against the new CI run
+- If still good, re-queue with `gh pr merge <N> --merge --auto`
+
+### Admin direct-merge — only when
+
+Use `gh pr merge <N> --merge --admin` (bypassing the queue) only when:
+- The change is workflow-only / CI-only and the queue ruleset checks don't apply
+- Tech lead explicitly authorizes a hotfix bypass
+- The queue itself is broken and needs unblocking
+
+Set `GATE_BYPASS=1` if the local pre-commit hook blocks because `pr-<N>.json` isn't present. **Tech-lead use only.**
 
 ## What ESCALATE means
 
