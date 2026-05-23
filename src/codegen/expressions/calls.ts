@@ -968,6 +968,52 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // (#1540) JSX runtime call intercept — `_jsx(type, props, key?)` /
+  // `_jsxs(type, props, key?)` / `_jsxDEV(...)`. TypeScript emits these
+  // automatically when `jsx: react-jsx` is set; preprocessImports recorded
+  // the actual local-binding names in `ctx.jsxRuntime`. We route the call
+  // to the matching `__jsx_runtime_*` host import (registered in
+  // `registerJsxRuntimeImports`), passing args as externref.
+  if (ctx.jsxRuntime && ts.isIdentifier(expr.expression)) {
+    const name = expr.expression.text;
+    let method: "jsx" | "jsxs" | "jsxDEV" | undefined;
+    let arity = 3;
+    if (ctx.jsxRuntime.localJsx === name) {
+      method = "jsx";
+      arity = 3;
+    } else if (ctx.jsxRuntime.localJsxs === name) {
+      method = "jsxs";
+      arity = 3;
+    } else if (ctx.jsxRuntime.localJsxDev === name) {
+      method = "jsxDEV";
+      arity = 6;
+    }
+    if (method) {
+      const importName = `__jsx_runtime_${method}`;
+      const ext: ValType = { kind: "externref" };
+      const params: ValType[] = Array.from({ length: arity }, () => ext);
+      const funcIdx = ensureLateImport(ctx, importName, params, [ext]);
+      if (funcIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        // Compile up to `arity` args as externref, padding shortfalls with
+        // ref.null.extern. Excess args (rare) are evaluated and dropped.
+        const argCount = Math.min(arity, expr.arguments.length);
+        for (let i = 0; i < argCount; i++) {
+          compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+        }
+        for (let i = argCount; i < arity; i++) {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        for (let i = arity; i < expr.arguments.length; i++) {
+          const t = compileExpression(ctx, fctx, expr.arguments[i]!);
+          if (t) fctx.body.push({ op: "drop" });
+        }
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // #1481: readStdin() builtin under --target wasi → call __wasi_read_stdin_all
   if (
     ctx.wasi &&

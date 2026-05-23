@@ -47,6 +47,8 @@ export interface CodegenOptions {
   wasiNodeFsFuncs?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
+  /** JSX runtime import detected during preprocessing (#1540). */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 /** Info about an externally declared class. */
@@ -641,6 +643,16 @@ export interface CodegenContext {
   ensureStructPending: Set<ts.Type>;
   /** Node builtin modules registered as externref globals (#1044) */
   nodeBuiltinGlobals: Map<string, number>; // localName → funcIdx
+  /**
+   * JSX runtime import detected during preprocessing (#1540). The codegen
+   * intercepts call expressions whose callee identifier matches one of the
+   * recorded local names (`localJsx`/`localJsxs`/`localJsxDev`) and routes
+   * them to the matching `__jsx_runtime_*` host import. The `Fragment`
+   * binding is exposed as a no-arg externref-returning function under
+   * `nodeBuiltinGlobals` so identifier resolution treats it like any
+   * declared externref.
+   */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 export type { SourcePos };
