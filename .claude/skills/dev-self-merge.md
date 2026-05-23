@@ -5,18 +5,49 @@ description: Algorithmic gate for self-merging a PR. Reads CI JSON, applies 4 ha
 
 # /dev-self-merge \<N\>
 
-## Waiting for CI — how to poll
+## Waiting for CI — synchronous, in-context
 
-The CI feed commits `pr-<N>.json` to **origin/main** (not your branch). Your
-worktree never sees it until you fetch. While waiting for CI, poll with:
+CI wall time is now ~2 min (115-shard parallel, sort-by-duration scheduling,
+parallel gate+shards — see PRs #503, #505, #506). The dev agent **blocks
+in-context** waiting for CI rather than terminating and handing off. Idle
+Sonnet polling is nearly free, and on-the-spot recovery from drift or CI
+failure with full PR context beats the complexity of fire-and-forget.
+
+```bash
+# Watch the run live (preferred — exits when the run finishes):
+run_id=$(gh pr view <N> --json statusCheckRollup \
+  --jq '[.statusCheckRollup[] | select(.detailsUrl) | .detailsUrl][0]' \
+  | grep -oE 'runs/[0-9]+' | cut -d/ -f2)
+gh run watch "$run_id" --exit-status
+
+# Or poll every 30s with a timeout:
+deadline=$(( $(date +%s) + 1200 ))   # 20 min hard cap
+while :; do
+  pending=$(gh pr checks <N> --json state \
+    --jq '[.[] | select(.state == "PENDING" or .state == "IN_PROGRESS")] | length')
+  [ "$pending" = "0" ] && break
+  [ "$(date +%s)" -gt "$deadline" ] && { echo "CI > 20 min — escalate"; exit 2; }
+  sleep 30
+done
+```
+
+After the run exits:
+
+| Outcome | Action |
+|---|---|
+| **All required checks green** | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) |
+| **Drift** (mergeable_state becomes `BEHIND` while waiting) | `git fetch origin && git merge origin/main` in the worktree, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI |
+| **CI failure** (any required check `FAILURE`) | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI |
+| **Long wait** (>10 min) | Emit a `TaskUpdate` noting the unusual wait but keep waiting |
+| **Very long wait** (>20 min) | Escalate to tech lead |
+
+The CI feed `pr-<N>.json` still drives the merge gate below — fetch it once
+CI completes:
 
 ```bash
 git fetch origin
 git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null
 ```
-
-Run this every few minutes. When output appears and the `head_sha` matches
-`git rev-parse HEAD`, CI is done — proceed to Step 0 below.
 
 Do NOT `git merge origin/main` just to check — `git show` reads the remote ref
 without touching your working tree.
