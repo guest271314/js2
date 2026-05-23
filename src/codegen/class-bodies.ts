@@ -944,7 +944,22 @@ export function compileClassBodies(
 
         // Build the "then" block: compile default expression, local.set
         const savedBody = pushBody(fctx);
-        const ctorDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+        // (#1451) For array binding patterns with externref param, force the
+        // default's array literals to compile as vec (not tuple) — same
+        // rationale as the method site below. See function-body.ts:701.
+        const ctorIsArrayPatternExternref = ts.isArrayBindingPattern(param.name) && paramType.kind === "externref";
+        const ctorPrevForceVec = (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec;
+        if (ctorIsArrayPatternExternref) {
+          (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = true;
+        }
+        let ctorDfltType: ValType | null;
+        try {
+          ctorDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+        } finally {
+          if (ctorIsArrayPatternExternref) {
+            (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = ctorPrevForceVec;
+          }
+        }
         if (ctorDfltType && !valTypesMatch(ctorDfltType, paramType)) {
           coerceType(ctx, fctx, ctorDfltType, paramType);
         }
@@ -1311,7 +1326,26 @@ export function compileClassBodies(
         if (dstrNullDefault) {
           for (const ins of buildDestructureNullThrow(ctx, fctx)) fctx.body.push(ins);
         } else {
-          const methDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+          // (#1451) For array binding patterns with externref param, force the
+          // default's array literals to compile as vec (not tuple) so the
+          // destructure path can iterate them via __array_from_iter. Without
+          // this, `method([_a, _b, ...x] = [1, 2])` produces a tuple struct
+          // for the default, and the rest-element handler's array.copy traps
+          // when it casts the tuple to an array. Mirrors function-body.ts:701
+          // (function-decl) and closures.ts:935 (object-literal methods).
+          const isArrayPatternExternref = ts.isArrayBindingPattern(param.name) && paramType.kind === "externref";
+          const prevForceVec = (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec;
+          if (isArrayPatternExternref) {
+            (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = true;
+          }
+          let methDfltType: ValType | null;
+          try {
+            methDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+          } finally {
+            if (isArrayPatternExternref) {
+              (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = prevForceVec;
+            }
+          }
           if (methDfltType && !valTypesMatch(methDfltType, paramType)) {
             coerceType(ctx, fctx, methDfltType, paramType);
           }
@@ -1634,7 +1668,22 @@ export function compileClassBodies(
 
         // Build the "then" block: compile default expression, local.set
         const savedBody = pushBody(fctx);
-        const getSetDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+        // (#1451) For array binding patterns with externref param, force the
+        // default's array literals to compile as vec (not tuple). See
+        // function-body.ts:701 / method site above for full rationale.
+        const setterIsArrayPatternExternref = ts.isArrayBindingPattern(param.name) && paramType.kind === "externref";
+        const setterPrevForceVec = (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec;
+        if (setterIsArrayPatternExternref) {
+          (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = true;
+        }
+        let getSetDfltType: ValType | null;
+        try {
+          getSetDfltType = compileExpression(ctx, fctx, param.initializer, paramType);
+        } finally {
+          if (setterIsArrayPatternExternref) {
+            (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = setterPrevForceVec;
+          }
+        }
         if (getSetDfltType && !valTypesMatch(getSetDfltType, paramType)) {
           coerceType(ctx, fctx, getSetDfltType, paramType);
         }
@@ -1713,13 +1762,31 @@ export function compileSuperCall(
     const args = callExpr.arguments;
     const hasSpread = args.some((a) => ts.isSpreadElement(a));
     if (hasSpread || args.length === 0) {
-      // Spread or zero-arg: pass null (best-effort; #1366b refines spread).
+      // (#1551) Even when we cannot forward spread args to the host
+      // constructor, evaluate them left-to-right for side effects so that
+      // abrupt completions (throws from arg expressions) propagate to the
+      // user's try/catch around `super(...)`. The host import receives null
+      // (best-effort; #1366b refines spread forwarding).
+      for (const a of args) {
+        const inner = ts.isSpreadElement(a) ? a.expression : a;
+        const argResult = compileExpression(ctx, fctx, inner);
+        if (argResult !== null) {
+          fctx.body.push({ op: "drop" });
+        }
+      }
       fctx.body.push({ op: "ref.null.extern" });
     } else {
-      // Single message arg coerced to externref.
+      // Single message arg coerced to externref, plus side-effect-only
+      // evaluation of any trailing args (§13.3.7.1 step 4 — #1551).
       const argResult = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
       if (argResult && argResult.kind !== "externref") {
         coerceType(ctx, fctx, argResult, { kind: "externref" });
+      }
+      for (let i = 1; i < args.length; i++) {
+        const extra = compileExpression(ctx, fctx, args[i]!);
+        if (extra !== null) {
+          fctx.body.push({ op: "drop" });
+        }
       }
     }
     const importName = `__new_${builtinParent}`;
@@ -1790,15 +1857,35 @@ export function compileSuperCall(
           compileExpression(ctx, fctx, arg, field.type);
           fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
           fieldIdx2++;
+        } else {
+          // (#1551) Side-effect-only evaluation for non-spread args after
+          // parent fields are exhausted.
+          const sideRes = compileExpression(ctx, fctx, arg);
+          if (sideRes !== null) {
+            fctx.body.push({ op: "drop" });
+          }
         }
       }
     }
   } else {
-    for (let i = 0; i < callExpr.arguments.length && i < assignableParentFields.length; i++) {
-      const { field, fieldIdx } = assignableParentFields[i]!;
-      fctx.body.push({ op: "local.get", index: selfLocal });
-      compileExpression(ctx, fctx, callExpr.arguments[i]!, field.type);
-      fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+    // (#1551) ArgumentListEvaluation (§13.3.7.1 step 4) must evaluate every
+    // argument expression left-to-right, regardless of whether the parent
+    // struct has a slot to receive it. Side-effects (and abrupt completions
+    // from arg evaluation) must propagate to the user's try/catch around
+    // `super(...)`. Args beyond `assignableParentFields.length` are evaluated
+    // for side effects only and the produced value is dropped.
+    for (let i = 0; i < callExpr.arguments.length; i++) {
+      if (i < assignableParentFields.length) {
+        const { field, fieldIdx } = assignableParentFields[i]!;
+        fctx.body.push({ op: "local.get", index: selfLocal });
+        compileExpression(ctx, fctx, callExpr.arguments[i]!, field.type);
+        fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+      } else {
+        const argResult = compileExpression(ctx, fctx, callExpr.arguments[i]!);
+        if (argResult !== null) {
+          fctx.body.push({ op: "drop" });
+        }
+      }
     }
   }
 }

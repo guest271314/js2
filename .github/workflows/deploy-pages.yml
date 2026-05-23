@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'loopdive/js2wasm'
+    if: github.repository == 'loopdive/js2'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,7 +58,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 25
 
       - name: Setup pnpm via Corepack
         run: |
@@ -80,7 +80,7 @@ jobs:
           path: dist/pages
 
   deploy:
-    if: github.repository == 'loopdive/js2wasm'
+    if: github.repository == 'loopdive/js2'
     needs: build
     runs-on: ubuntu-latest
     environment:

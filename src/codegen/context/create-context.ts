@@ -36,6 +36,7 @@ export function createCodegenContext(
     stringLiteralMap: new Map(),
     stringLiteralValues: new Map(),
     stringLiteralCounter: 0,
+    funcSourceText: new Map(),
     stringGlobalMap: new Map(),
     numImportGlobals: 0,
     hasStringImports: false,
@@ -130,6 +131,9 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
+    // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
+    // expose a CLI/option flag once the CPS lowering is parity-tested.
+    supportsAsyncIr: false,
     wasiFdWriteIdx: -1,
     wasiProcExitIdx: -1,
     wasiPathOpenIdx: -1,
@@ -147,6 +151,7 @@ export function createCodegenContext(
     funcConstructorMap: new Map(),
     ensureStructPending: new Set(),
     nodeBuiltinGlobals: new Map(),
+    jsxRuntime: options?.jsxRuntime,
   };
 
   getOrRegisterVecType(ctx, "externref", { kind: "externref" });
