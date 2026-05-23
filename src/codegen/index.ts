@@ -4102,7 +4102,11 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
       const methodName = prop.name.text;
       if (isStringType(receiverType) && Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)) {
         needed.add(methodName);
-        // Track if the method has a RegExp arg (replace, replaceAll, split, match, search)
+        // Track if the method has a non-string arg (RegExp or custom object
+        // implementing Symbol.replace/Symbol.match/etc). The native helpers
+        // only handle string search values — for any other type the host
+        // import must be available so JS handles @@replace/@@match dispatch
+        // (#1443).
         if (
           (methodName === "replace" ||
             methodName === "replaceAll" ||
@@ -4112,8 +4116,20 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
           node.arguments.length > 0
         ) {
           const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-          const symName = argType.getSymbol()?.getName();
-          if (symName === "RegExp") {
+          const isStringLike = (t: ts.Type): boolean => {
+            if ((t.flags & ts.TypeFlags.String) !== 0) return true;
+            if ((t.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
+            if ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String") return true;
+            return false;
+          };
+          let needsHost = false;
+          if ((argType.flags & ts.TypeFlags.Union) !== 0) {
+            const union = argType as ts.UnionType;
+            needsHost = !union.types.every(isStringLike);
+          } else {
+            needsHost = !isStringLike(argType);
+          }
+          if (needsHost) {
             regexpArgMethods.add(methodName);
           }
         }
