@@ -18,7 +18,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
-import { emitThrowString } from "../expressions/helpers.js";
+import { emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
   compileClassBodies,
@@ -56,7 +56,7 @@ export function compileNestedClassDeclaration(
   if (ctx.structMap.has(className) && !isDeferred) {
     // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
     if (ctx.classThrowsOnEval.has(className)) {
-      emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+      emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
       return;
     }
     return;
@@ -71,7 +71,7 @@ export function compileNestedClassDeclaration(
     // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
     // Check after collection since collectClassDeclaration sets the flag.
     if (ctx.classThrowsOnEval.has(className)) {
-      emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+      emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
       return;
     }
 

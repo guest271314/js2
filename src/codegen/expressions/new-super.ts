@@ -1217,7 +1217,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
   if (classNameForCheck && ctx.classThrowsOnEval.has(classNameForCheck)) {
-    emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+    emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
     fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }
@@ -1263,7 +1263,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       unwrappedNew = unwrappedNew.expression;
     }
     if (ts.isArrowFunction(unwrappedNew)) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: throw a real TypeError instance so `assert.throws(TypeError, …)`
+      // catches it (the bare-string throw is only `instanceof Error`/string).
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
@@ -1313,7 +1315,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (ts.isPropertyAccessExpression(expr.expression)) {
       const obj = expr.expression.expression; // e.g. Array.prototype
       if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") {
-        emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+        // #1528: real TypeError instance so test262 `assert.throws(TypeError, …)`
+        // catches it (prototype methods are not constructors per spec §9.2.2).
+        emitThrowTypeError(ctx, fctx, "is not a constructor");
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
@@ -1325,7 +1329,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
     if (callSigs.length > 0 && constructSigs.length === 0) {
-      emitThrowString(ctx, fctx, "TypeError: is not a constructor");
+      // #1528: real TypeError instance — spec requires `Construct(F)` to throw
+      // `TypeError("F is not a constructor")` when F has no [[Construct]].
+      emitThrowTypeError(ctx, fctx, "is not a constructor");
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
@@ -1648,6 +1654,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
 
     if (args.length === 0) {
+      // (#1483) Under --target wasi, route `new Date()` (no args) to
+      // clock_time_get via the __wasi_date_now helper (registered up front in
+      // registerWasiImports).
+      if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
       const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
       if (dateNowIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);
