@@ -6894,9 +6894,17 @@ export function buildImports(
  * negated();                              // dispatches via __call_fn_0
  * ```
  */
-export function wrapExports(rawExports: WebAssembly.Exports): Record<string, any> {
+export function wrapExports(
+  rawExports: WebAssembly.Exports,
+  options?: { marshal?: "copy" | false },
+): Record<string, any> {
   const callFn0 = rawExports.__call_fn_0 as ((closure: any) => any) | undefined;
   const callFn1 = rawExports.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
+  // #1504: marshal struct/vec returns to plain JS by default. Opt-out:
+  // `wrapExports(exports, { marshal: false })` keeps raw WasmGC handles
+  // (used by test262 runners and advanced callers that want zero-copy access).
+  const marshal: "copy" | false = options?.marshal === false ? false : "copy";
+  const exportsForMarshal = rawExports as unknown as Record<string, Function>;
 
   // Build a JS-callable wrapper around a Wasm closure struct.
   const makeCallableClosureWrapper = (closure: any): ((...args: any[]) => any) => {
@@ -6914,6 +6922,36 @@ export function wrapExports(rawExports: WebAssembly.Exports): Record<string, any
     };
   };
 
+  // #1504: discriminate a "named struct" / "vec" result from a closure struct.
+  // Order of checks:
+  // 1. If `__is_closure(val)` returns 1 → it's a closure, NOT marshalable
+  //    (this is the authoritative codegen-side discriminator).
+  // 2. If `__struct_field_names(val)` returns non-empty → named struct.
+  // 3. If `__vec_len(val)` returns a number ≥ 0 → vec wrapper.
+  // Otherwise, fall back to the closure-wrapping path (#1308 default).
+  const isClosureFn = exportsForMarshal.__is_closure as ((v: any) => number) | undefined;
+  const looksMarshalable = (val: any): boolean => {
+    if (val == null || typeof val !== "object") return false;
+    if (typeof isClosureFn === "function") {
+      try {
+        if (isClosureFn(val) === 1) return false;
+      } catch {
+        /* fall through to next probe */
+      }
+    }
+    if (_getStructFieldNames(val, exportsForMarshal) != null) return true;
+    const vecLen = exportsForMarshal.__vec_len;
+    if (typeof vecLen === "function") {
+      try {
+        const n = vecLen(val);
+        if (typeof n === "number" && n >= 0) return true;
+      } catch {
+        /* not a vec */
+      }
+    }
+    return false;
+  };
+
   const wrapped: Record<string, any> = Object.create(null);
   for (const key of Object.keys(rawExports)) {
     const val = (rawExports as Record<string, any>)[key];
@@ -6928,14 +6966,26 @@ export function wrapExports(rawExports: WebAssembly.Exports): Record<string, any
       wrapped[key] = val;
       continue;
     }
-    // Wrap user-visible callable exports — when they return a Wasm closure
-    // struct, replace it with a JS-callable proxy.
+    // Wrap user-visible callable exports:
+    //   - closure struct → JS-callable wrapper (regression guard for #1308)
+    //   - named struct / vec → plain JS object/array via `_wasmToPlain`
+    //     (#1504), unless `marshal: false` is passed
+    //   - everything else (primitives, strings, raw externrefs) → pass through
     wrapped[key] = function (this: any, ...args: any[]): any {
       const result = (val as Function).apply(this, args);
-      if (result != null && _isWasmStruct(result)) {
-        return makeCallableClosureWrapper(result);
+      if (result == null || !_isWasmStruct(result)) return result;
+      const marshalable = looksMarshalable(result);
+      if (marshal === "copy" && marshalable) {
+        return _wasmToPlain(result, exportsForMarshal);
       }
-      return result;
+      if (marshalable) {
+        // Struct/vec but `marshal: false` → return the raw WasmGC handle
+        // so advanced callers can use the exported `__sget_*` / `__vec_*`
+        // helpers directly without the copy overhead.
+        return result;
+      }
+      // Not marshalable → treat as a closure (regression guard for #1308).
+      return makeCallableClosureWrapper(result);
     };
   }
   return wrapped;
