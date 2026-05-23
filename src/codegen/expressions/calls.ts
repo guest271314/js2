@@ -6514,6 +6514,27 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const sigRetWasm = isVoidType(sigRetType) ? null : resolveWasmType(ctx, sigRetType);
         const sigParamWasmTypes: ValType[] = [];
         for (let i = 0; i < sigParamCount; i++) {
+          // (#820d) Destructuring-pattern parameters (e.g. `method({ x = 5 } = {})`)
+          // are compiled by the callee as a single `externref` slot — the binding
+          // pattern is destructured inside the body from that externref, and the
+          // param-default check uses `__extern_is_undefined`. Resolving the TS
+          // type of such a param to a concrete struct ref (which `resolveWasmType`
+          // does once the anonymous object type gets a registered struct) produces
+          // a funcref wrapper type that mismatches the actual method/trampoline
+          // signature. The closure call then casts the trampoline funcref to the
+          // wrong (struct-param) type and traps with `illegal cast` — and for an
+          // unresolvable default the spec-correct ReferenceError never gets a
+          // chance to throw. Force `externref` for binding-pattern params so the
+          // call site agrees with the compiled callee.
+          const paramDecl = sig.parameters[i]!.valueDeclaration;
+          if (
+            paramDecl &&
+            ts.isParameter(paramDecl) &&
+            (ts.isObjectBindingPattern(paramDecl.name) || ts.isArrayBindingPattern(paramDecl.name))
+          ) {
+            sigParamWasmTypes.push({ kind: "externref" });
+            continue;
+          }
           const paramType = ctx.checker.getTypeOfSymbol(sig.parameters[i]!);
           sigParamWasmTypes.push(resolveWasmType(ctx, paramType));
         }
