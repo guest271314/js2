@@ -65,6 +65,7 @@ import { taggedUnions } from "./passes/tagged-unions.js";
 import { planIrCompilation, type IrSelection } from "./select.js";
 import { verifyIrFunction } from "./verify.js";
 import { AllocSiteRegistry } from "./alloc-registry.js";
+import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
 
@@ -356,6 +357,16 @@ export function compileIrPathFunctions(
   }
 
   if (afterHygiene.length === 0) return { compiled, errors };
+
+  // #1588: string-encoding analysis. Read-only over the hygiene-stable IR;
+  // writes `encoding` annotations onto string allocation sites in the
+  // registry (`ALLOC_NAMESPACES.encoding`). Annotations are advisory and
+  // inert at lowering, so the emitted Wasm is unchanged. Later passes
+  // (inline/mono) preserve or alias the alloc ids, so an annotation written
+  // here travels to the canonical site via the registry's alias merge.
+  for (const entry of afterHygiene) {
+    analyzeEncoding(entry.fn, allocRegistry);
+  }
 
   // 2b. Module-scope inlining (#1167b).
   const modIn: IrModule = { functions: afterHygiene.map((e) => e.fn) };

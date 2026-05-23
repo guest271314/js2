@@ -1,0 +1,149 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// String encoding analysis (#1588).
+//
+// Propagates a per-string-value encoding guarantee through the IR,
+// distinguishing strings provably containing only well-formed UTF-8 scalar
+// values from strings that may contain unpaired surrogates (WTF-16). The
+// motivation is the WebAssembly Component Model `string` type, which is
+// UTF-8 by definition: a string proven to be valid UTF-8 can cross a
+// Component boundary without the scan-and-re-encode copy that a WTF-16
+// string requires.
+//
+// The analysis is purely advisory. A wrongly-conservative annotation yields
+// a slower boundary path; a wrongly-optimistic annotation is a correctness
+// bug, so every rule errs conservative: the default is `wtf16`, and only an
+// explicit, audited origin/propagation rule promotes a value to
+// `utf8-guaranteed` or `ascii`.
+//
+// It writes its result to the #1586 `AllocSiteRegistry` under the
+// `encoding` namespace (`ALLOC_NAMESPACES.encoding`); it never mutates the
+// IR, so it can run at any point after the build phase. See the issue file
+// `plan/issues/sprints/55/1588-...md` and ADR-0013 (allocation sites).
+//
+// Phase 1 (this pass) covers the string-producing IR instrs that exist on
+// the IR path today and carry an `alloc` id from the builder:
+//   - `string.const`  → origin rule (ascii if all chars ≤ 0x7F, else utf8)
+//   - `string.concat` → join the operands' encodings per the lattice
+// Calls that produce UTF-8-by-construction strings (JSON.parse,
+// TextDecoder.decode) and method-based propagation (slice/toUpperCase/…)
+// are Phase 2: their IR results do not yet carry string `alloc` ids, so
+// there is no attachment point for an annotation. Documented as follow-up
+// in the issue.
+
+import { ALLOC_NAMESPACES, type AllocSiteRegistry } from "../alloc-registry.js";
+import type { AllocSiteId, IrFunction, IrInstr, IrValueId } from "../nodes.js";
+
+/**
+ * Encoding lattice. Ordering (most → least restrictive):
+ *   ascii  ⊑  utf8-guaranteed  ⊑  wtf16
+ * `wtf16` is top (the conservative default); `ascii` is bottom (the
+ * strongest claim). The join of two encodings is their least upper bound:
+ * any operand being `wtf16` forces `wtf16`; otherwise `utf8-guaranteed`
+ * unless both are `ascii`.
+ */
+export type Encoding = "ascii" | "utf8-guaranteed" | "wtf16";
+
+/** Rank in the lattice — higher is more permissive (closer to top). */
+function rank(e: Encoding): number {
+  switch (e) {
+    case "ascii":
+      return 0;
+    case "utf8-guaranteed":
+      return 1;
+    case "wtf16":
+      return 2;
+  }
+}
+
+/** Least upper bound of two encodings (the conservative join). */
+export function joinEncoding(a: Encoding, b: Encoding): Encoding {
+  return rank(a) >= rank(b) ? a : b;
+}
+
+/**
+ * Classify a statically known string literal by its code units.
+ *   - all code units ≤ 0x7F           → `ascii`
+ *   - else, no lone surrogates        → `utf8-guaranteed`
+ *   - else (a lone surrogate present) → `wtf16`
+ *
+ * A surrogate is lone when a high surrogate (0xD800–0xDBFF) is not
+ * immediately followed by a low surrogate (0xDC00–0xDFFF), or a low
+ * surrogate appears without a preceding high surrogate. Such a string
+ * cannot be encoded as UTF-8, so it must stay `wtf16`.
+ */
+export function classifyLiteral(value: string): Encoding {
+  let ascii = true;
+  for (let i = 0; i < value.length; i++) {
+    const u = value.charCodeAt(i);
+    if (u > 0x7f) ascii = false;
+    if (u >= 0xd800 && u <= 0xdbff) {
+      // High surrogate — must be followed by a low surrogate.
+      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++; // consume the well-formed pair
+      } else {
+        return "wtf16";
+      }
+    } else if (u >= 0xdc00 && u <= 0xdfff) {
+      // Low surrogate with no preceding high surrogate.
+      return "wtf16";
+    }
+  }
+  return ascii ? "ascii" : "utf8-guaranteed";
+}
+
+/**
+ * Run the encoding analysis over a single IR function, writing `encoding`
+ * annotations onto the string allocation sites in `registry`. Read-only on
+ * the IR. Idempotent: re-running overwrites the same annotations with the
+ * same values.
+ *
+ * The analysis is a single forward pass. SSA dominance guarantees each
+ * value is defined before use within a block, and string values in Phase 1
+ * are produced and consumed locally (literals + concat), so a per-function
+ * value→encoding map filled in instruction order is sufficient. Values with
+ * no tracked origin are absent from the map and treated as `wtf16`.
+ */
+export function analyzeEncoding(fn: IrFunction, registry: AllocSiteRegistry): void {
+  const ns = ALLOC_NAMESPACES.encoding;
+  const encodings = new Map<IrValueId, Encoding>();
+
+  const enc = (v: IrValueId): Encoding => encodings.get(v) ?? "wtf16";
+
+  const record = (result: IrValueId | null, alloc: AllocSiteId | undefined, e: Encoding): void => {
+    if (result !== null) encodings.set(result, e);
+    if (alloc !== undefined) registry.annotate(alloc, ns, e);
+  };
+
+  for (const block of fn.blocks) {
+    for (const instr of block.instrs) {
+      classifyInstr(instr, enc, record);
+    }
+  }
+}
+
+function classifyInstr(
+  instr: IrInstr,
+  enc: (v: IrValueId) => Encoding,
+  record: (result: IrValueId | null, alloc: AllocSiteId | undefined, e: Encoding) => void,
+): void {
+  switch (instr.kind) {
+    case "string.const":
+      record(instr.result, instr.alloc, classifyLiteral(instr.value));
+      return;
+    case "string.concat":
+      // Concatenation preserves well-formedness: joining two UTF-8 strings
+      // cannot create a lone surrogate, and joining two ASCII strings stays
+      // ASCII. (WTF-16 inputs can split surrogate pairs across the seam, but
+      // the lattice already forces `wtf16` whenever either operand is.)
+      record(instr.result, instr.alloc, joinEncoding(enc(instr.lhs), enc(instr.rhs)));
+      return;
+    default:
+      // Any other string-producing instr (and there are none in Phase 1 that
+      // carry a string `alloc` id beyond the two above) defaults to `wtf16`.
+      // We still record nothing here so the value stays absent from the map,
+      // which `enc` reads back as `wtf16`.
+      return;
+  }
+}
