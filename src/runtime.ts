@@ -6925,6 +6925,7 @@ export function buildWasiPolyfill(options?: { env?: Record<string, string | unde
   fd_write: (fd: number, iovs: number, iovs_len: number, nwritten: number) => number;
   fd_read: (fd: number, iovs: number, iovs_len: number, nread: number) => number;
   proc_exit: (code: number) => void;
+  poll_oneoff: (in_ptr: number, out_ptr: number, nsubs: number, nevents_out: number) => number;
   environ_sizes_get: (countPtr: number, bufSizePtr: number) => number;
   environ_get: (envPtrsPtr: number, envBufPtr: number) => number;
   clock_time_get: (clockid: number, precision: bigint, out_ptr: number) => number;
@@ -7028,6 +7029,29 @@ export function buildWasiPolyfill(options?: { env?: Record<string, string | unde
         process.exit(code);
       }
       throw new Error(`WASI proc_exit(${code})`);
+    },
+
+    // #1484 — Minimal poll_oneoff shim for vitest-driven tests.
+    //
+    // Real wasmtime semantics: read `nsubs` subscription_t records from `in_ptr`,
+    // suspend until the earliest event fires, then write the firing event(s) to
+    // `out_ptr` and the count to `nevents_out`. The compiled `__wasi_sleep_ms`
+    // helper passes a single CLOCK_MONOTONIC subscription, so we acknowledge
+    // it synchronously (no real sleep — tests run instantly) and report 1 event
+    // fired with no error. Returns 0 (__WASI_ERRNO_SUCCESS).
+    poll_oneoff(_in_ptr: number, out_ptr: number, nsubs: number, nevents_out: number): number {
+      if (!memory) return -1;
+      const view = new DataView(memory.buffer);
+      // Zero the event buffer (32 bytes per event) so downstream code can read
+      // userdata/error/type/clock fields without observing stale memory.
+      const written = Math.min(nsubs, 1) | 0;
+      if (written > 0) {
+        for (let i = 0; i < 32; i++) {
+          view.setUint8(out_ptr + i, 0);
+        }
+      }
+      view.setUint32(nevents_out, written, true);
+      return 0;
     },
 
     // #1482: WASI environ_sizes_get — report `[count, total_buf_bytes]`. The
