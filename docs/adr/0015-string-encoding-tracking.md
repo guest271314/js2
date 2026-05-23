@@ -98,6 +98,32 @@ are the two rules the analysis can attach annotations to today. Call-result
 origins (`JSON.parse`, `TextDecoder`) and method propagation require the IR to
 mint string alloc ids on those results first — tracked as Phase 2 follow-up.
 
+## Phase 2 status
+
+**PR-A (landed, still inert).** The builder now mints a `"string"`
+allocation-site id on `call` and `extern.call` instrs whose result type is
+`string` (`emitCall` / `emitExternCall`). This is inert at lowering — the
+emitted Wasm is byte-identical — and gives the analysis an attachment point
+for call-result rules:
+
+- **Call-result origins**: `JSON.parse` / `JSON.stringify` (host import names
+  `JSON_parse` / `JSON_stringify`) → `utf8-guaranteed`. `TextDecoder.decode`
+  (an `extern.call`) → `utf8-guaranteed`.
+- **Method propagation**: string methods lower to a `call` named
+  `string_<m>` (host) or `__str_<m>` (native) with the receiver as the first
+  argument. Methods that cannot introduce a surrogate from non-surrogate
+  input — `toUpperCase`, `toLowerCase`, `trim`, `trimStart`, `trimEnd`,
+  `normalize`, `padStart`, `padEnd`, `repeat` — propagate the receiver's
+  encoding. `slice` / `substring` / `charAt` are **not** preserving:
+  code-unit indexing can split a surrogate pair, so they conservatively drop
+  to `wtf16` (refining `slice` with statically-known code-point boundaries is
+  a later refinement). Any other string-returning call is `wtf16`.
+
+**PR-B / PR-C (still deferred).** Dual i8/i16 storage at allocation sites and
+the Component Model boundary lowering + benchmark. These change storage
+layout / emitted Wasm and warrant an architect design pass on the storage +
+boundary ABI before implementation.
+
 ## Consequences
 
 - **Soundness is the bar.** A wrongly-conservative annotation only costs a

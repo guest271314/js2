@@ -18,6 +18,7 @@ import {
   analyzeEncoding,
   classifyLiteral,
   joinEncoding,
+  irVal,
   type Encoding,
   type IrType,
 } from "../../src/ir/index.js";
@@ -179,5 +180,99 @@ describe("#1588 — analyzeEncoding pass", () => {
     const second = readEnc(reg, "hi", "string.const", fn);
     expect(second).toBe(first);
     expect(second).toBe("ascii");
+  });
+});
+
+describe("#1588 Phase 2 — call-result origins + method propagation", () => {
+  const callEnc = (reg: AllocSiteRegistry, fn: ReturnType<IrFunctionBuilder["finish"]>): Encoding | undefined => {
+    const instr = fn.blocks[0]!.instrs.find((i) => i.kind === "call" && i.alloc !== undefined)!;
+    return reg.read<Encoding>(instr.alloc!, NS);
+  };
+
+  it("JSON.parse / JSON.stringify results are utf8-guaranteed", () => {
+    for (const fnName of ["JSON_parse", "JSON_stringify"]) {
+      const reg = new AllocSiteRegistry();
+      const b = new IrFunctionBuilder("f", [STR], false, reg);
+      const arg = b.addParam("x", STR);
+      b.openBlock();
+      const r = b.emitCall({ kind: "func", name: fnName }, [arg], STR)!;
+      b.terminate({ kind: "return", values: [r] });
+      const fn = b.finish();
+      analyzeEncoding(fn, reg);
+      expect(callEnc(reg, fn)).toBe("utf8-guaranteed");
+    }
+  });
+
+  it("encoding-preserving string methods propagate the receiver encoding", () => {
+    // ASCII receiver → toUpperCase stays ascii.
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    b.openBlock();
+    const recv = b.emitStringConst("hello"); // ascii
+    const r = b.emitCall({ kind: "func", name: "string_toUpperCase" }, [recv], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    expect(callEnc(reg, fn)).toBe("ascii");
+  });
+
+  it("native-mode method prefix (__str_) also propagates", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    b.openBlock();
+    const recv = b.emitStringConst("café"); // utf8-guaranteed
+    const r = b.emitCall({ kind: "func", name: "__str_trim" }, [recv], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    expect(callEnc(reg, fn)).toBe("utf8-guaranteed");
+  });
+
+  it("slice is conservatively wtf16 (code-unit indices can split a pair)", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    b.openBlock();
+    const recv = b.emitStringConst("hello"); // ascii receiver
+    const r = b.emitCall({ kind: "func", name: "string_slice" }, [recv], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    expect(callEnc(reg, fn)).toBe("wtf16");
+  });
+
+  it("an unknown string-returning call is conservatively wtf16", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    b.openBlock();
+    const r = b.emitCall({ kind: "func", name: "someUserFunc" }, [], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    expect(callEnc(reg, fn)).toBe("wtf16");
+  });
+
+  it("a non-string-returning call gets no string alloc id / no annotation", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [irVal({ kind: "f64" })], false, reg);
+    b.openBlock();
+    const r = b.emitCall({ kind: "func", name: "numFunc" }, [], irVal({ kind: "f64" }))!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    const call = fn.blocks[0]!.instrs.find((i) => i.kind === "call")!;
+    expect(call.alloc).toBeUndefined();
+  });
+
+  it("TextDecoder.decode (extern.call) is utf8-guaranteed", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const buf = b.addParam("buf", irVal({ kind: "externref" }));
+    b.openBlock();
+    const r = b.emitExternCall("TextDecoder", "decode", buf, [], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+    analyzeEncoding(fn, reg);
+    const ec = fn.blocks[0]!.instrs.find((i) => i.kind === "extern.call" && i.alloc !== undefined)!;
+    expect(reg.read<Encoding>(ec.alloc!, NS)).toBe("utf8-guaranteed");
   });
 });
