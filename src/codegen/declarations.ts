@@ -2203,6 +2203,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const name = stmt.name ? stmt.name.text : "default";
       // Register the function's .name value for ES-spec compliance
       ctx.functionNameMap.set(name, name);
+      // #1463 — capture source text for Function.prototype.toString() so that
+      // `someFn.toString()` returns the original declaration text instead of
+      // the `function () { [native code] }` placeholder. Only top-level
+      // declarations are captured; class methods, arrow functions, and
+      // function expressions fall back to the placeholder.
+      try {
+        const sourceText = stmt.getText(sourceFile);
+        if (sourceText) ctx.funcSourceText.set(name, sourceText);
+      } catch {
+        // Synthetic nodes lacking source positions — skip silently.
+      }
       const sig = ctx.checker.getSignatureFromDeclaration(stmt);
       if (!sig) continue;
 

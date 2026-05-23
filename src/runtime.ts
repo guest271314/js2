@@ -369,6 +369,257 @@ const _wasmPropDescs = new WeakMap<object, Map<string | symbol, number>>();
  */
 const _wasmStructAccessors = new WeakMap<object, Map<string | symbol, { get?: Function; set?: Function }>>();
 
+/**
+ * #1464 — ES2025 Iterator helper polyfills.
+ *
+ * `Iterator.zip(iters, opts)`, `Iterator.zipKeyed(iterMap, opts)` and
+ * `Iterator.concat(...iters)` are recent ES2025 additions that some hosts
+ * (Node ≤24 / older V8) don't ship. They are wired through
+ * `__extern_method_call` (since `Iterator` is in `BUILTIN_CLASS_NAMES`),
+ * so installing a single polyfill on `globalThis.Iterator` makes every
+ * call site work uniformly. The polyfill:
+ *   - returns helper iterators that inherit from `%Iterator.prototype%`
+ *     so chained `.map / .filter / .toArray` continue working
+ *   - validates arguments eagerly and calls `return()` on any
+ *     already-opened underlying iterator when one rejects
+ *   - implements `mode: "shortest" | "longest" | "strict"` for `zip` per
+ *     the proposal text (TC39 stage 4, ES2025)
+ *
+ * Called from `buildImports` (once, guarded by `_iteratorHelpersInstalled`).
+ * Safe to call on a host that already ships the helpers — we only install
+ * when the method is missing.
+ */
+let _iteratorHelpersInstalled = false;
+function _installIteratorHelperPolyfills(): void {
+  if (_iteratorHelpersInstalled) return;
+  _iteratorHelpersInstalled = true;
+  const I: any = (globalThis as any).Iterator;
+  if (typeof I !== "function" || typeof I.prototype !== "object" || I.prototype == null) return;
+  const Iproto: any = I.prototype;
+
+  // ES2025 GetIteratorFlattenable — accepts an iterable OR a raw iterator.
+  function _getFlattenable(obj: any): any {
+    if (obj == null) {
+      throw new TypeError("Iterator helper: argument is null or undefined");
+    }
+    let it: any;
+    const sym = obj[Symbol.iterator];
+    if (typeof sym === "function") {
+      it = sym.call(obj);
+    } else if (typeof obj.next === "function") {
+      it = obj;
+    } else {
+      throw new TypeError("Iterator helper: argument is not iterable");
+    }
+    if (it == null || typeof it.next !== "function") {
+      throw new TypeError("Iterator helper: iterator has no next()");
+    }
+    return it;
+  }
+
+  function _makeHelperIterator(nextFn: () => any, returnFn: (v?: any) => any): any {
+    const obj: any = Object.create(Iproto);
+    obj.next = nextFn;
+    obj.return = returnFn;
+    obj[Symbol.iterator] = function () {
+      return this;
+    };
+    return obj;
+  }
+
+  if (typeof I.zip !== "function") {
+    Object.defineProperty(I, "zip", {
+      value: function zip(iterables: any, options?: any) {
+        if (iterables == null) {
+          throw new TypeError("Iterator.zip: iterables required");
+        }
+        const mode: string = (options && options.mode) || "shortest";
+        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+          throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+        }
+        const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
+        const iters: any[] = [];
+        // Open all iterators eagerly; on failure, close already-opened ones.
+        try {
+          for (const iterable of iterables) {
+            iters.push(_getFlattenable(iterable));
+          }
+        } catch (e) {
+          for (const it of iters) {
+            try {
+              it.return?.();
+            } catch {}
+          }
+          throw e;
+        }
+        const closed: boolean[] = iters.map(() => false);
+        let exhausted = false;
+
+        function closeAllExcept(except: number): void {
+          for (let i = 0; i < iters.length; i++) {
+            if (i !== except && !closed[i]) {
+              closed[i] = true;
+              try {
+                iters[i].return?.();
+              } catch {}
+            }
+          }
+        }
+
+        return _makeHelperIterator(
+          function next() {
+            if (exhausted || iters.length === 0) return { value: undefined, done: true };
+            const tuple: any[] = new Array(iters.length);
+            let liveCount = 0;
+            for (let i = 0; i < iters.length; i++) {
+              if (closed[i]) {
+                tuple[i] = padding[i];
+                continue;
+              }
+              let r: any;
+              try {
+                r = iters[i].next();
+              } catch (e) {
+                exhausted = true;
+                closeAllExcept(i);
+                throw e;
+              }
+              if (r && r.done) {
+                closed[i] = true;
+                if (mode === "shortest") {
+                  exhausted = true;
+                  closeAllExcept(i);
+                  return { value: undefined, done: true };
+                }
+                if (mode === "strict") {
+                  // Strict: every other iterator must also be done.
+                  for (let j = 0; j < iters.length; j++) {
+                    if (j === i || closed[j]) continue;
+                    let r2: any;
+                    try {
+                      r2 = iters[j].next();
+                    } catch (e) {
+                      closeAllExcept(-1);
+                      throw e;
+                    }
+                    if (r2 && !r2.done) {
+                      closeAllExcept(-1);
+                      throw new RangeError("Iterator.zip strict mode: length mismatch");
+                    }
+                    closed[j] = true;
+                  }
+                  exhausted = true;
+                  return { value: undefined, done: true };
+                }
+                tuple[i] = padding[i];
+              } else {
+                tuple[i] = r.value;
+                liveCount++;
+              }
+            }
+            if (mode === "longest" && liveCount === 0) {
+              exhausted = true;
+              return { value: undefined, done: true };
+            }
+            return { value: tuple, done: false };
+          },
+          function returnFn() {
+            exhausted = true;
+            closeAllExcept(-1);
+            return { value: undefined, done: true };
+          },
+        );
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (typeof I.zipKeyed !== "function") {
+    Object.defineProperty(I, "zipKeyed", {
+      value: function zipKeyed(iterables: any, options?: any) {
+        if (iterables == null || typeof iterables !== "object") {
+          throw new TypeError("Iterator.zipKeyed: iterables must be an object");
+        }
+        const keys = Object.keys(iterables);
+        const iterArr: any[] = keys.map((k) => iterables[k]);
+        const zipped = (I as any).zip(iterArr, options);
+        return _makeHelperIterator(
+          function next() {
+            const r = zipped.next();
+            if (r.done) return { value: undefined, done: true };
+            const out: any = {};
+            for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
+            return { value: out, done: false };
+          },
+          function returnFn() {
+            try {
+              zipped.return?.();
+            } catch {}
+            return { value: undefined, done: true };
+          },
+        );
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (typeof I.concat !== "function") {
+    Object.defineProperty(I, "concat", {
+      value: function concat(...iterables: any[]) {
+        // Eagerly validate the iterable-ness of each argument; open lazily.
+        for (const iterable of iterables) {
+          if (iterable == null) {
+            throw new TypeError("Iterator.concat: argument is null or undefined");
+          }
+          const sym = iterable[Symbol.iterator];
+          if (typeof sym !== "function" && typeof iterable.next !== "function") {
+            throw new TypeError("Iterator.concat: argument is not iterable");
+          }
+        }
+        let idx = 0;
+        let current: any = null;
+        return _makeHelperIterator(
+          function next() {
+            while (true) {
+              if (current == null) {
+                if (idx >= iterables.length) return { value: undefined, done: true };
+                current = _getFlattenable(iterables[idx++]);
+              }
+              let r: any;
+              try {
+                r = current.next();
+              } catch (e) {
+                current = null;
+                idx = iterables.length;
+                throw e;
+              }
+              if (r && r.done) {
+                current = null;
+                continue;
+              }
+              return r;
+            }
+          },
+          function returnFn() {
+            if (current != null) {
+              try {
+                current.return?.();
+              } catch {}
+            }
+            idx = iterables.length;
+            current = null;
+            return { value: undefined, done: true };
+          },
+        );
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 /** Tracks WasmGC struct objects that have been frozen via Object.freeze. */
 const _wasmFrozenObjs = new WeakSet<object>();
 /** Tracks WasmGC struct objects that have been sealed via Object.seal. */
@@ -2952,6 +3203,42 @@ assert._isSameValue = isSameValue;
           }
           return 0;
         };
+      // __extern_has(obj, key) → i32. Runtime fallback for `key in obj` when
+      // RHS is externref and the compile-time static resolution has no info
+      // (e.g. regex `result.groups`, untyped objects). Mirrors `__extern_has_idx`
+      // but for string keys. Returns 0 on opaque structs / null receivers so it
+      // never throws into Wasm — matching V8's `in` operator semantics for
+      // non-object operands would also throw, but at this dispatch point the
+      // caller already confirmed RHS is an object-shaped externref.
+      if (name === "__extern_has")
+        return (obj: any, key: any): number => {
+          if (obj == null) return 0;
+          // WasmGC struct keys → primitive via ToPrimitive (mirrors _safeGet)
+          if (key != null && typeof key === "object" && _isWasmStruct(key)) {
+            const prim = _toPrimitiveSync(key, "string");
+            if (prim != null && typeof prim !== "object") key = prim;
+          }
+          try {
+            if (key in obj) return 1;
+          } catch {
+            /* opaque struct or non-object obj */
+          }
+          // Fall back to sidecar (user-assigned properties on host objects)
+          if (_sidecarGet(obj, key) !== undefined) return 1;
+          // Wasm struct getter (defineProperty accessor)
+          if (typeof key === "string") {
+            const exports = callbackState?.getExports();
+            if (typeof exports?.[`__sget_${key}`] === "function") {
+              try {
+                const v = exports[`__sget_${key}`](obj);
+                if (v !== undefined) return 1;
+              } catch {
+                /* not a field on this variant */
+              }
+            }
+          }
+          return 0;
+        };
       if (name === "__extern_toString")
         return (v: any) => {
           if (v == null) return String(v);
@@ -3290,7 +3577,13 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter")
+      if (name === "__array_from_iter") {
+        // Cache the original Array.prototype[Symbol.iterator] so we can
+        // detect when user code (e.g. test262 iter-get-err-array-prototype)
+        // has overridden it. When overridden, we must invoke the protocol
+        // rather than fast-pathing the array — otherwise a throwing custom
+        // @@iterator on Array.prototype is silently swallowed (#1454).
+        const _origArrayIter: any = (Array.prototype as any)[Symbol.iterator];
         return (obj: any): any => {
           // Materialize an iterable/array-like to a real JS array so downstream
           // destructuring can walk it via .length + indexed access. For proper
@@ -3298,7 +3591,21 @@ assert._isSameValue = isSameValue;
           // propagates any throws from .next() — needed for spec-compliant
           // destructuring of throwing iterators (#1150).
           if (obj == null) return [];
-          if (Array.isArray(obj)) return obj;
+          if (Array.isArray(obj)) {
+            // #1454: Real arrays normally take a fast path, but if the user has
+            // overridden Array.prototype[Symbol.iterator] (or installed an own
+            // @@iterator on the array), spec §22.1.5 requires going through
+            // the iterator protocol so a throwing getter / non-default iterator
+            // is observable. Read the @@iterator descriptor first (this fires
+            // any accessor) — a throw here propagates as iter-get-err.
+            const ownIter = (obj as any)[Symbol.iterator];
+            if (ownIter !== _origArrayIter) {
+              // Non-default iterator: fall through to the protocol path below
+              // by treating the array as a generic iterable.
+              return Array.from(obj);
+            }
+            return obj;
+          }
           // Compiled sources that do `iter[Symbol.iterator] = fn` often land the
           // function under a stringified "Symbol(Symbol.iterator)" key rather
           // than the real well-known symbol. Array.from would then reject on
@@ -3435,6 +3742,7 @@ assert._isSameValue = isSameValue;
           }
           return Array.from(obj);
         };
+      }
       if (name === "__extern_slice")
         return (arr: any, start: number) => {
           if (Array.isArray(arr)) return arr.slice(start);
@@ -6025,6 +6333,11 @@ export function buildImports(
   string_constants: Record<string, WebAssembly.Global>;
   setExports?: (exports: Record<string, Function>) => void;
 } {
+  // #1464 — install ES2025 Iterator.zip / zipKeyed / concat polyfills on
+  // the host's `Iterator` global if missing. Idempotent and safe to call
+  // unconditionally; older Node / V8 versions need it, newer hosts skip.
+  _installIteratorHelperPolyfills();
+
   const env: Record<string, Function> = {};
   let wasmExports: Record<string, Function> | undefined;
   const callbackState = { getExports: () => wasmExports };
