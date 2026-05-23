@@ -159,8 +159,84 @@ export interface PreprocessResult {
  * - `import X from "mod"` → `declare const X: any;`
  * - `import { a, b } from "mod"` → `declare function a(...): any;` or `declare const a: any;`
  */
+/**
+ * #1501 — Timer host-import shim.
+ *
+ * Bare identifiers `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`
+ * are global functions on the JS host but unbound from compiled Wasm — the
+ * `declared_global` resolver returns a getter, not a callable, so user
+ * `setTimeout(cb, 100)` calls silently no-op (in the best case) or pass a
+ * WasmGC closure to `globalThis.setTimeout`, which the host coerces to
+ * `"[object Object]"` and the timer never fires.
+ *
+ * The shim below replaces those identifiers with `function` declarations
+ * that delegate to `__timer_set_timeout` / `__timer_clear_interval` host
+ * imports. Those names are classified by `compiler/import-manifest.ts` into
+ * the `timer_set` / `timer_clear` `ImportIntent` variants, and
+ * `runtime.resolveImport` binds them to `globalThis.{set,clear}{Timeout,
+ * Interval}` (with the same `_wrapWasmClosure` callback-bridging
+ * machinery future-proofed for #1382).
+ *
+ * Scope: this is the "doesn't crash" passthrough path requested by the
+ * tech lead while #1382 (Wasm closure → JS-callable bridge) is in flight.
+ * `clearTimeout` / `clearInterval` already work end-to-end (the handle is
+ * an externref that round-trips); `setTimeout` / `setInterval` callbacks
+ * will fire fully once #1382 lands.
+ */
+const TIMER_SHIM_FNS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] as const;
+
+function detectTimerCallSites(sf: ts.SourceFile): Set<string> {
+  const found = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text;
+      if ((TIMER_SHIM_FNS as readonly string[]).includes(name)) {
+        found.add(name);
+      }
+    }
+    forEachChild(node, visit);
+  };
+  for (const stmt of sf.statements) {
+    forEachChild(stmt, visit);
+  }
+  return found;
+}
+
+function buildTimerShim(used: Set<string>, definedNames: Set<string>): string {
+  if (used.size === 0) return "";
+  const lines: string[] = [];
+  const hostFor: Record<string, string> = {
+    setTimeout: "__timer_set_timeout",
+    setInterval: "__timer_set_interval",
+    clearTimeout: "__timer_clear_timeout",
+    clearInterval: "__timer_clear_interval",
+  };
+  // declares + wrapper functions. Skip any name that the user has already
+  // defined to avoid shadowing user functions.
+  for (const name of TIMER_SHIM_FNS) {
+    if (!used.has(name) || definedNames.has(name)) continue;
+    const hostName = hostFor[name]!;
+    if (name === "clearTimeout" || name === "clearInterval") {
+      lines.push(`declare function ${hostName}(h: any): void;`);
+      lines.push(`function ${name}(h: any): void { ${hostName}(h); }`);
+    } else {
+      lines.push(`declare function ${hostName}(cb: any, ms: any): any;`);
+      lines.push(`function ${name}(cb: any, ms: any): any { return ${hostName}(cb, ms); }`);
+    }
+  }
+  if (lines.length === 0) return "";
+  return `// #1501 timer host-import shim (auto-injected)\n${lines.join("\n")}\n`;
+}
+
 export function preprocessImports(source: string): PreprocessResult {
   const sf = ts.createSourceFile("__preprocess__.ts", source, ts.ScriptTarget.Latest, true);
+
+  // #1501 — detect bare-identifier calls to timer globals BEFORE the early
+  // return for source-without-imports, so a file that uses `setTimeout`
+  // without any `import` statements still gets the shim. (The
+  // `definedNames` reachable at this point includes the same scan used
+  // below for the existing import resolution path.)
+  const timerCalls = detectTimerCallSites(sf);
 
   // Step 1: Find all imports
   const nsImports = new Map<string, { start: number; end: number; moduleSpec: string }>();
@@ -272,11 +348,13 @@ export function preprocessImports(source: string): PreprocessResult {
     }
   }
 
-  if (nsImports.size === 0 && otherImports.length === 0 && jsxRuntimeImportRanges.length === 0)
-    return { source, nodeBuiltins, jsxRuntime };
-
+  // #1501 — Build the timer shim if the source uses any timer call site.
+  // The shim is prepended to the (possibly otherwise-unchanged) source.
+  // We compute `definedNames` before the early-return so the shim can
+  // skip any timer name the user has already defined locally.
+  //
   // Collect names already defined in the source (functions, variables, classes)
-  // to avoid generating conflicting declare stubs
+  // to avoid generating conflicting declare stubs.
   const definedNames = new Set<string>();
   for (const stmt of sf.statements) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name) {
@@ -292,6 +370,11 @@ export function preprocessImports(source: string): PreprocessResult {
     if (ts.isClassDeclaration(stmt) && stmt.name) {
       definedNames.add(stmt.name.text);
     }
+  }
+  const timerShim = buildTimerShim(timerCalls, definedNames);
+
+  if (nsImports.size === 0 && otherImports.length === 0 && jsxRuntimeImportRanges.length === 0) {
+    return { source: timerShim ? timerShim + source : source, nodeBuiltins, jsxRuntime };
   }
 
   // Step 2: Analyze usage for namespace imports
@@ -611,5 +694,5 @@ export function preprocessImports(source: string): PreprocessResult {
     result = result.substring(0, r.start) + r.text + result.substring(r.end);
   }
 
-  return { source: result, nodeBuiltins, jsxRuntime };
+  return { source: timerShim ? timerShim + result : result, nodeBuiltins, jsxRuntime };
 }
