@@ -1,13 +1,18 @@
 name: Auto-refresh open PR branches with main
 
-# DISABLED: under the merge-queue-driven workflow, the queue builds its own
-# fresh main+PR merge_group ref per cycle, so PR branches don't need force
-# refreshes. Running this on every push-to-main caused massive CI churn:
-# N open PRs × ~6 workflows per push = hundreds of redundant runs per merge.
+# DISABLED: GITHUB_TOKEN-authored commits do NOT trigger downstream
+# workflows (documented GitHub Actions limitation). So auto-refresh-prs's
+# update-branch calls create bot commits on PR branches but the resulting
+# synchronize events don't fire any CI workflows — PRs stay BLOCKED with
+# empty check sets after refresh. Net effect was harmful churn.
 #
-# The queue rejects PRs that can't merge into current main due to conflicts —
-# same end result as auto-refresh surfacing them preemptively, without the
-# churn. Kept as workflow_dispatch-only for occasional manual housekeeping.
+# Replaced by: drift watcher polling script (scripts/poll-pr-mentions.sh)
+# running in the tech lead's session. On detected drift, tech lead
+# manually dispatches an agent that pulls main, reviews the merge
+# semantically, and pushes. Authored by user, so synchronize events
+# trigger CI normally.
+#
+# Kept as workflow_dispatch for occasional manual emergency refreshes.
 
 on:
   workflow_dispatch:
