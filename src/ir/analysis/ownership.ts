@@ -33,14 +33,7 @@
 
 import type { AllocSiteRegistry } from "../alloc-registry.js";
 import { ALLOC_NAMESPACES } from "../alloc-registry.js";
-import type {
-  IrBlock,
-  IrBlockId,
-  IrFunction,
-  IrInstr,
-  IrTerminator,
-  IrValueId,
-} from "../nodes.js";
+import type { IrBlock, IrBlockId, IrFunction, IrInstr, IrTerminator, IrValueId } from "../nodes.js";
 import {
   AccessSet,
   joinAnnotations,
@@ -213,7 +206,13 @@ function runBlock(block: IrBlock, state: State, allocOf: Map<IrValueId, number>)
 type State = Map<IrValueId, OwnershipAnnotation>;
 
 /** Widen `value`'s ownership to at least `o` and add access op `op` (if any). */
-function touch(state: State, value: IrValueId, allocOf: Map<IrValueId, number>, o: Ownership | null, op: AccessOp | null): void {
+function touch(
+  state: State,
+  value: IrValueId,
+  allocOf: Map<IrValueId, number>,
+  o: Ownership | null,
+  op: AccessOp | null,
+): void {
   const cur = state.get(value) ?? bottomFor(value, allocOf);
   let { ownership, access } = cur;
   if (o !== null) ownership = joinAnnotations({ ownership, access }, { ownership: o, access }).ownership;
