@@ -3425,10 +3425,16 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           if (typeof exports?.[`__sget_${strKey}`] === "function") {
             try {
-              const v = exports[`__sget_${strKey}`](obj);
-              if (v != null) return 1;
+              // (#1589A) HasProperty (spec §7.3.12) is true for any own
+              // property regardless of value — including null/undefined. A
+              // struct getter that returns *at all* (even null) proves the
+              // field exists on this struct shape. Only a throw means "this
+              // field is not defined on this struct variant" (opaque-struct
+              // access error), so we fall through to `return 0` in that case.
+              exports[`__sget_${strKey}`](obj);
+              return 1;
             } catch {
-              /* not a field on this variant */
+              /* getter not defined for this struct variant — fall through */
             }
           }
           return 0;
@@ -3460,10 +3466,14 @@ assert._isSameValue = isSameValue;
             const exports = callbackState?.getExports();
             if (typeof exports?.[`__sget_${key}`] === "function") {
               try {
-                const v = exports[`__sget_${key}`](obj);
-                if (v !== undefined) return 1;
+                // (#1589A) Mirror __extern_has_idx: a getter that returns at
+                // all (even null/undefined) proves the field exists on this
+                // struct shape — HasProperty (§7.3.12) is value-independent.
+                // Only a throw signals "field not defined on this variant".
+                exports[`__sget_${key}`](obj);
+                return 1;
               } catch {
-                /* not a field on this variant */
+                /* getter not defined for this struct variant — fall through */
               }
             }
           }
