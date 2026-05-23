@@ -1493,7 +1493,7 @@ export function destructureParamArray(
     // Only allocate if not already pre-allocated by ensureBindingLocals
     if (!fctx.localMap.has(localName)) {
       allocLocal(fctx, localName, elemType);
-    } else if (isDecl && elemType.kind === "externref") {
+    } else if (isDecl && elemType.kind === "externref" && !!element.initializer) {
       // #1553d — decl-mode parity with the retired externref-array path, which
       // allocated each binding local with the *element* type (externref) rather
       // than the TS-narrowed type. For an externref vec element the TS type can
