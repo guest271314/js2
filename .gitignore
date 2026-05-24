@@ -37,6 +37,7 @@ benchmarks/results/test262-results.jsonl
 .claude/agents/
 .test262-cache/
 output/
+examples/native-messaging/out/
 scripts/compiler-bundle.mjs
 scripts/runtime-bundle.mjs
 scripts/main-compiler-bundle.mjs
