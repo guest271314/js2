@@ -42,7 +42,7 @@ both others); #1653 is the keystone for the read side + continuous loop.
 
 ## Governance / legal — CLA gate (2026-05-24)
 
-- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate (CLA-assistant bot or DCO `Signed-off-by`), made a required check on `main` — **high**, medium, **ready**. The current `cla-check` is a no-op that records nothing, so external contributions land with no auditable CLA acceptance. **Gates external-PR merges, including guest271314's PR #589 (see #1530 HOLD).** Related: #1530.
+- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a *required* branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
 
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 
