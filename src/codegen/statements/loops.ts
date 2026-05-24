@@ -385,6 +385,44 @@ function findAllNamesCapturedByClosuresInForLoop(stmt: ts.ForStatement): Set<str
   return captured;
 }
 
+/**
+ * Collect names that are lexically declared (`let`/`const`/`using`, class,
+ * or function) at the top level of the loop body — i.e. block-scoped bindings
+ * that belong to each iteration's environment rather than to an outer scope.
+ *
+ * The #1589 pre-box pass is only meant for `var`-declared or enclosing-function
+ * variables. A body-local `let`/`const` captured by a closure already gets a
+ * fresh per-iteration cell via the body declaration + closure-construction
+ * path; pre-boxing it at the loop head is semantically wrong (the binding does
+ * not exist yet) and conflates the hoisted value slot with the ref cell,
+ * emitting `ref.is_null` over an f64 local (invalid wasm). We exclude these.
+ *
+ * We do NOT descend into nested closures or nested blocks/loops: only bindings
+ * whose scope is the loop body's own lexical environment matter here.
+ */
+function findBodyLocalLexicalNames(stmt: ts.ForStatement): Set<string> {
+  const names = new Set<string>();
+  const body = stmt.statement;
+  const statements = ts.isBlock(body) ? body.statements : [body];
+  for (const s of statements) {
+    if (ts.isVariableStatement(s)) {
+      const isLexical =
+        (s.declarationList.flags &
+          (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)) !==
+        0;
+      if (!isLexical) continue;
+      for (const decl of s.declarationList.declarations) {
+        for (const n of collectPatternBindingNames(decl.name)) names.add(n);
+      }
+    } else if (ts.isFunctionDeclaration(s) && s.name) {
+      names.add(s.name.text);
+    } else if (ts.isClassDeclaration(s) && s.name) {
+      names.add(s.name.text);
+    }
+  }
+  return names;
+}
+
 export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForStatement): void {
   // Save localMap entries for let/const initializers that shadow outer variables.
   // `for (let x = ...; ...)` creates a block scope that ends after the loop.
@@ -628,7 +666,13 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   }[] = [];
   {
     const capturedNames = findAllNamesCapturedByClosuresInForLoop(stmt);
+    // Body-local `let`/`const`/class/function bindings are block-scoped to each
+    // iteration and handled by the body declaration + closure-construction path.
+    // Pre-boxing them at the loop head conflates the hoisted value slot with the
+    // ref cell (→ `ref.is_null` over an f64 local). Exclude them.
+    const bodyLocalLexical = findBodyLocalLexicalNames(stmt);
     for (const name of capturedNames) {
+      if (bodyLocalLexical.has(name)) continue;
       if (fctx.boxedCaptures?.has(name)) continue; // already boxed (let/const per-iter)
       const oldLocalIdx = fctx.localMap.get(name);
       if (oldLocalIdx === undefined) continue; // not a local — globals/imports
