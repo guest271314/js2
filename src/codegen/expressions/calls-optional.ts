@@ -26,10 +26,6 @@ export function compileOptionalCallExpression(
   const objType = compileExpression(ctx, fctx, propAccess.expression);
   if (!objType) return null;
 
-  const tmp = allocLocal(fctx, `__optcall_${fctx.locals.length}`, objType);
-  fctx.body.push({ op: "local.tee", index: tmp });
-  fctx.body.push({ op: "ref.is_null" });
-
   let callReturnType: ValType | typeof VOID_RESULT = VOID_RESULT;
   const sig = ctx.checker.getResolvedSignature(expr);
   if (sig) {
@@ -37,6 +33,24 @@ export function compileOptionalCallExpression(
     if (!isVoidType(retType)) callReturnType = resolveWasmType(ctx, retType);
   }
   let resultType: ValType = callReturnType === VOID_RESULT ? { kind: "externref" } : callReturnType;
+
+  // `?.` short-circuits on null/undefined. `ref.is_null` only validates on a
+  // reference operand, but the receiver can lower to a non-reference value type
+  // (e.g. a `const x = undefined` stored as an i32 global — #1603). A
+  // non-reference receiver here is the compiler's representation of
+  // `undefined`/`null`, which short-circuits the call: drop it and emit the
+  // default result.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    let shortType: ValType = resultType;
+    if (shortType.kind === "ref") shortType = { kind: "ref_null", typeIdx: shortType.typeIdx };
+    fctx.body.push(...defaultValueInstrs(shortType));
+    return shortType;
+  }
+
+  const tmp = allocLocal(fctx, `__optcall_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
 
   const savedBody = pushBody(fctx);
   const tsReceiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
