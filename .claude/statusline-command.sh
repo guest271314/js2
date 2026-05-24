@@ -214,21 +214,19 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
     fi
   fi
   if [ -z "$sprint_n" ]; then
-    # Fallback: raw scan when sprints.json not available
-    sprint_dir="/workspace/plan/issues/sprints"
-    if [ -d "$sprint_dir" ]; then
-      for n in $(ls "$sprint_dir" | grep -E '^[0-9]+$' | sort -rn); do
-        files=$(find "$sprint_dir/$n" -maxdepth 1 -name '*.md' ! -name 'sprint.md' 2>/dev/null)
-        if [ -n "$files" ]; then
-          done_n=$(echo "$files" | xargs grep -lE '^status: (done|wont-fix)' 2>/dev/null | wc -l)
-          if [ "$done_n" -gt 0 ] || [ -z "$sprint_n" ]; then
-            sprint_n="$n"
-            sprint_total=$(echo "$files" | wc -l)
-            sprint_done="$done_n"
-            [ "$done_n" -gt 0 ] && break
-          fi
-        fi
-      done
+    # Fallback when sprints.json is absent: delegate to statusline-sprint.mjs,
+    # which scans the flat plan/issues/*.md tree by `sprint:`/`status:`
+    # frontmatter (#1616). The previous shell fallback scanned per-sprint
+    # DIRECTORIES, which broke after the #576 flatten (issues are now flat
+    # files; sprint docs are sprints/<N>.md). --porcelain emits "N done total".
+    sprint_mjs="/workspace/scripts/statusline-sprint.mjs"
+    if [ -f "$sprint_mjs" ] && command -v node >/dev/null 2>&1; then
+      sprint_data=$(node "$sprint_mjs" --porcelain 2>/dev/null)
+      if [ -n "$sprint_data" ]; then
+        sprint_n=$(echo "$sprint_data" | awk '{print $1}')
+        sprint_done=$(echo "$sprint_data" | awk '{print $2}')
+        sprint_total=$(echo "$sprint_data" | awk '{print $3}')
+      fi
     fi
   fi
   # Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts)

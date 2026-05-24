@@ -1,6 +1,52 @@
 {
   "backlog": [
     {
+      "id": "1655",
+      "title": "wasi: process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [
+        "1654"
+      ],
+      "goal": "wasi-completeness",
+      "status": "backlog",
+      "sprint": "Backlog"
+    },
+    {
+      "id": "1654",
+      "title": "wasi: DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under --target wasi",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "wasi-completeness",
+      "status": "backlog",
+      "sprint": "Backlog"
+    },
+    {
+      "id": "1653",
+      "title": "wasi: process.stdin.read(buffer, offset?) — binary incremental stdin read into a typed buffer",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [
+        "1654"
+      ],
+      "goal": "wasi-completeness",
+      "status": "backlog",
+      "sprint": "Backlog"
+    },
+    {
+      "id": "1650",
+      "title": "Component Model string boundary: encode-import selection (Edge B) on the encoding annotation",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [
+        "1588"
+      ],
+      "goal": "platform",
+      "status": "backlog",
+      "sprint": "Backlog"
+    },
+    {
       "id": "1628",
       "title": "wasi: raw-byte stdout primitive (writeStdout(bytes)) for binary protocols",
       "priority": "medium",
@@ -37,16 +83,6 @@
       "feasibility": "medium",
       "depends_on": [],
       "goal": "",
-      "status": "backlog",
-      "sprint": "Backlog"
-    },
-    {
-      "id": "1618",
-      "title": "wasi: console.log of a runtime string emits corrupted [object] placeholder",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "wasi-completeness",
       "status": "backlog",
       "sprint": "Backlog"
     },
@@ -448,6 +484,16 @@
   ],
   "ready": [
     {
+      "id": "1656",
+      "title": "Consolidate all website/frontend files under website/",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "",
+      "status": "ready",
+      "sprint": "55"
+    },
+    {
       "id": "1649",
       "title": "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)",
       "priority": "medium",
@@ -658,16 +704,6 @@
       "sprint": "56"
     },
     {
-      "id": "1616",
-      "title": "Flatten issue files into a stable location; sprint membership via frontmatter only",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "process",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
       "id": "1615",
       "title": "deferred: import.defer / import.source phase proposal not supported (Stage-N) — tracking",
       "priority": "low",
@@ -844,26 +880,6 @@
       "feasibility": "easy",
       "depends_on": [],
       "goal": "standalone-wasm",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
-      "id": "1597",
-      "title": "host-indep: gate __throw_reference_error in standalone mode",
-      "priority": "medium",
-      "feasibility": "easy",
-      "depends_on": [],
-      "goal": "standalone-wasm",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
-      "id": "1589a",
-      "title": "Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "",
       "status": "ready",
       "sprint": "55"
     },
@@ -1674,28 +1690,6 @@
       "sprint": "45"
     },
     {
-      "id": "1116b",
-      "title": "Promise subclass: Wasm-compiled class extends Promise must be a valid JS constructor (Wasm-class-as-JS-ctor bridge)",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
-      "id": "1116",
-      "title": "Promise resolution and async error handling (210 tests)",
-      "priority": "critical",
-      "feasibility": "hard",
-      "depends_on": [
-        "944"
-      ],
-      "goal": "async-model",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
       "id": "1105",
       "title": "Wasm-native String method implementations for standalone mode",
       "priority": "high",
@@ -2404,16 +2398,6 @@
       "sprint": "Backlog"
     },
     {
-      "id": "820d",
-      "title": "class/dstr async-gen-meth default-init `unresolvable` illegal cast",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "property-model",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
       "id": "820",
       "title": "Nullish TypeError / null-pointer / illegal-cast umbrella (6,993 FAIL)",
       "priority": "critical",
@@ -2782,6 +2766,16 @@
       "goal": "symbol-protocol",
       "status": "ready",
       "sprint": "Backlog"
+    },
+    {
+      "id": "0",
+      "title": "Sprint 0 -- Pre-sprint historical issues",
+      "priority": "medium",
+      "feasibility": "",
+      "depends_on": [],
+      "goal": "",
+      "status": "ready",
+      "sprint": ""
     }
   ],
   "inprogress": [
@@ -2804,66 +2798,6 @@
       "goal": "spec-completeness",
       "status": "in-progress",
       "sprint": "50"
-    },
-    {
-      "id": "1588",
-      "title": "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop",
-      "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [
-        "1586"
-      ],
-      "goal": "platform",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1587",
-      "title": "Static analysis pass: ownership and access semantics on IR values",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [
-        "1586"
-      ],
-      "goal": "platform",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1586",
-      "title": "IR preparation: explicit allocation sites with stable identity and metadata hooks",
-      "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "platform",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1553d",
-      "title": "decl-dstr: route array declaration (typed-vec + externref) through destructureParamArray (decl-mode)",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [
-        "1553a",
-        "1553c"
-      ],
-      "goal": "spec-completeness",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1553c",
-      "title": "decl-dstr: route externref-fallback object declaration through destructureParamObject (decl-mode)",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [
-        "1553a",
-        "1553b"
-      ],
-      "goal": "spec-completeness",
-      "status": "in-progress",
-      "sprint": "55"
     },
     {
       "id": "1551",
@@ -2924,46 +2858,6 @@
       "goal": "spec-completeness",
       "status": "in-progress",
       "sprint": "52"
-    },
-    {
-      "id": "1474",
-      "title": "host-independence: eliminate JS host RegExp for standalone Wasm",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "host-independence",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1473",
-      "title": "host-independence: eliminate JS host error/exception ops for standalone Wasm",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "host-independence",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1472",
-      "title": "host-independence: eliminate JS host object/property ops for standalone Wasm",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "host-independence",
-      "status": "in-progress",
-      "sprint": "55"
-    },
-    {
-      "id": "1471",
-      "title": "host-independence: eliminate JS host boxing/unboxing for standalone Wasm",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "host-independence",
-      "status": "in-progress",
-      "sprint": "55"
     },
     {
       "id": "1378",
@@ -3056,22 +2950,39 @@
       "goal": "platform",
       "status": "in-progress",
       "sprint": "42"
-    },
-    {
-      "id": "747",
-      "title": "Escape analysis for stack allocation",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [
-        "1586",
-        "1587"
-      ],
-      "goal": "performance",
-      "status": "in-progress",
-      "sprint": "55"
     }
   ],
   "review": [
+    {
+      "id": "1651",
+      "title": "wasi: process.stdout.write(str|Uint8Array) → fd_write (no newline, raw bytes)",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "wasi-completeness",
+      "status": "review",
+      "sprint": "Backlog"
+    },
+    {
+      "id": "1618",
+      "title": "wasi: console.log of a runtime string emits corrupted [object] placeholder",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "wasi-completeness",
+      "status": "review",
+      "sprint": "Backlog"
+    },
+    {
+      "id": "1597",
+      "title": "host-indep: gate __throw_reference_error in standalone mode",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "standalone-wasm",
+      "status": "review",
+      "sprint": "55"
+    },
     {
       "id": "1519",
       "title": "spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call",
@@ -3615,6 +3526,16 @@
   ],
   "done": [
     {
+      "id": "1652",
+      "title": "Fix native-messaging README build command (npx js2wasm not found on fresh clone)",
+      "priority": "low",
+      "feasibility": "",
+      "depends_on": [],
+      "goal": "",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
       "id": "1647",
       "title": "ECMAScript spec compliance audit: section-by-section review, gap issues, HTML report",
       "priority": "high",
@@ -3665,12 +3586,32 @@
       "sprint": "56"
     },
     {
+      "id": "1616",
+      "title": "Flatten issue files into a stable location; sprint membership via frontmatter only",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "process",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
       "id": "1590",
       "title": "Improve first-5-minutes UX: Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, comparison section",
       "priority": "high",
       "feasibility": "easy",
       "depends_on": [],
       "goal": "developer-experience",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1589a",
+      "title": "Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "",
       "status": "done",
       "sprint": "55"
     },
@@ -3683,6 +3624,40 @@
       "goal": "",
       "status": "done",
       "sprint": "54"
+    },
+    {
+      "id": "1588",
+      "title": "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [
+        "1586"
+      ],
+      "goal": "platform",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1587",
+      "title": "Static analysis pass: ownership and access semantics on IR values",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [
+        "1586"
+      ],
+      "goal": "platform",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1586",
+      "title": "IR preparation: explicit allocation sites with stable identity and metadata hooks",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "platform",
+      "status": "done",
+      "sprint": "55"
     },
     {
       "id": "1583",
@@ -3777,6 +3752,32 @@
       "sprint": "53"
     },
     {
+      "id": "1553d",
+      "title": "decl-dstr: route array declaration (typed-vec + externref) through destructureParamArray (decl-mode)",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [
+        "1553a",
+        "1553c"
+      ],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1553c",
+      "title": "decl-dstr: route externref-fallback object declaration through destructureParamObject (decl-mode)",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [
+        "1553a",
+        "1553b"
+      ],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
       "id": "1553a",
       "title": "destructure-helpers: thread decl-mode + bindingKind through destructureParamObject/Array (foundation)",
       "priority": "high",
@@ -3845,6 +3846,46 @@
       "goal": "wasi-completeness",
       "status": "done",
       "sprint": "52"
+    },
+    {
+      "id": "1474",
+      "title": "host-independence: eliminate JS host RegExp for standalone Wasm",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "host-independence",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1473",
+      "title": "host-independence: eliminate JS host error/exception ops for standalone Wasm",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "host-independence",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1472",
+      "title": "host-independence: eliminate JS host object/property ops for standalone Wasm",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "host-independence",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1471",
+      "title": "host-independence: eliminate JS host boxing/unboxing for standalone Wasm",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "host-independence",
+      "status": "done",
+      "sprint": "55"
     },
     {
       "id": "1455",
@@ -6368,6 +6409,28 @@
       "sprint": "42"
     },
     {
+      "id": "1116b",
+      "title": "Promise subclass: Wasm-compiled class extends Promise must be a valid JS constructor (Wasm-class-as-JS-ctor bridge)",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
+      "id": "1116",
+      "title": "Promise resolution and async error handling (210 tests)",
+      "priority": "critical",
+      "feasibility": "hard",
+      "depends_on": [
+        "944"
+      ],
+      "goal": "async-model",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
       "id": "1115",
       "title": "Fix illegal cast when closures are passed as callable parameters",
       "priority": "high",
@@ -8716,6 +8779,16 @@
       "sprint": "31"
     },
     {
+      "id": "820d",
+      "title": "class/dstr async-gen-meth default-init `unresolvable` illegal cast",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "property-model",
+      "status": "done",
+      "sprint": "55"
+    },
+    {
       "id": "820c",
       "title": "Async-gen object-method yield* iterator-protocol null deref (~39 fails)",
       "priority": "high",
@@ -9349,6 +9422,19 @@
       "goal": "compilable",
       "status": "done",
       "sprint": "17"
+    },
+    {
+      "id": "747",
+      "title": "Escape analysis for stack allocation",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [
+        "1586",
+        "1587"
+      ],
+      "goal": "performance",
+      "status": "done",
+      "sprint": "55"
     },
     {
       "id": "740",

@@ -105,6 +105,14 @@ const sprint = jsonData ? jsonData.sprint : currentSprint();
 const { done, total } = jsonData ?? sprintProgress(sprint);
 const pct = total === 0 ? 0 : done / total;
 const pctInt = Math.round(pct * 100);
+
+// --porcelain: emit machine-readable "N done total" for shell callers
+// (.claude/statusline-command.sh renders its own progress bar from these).
+if (process.argv.includes("--porcelain")) {
+  process.stdout.write(`${sprint} ${done} ${total}\n`);
+  process.exit(0);
+}
+
 const [r, g, b] = interpolateColor(pct);
 
 // ANSI 24-bit foreground color + reset
