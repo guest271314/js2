@@ -129,6 +129,52 @@ pnpm run test:262
 pnpm dev
 ```
 
+## Running compiled output
+
+`js2wasm` emits WasmGC modules that use several post-MVP WebAssembly proposals.
+Most are on by default in current engines, but **WasmGC and typed function
+references are not enabled by default in stable Wasmtime**, so a bare
+`wasmtime out.wasm` fails with a validation error until they are turned on.
+
+The simplest way to run the output is to enable all proposals:
+
+```bash
+wasmtime -W all-proposals=y out.wasm
+```
+
+The proposals the compiler actually relies on are:
+
+| Proposal | Wasmtime `-W` flag | Why js2wasm needs it |
+| --- | --- | --- |
+| Garbage collection | `gc=y` | objects, arrays, closures lower to GC structs/arrays |
+| Typed function references | `function-references=y` | required by GC; typed `call_ref` for closures |
+| Exception handling | `exceptions=y` | `throw` / `try` / `catch` lowering |
+| Tail calls | `tail-call=y` | `return_call` optimization in tail position |
+
+So the minimal explicit flag set is:
+
+```bash
+wasmtime -W gc=y -W function-references=y -W exceptions=y -W tail-call=y out.wasm
+```
+
+Bulk memory, sign-extension, saturating float-to-int, multi-value, and mutable
+globals are also emitted but are enabled by default in current Wasmtime, so they
+do not need explicit flags. `js2wasm` deliberately avoids the custom-descriptors
+proposal, which stable Wasmtime does not yet accept.
+
+**Minimum version:** Wasmtime **44+** (the first release with a stable WasmGC
+implementation). Older versions reject the GC types.
+
+> The flag table reflects the proposals the compiler emits (see
+> `src/optimize.ts`). The exact minimal `-W` subset was not re-verified by
+> running each flag combination in this environment; if `all-proposals=y` is
+> what you reach for, it is always safe.
+
+Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
+maturing, so compiled output is not guaranteed to run there yet. Browser hosts
+(Chrome 119+, Firefox 120+) and Node.js 22+ run the JS-host target without extra
+flags.
+
 ## What Works Today
 
 The compiler already covers a meaningful subset of the language and runtime surface. Current work is concentrated on steadily expanding spec coverage while reducing dependence on JS-host fallbacks.
