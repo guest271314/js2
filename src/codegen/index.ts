@@ -3532,6 +3532,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "readStdin") {
       needsFdRead = true;
     }
+    // #1653: process.stdin.read(buf, offset?) → triggers fd_read import (the
+    // binary, incremental Node-API replacement for readStdin()). Detect the
+    // `process.stdin.read(...)` call shape so fd_read is registered even when
+    // readStdin() is never used.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "read" &&
+      ts.isPropertyAccessExpression(node.expression.expression) &&
+      node.expression.expression.name.text === "stdin" &&
+      ts.isIdentifier(node.expression.expression.expression) &&
+      node.expression.expression.expression.text === "process"
+    ) {
+      needsFdRead = true;
+    }
     forEachChild(node, visit);
   }
   forEachChild(sourceFile, visit);
@@ -3903,7 +3918,7 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  *   - WASI_WRITE_SCRATCH_START = 128KB (page 2) — fd_write staging buffer
  * `registerWasiImports` reserves 3 pages so both always exist.
  */
-const WASI_STDIN_BUF_START = 64 * 1024;
+export const WASI_STDIN_BUF_START = 64 * 1024;
 const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
