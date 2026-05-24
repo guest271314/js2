@@ -43,6 +43,7 @@ coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 land
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
 | 1661 | README programmatic-API example fails — `instantiate(binary, {})` vs default-mode host imports (guest #601) | high | easy | **Ready** (sprint 55, docs, plan-only) |
+| 1667 | DX: `compile()` returns a ready-to-pass import object for default/JS-host mode (guest #601) | medium | medium | **Ready** (Backlog, feature). Complements #1661 — adds the JS-host convenience; standalone stays the recommended default |
 
 ## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
 
