@@ -1,9 +1,9 @@
 ---
 id: 1588
 title: "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop"
-status: in-progress
+status: in-review
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -718,3 +718,49 @@ bake before PR-C flips any boundary behavior.
 | WIT string type (unchanged) | `src/wit-generator.ts:138` | `mapTypeNode` |
 | CLI / option flag | `src/cli.ts`, `src/compiler.ts`, `src/index.ts` | `--utf8-storage` |
 | ADR | `docs/adr/0015-string-encoding-tracking.md` (@strenc) | extend §"Component Model boundary" + add storage + alias-guard |
+
+## PR-C status (2026-05-24) — revised scope
+
+The original PR-C plan (Edge A `c-abi.ts` scan elision + Edge B
+`declarations.ts` import selection + benchmark) presumed a Component-Model
+encode-import infrastructure on the WasmGC backend that **does not exist yet**:
+no CM adapter, no boundary-lowering pass reading the annotation, no declared
+encode imports, and `allocRegistry` not threaded into the host-edge resolver.
+Edge B "import selection" could not be built without first building that
+adapter — an infrastructure gap, not a wiring change. PR-C was therefore
+rescoped to ship the **missing transcode primitive** the boundary will consume.
+
+Landed:
+
+- **`__str_to_utf8(s: ref $AnyString) -> ref $__str_data_u8`** —
+  `src/codegen/native-strings.ts`, gated on `--utf8-storage` (emitted next to
+  the inverse `__str_utf8_to_flat`). Pure-Wasm WTF-16 → UTF-8 transcoder:
+  flattens any string (NativeString i16 / ConsString rope / Utf8String i8) via
+  `__str_flatten`, then two passes over the i16 buffer (pass 1 sums the UTF-8
+  byte length so the i8 output is allocated exactly once; pass 2 writes bytes).
+  Total — a lone surrogate is emitted as 3-byte WTF-8 rather than trapping
+  (defensive; the boundary fast path only ever sees proven-`utf8-guaranteed`
+  values, which can never contain a lone surrogate). This is the standalone
+  primitive the deferred Edge B fallback (`string_to_utf8`) will call — "JS
+  host optional" without a `TextEncoder` import.
+- **Tests** — `tests/issue-1588-str-to-utf8.test.ts` (10): asserts byte-exact
+  equality with `Buffer.from(str,"utf8")` for ascii / 2-byte / 3-byte / astral /
+  mixed / empty, plus explicit WTF-8 checks for lone high/low surrogates.
+- **Benchmark** — `benchmarks/str-to-utf8.bench.mts` (`npx tsx`): pure-Wasm
+  `__str_to_utf8` vs JS host `TextEncoder.encode`. Kernel micro-benchmark
+  (each rep re-materializes the source string, so figures include WasmGC
+  allocation the in-heap boundary path would not pay): ascii ~0.22×, latin-1
+  ~0.31×, CJK ~0.67×, astral (4-byte emoji) **~1.5× faster than TextEncoder**.
+  The pure-Wasm kernel wins on astral-heavy content; numbers recorded in
+  ADR-0015. Conclusion: a standalone transcoder is competitive with V8's native
+  encoder, so the standalone CM path is worth taking when no host runtime is
+  present.
+- **ADR-0015** — "PR-C (landed — revised scope)" documents the helper, the
+  Edge A invariant (a lone surrogate can never be `utf8-guaranteed`, so the
+  scan-eliding fast path can never emit malformed UTF-8), and the Edge B
+  deferral.
+
+Deferred to **#1650** (CM-boundary encode-import selection): Edge A scan
+elision, Edge B import selection + standalone fallback wiring, `allocRegistry`
+plumbing into the boundary resolver, alias-fusion soundness guard, and the
+end-to-end boundary benchmark.

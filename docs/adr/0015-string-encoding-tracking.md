@@ -171,10 +171,78 @@ exists today, so this is a forward guard, not a present bug). Concat-result
 i8 storage (`string.concat` still produces i16; only literals take i8 in this
 PR — concat decodes its operands via flatten, so it stays correct).
 
-**PR-C (deferred).** Component Model boundary lowering (Edge A `c-abi.ts` scan
-elision; Edge B `declarations.ts` import selection + standalone Wasm-native
-`string_to_utf8`) + benchmark. See "## Phase 2 ABI Plan" in the #1588 issue
-file for the full design.
+**PR-C (landed — revised scope).** The original PR-C plan presumed a
+Component-Model encode-import infrastructure on the WasmGC backend that does not
+exist yet (no CM adapter, no boundary-lowering pass that reads the annotation,
+no declared encode imports). Edge B "import selection" therefore could not be
+built without first building that adapter — an infrastructure gap, not a wiring
+change. PR-C was rescoped to ship the **missing transcode primitive** that the
+boundary will consume, and to document the two boundary edges so the deferred
+work has a clear contract.
+
+Delivered:
+
+- **Standalone `__str_to_utf8(s: ref $AnyString) -> ref $__str_data_u8`**
+  (`src/codegen/native-strings.ts`, gated on `--utf8-storage`). A pure-Wasm
+  (no JS host call) WTF-16 → UTF-8 transcoder: flattens any string
+  (`NativeString` i16, `ConsString` rope, or `Utf8String` i8) via
+  `__str_flatten`, then two-passes the i16 buffer — pass 1 sums the UTF-8 byte
+  length so the `__str_data_u8` output is allocated exactly once; pass 2 writes
+  the bytes. This is the in-heap counterpart to the existing inverse helper
+  `__str_utf8_to_flat` (UTF-8 → WTF-16) and the runtime counterpart to the
+  compile-time literal encoder `utf8Encode`. It is the primitive the deferred
+  Edge B standalone fallback (`string_to_utf8`) will call, satisfying the "JS
+  host optional" rule (CLAUDE.md) without a `TextEncoder` host import.
+  - **Totality**: unlike the compile-time `utf8Encode` (which asserts
+    well-formedness for proven ascii/utf8 literals), the runtime helper handles
+    arbitrary WTF-16 input. A lone surrogate is emitted as its 3-byte WTF-8
+    generalization, so the function never traps. This is a defensive totality
+    guarantee — the boundary fast path is only ever selected for values the
+    analysis proved `utf8-guaranteed`, which can never contain a lone surrogate
+    (the literal classifier demotes those to `wtf16`), so a surrogate never
+    reaches the fast path in practice.
+  - **Tests**: `tests/issue-1588-str-to-utf8.test.ts` (10 cases) splices an
+    exported probe that builds a `NativeString` from baked-in code units, calls
+    `__str_to_utf8`, and reads back the byte array — asserting equality with
+    Node's `Buffer.from(str, "utf8")` for ascii / 2-byte / 3-byte / astral /
+    mixed / empty, plus explicit WTF-8 byte checks for lone high/low surrogates.
+
+- **Benchmark** — `benchmarks/str-to-utf8.bench.mts` (`npx tsx`), pure-Wasm
+  `__str_to_utf8` vs the JS host `TextEncoder.encode`, 20k reps per case. On
+  V8/Node 25 (kernel micro-benchmark, each rep re-materializes the source
+  string so the figures include WasmGC allocation overhead that the in-heap
+  boundary path would not pay): ascii ~0.22×, latin-1 ~0.31×, CJK (3-byte)
+  ~0.67×, **astral (4-byte emoji) ~1.5× faster than TextEncoder** — the
+  pure-Wasm kernel pulls ahead exactly where the host encoder's surrogate-pair
+  handling and the JS↔native boundary cost most. The takeaway for the deferred
+  boundary work: a standalone transcoder is competitive with V8's native
+  encoder and wins on astral-heavy content, so the standalone CM path is worth
+  taking when no host runtime is present.
+
+The two boundary edges (design unchanged from "## Phase 2 ABI Plan" §2 in the
+#1588 issue; deferred to **#1650**):
+
+- **Edge A — linear / WASI / canonical ABI (`c-abi.ts`).** Internal strings are
+  already byte-oriented UTF-8, so the annotation buys **scan elision**, not a
+  copy: a `utf8-guaranteed`/`ascii` arg lowers directly to `(ptr, byteLen)`
+  from the string header, skipping the surrogate-validity scan; `wtf16`/unknown
+  keeps the existing scan path. **Invariant** (the soundness anchor): a lone
+  surrogate can never be `utf8-guaranteed` (the classifier demotes it), so the
+  scan-eliding fast path can never emit malformed UTF-8 across the WIT edge.
+  For ascii specifically `byteLen == len` (1 byte per code unit), enabling an
+  optional latin1 fast path to CM receivers that accept it.
+
+- **Edge B — WasmGC / host edge (`declarations.ts`).** The annotation selects
+  *which encode path* a string-typed CM-boundary call lowers to: a checked host
+  `string_to_utf8` import (validates/substitutes) for `wtf16`; an unchecked
+  `string_to_utf8_unchecked` (or the stringref `encode` builtin) for the proven
+  set; and — for standalone mode (no JS host) — the in-heap Wasm-native
+  fallback that calls `__str_to_utf8` (this PR). **Deferred** because it
+  presumes a CM adapter for the WasmGC backend that does not exist: the encode
+  imports are undeclared, no boundary-lowering pass reads the annotation, and
+  the `allocRegistry` is not yet threaded into the host-edge resolver. Tracked
+  in **#1650** (CM-boundary encode-import selection), which also carries the
+  alias-fusion soundness guard and the end-to-end boundary benchmark.
 
 ## Consequences
 
@@ -195,6 +263,7 @@ file for the full design.
 ## References
 
 - ADR-0013 — explicit allocation sites (the attachment mechanism)
+- #1650 — Component Model boundary encode-import selection (Edge B follow-up)
 - ECMA-262 §6.1.4 (String type / WTF-16), §24.5.2 (JSON.stringify)
 - WHATWG Encoding (TextDecoder UTF-8 guarantees), RFC 8259 (JSON UTF-8)
 - Component Model CanonicalABI (`string`)
