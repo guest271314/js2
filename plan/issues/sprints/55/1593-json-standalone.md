@@ -1,8 +1,8 @@
 ---
 id: 1593
-sprint: backlog
+sprint: 55
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: backlog
+status: ready
 created: 2026-05-24
 priority: medium
 feasibility: hard

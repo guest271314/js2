@@ -104,6 +104,9 @@ until it lands, so it must be in P1 despite zero direct test262 yield.
 | [#1473](1473-no-js-host-error-exceptions.md) | host-indep: error/exception ops | medium | yes (in-issue) | +0 (WASI) | — |
 | [#1474](1474-no-js-host-regex-standalone.md) | host-indep: pure-Wasm RegExp (Phase 1 — done) | medium | yes (in-issue) | +0 (WASI) | — |
 | [#1539](1539-wasm-native-regex-engine-regress.md) | standalone regex engine via regress (Phase 2 of #1474) | hard | yes (in-issue) | +400–800 (WASI) | #1474 ✓ |
+| [#1591](1591-throw-reference-error-standalone-gate.md) | host-indep: `__throw_reference_error` → `unreachable` | easy | yes (in-issue) | +0 (WASI) | — |
+| [#1592](1592-string-fromcharcode-standalone.md) | host-indep: `String.fromCharCode/fromCodePoint` pure-Wasm | easy | yes (in-issue) | +0 (WASI) | — |
+| [#1593](1593-json-standalone.md) | host-indep: JSON standalone (Phase 1 refuse, Phase 2 cJSON) | hard | yes (in-issue) | +0 (WASI) | — |
 | [#747](747-escape-analysis-for-stack-allocation.md) | escape analysis for stack alloc (Phase 1 of #652) | hard | yes (re-scope) | strategic | #1586, #1587 |
 | [#1589A](1589A-object-literal-field-type-and-has-idx.md) | object-literal field-type + has_idx null semantics | hard | yes (fix plan) | +0 (tests skipped) | — |
 
@@ -138,7 +141,7 @@ Plan` and must be spec'd by the architect first:
 
 Already-spec'd (dispatch-ready): #820d (in-issue), #1553b (in-issue),
 #1553c/#1553d (in-issue partial), #747 (has spec, re-scope to #1587 substrate),
-#1589A (has fix plan), #1471–#1474 (in-issue specs), #1539 (in-issue spec).
+#1589A (has fix plan), #1471–#1474 (in-issue specs), #1539/#1591/#1592/#1593 (in-issue specs).
 
 ## Theme
 

@@ -1,8 +1,8 @@
 ---
 id: 1592
-sprint: backlog
+sprint: 55
 title: "host-indep: pure-Wasm String.fromCharCode / fromCodePoint in standalone mode"
-status: backlog
+status: ready
 created: 2026-05-24
 priority: medium
 feasibility: easy
