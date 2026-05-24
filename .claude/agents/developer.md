@@ -46,9 +46,13 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 ## Workflow
 
 ### Start
-1. `TaskList` — claim the lowest-ID unowned/unblocked task via `TaskUpdate(owner: "your-name")`
+1. `TaskList` — pick the lowest-ID candidate task. **Before claiming, run the pre-claim gate. Skip the task (do NOT claim) and move to the next candidate if ANY of these is true:**
+   - **Owner pin**: the task already has an `owner` set to a name other than yours. An owned task belongs to that agent — never take it, even if it looks idle. (The auto-dispatcher only offers ownerless tasks; if you were handed an owned one, that is stale routing — skip it.)
+   - **Scope mismatch**: the subject carries a role tag outside your lane — `[SENIOR-DEV ONLY]`, `[ARCH]`/`arch(...)`, `[PO]`/`po:`, `[CONFLICT]` (senior-dev), or `[PARKED ...]`/`[PAUSE]`. You are a `developer`; only claim plain `fix(...)`/`refactor(...)`/`dev:` tasks with no foreign role tag.
+   - **Already done**: a PR for this issue is already merged (`gh pr list --state merged --search "<issue#>"`) or open and owned by someone else. If so, the task is stale — flag the tech lead so they reconcile it, and skip.
+   Only when the gate passes: claim it via `TaskUpdate(owner: "your-name", status: in_progress)`.
 2. If the issue has `status: suspended` + `## Suspended Work`, use the listed worktree and resume instructions
-3. If no tasks: message tech lead `"TaskList is empty, need next task."`
+3. If no claimable task survives the gate: message tech lead `"TaskList is empty (or all remaining tasks are owned/out-of-scope), need next task."`
 
 ### Implement
 1. Read `plan/issues/sprints/{sprint}/{N}.md` + smoke-test 1-2 failing cases to confirm the bug reproduces
@@ -75,6 +79,7 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
    ```
    Then open the PR:
    `gh pr create --base main --title "fix(#N): <description>" --body "..."`
+   **Immediately after the PR is created, set the issue frontmatter `status: in-review`** in `plan/issues/sprints/{sprint}/{N}.md` (commit it on your branch). This signals the issue has left active dev and is awaiting merge — never leave it at `in-progress` once a PR is open.
 5. **After `gh pr create` returns — block on CI synchronously:**
    - Update your status file to show the open PR:
      ```bash
@@ -87,7 +92,8 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
      - **Drift detected** (`mergeable_state` becomes `BEHIND`) → `git fetch origin && git merge origin/main`, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI. Do NOT escalate.
      - **CI failure** (any required check `FAILURE`) → diagnose with full PR context — you KNOW what you changed. Fix locally, `git push`, loop back to wait-for-CI. Do NOT escalate ordinary failures.
      - **ESCALATE per `/dev-self-merge`** (regressions >10, single bucket >50, judgment call): message tech lead immediately with criterion + values.
-6. After merge lands:
+6. After merge lands (by you OR by the merge queue):
+   - Set the issue frontmatter `status: done` in `plan/issues/sprints/{sprint}/{N}.md`. A merged PR ALWAYS implies `status: done` — whoever observes the merge sets it; do not leave a merged issue at `in-review`.
    - `rm -f "/workspace/.claude/agent-status/issue-{N}-{slug}.json"` — clear your status
    - `git worktree remove /workspace/.claude/worktrees/<branch>` — clean up your own worktree
    - `TaskUpdate(status: completed)`
