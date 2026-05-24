@@ -1,9 +1,10 @@
 ---
 id: 1553d
 title: "decl-dstr: route array declaration (typed-vec + externref) through destructureParamArray (decl-mode)"
-status: in-progress
+status: done
 created: 2026-05-20
-updated: 2026-05-23
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: hard
 reasoning_effort: high

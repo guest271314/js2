@@ -120,7 +120,7 @@ All independent -- can run in parallel (different codegen paths).
 
 ```
 #849 (mapped arguments) -- independent
-#1116 (promise/async errors) -- independent
+#1116 (promise/async errors) -- DONE (s55, merged PR #436)
 #1117 (wrong error type) -- coordinates with #846
 #1118 (worker/timeout/eval null deref) -- independent
 #853 (opaque Wasm objects) -- independent
@@ -258,7 +258,7 @@ All independent, can run in parallel.
 | 686 | Closure capture type preservation | Perf | **Ready** |
 | 744 | Monomorphize: specialized function copies | Perf | Blocked by #743 |
 | 746 | Hidden class optimization | Perf | Blocked |
-| 747 | Escape analysis / stack allocation | Perf | Blocked |
+| ~~747~~ | ~~Escape analysis / stack allocation~~ | Perf | **DONE** (s55, PR #545) |
 
 ---
 

@@ -1,9 +1,10 @@
 ---
 id: 1116b
 title: "Promise subclass: Wasm-compiled class extends Promise must be a valid JS constructor (Wasm-class-as-JS-ctor bridge)"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-23
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: hard
 reasoning_effort: max
