@@ -1,7 +1,7 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: ready
+status: in-review
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
@@ -142,3 +142,43 @@ number   := '-'? int frac? exp?
 
 Phase 1: ~30 LOC, easy.
 Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolchain.
+
+## Status — Phase 1 done (PR fix(#1599))
+
+**Phase 1 (refuse-and-document) is implemented and merged.** Phase 2
+(pure-Wasm codec) remains a follow-up.
+
+### What landed
+- `src/codegen/declarations.ts` — `env::JSON_stringify` / `env::JSON_parse`
+  imports are now gated on `!(ctx.wasi || ctx.standalone)`. No JSON host import
+  is registered in standalone / WASI output. (Both targets lack the JS host;
+  the spec mentioned only `ctx.standalone`, but `--target wasi` has the same
+  instantiation failure, so the guard covers both — matching the #1473 sibling
+  precedent `ctx.wasi || ctx.standalone`.)
+- `src/codegen/expressions/calls.ts` — at the `JSON.stringify` / `JSON.parse`
+  call site, when `ctx.standalone || ctx.wasi` and the value is not handled by
+  the pure-Wasm primitive slice (#1324), emit a `reportError` whose message
+  starts with `Codegen error:` (required to flip `CompileResult.success` to
+  `false` per `src/compiler.ts`) referencing #1599.
+- `tests/issue-1599-json-standalone-refuse.test.ts` — 11 tests: refusal of
+  object/array/string stringify + all parse (standalone AND wasi), no
+  `env::JSON_*` import emitted, primitive `null`/`true` stringify still compiles
+  standalone, and default JS-host mode unchanged.
+
+### Acceptance criteria — Phase 1
+- ✅ `--target standalone`/`wasi` module using non-primitive `JSON.stringify`
+  or any `JSON.parse` fails at compile time with a clear `#1599` error + source
+  location.
+- ✅ No `env::JSON_parse` / `env::JSON_stringify` in standalone/wasi output.
+
+### Notes for Phase 2 (follow-up — NOT in this PR)
+- The primitive `JSON.stringify` slice (#1324) covers `null` / `undefined` /
+  `boolean` standalone, but **`number` is NOT standalone-safe**: that slice
+  lowers via `env::number_toString`, a host import absent in standalone/wasi.
+  So `JSON.stringify(42)` is (correctly) refused with the #1599 message today.
+  Phase 2 must add a pure-Wasm f64→string path (or reuse `__f64_to_string`) to
+  unblock the number primitive standalone.
+- Remaining Phase 2 scope unchanged from the spec above: pure-Wasm serialiser
+  (`json-stringify.ts`) + recursive-descent parser (`json-parse.ts`) over the
+  WasmGC value graph. Acceptance: `JSON.stringify({a:1,b:[2,3]})` →
+  `'{"a":1,"b":[2,3]}'` and `JSON.parse('{"x":42}').x === 42` standalone.

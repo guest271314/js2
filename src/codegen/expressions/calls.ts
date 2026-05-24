@@ -4344,6 +4344,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             return { kind: "externref" };
           }
         }
+        // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
+        // WASI mode there is no `env::JSON_*` host import to fall back to.
+        // The primitive `JSON.stringify` slice above (#1324) already handles
+        // null / undefined / boolean / number as pure Wasm; everything else
+        // (objects, arrays, strings, and all `JSON.parse`) needs the pure-Wasm
+        // codec from Phase 2, which is not yet implemented. Emit a clear
+        // compile error rather than a module that traps at instantiation.
+        if (ctx.standalone || ctx.wasi) {
+          reportError(
+            ctx,
+            expr,
+            `Codegen error: JSON.${method} of this value is not yet supported in --target standalone/wasi (#1599). ` +
+              `Pure-Wasm JSON.stringify of null/undefined/boolean/number works standalone; ` +
+              `objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
+              `Avoid JSON for these shapes in standalone/WASI targets for now.`,
+          );
+          return null;
+        }
         const importName = `JSON_${method}`;
         const funcIdx = ctx.funcMap.get(importName);
         if (funcIdx !== undefined) {
