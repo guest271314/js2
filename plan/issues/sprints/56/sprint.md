@@ -1,0 +1,98 @@
+---
+sprint: 56
+status: planned
+created: 2026-05-24
+authors: product-owner
+baseline_pass: 29432
+baseline_total: 43159
+baseline_pct: 68.24
+target_pass: 29950
+expected_gain: 518
+---
+
+# Sprint 56 Plan — destructuring fidelity + class-element coverage
+
+## Goal
+
+Close the structural gaps exposed by the 2026-05-24 test262 harvest. Two parallel tracks:
+
+1. **Destructuring fidelity** (#1593, #1592, #779e, #1529) — fix the undefined-vs-null default-init guard, elision iterator holes, and the illegal-cast residuals. These are self-contained fixes in `destructuring.ts` / `destructure-params.ts` with clear spec citations.
+
+2. **Class element coverage** (#1591, #779a) — the class-body emitter drops same-line / stacked member definitions (#1591), and the class/dstr method-tramp path has residual failures (#779a). Both touch `src/codegen/index.ts` / `src/codegen/literals.ts` but at different depths.
+
+Alongside: carry-in from s55 (#1553b, #1116 remaining slices, #1130 respec), and high-value opportunistic picks (#1596 apply/call, #1319 toPrimitive, #1594 AnnexB TDZ).
+
+## Baseline & projection
+
+- **Baseline (s56 open):** 29,432 / 43,159 = **68.24%** (2026-05-24 CI run)
+- **Target:** ~29,950 pass (+518 conservative)
+- **Conservative addressable by issue:**
+
+| Issue | Est. +PASS |
+|-------|-----------|
+| #1593 default-init null guard | +165 |
+| #1592 ary-ptrn elision holes | +260 (some overlap w/ #1529) |
+| #1591 class/elements same-line | +250 (some overlap w/ #779a) |
+| #779a class/dstr method-tramp | +200 (partial; 727 total, hard) |
+| #1596 Function.prototype.apply/call | +40 |
+| #1319 toPrimitive chain | +100 |
+| #779e arguments-object residual | +80 |
+| #1594 AnnexB TDZ | +50 |
+| s55 carry-in: #1553b | +18 |
+| s55 carry-in: #1116 slices | +50 (conservative) |
+
+Conservative sum: ~1,213 addressable. Target +518 is the bottom 40%.
+
+## Priority buckets
+
+### P1 — dispatch first (high yield, self-contained)
+
+| ID | Title | Feasibility | Spec? | Est. | Depends on |
+|----|-------|-------------|-------|------|------------|
+| [#1593](../../backlog/1593-default-init-triggers-on-null-should-be-undefined-only.md) | Destructuring default init on null (undefined-only) | easy | yes (in-issue) | +165 | — |
+| [#1591](../../backlog/1591-class-elements-same-line-multi-definition.md) | class/elements same-line multi-definition | medium | partial (in-issue) | +250 | — |
+| [#1592](../../backlog/1592-ary-ptrn-elision-rest-holes-dstr.md) | Array pattern elision & rest-array holes | medium | yes (in-issue) | +260 | — |
+
+### P2 — high value, more complex
+
+| ID | Title | Feasibility | Spec? | Est. | Depends on |
+|----|-------|-------------|-------|------|------------|
+| [#779a](../../backlog/779a-class-dstr-method-tramp-residual.md) | class/dstr method-tramp residual | hard | partial | +200 | — |
+| [#1319](../../sprints/50/1319-cannot-convert-to-primitive-symbol-toprimitive.md) | Cannot convert object to primitive | medium | yes | +100 | — |
+| [#1596](../../backlog/1596-function-prototype-apply-call-not-accessible.md) | Function.prototype.apply/call on Wasm fns | medium | yes (in-issue) | +40 | — |
+| s55 carry-in: [#1553b](../55/1553b.md) | decl-dstr typed-struct object delegation | medium | yes (in-issue) | +18 | — |
+| s55 carry-in: [#1116](../55/1116-promise-resolution-and-async-error.md) | Promise slices remaining | hard | partial | +50 | — |
+
+### P3 — medium value / strategic
+
+| ID | Title | Feasibility | Spec? | Est. | Depends on |
+|----|-------|-------------|-------|------|------------|
+| [#1594](../../backlog/1594-annexb-strict-function-code-tdz-referenceerror.md) | AnnexB strict fn TDZ / class name TDZ | medium | yes (in-issue) | +50 | — |
+| [#779e](../../backlog/779e-arguments-object-residual.md) | arguments-object residuals | medium | partial | +80 | — |
+| [#1529](../../backlog/1529-codegen-illegal-cast-at-closure-and-destructuring-boundaries.md) | illegal cast at closure/dstr boundaries | medium | partial | +80 | — |
+| [#1130](../55/1130-array-methods-getter-observing-property.md) | Array methods getter-observing (needs respec) | hard | needs-respec | +80 | new spec needed |
+| [#1590](../../backlog/1590-first-5-min-ux-docs-and-hints.md) | First-5-min UX docs | easy | yes (in-issue) | +0 | — |
+
+## Dispatch manifest (for tech lead)
+
+- **Parallelisable from start:** #1593, #1591, #1596, #779e — independent files
+- **Serial (same file region):** #1592 and #1529 both touch `destructuring.ts` / `destructure-params.ts` — one owner, sequential
+- **Serial (#1116 slices):** each slice merged before next dispatched; one owner
+- **#779a** is `feasibility: hard` — needs architect spec before dev dispatch; spec can be written in parallel with P1 work
+- **#1130** needs a respec before dispatch — PO/architect to define the new approach (accessor-protocol path vs. host-side getter interception)
+
+## Architect specs needed before dev dispatch
+
+1. **#779a** — class/dstr method-tramp residual. Hard; no full spec yet. Write spec against `src/codegen/literals.ts` binding-element + tramp builder.
+2. **#1130** — needs-respec; the "array methods getter-observing" approach must be redesigned before a dev touches it.
+
+## Notes
+
+- #1130 carries over from s55 with `needs-respec`. Do NOT dispatch without a new implementation plan.
+- #1553b was skipped in s55 (team went straight to #1553c). Its typed-struct path may already be handled by the #1553c externref delegation, or it may need a thin typed-struct → shared-helper wrapper. Verify by running the 1553b equivalence tests against current main before dispatch.
+- The s55 #1588 Phase 2b (PR #548) is expected to land before s56 begins — treat it as a dependency unlocked state.
+- Sprint 56 can start once s55's #1588-phase2b merges and the final s55 CI run is recorded.
+
+## Theme
+
+**Destructuring fidelity + class-body coverage.** Fix three independent but thematically linked spec violations in destructuring (null guard, elision holes, iterator fidelity), then clear the class-body emitter bugs that cost ~550 tests across same-line class elements and method-tramp patterns.
