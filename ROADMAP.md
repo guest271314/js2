@@ -83,9 +83,9 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ## Why This Matters for Digital Sovereignty
 
-### Independence from Proprietary JS Engines
+### Independence from Heavyweight JS Engines
 
-Today, running JavaScript on the server or at the edge requires one of three proprietary engines: Google's V8, Apple's JavaScriptCore, or Mozilla's SpiderMonkey. js2wasm eliminates this dependency entirely — compiled Wasm modules run on **any** standards-compliant WebAssembly runtime, including fully open-source options like Wasmtime and wazero.
+Today, running JavaScript on the server or at the edge in practice means embedding one of three large, vendor-led engines: Google's V8, Apple's JavaScriptCore, or Mozilla's SpiderMonkey. All three are open source (V8 and JavaScriptCore under BSD-style licenses, SpiderMonkey under the MPL), but each is a megabyte-scale engine governed by a single major vendor, and embedding one means shipping and initializing that whole engine. js2wasm removes that dependency: compiled Wasm modules run on **any** standards-compliant WebAssembly runtime, including lightweight, independently governed options like Wasmtime and wazero — no bundled engine required.
 
 ### Open Standards, No Vendor Lock-In
 

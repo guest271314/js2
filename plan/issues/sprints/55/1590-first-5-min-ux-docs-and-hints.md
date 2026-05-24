@@ -2,7 +2,7 @@
 id: 1590
 sprint: 55
 title: "Improve first-5-minutes UX: Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, comparison section"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-24
 priority: high

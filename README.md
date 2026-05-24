@@ -86,6 +86,42 @@ WasmGC structs, arrays, primitives, and functions. Where JavaScript remains
 dynamic, it inserts guards, uses dynamic representations, or delegates at host
 boundaries.
 
+### How does this compare to specific projects?
+
+These projects share parts of the design space with `js2wasm` and each makes a
+different, reasonable trade-off:
+
+- **[AssemblyScript](https://www.assemblyscript.org/)** — a well-engineered
+  compiler for a TypeScript-*like* language with its own stricter type system,
+  lowering to compact Wasm via Binaryen. It achieves small output by defining a
+  new language contract rather than accepting mainstream JavaScript semantics.
+  `js2wasm` targets existing TypeScript/JavaScript semantics directly, which is
+  a harder compatibility goal; AssemblyScript is the better fit when you can
+  write to its language and want maximally lean output.
+
+- **[Javy](https://github.com/bytecodealliance/javy)** — embeds the QuickJS
+  interpreter inside the Wasm module and runs your JS on top of it. That
+  inherits broad JavaScript compatibility immediately, at the cost of shipping
+  and initializing an interpreter in every module. `js2wasm` instead compiles
+  the code ahead-of-time with no embedded interpreter, trading some
+  compatibility for a smaller, engine-free artifact.
+
+- **[Porffor](https://porffor.dev/)** — like `js2wasm`, an ahead-of-time
+  JavaScript-to-Wasm compiler aiming at real JS semantics rather than a subset,
+  which puts it in the same fourth category. It is an early-stage project that
+  lowers to linear memory; `js2wasm` lowers to WasmGC, leaning on the host
+  garbage collector for objects, closures, and arrays. The two are close
+  neighbors exploring different lowering strategies for the same hard target.
+
+- **StarlingMonkey + [weval](https://github.com/bytecodealliance/weval)** —
+  StarlingMonkey is a WASI-oriented build of the SpiderMonkey engine; weval
+  applies Wasm partial evaluation (a Futamura projection) to specialize the
+  engine for a given script, reducing interpreter overhead. This is a
+  bundled-engine approach made faster through specialization, so it keeps full
+  engine compatibility while still shipping the engine. `js2wasm` avoids
+  bundling an engine at all, accepting a narrower compatibility surface in
+  exchange.
+
 For a more detailed category-level comparison, see the [FAQ](./docs/faq.md).
 
 ## Quick Start
@@ -129,20 +165,93 @@ pnpm run test:262
 pnpm dev
 ```
 
-## What Works Today
+## Running compiled output
 
-The compiler already covers a meaningful subset of the language and runtime surface. Current work is concentrated on steadily expanding spec coverage while reducing dependence on JS-host fallbacks.
+`js2wasm` emits WasmGC modules that use several post-MVP WebAssembly proposals.
+Most are on by default in current engines, but **WasmGC and typed function
+references are not enabled by default in stable Wasmtime**, so a bare
+`wasmtime out.wasm` fails with a validation error until they are turned on.
 
-Areas with meaningful progress today include:
+The simplest way to run the output is to enable all proposals:
 
-- arithmetic and basic scalar operations
-- functions, closures, and many control-flow forms
-- classes, inheritance, and object operations
-- arrays, strings, destructuring, and template literals
-- significant portions of built-in and host interop behavior
-- a public conformance workflow based on Test262
+```bash
+wasmtime -W all-proposals=y out.wasm
+```
 
-This is not yet a “drop in any npm package” story. It is a serious compiler with a growing compatibility baseline and a clear infrastructure target.
+The proposals the compiler actually relies on are:
+
+| Proposal | Wasmtime `-W` flag | Why js2wasm needs it |
+| --- | --- | --- |
+| Garbage collection | `gc=y` | objects, arrays, closures lower to GC structs/arrays |
+| Typed function references | `function-references=y` | required by GC; typed `call_ref` for closures |
+| Exception handling | `exceptions=y` | `throw` / `try` / `catch` lowering |
+| Tail calls | `tail-call=y` | `return_call` optimization in tail position |
+
+So the minimal explicit flag set is:
+
+```bash
+wasmtime -W gc=y -W function-references=y -W exceptions=y -W tail-call=y out.wasm
+```
+
+Bulk memory, sign-extension, saturating float-to-int, multi-value, and mutable
+globals are also emitted but are enabled by default in current Wasmtime, so they
+do not need explicit flags. `js2wasm` deliberately avoids the custom-descriptors
+proposal, which stable Wasmtime does not yet accept.
+
+**Minimum version:** Wasmtime **44+** (the first release with a stable WasmGC
+implementation). Older versions reject the GC types.
+
+> The flag table reflects the proposals the compiler emits (see
+> `src/optimize.ts`). The exact minimal `-W` subset was not re-verified by
+> running each flag combination in this environment; if `all-proposals=y` is
+> what you reach for, it is always safe.
+
+Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
+maturing, so compiled output is not guaranteed to run there yet. Browser hosts
+(Chrome 119+, Firefox 120+) and Node.js 22+ run the JS-host target without extra
+flags.
+
+For reading STDIN and writing STDOUT/STDERR from standalone (`--target wasi`)
+output, see [docs/standalone-io.md](./docs/standalone-io.md).
+
+## Current coverage and limitations
+
+`js2wasm` passes roughly two-thirds of Test262 in a JS host (see the conformance
+figure above and the full [Test262 report](./benchmarks/results/report.html)).
+That means a large, useful subset of the language works — but there are real
+gaps, and you will hit them. This section is the honest high-level shape; the
+report is the authoritative per-feature detail.
+
+**Solid** (broadly works):
+
+- arithmetic, comparison, and scalar operations
+- functions, closures, recursion, and most control-flow forms
+- classes, inheritance, methods, and object operations
+- arrays and array methods, destructuring, spread, template literals
+- strings and common string methods
+- `try`/`catch`/`finally` and `throw`
+- `async`/`await`, generators, and iterators
+
+**Partial** (works in common cases, with gaps):
+
+- standard-library built-ins — many are implemented, but not the full surface;
+  some methods are missing or only handle the common overloads
+- `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
+- standalone (no-JS-host) mode — actively in progress; conformance there is
+  lower than the JS-host figure and it is not yet the primary path
+- getters/setters and other highly dynamic patterns — limited
+
+**Not yet** (intentionally unsupported or out of scope today):
+
+- `eval`, `with`, and dynamic `Function` construction
+- `Proxy` and `Reflect`-driven metaprogramming
+- `SharedArrayBuffer` / threads, `WeakRef` / `FinalizationRegistry`, `Temporal`
+- dropping in an arbitrary npm package unchanged
+
+If a pattern you rely on does not work, check the [Test262 report](./benchmarks/results/report.html)
+or open an issue. This is a serious compiler with a growing compatibility
+baseline and a clear infrastructure target — not yet a "drop in any npm package"
+story.
 
 ## The Methodology
 
