@@ -61,6 +61,7 @@ Options:
   --ts7             Use @typescript/native-preview (TypeScript 7 Go-port) as
                     the parser/checker frontend (preview; full migration
                     tracked in #1029). Equivalent to JS2WASM_TS7=1.
+  -q, --quiet       Suppress the post-compile "how to run" hint
   -v, --version     Print version and exit
   -h, --help        Show this help
 
@@ -82,6 +83,7 @@ let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
 let emitWit = false;
 let allowFs = false;
+let quiet = false;
 // #1524 — dual-mode strict gate. `undefined` = let the compiler use its
 // default (strict-on under `--target wasi`); `true` / `false` = explicit
 // override from `--no-host-imports` / `--allow-host-imports`.
@@ -112,6 +114,8 @@ for (let i = 0; i < args.length; i++) {
     emitWit = true;
   } else if (arg === "--allow-fs") {
     allowFs = true;
+  } else if (arg === "--quiet" || arg === "-q") {
+    quiet = true;
   } else if (arg === "--no-host-imports") {
     strictNoHostImports = true;
   } else if (arg === "--allow-host-imports") {
@@ -197,10 +201,12 @@ if (watOnly) {
   process.exit(0);
 }
 
+let emittedWasmPath: string | undefined;
 if (emitWasm) {
   const wasmPath = resolve(dir, `${name}.wasm`);
   writeFileSync(wasmPath, result.binary);
   console.log(`${wasmPath}  (${result.binary.byteLength} bytes)`);
+  emittedWasmPath = wasmPath;
 }
 
 if (emitWat) {
@@ -225,4 +231,25 @@ if (emitWit && result.wit) {
   const witPath = resolve(dir, `${name}.wit`);
   writeFileSync(witPath, result.wit);
   console.log(`${witPath}  (${result.wit.length} chars)`);
+}
+
+// Post-compile run hint (#1590). Tells the user how to actually execute the
+// output, which otherwise requires trial-and-error (Wasmtime needs explicit
+// proposal flags; JS-host output needs the generated imports helper). Suppress
+// with --quiet for scripted use.
+if (!quiet && emittedWasmPath) {
+  if (target === "wasi" || target === "standalone" || target === "linear") {
+    // Pure Wasm, no JS host required — runnable directly under Wasmtime.
+    console.log(`\nTo run: wasmtime -W all-proposals=y ${emittedWasmPath}`);
+  } else {
+    // Default (gc) target emits JS-host imports; needs the generated helper.
+    console.log(
+      `\nThis is a JS-host build (default --target gc) — it needs the generated` +
+        ` ${name}.imports.js helper. To run with Node.js:\n` +
+        `  node --experimental-wasm-imported-strings -e "import('./${name}.imports.js')` +
+        `.then(async ({ createImports }) => { const { instance } = await WebAssembly.instantiate(` +
+        `require('fs').readFileSync('${emittedWasmPath}'), createImports()); /* call instance.exports.* */ })"\n` +
+        `For a pure-Wasm build runnable under Wasmtime, recompile with --standalone.`,
+    );
+  }
 }
