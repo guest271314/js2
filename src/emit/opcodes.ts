@@ -127,7 +127,9 @@ export const OP = {
   f64_convert_i32_s: 0xb7,
   f64_convert_i32_u: 0xb8,
   // reinterpret (bit-cast) conversions
+  i32_reinterpret_f32: 0xbc,
   i64_reinterpret_f64: 0xbd,
+  f32_reinterpret_i32: 0xbe,
   f64_reinterpret_i64: 0xbf,
   ref_null: 0xd0,
   ref_is_null: 0xd1,

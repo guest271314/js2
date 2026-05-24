@@ -28,6 +28,7 @@ import {
   registerResolveEnclosingClassName,
 } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
@@ -1875,6 +1876,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // vs an array/iterable (copy constructor)
         const argType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSym = argType.getSymbol?.();
+        // #1654 — `new Uint8Array(arrayBuffer)` views the buffer's bytes. The
+        // ArrayBuffer/DataView is backed by an i32_byte vec; copy the bytes
+        // into this TypedArray's f64 backing array. Must precede the
+        // size-constructor path (an ArrayBuffer is NOT a numeric length).
+        const argSymName = argSym?.name;
+        if (
+          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView") &&
+          !ts.isNumericLiteral(args[0]!) &&
+          emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)
+        ) {
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
         const isArrayLike =
           argSym?.name === "Array" ||
           ((argType.flags & ts.TypeFlags.Object) !== 0 &&
@@ -2104,12 +2117,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array buffer length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2147,12 +2159,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Start offset is outside the bounds of the buffer";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2186,12 +2197,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Invalid DataView length";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2221,12 +2231,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2389,6 +2398,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
         fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
       } else {
+        // #1654 — `new Uint8Array(arrayBuffer)` must VIEW the buffer's bytes,
+        // not treat the buffer as a numeric length. The ArrayBuffer is backed
+        // by an `i32_byte` vec (one i32 per byte). Detect that case and copy the
+        // bytes into the f64-element vec this TypedArray uses (so e.g.
+        // process.stdout.write, which expects a vec_f64, sees the real bytes).
+        const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
+        const argSymName = argTsType.getSymbol?.()?.name;
+        const isBufferArg =
+          argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView";
+        if (isBufferArg && emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)) {
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
         // new Uint8Array(n) → array of size n, all zeros
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         fctx.body.push({ op: "i32.trunc_sat_f64_s" });
@@ -2431,12 +2452,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array buffer length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2526,12 +2546,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Start offset is outside the bounds of the buffer";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2584,12 +2603,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Invalid DataView length";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2752,12 +2770,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2796,6 +2813,103 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   reportError(ctx, expr, `Unsupported new expression for class: ${className}`);
   return null;
+}
+
+/**
+ * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
+ * TypedArray's f64-element backing array.
+ *
+ * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
+ * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
+ * variables to externref, so recover the struct via any.convert_extern +
+ * ref.cast, read its length, allocate an f64 array of that length, and copy
+ * byte-by-byte (i32 → f64). Returns true on success; false to let the caller
+ * fall back to the numeric-length path.
+ */
+function emitTypedArrayFromByteBuffer(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: ts.Expression,
+  dstVecTypeIdx: number,
+  dstArrTypeIdx: number,
+): boolean {
+  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
+  if (srcArrTypeIdx < 0 || dstArrTypeIdx < 0) return false;
+
+  // Compile the buffer expression and recover the i32_byte vec struct.
+  const bufType = compileExpression(ctx, fctx, bufExpr);
+  if (!bufType) return false;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && bufType.typeIdx !== srcVecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return false;
+  }
+  const srcVecLocal = allocLocal(fctx, `__tab_src_${fctx.locals.length}`, { kind: "ref", typeIdx: srcVecTypeIdx });
+  fctx.body.push({ op: "local.set", index: srcVecLocal });
+
+  // len = src.length (field 0)
+  const lenLocal = allocLocal(fctx, `__tab_len_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+
+  // srcArr = src.data (field 1)
+  const srcArrLocal = allocLocal(fctx, `__tab_srcarr_${fctx.locals.length}`, { kind: "ref", typeIdx: srcArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: srcArrLocal });
+
+  // dstArr = new f64[len]
+  const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, { kind: "ref", typeIdx: dstArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dstArrLocal });
+
+  // for (i = 0; i < len; i++) dstArr[i] = f64(srcArr[i] & 0xff)
+  const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal });
+  const loopBody: Instr[] = [
+    // if (i >= len) break (br 1 out of loop)
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // dstArr[i] = f64(srcArr[i] & 0xff)
+    { op: "local.get", index: dstArrLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: srcArrLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
+    { op: "i32.const", value: 0xff } as Instr,
+    { op: "i32.and" } as Instr,
+    { op: "f64.convert_i32_u" } as Instr,
+    { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
+    // i++
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: iLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // struct.new dstVec(len, dstArr)
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: dstArrLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: dstVecTypeIdx } as Instr);
+  return true;
 }
 
 export {

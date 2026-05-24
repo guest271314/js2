@@ -103,6 +103,7 @@ import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImport
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { ensureNativeStringExternBridge } from "../native-strings.js";
+import { emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
  * Known built-in global class/object names that compile to ref.null.extern
@@ -4649,6 +4650,29 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     // looking for a non-existent RegExp_hasOwnProperty import.
     if (propAccess.name.text === "hasOwnProperty" || propAccess.name.text === "propertyIsEnumerable") {
       return compilePropertyIntrospection(ctx, fctx, propAccess, expr);
+    }
+
+    // #1654 — native DataView accessors in no-JS-host mode. In JS-host mode the
+    // runtime materializes a real DataView over the byte array; standalone/WASI
+    // has no JS runtime, so emit Wasm-native byte read/write into the i32_byte
+    // backing array directly. Must run BEFORE the extern-class dispatch, which
+    // would otherwise route DataView_setUint32 to an unsatisfiable host import
+    // (or silently drop the call).
+    if (noJsHost(ctx) && isDataViewAccessor(propAccess.name.text)) {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "DataView") {
+        const dvResult = emitDataViewAccessor(
+          ctx,
+          fctx,
+          propAccess.name.text,
+          propAccess.expression,
+          expr.arguments,
+          (e, hint) => compileExpression(ctx, fctx, e, hint),
+        );
+        if (dvResult) {
+          return dvResult.kind === "get" ? dvResult.result : VOID_RESULT;
+        }
+      }
     }
 
     if (isExternalDeclaredClass(receiverType, ctx.checker)) {
