@@ -131,13 +131,13 @@ Wave 3 (re-baseline driven):
 
 ## File index (new artifacts from this audit)
 
-- `plan/issues/backlog/779a-class-dstr-method-tramp-residual.md`
-- `plan/issues/backlog/779d-object-literal-dstr-residual.md`
-- `plan/issues/backlog/779e-arguments-object-residual.md`
-- `plan/issues/backlog/820h-disposable-stack-brand-check.md`
-- `plan/issues/backlog/820j-generator-prototype-brand.md`
-- `plan/issues/backlog/820k-object-receiver-toobject.md`
-- `plan/issues/sprints/53/779-820-cluster-decomposition.md` (this file)
+- `plan/issues/779a-class-dstr-method-tramp-residual.md`
+- `plan/issues/779d-object-literal-dstr-residual.md`
+- `plan/issues/779e-arguments-object-residual.md`
+- `plan/issues/820h-disposable-stack-brand-check.md`
+- `plan/issues/820j-generator-prototype-brand.md`
+- `plan/issues/820k-object-receiver-toobject.md`
+- `plan/issues/1625-820-cluster-decomposition.md` (this file)
 
 ## Method notes
 

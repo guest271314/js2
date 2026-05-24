@@ -52,7 +52,7 @@ clear process, clean planning data, and understandable repository structure.
 | **914** | Add a short compiler architecture overview for contributors | 36 | done | high |
 | **916** | Clean contributor-facing repo hygiene and remove misleading clutter | 36 | done | high |
 | **917** | Make lint, format, and typecheck apply consistently across the whole source tree | 36 | done | medium |
-| **944** | DUPLICATE — see #945 |  | wont-fix | low |
+| **944** | DUPLICATE — see #945 | Backlog | wont-fix | low |
 | **1000** | Normalize issue frontmatter and repopulate historical sprint issue assignments | 45 | ready | high |
 | **1003** | Normalize issue metadata: add ES edition, language feature, and task type to all issue frontmatter | 45 | ready | high |
 | **1009** | Investigate report-page benchmark outliers where Wasm is much slower than JS | Backlog | ready | medium |

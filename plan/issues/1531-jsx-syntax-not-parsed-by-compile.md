@@ -150,7 +150,7 @@ A two-step delivery is natural:
   intent (resolves to user-supplied React/Preact or a built-in
   React-element-shaped fallback); `--target wasi` emits a Wasm-native
   `$JsxNode` struct stub. See
-  `plan/issues/sprints/52/1540-jsx-runtime-host-import-and-stub.md`
+  `plan/issues/1540-jsx-runtime-host-import-and-stub.md`
   for the full implementation spec. #1033 still plans a full Wasm-native
   reconciler on top of the standalone stub.
 

@@ -559,7 +559,7 @@ function generateBacklogIndex(records) {
   ];
 
   function issueRow(rec) {
-    const link = `[#${rec.fields.id}](${basename(rec.file)})`;
+    const link = `[#${rec.fields.id}](../${basename(rec.file)})`;
     const deps = rec.fields.depends_on.length ? rec.fields.depends_on.map((d) => `#${d}`).join(", ") : "";
     return `| ${link} | ${truncate(rec.fields.title, 65)} | ${rec.fields.priority || ""} | ${rec.fields.feasibility || ""} | ${rec.fields.goal || ""} | ${deps} |`;
   }
@@ -592,7 +592,7 @@ function generateBacklogIndex(records) {
     lines.push("| Completed | # | Title |");
     lines.push("|-----------|---|-------|");
     for (const rec of done) {
-      const link = `[#${rec.fields.id}](${basename(rec.file)})`;
+      const link = `[#${rec.fields.id}](../${basename(rec.file)})`;
       lines.push(`| ${rec.fields.completed || ""} | ${link} | ${truncate(rec.fields.title, 70)} |`);
     }
     lines.push("");
@@ -620,7 +620,7 @@ function generateWontFixIndex(records) {
   ];
 
   for (const rec of wontFixRecs) {
-    const link = `[#${rec.fields.id}](${basename(rec.file)})`;
+    const link = `[#${rec.fields.id}](../${basename(rec.file)})`;
     // Look for closed_reason in the raw text
     const reasonMatch = rec.originalText.match(/^closed_reason:\s*["']?(.+?)["']?\s*$/m);
     const reason = reasonMatch ? truncate(reasonMatch[1], 60) : "";

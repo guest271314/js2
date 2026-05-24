@@ -108,5 +108,6 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1293 | Hono Tier 4 — string[][] array-of-arrays type support + #segments field | medium | done |
 | #1294 | test262 worker: reclassify WebAssembly.Exception compile-errors as fail + restart fork | high | done |
 | #1295 | compiler.ts: re-throw WebAssembly.Exception from internal catch blocks | high | done |
+| #1619 | lodash transitive init: start-function throws WebAssembly.Exception during instantiate (clamp/add) | medium | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->

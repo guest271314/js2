@@ -183,5 +183,5 @@ once #1617 and #1618 land.
 
 ## Follow-up issues filed
 
-- **#1617** — `plan/issues/backlog/1617-wasi-raw-byte-stdout.md` (raw-byte stdout)
-- **#1618** — `plan/issues/backlog/1618-wasi-runtime-string-stdout-corrupt.md` (runtime-string corruption bug)
+- **#1617** — `plan/issues/1628-wasi-raw-byte-stdout.md` (raw-byte stdout)
+- **#1618** — `plan/issues/1618-wasi-runtime-string-stdout-corrupt.md` (runtime-string corruption bug)

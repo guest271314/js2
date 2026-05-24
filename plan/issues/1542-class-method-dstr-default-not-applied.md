@@ -1,6 +1,6 @@
 ---
 id: 1542
-title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\" instead"
+title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" instead"
 status: ready
 created: 2026-05-20
 updated: 2026-05-20

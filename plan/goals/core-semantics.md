@@ -179,7 +179,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **1126** | Infer when JavaScript number flows can be safely lowered to int32 or uint32 | 50 | done | high |
 | **1127** | Class method param destructuring: nested array pattern + initializer throws spurious TypeError | 43 | done | high |
 | **1128** | Destructuring TDZ and AnnexB B.3.3 function-in-block hoisting (≥211 tests) | 45 | done | medium |
-| **1129** | ToObject (§7.1.18) not implemented — no primitive auto-boxing | Backlog | ready | low |
+| **1129** | ToObject (§7.1.18) not implemented — no primitive auto-boxing | 53 | done | low |
 | **1158** | destructureParamArray fallback eagerly consumes iterators via Array.from — violates 13.3.3.6 for empty pattern [] | 50 | done | medium |
 | **1159** | Nested empty array pattern with initializer violates §13.3.3.6 iterator consumption semantics | 50 | done | medium |
 | **1168** | IR frontend widening — IrType union/boxed, lattice string/object/union, box/unbox instructions | 44 | done | high |

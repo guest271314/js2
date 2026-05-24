@@ -83,7 +83,7 @@ Recommended: pursue (1). Design doc before implementation because this interacts
 
 This issue is now the **acceptance owner** for the async-model
 cluster, not the implementation tracker. The implementation lives in
-**#1373b** (`plan/issues/sprints/52/1373b-ir-async-cps-lowering.md`)
+**#1373b** (`plan/issues/1373b-ir-async-cps-lowering.md`)
 under `## Implementation Plan (S53 architect — joint spec for #1042 /
 #1373 / #1373b)`.
 

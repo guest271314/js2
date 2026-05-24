@@ -3,6 +3,7 @@ id: 1597
 title: "host-indep: gate __throw_reference_error in standalone mode"
 status: ready
 created: 2026-05-24
+updated: 2026-05-24
 priority: medium
 feasibility: easy
 reasoning_effort: low

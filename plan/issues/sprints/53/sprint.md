@@ -190,7 +190,30 @@ include them as new work.
 
 _Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
-No issues currently assigned to this sprint.
+### Ready
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1625 | #779 and #820 cluster decomposition — sprint 54 dispatch plan |  | ready |
+
+### Done
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #779b | class/elements same-line / semicolon multi-definition parsing | high | done |
+| #779c | String.prototype.split result `.constructor` is not `Array` | medium | done |
+| #804 | Extract new expressions from expressions.ts → new-expression.ts | medium | done |
+| #806 | Extract increment/decrement from expressions/unary.ts → unary-updates.ts | medium | done |
+| #820a | RegExp Symbol.match/replace/search/matchAll/RegExpStringIterator null deref (~148 fails) | high | done |
+| #820b | Object literal computed-property accessor names silently dropped (~30 fails) | high | done |
+| #820c | Async-gen object-method yield* iterator-protocol null deref (~39 fails) | high | done |
+| #1129 | ToObject (§7.1.18) not implemented — no primitive auto-boxing | low | done |
+| #1553a | destructure-helpers: thread decl-mode + bindingKind through destructureParamObject/Array (foundation) | high | done |
+| #1553e | decl-dstr: f64-array literal with explicit `undefined` element must trigger destructuring default | medium | done |
+| #1557 | ESLint config.js direct compile: __obj_meth_tramp validate arity mismatch (need 2, got 1) | high | done |
+| #1558 | ESLint linter.js direct compile: Linter_verifyAndFix f64.eq missing i32→f64 coercion on call result | high | done |
+| #1559 | ModuleResolver: bare-package import resolves to implementation (default/main) for codegen, not .d.ts | high | done |
+| #1560 | CJS module.exports = { Linter } — named class re-exports link to compiled class, not extern fallback | high | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->
 

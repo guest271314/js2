@@ -60,6 +60,9 @@ promise infrastructure.
 | **793** | - Infinite compilation loop on private-methods class expressions (5 tests) | 25 | done | medium |
 | **808** | Extract string/import infrastructure from index.ts → imports.ts | Backlog | ready | medium |
 | **820** | Nullish TypeError / null-pointer / illegal-cast umbrella (6,993 FAIL) | Backlog | ready | critical |
+| **820h** | DisposableStack / AsyncDisposableStack brand-check and protocol stubs (~74 fails) | Backlog | ready | medium |
+| **820j** | (Async)GeneratorPrototype brand check + receiver TypeError (~36 fails) | Backlog | ready | medium |
+| **820k** | Object.* receiver TypeError on null/undefined (ToObject step) (~39 fails) | Backlog | ready | medium |
 | **851** | Iterator close protocol not implemented (147 tests) | 31 | done | high |
 | **854** | Iterator protocol: null next/return/throw methods (126 tests) | 44 | done | high |
 | **855** | Promise resolution and async error handling (210 tests) | 35 | done | high |
@@ -94,7 +97,7 @@ promise infrastructure.
 | **1044** | Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization) | 45 | ready | high |
 | **1089** | codegen: support dynamic import() expressions — 429 test262 tests skipped | Backlog | ready | medium |
 | **1093** | Systematic ECMAScript spec conformance audit — review compiled semantics against tc39.es/ecma262 | 45 | ready | high |
-| **1116** | Promise resolution and async error handling (210 tests) | Backlog | ready | critical |
+| **1116** | Promise resolution and async error handling (210 tests) | 55 | ready | critical |
 | **1150** | Fix runtime_error:26 + type_error:7 + oob:5 — async destructuring regressions | 44 | done | high |
 | **1151** | Async function synchronous throws bypass Promise.reject wrapping | Backlog | ready | high |
 | **1153** | Compiler-internal crashes block ~3,585 test262 tests: commentDirectiveRegEx.exec, constructSigs.reduce, cache.set | 44 | done | critical |

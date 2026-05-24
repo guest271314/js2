@@ -115,7 +115,7 @@ Only viable in JS-host mode; defeats standalone goals. Last resort.
 ## Related
 
 - `with` skip filter: `tests/test262-runner.ts` (grep `WithStatement` or `with`)
-- Eval skip (similar dynamic-scope problem): `plan/issues/wont-fix/1262-eval-static-string-compile-time.md`
+- Eval skip (similar dynamic-scope problem): `plan/issues/1262-eval-static-string-compile-time.md`
 - IR externref path: `src/ir/`
 - CLAUDE.md architecture principle: "compile away, don't emulate — resolve JS semantics statically"
   — `with` may require a principled exception to this rule for the body scope lookup.

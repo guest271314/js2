@@ -7,7 +7,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Run a specific test file: `npm test -- tests/issue-277.test.ts`
 - Run equivalence tests only: `npm test -- tests/equivalence.test.ts`
 - Test262: `pnpm run test:262` — vitest-based runner, creates its own worktree, writes to `benchmarks/results/`. Default 3 workers.
-- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/backlog/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
+- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
 
 ## Dev scratch
 - **All ad-hoc probe / debug / repro files go in `.tmp/`** — gitignored, not picked up by vitest, doesn't pollute `git status`.

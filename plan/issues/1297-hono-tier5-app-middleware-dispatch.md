@@ -163,7 +163,7 @@ as the Map shape, different representation. Passing (6):
 - **#1298** — Function-typed fields/arrays/Map values null-deref on
   call. Set side correctly boxes via `__fn_wrap_N_struct`, call site
   doesn't unwrap. Repro + fix-location + acceptance criteria documented
-  in `plan/issues/sprints/49/1298-fn-typed-fields-call-drops.md`.
+  in `plan/issues/1298-fn-typed-fields-call-drops.md`.
 - **#1299** — Virtual dispatch through abstract-base-typed dict values
   resolves to first stored subclass's method for ALL stored values.
   Surfaced while exploring abstract-class workaround for #1298.

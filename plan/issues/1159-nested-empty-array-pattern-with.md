@@ -93,7 +93,7 @@ handle this correctly, or a more targeted fix is needed in
 ## Implementation Plan
 
 **Bundled with #1158.** The full implementation plan lives in
-`plan/issues/sprints/50/1158-destructureparamarray-fallback-eagerly-consumes-iterators.md`
+`plan/issues/1158-destructureparamarray-fallback-eagerly-consumes-iterators.md`
 under "## Implementation Plan (BUNDLED — covers #1158 and #1159)".
 
 The fix for this issue specifically is **Change 1.2** in that plan —

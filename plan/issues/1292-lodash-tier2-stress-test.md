@@ -58,7 +58,7 @@ If any tier fails at compile or instantiate, mark with `it.skip` and an issue re
 ## Files
 
 - `tests/stress/lodash-tier2.test.ts` (new)
-- `plan/issues/sprints/48/1292-lodash-tier2-stress-test.md` — this file
+- `plan/issues/1292-lodash-tier2-stress-test.md` — this file
 
 ## Notes
 

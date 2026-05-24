@@ -65,6 +65,6 @@ The `rs` suffix means the test generator permuted the order of class-element kin
 
 ## Notes
 
-- Identified in the #779 bucket decomposition (`plan/issues/backlog/1569-779-bucket-decomposition.md`, 2026-05-21) as sub-issue "779b"; formally filed 2026-05-24 after harvest
+- Identified in the #779 bucket decomposition (`plan/issues/1569-779-bucket-decomposition.md`, 2026-05-21) as sub-issue "779b"; formally filed 2026-05-24 after harvest
 - The 1569 decomposition estimated ~290 fails — current measurement 294, consistent
 - Cross-check the TypeScript parser output for these forms first; the bug may be in class-body lowering rather than parsing

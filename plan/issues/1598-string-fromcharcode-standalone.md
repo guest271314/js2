@@ -3,6 +3,7 @@ id: 1598
 title: "host-indep: pure-Wasm String.fromCharCode / fromCodePoint in standalone mode"
 status: ready
 created: 2026-05-24
+updated: 2026-05-24
 priority: medium
 feasibility: easy
 reasoning_effort: low

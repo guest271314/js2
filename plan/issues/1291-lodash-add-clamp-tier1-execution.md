@@ -72,7 +72,7 @@ time is likely one of these.
 ## Files
 
 - `tests/stress/lodash-tier1.test.ts` — upgrade test bodies
-- `plan/issues/sprints/48/1291-lodash-add-clamp-tier1-execution.md` — this file
+- `plan/issues/1291-lodash-add-clamp-tier1-execution.md` — this file
 
 ## Findings (2026-05-03)
 

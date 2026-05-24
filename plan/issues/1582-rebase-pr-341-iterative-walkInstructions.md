@@ -65,7 +65,7 @@ hand-resolution per file. Reserve for an Opus session.
 
 Dispatch a `senior-developer` agent with `isolation: worktree`. Prompt:
 
-> Read `plan/issues/backlog/1582-rebase-pr-341-iterative-walkInstructions.md`.
+> Read `plan/issues/1582-rebase-pr-341-iterative-walkInstructions.md`.
 > First do the cast audit (acceptance criterion 1) and report back. If the
 > count justifies the rebase, follow the strategy in the issue. If not,
 > close PR #341 with the audit numbers as the rationale.

@@ -475,3 +475,18 @@ Status-only updates (no move):
 #1580's PR landed before sprint 53 even closed; the file's status was
 just never updated. This closeout sweeps it back to `done` so it doesn't
 linger as fake-open work into sprint 55.
+
+<!-- GENERATED_ISSUE_TABLES_START -->
+## Issue Tables
+
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+
+### Done
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1580 | string-hash benchmark: wasm-validator pre-existing bug + uncompetitive hot runtime | high | done |
+| #1583 | Audit landing-page feature support table (ES editions section) | medium | done |
+| #1589 | Investigate 100 test262 tests that hit the 30s compile_timeout ceiling | medium | done |
+
+<!-- GENERATED_ISSUE_TABLES_END -->

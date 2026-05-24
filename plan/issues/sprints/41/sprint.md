@@ -253,6 +253,12 @@ If any dev finishes early, pick from: #1051, #1024, #997, #1016a (class dstr sli
 
 _Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
 
+### Ready
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1087 | codegen: iterative walkInstructions + patchStructNewForAddedField to stop recursive walker composing with compile stack under tight CI stack budgets | critical | ready |
+
 ### Done
 
 | Issue | Title | Priority | Status |
