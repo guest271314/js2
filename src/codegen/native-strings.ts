@@ -871,6 +871,430 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     });
   }
 
+  // #1588 PR-C: $__str_to_utf8(s: ref $AnyString) -> ref $__str_data_u8
+  //
+  // Standalone (pure-Wasm, no JS host call) WTF-16 → UTF-8 transcoder. Takes any
+  // string value (NativeString, ConsString, or Utf8String), flattens it to a
+  // contiguous i16 buffer, then encodes the code units to a freshly-allocated i8
+  // UTF-8 byte array. This is the missing primitive the Component-Model boundary
+  // (Edge B, deferred — see ADR-0015) will eventually call instead of a host
+  // `TextEncoder` import, satisfying the "JS host optional" architecture rule.
+  //
+  // Semantics: this is the *conservative* encoder. Unlike the compile-time
+  // `utf8Encode` (which asserts well-formedness for ascii/utf8-guaranteed
+  // literals), this runtime helper handles arbitrary WTF-16 input. A lone
+  // surrogate is encoded with the WTF-8 generalization (3-byte form of the raw
+  // code unit 0xD800–0xDFFF) so the function is total and never traps. The
+  // Component-Model fast path is only ever selected for values the encoding
+  // analysis proved `utf8-guaranteed`, so a lone surrogate never reaches the
+  // boundary fast path; this helper's surrogate handling is a defensive
+  // totality guarantee, not a correctness path.
+  //
+  // Two passes over the flattened i16 buffer: pass 1 sums the UTF-8 byte length
+  // so the output array is allocated exactly once (no realloc); pass 2 writes
+  // the bytes. Only emitted when `--utf8-storage` is on (the i8 backing array
+  // type `__str_data_u8` is registered only then).
+  if (ctx.utf8Storage && ctx.utf8StrDataTypeIdx >= 0) {
+    const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
+    const u8DataRef: ValType = { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx };
+    const typeIdx = addFuncType(ctx, [strRef], [u8DataRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__str_to_utf8", funcIdx);
+
+    // params: s(0)
+    // locals:
+    //   flat(1): ref $NativeString — flattened input
+    //   data(2): ref $__str_data — i16 code units
+    //   off(3): i32 — flat.off
+    //   len(4): i32 — flat.len (code-unit count)
+    //   out(5): ref $__str_data_u8 — UTF-8 output array
+    //   i(6): i32 — code-unit cursor (shared by both passes)
+    //   o(7): i32 — output byte cursor
+    //   byteLen(8): i32 — total UTF-8 byte length (pass 1 result)
+    //   cu(9): i32 — current code unit
+    //   cp(10): i32 — current code point (after surrogate-pair decode)
+    //   lo(11): i32 — trailing low surrogate scratch
+    const FLAT = 1;
+    const DATA = 2;
+    const OFF = 3;
+    const LEN = 4;
+    const OUT = 5;
+    const I = 6;
+    const O = 7;
+    const BYTELEN = 8;
+    const CU = 9;
+    const CP = 10;
+    const LO = 11;
+
+    // Shared sub-sequence: read the code point starting at code-unit index I of
+    // `data`+`off`, advancing I past the consumed unit(s). Leaves cp in CP.
+    // Handles a well-formed high+low surrogate pair (astral scalar) and treats a
+    // lone surrogate as its raw code-unit value (WTF-8). `bodyAfterCp` is emitted
+    // after CP is set and I is advanced; it differs between the two passes.
+    const decodeCp = (bodyAfterCp: Instr[]): Instr[] => [
+      // cu = data[off + i]
+      { op: "local.get", index: DATA },
+      { op: "local.get", index: OFF },
+      { op: "local.get", index: I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
+      { op: "local.set", index: CU },
+      // cp = cu (default)
+      { op: "local.get", index: CU },
+      { op: "local.set", index: CP },
+      // i++ (consume the lead unit)
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: I },
+      // if cu is a high surrogate (0xD800..0xDBFF) and a low surrogate follows,
+      // combine into an astral code point and consume the low unit too.
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xd800 },
+      { op: "i32.ge_u" },
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xdbff },
+      { op: "i32.le_u" },
+      { op: "i32.and" },
+      // && i < len (a low unit exists)
+      { op: "local.get", index: I },
+      { op: "local.get", index: LEN },
+      { op: "i32.lt_s" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // lo = data[off + i]
+          { op: "local.get", index: DATA },
+          { op: "local.get", index: OFF },
+          { op: "local.get", index: I },
+          { op: "i32.add" },
+          { op: "array.get_u", typeIdx: strDataTypeIdx },
+          { op: "local.set", index: LO },
+          // if lo in 0xDC00..0xDFFF: cp = 0x10000 + ((cu-0xD800)<<10) + (lo-0xDC00); i++
+          { op: "local.get", index: LO },
+          { op: "i32.const", value: 0xdc00 },
+          { op: "i32.ge_u" },
+          { op: "local.get", index: LO },
+          { op: "i32.const", value: 0xdfff },
+          { op: "i32.le_u" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 0x10000 },
+              { op: "local.get", index: CU },
+              { op: "i32.const", value: 0xd800 },
+              { op: "i32.sub" },
+              { op: "i32.const", value: 10 },
+              { op: "i32.shl" },
+              { op: "i32.add" },
+              { op: "local.get", index: LO },
+              { op: "i32.const", value: 0xdc00 },
+              { op: "i32.sub" },
+              { op: "i32.add" },
+              { op: "local.set", index: CP },
+              // i++ (consume the low unit)
+              { op: "local.get", index: I },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: I },
+            ],
+          },
+        ],
+      },
+      ...bodyAfterCp,
+    ];
+
+    // Byte-length contribution of cp (UTF-8 / WTF-8): 1/2/3/4 bytes.
+    // <=0x7F → 1; <=0x7FF → 2; <=0xFFFF → 3 (incl. lone surrogates); else 4.
+    const cpByteLen = (onResult: Instr[]): Instr[] => [
+      { op: "local.get", index: CP },
+      { op: "i32.const", value: 0x80 },
+      { op: "i32.lt_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, ...onResult],
+        else: [
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x800 },
+          { op: "i32.lt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 2 }, ...onResult],
+            else: [
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x10000 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 3 }, ...onResult],
+                else: [{ op: "i32.const", value: 4 }, ...onResult],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    // Write cp as UTF-8 bytes into out[o..], advancing o.
+    const writeBytes: Instr[] = [
+      { op: "local.get", index: CP },
+      { op: "i32.const", value: 0x80 },
+      { op: "i32.lt_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // out[o] = cp; o += 1
+          { op: "local.get", index: OUT },
+          { op: "local.get", index: O },
+          { op: "local.get", index: CP },
+          { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+          { op: "local.get", index: O },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: O },
+        ],
+        else: [
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x800 },
+          { op: "i32.lt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // 2-byte: 0xC0|(cp>>6), 0x80|(cp&0x3F)
+              { op: "local.get", index: OUT },
+              { op: "local.get", index: O },
+              { op: "i32.const", value: 0xc0 },
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 6 },
+              { op: "i32.shr_u" },
+              { op: "i32.or" },
+              { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+              { op: "local.get", index: OUT },
+              { op: "local.get", index: O },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "i32.const", value: 0x80 },
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x3f },
+              { op: "i32.and" },
+              { op: "i32.or" },
+              { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+              { op: "local.get", index: O },
+              { op: "i32.const", value: 2 },
+              { op: "i32.add" },
+              { op: "local.set", index: O },
+            ],
+            else: [
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x10000 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // 3-byte: 0xE0|(cp>>12), 0x80|((cp>>6)&0x3F), 0x80|(cp&0x3F)
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 0xe0 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 2 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 3 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: O },
+                ],
+                else: [
+                  // 4-byte: 0xF0|(cp>>18), 0x80|((cp>>12)&0x3F), 0x80|((cp>>6)&0x3F), 0x80|(cp&0x3F)
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 0xf0 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 18 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 2 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: OUT },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 3 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "array.set", typeIdx: ctx.utf8StrDataTypeIdx },
+                  { op: "local.get", index: O },
+                  { op: "i32.const", value: 4 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: O },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const body: Instr[] = [
+      // flat = __str_flatten(s)
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "local.set", index: FLAT },
+      // off = flat.off, len = flat.len, data = flat.data
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: OFF },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: LEN },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: DATA },
+
+      // --- Pass 1: compute byteLen ---
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: BYTELEN },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= len break
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              // decode cp (advances i), then byteLen += cpByteLen(cp)
+              ...decodeCp(
+                cpByteLen([
+                  { op: "local.get", index: BYTELEN },
+                  { op: "i32.add" },
+                  { op: "local.set", index: BYTELEN },
+                ]),
+              ),
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+
+      // out = array.new_default $__str_data_u8(byteLen)
+      { op: "local.get", index: BYTELEN },
+      { op: "array.new_default", typeIdx: ctx.utf8StrDataTypeIdx },
+      { op: "local.set", index: OUT },
+
+      // --- Pass 2: write bytes ---
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: O },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              ...decodeCp(writeBytes),
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+
+      // return out
+      { op: "local.get", index: OUT },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__str_to_utf8",
+      typeIdx,
+      locals: [
+        { name: "flat", type: flatStrRef },
+        { name: "data", type: strDataRef },
+        { name: "off", type: { kind: "i32" } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "out", type: u8DataRef },
+        { name: "i", type: { kind: "i32" } },
+        { name: "o", type: { kind: "i32" } },
+        { name: "byteLen", type: { kind: "i32" } },
+        { name: "cu", type: { kind: "i32" } },
+        { name: "cp", type: { kind: "i32" } },
+        { name: "lo", type: { kind: "i32" } },
+      ],
+      body,
+      exported: false,
+    });
+  }
+
   // --- $__str_concat(a: ref $AnyString, b: ref $AnyString) -> ref $AnyString ---
   // For short strings (combined length < 64), copies into a flat string.
   // For longer strings, creates a ConsString node in O(1).
