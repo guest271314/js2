@@ -1,5 +1,5 @@
 ---
-id: 1591
+id: 1597
 sprint: 55
 title: "host-indep: gate __throw_reference_error in standalone mode"
 status: ready
@@ -15,7 +15,7 @@ related: [1471, 1473, 1474]
 depends_on: []
 ---
 
-# #1591 — Gate `__throw_reference_error` in standalone mode
+# #1597 — Gate `__throw_reference_error` in standalone mode
 
 ## Problem
 

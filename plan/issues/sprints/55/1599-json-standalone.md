@@ -1,5 +1,5 @@
 ---
-id: 1593
+id: 1599
 sprint: 55
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
 status: ready
@@ -15,7 +15,7 @@ related: [1474, 1539]
 depends_on: []
 ---
 
-# #1593 — JSON standalone: refuse-and-document then pure-Wasm implementation
+# #1599 — JSON standalone: refuse-and-document then pure-Wasm implementation
 
 ## Problem
 
@@ -56,7 +56,7 @@ At the call sites in `string-ops.ts` / `expressions/calls.ts` that lower
 ```ts
 if (ctx.standalone) {
   reportError(ctx, expr,
-    "JSON.stringify / JSON.parse is not supported in --target standalone (#1593). " +
+    "JSON.stringify / JSON.parse is not supported in --target standalone (#1599). " +
     "Use a pure-JS serializer compiled with js2wasm, or avoid JSON in WASI targets.");
   return null;
 }
@@ -131,7 +131,7 @@ number   := '-'? int frac? exp?
 
 ### Phase 1
 - `--target standalone` module using `JSON.parse` or `JSON.stringify` fails at
-  compile time with a clear error referencing #1593.
+  compile time with a clear error referencing #1599.
 - No `env::JSON_parse` or `env::JSON_stringify` in standalone output.
 
 ### Phase 2

@@ -1,5 +1,5 @@
 ---
-id: 1592
+id: 1598
 sprint: 55
 title: "host-indep: pure-Wasm String.fromCharCode / fromCodePoint in standalone mode"
 status: ready
@@ -15,7 +15,7 @@ related: [1471, 1474]
 depends_on: []
 ---
 
-# #1592 — Pure-Wasm `String.fromCharCode` / `String.fromCodePoint` in standalone mode
+# #1598 — Pure-Wasm `String.fromCharCode` / `String.fromCodePoint` in standalone mode
 
 ## Problem
 
