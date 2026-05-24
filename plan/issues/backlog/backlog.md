@@ -18,6 +18,10 @@ already enumerated in #1522 / #1543 / #1556 are not re-filed.
 - [#1595](1595-arraybuffer-transfer-methods-not-implemented.md) — ArrayBuffer.prototype.transfer / transferToFixedLength / transferToImmutable not implemented — **~40 fails**, medium
 - [#1596](1596-function-prototype-apply-call-not-accessible.md) — Function.prototype.apply / .call not accessible on compiled Wasm functions — **~46 fails**, high
 
+## Sprint 55 — repo structure / website (2026-05-24)
+
+- [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
+
 ## WASI Native Messaging — AssemblyScript-reference alignment (2026-05-24)
 
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`

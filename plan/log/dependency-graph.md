@@ -45,6 +45,12 @@ Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
   └── #1655 (stdout write ArrayBuffer)
 ```
 
+## Sprint 55 — repo structure / website (added 2026-05-24)
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1656 | Consolidate all website/frontend files under website/ | medium | medium | **Ready** — needs architect spec (`arch(#1656)`) before dev; one PR. Related: #1583, #1590 |
+
 ---
 
 ## TOP PRIORITY: Highest-impact runtime failures `[E][S][I]`
