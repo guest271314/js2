@@ -1,8 +1,8 @@
 ---
 id: 1530
-sprint: 52
+sprint: 55
 title: "wasi: Native Messaging host example (Chrome extension integration)"
-status: blocked
+status: ready
 created: 2026-05-20
 priority: medium
 feasibility: medium
@@ -13,7 +13,7 @@ language_feature: stdin, stdout, process.env
 goal: wasi-completeness
 github_issue: 389
 filed_by: guest271314
-depends_on: [1480, 1481]
+depends_on: []  # was [1480, 1481] — both LANDED (PR #391, #400); unblocked
 related: [1482, 1483, 1484]
 ---
 
