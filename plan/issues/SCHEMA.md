@@ -18,8 +18,10 @@ Current layout (flat, #1616):
 - numbered issues: `plan/issues/<id>-<slug>.md` — flat, one stable location for
   every issue regardless of sprint. The file never moves when an issue is
   scheduled or rescheduled; only its `sprint:` frontmatter value changes.
-- sprint docs: `plan/issues/sprints/<number>/sprint.md` — the planning doc and
-  any sprint-scoped planning artifacts stay under the sprint dir.
+- sprint docs: `plan/issues/sprints/<number>.md` — the planning doc lives
+  directly under `sprints/`. Any sprint-scoped planning artifacts (drafts,
+  triage notes, screenshots) stay in the corresponding `sprints/<number>/`
+  sub-directory.
 - sprint membership / bucket is frontmatter only: `sprint: <N>` (numbered
   sprint), `sprint: 0` (pre-sprint history), `sprint: Backlog` (unscheduled);
   wont-fix is a `status: wont-fix`, not a sprint value.
