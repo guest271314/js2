@@ -1,10 +1,11 @@
 ---
 id: 1590
+sprint: 55
 title: "Improve first-5-minutes UX: Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, comparison section"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
-priority: medium
+priority: high
 feasibility: easy
 reasoning_effort: medium
 task_type: docs

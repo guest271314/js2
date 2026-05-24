@@ -74,12 +74,13 @@ its acceptance criteria still describe an unfixed bug.)
 
 | ID | Title | Feasibility | Spec? | Est. | Depends on |
 |----|-------|-------------|-------|------|------------|
+| [#1590](1590-first-5-min-ux-docs-and-hints.md) | **first-5-minutes UX** (Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, compare-to) — docs+CLI only | easy | yes (in-issue) | UX | — |
 | [#820d](820d-async-gen-meth-unresolvable-cast.md) | async-gen-meth-dflt `unresolvable` illegal cast | medium | yes (in-issue) | +80 | — |
 | [#1553b](1553b.md) | decl-dstr typed-struct object delegation | medium | yes (in-issue) | +18 (chain +60) | #1553a (done) |
 | _(note: #1553b was carried as `in-progress` but no work landed; reset to `ready`)_ | | | | | |
 | [#1586](1586-explicit-allocation-sites-in-ir.md) | IR explicit allocation sites (foundation gate) | medium | **NO** | strategic | — |
 
-Rationale: #820d is the single biggest direct test262 win (~80) and is
+Rationale: **#1590 (first-5-minutes UX) is the top priority for this sprint per stakeholder direction** — docs/CLI polish that shapes new-user perception; dispatch it first. #820d is the single biggest direct test262 win (~80) and is
 self-contained. #1553b unblocks the whole decl-dstr chain (1553c → 1553d). #1586
 is the hard gate for all of track 1 — nothing in #1587/#1588/#747 can start
 until it lands, so it must be in P1 despite zero direct test262 yield.
