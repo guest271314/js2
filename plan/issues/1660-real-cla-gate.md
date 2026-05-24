@@ -140,3 +140,14 @@ PRs hard-blocked:
 
 This was deliberately deferred so an over-strict gate can't deadlock the
 internal merge queue before the exemption is proven in the wild.
+
+### Note: why THIS PR has no `cla-check` status (expected)
+A `pull_request_target` workflow always runs the workflow definition from the
+**base branch**, and the old `pull_request` placeholder runs from the **head**.
+This PR removes the `pull_request` trigger (head) and adds `pull_request_target`
+(only active once on `main`), so the new gate does **not** run against its own
+introducing PR — standard GitHub behavior, and the usual way CLA gates are
+landed. The gate goes live for the *next* PR. Because `cla-check` is not a
+required check (and branch protection is off), the absent status does not block
+this merge; the required checks (`cheap gate`, `merge shard reports`,
+`quality`) all passed.
