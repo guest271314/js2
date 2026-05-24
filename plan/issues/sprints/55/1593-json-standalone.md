@@ -66,38 +66,53 @@ Phase 1 is ~30 LOC, follows the exact same pattern as #1474 Phase 1.
 
 ## Phase 2 — Pure-Wasm JSON implementation
 
-Implement JSON serialisation and deserialisation as pure Wasm (WasmGC).
+Implement JSON serialisation and deserialisation directly as Wasm helper emitters
+operating on the existing WasmGC type graph. No C library, no side module, no
+marshalling layer.
 
-### Option A: embed a small C JSON library (recommended)
+**Why not cJSON or a C side module**: cJSON returns a C struct tree, not WasmGC
+types. stringify would need to walk the WasmGC value graph into C memory first;
+parse would need to reconstruct WasmGC objects/arrays from the C struct output.
+That marshalling layer is more code and more fragile than implementing the codec
+directly against the types we already have.
 
-[`jsmn`](https://github.com/zserge/jsmn) or [`cJSON`](https://github.com/DaveGamble/cJSON):
-- `cJSON`: ~1,500 LOC C, MIT, handles full RFC 8259. Compile with `wasi-sdk clang -Os`
-  → embed as side module via Binaryen `wasmMerge` (same pattern as #1539 / regress).
-- Binary size: ~30–50 KB compiled Wasm. Only linked when `JSON.*` is used.
+### Serialiser (`JSON.stringify`) — `src/codegen/wasm-helpers/json-stringify.ts`
 
-### Option B: implement in Wasm helpers (~medium effort)
+Recursive value walker over the WasmGC value graph:
 
-Write a JSON serialiser/deserialiser directly as Wasm helper emitters:
+- `null` / `undefined` → emit `"null"`
+- `boolean` → emit `"true"` / `"false"` (tag check on externref)
+- `number` (f64) → `__f64_to_string` (already exists); emit `"null"` for NaN/Infinity per spec
+- `string` (`$StringArr`) → scan UTF-16 code units, escape `"`, `\`, and control chars U+0000–U+001F
+- `array` (`$Array`) → `[` + iterate elements recursively + `]`
+- `object` (`$PlainObject`) → `{` + iterate own enumerable string keys + `:`+ value + `}`
+- Circular reference detection: thread a seen-set (linear scan over a local `(array ref)` — JSON depth is shallow in practice)
+- `toJSON()` method: check for it via the existing property-lookup path before serialising
 
-**Serialiser** (`JSON.stringify`):
-- `null`/`undefined` → `"null"`
-- `boolean` → `"true"` / `"false"`
-- `number` (f64) → use existing `__f64_to_string` helper
-- `string` → escape control chars, wrap in `"`
-- `array` → `[` + join elements with `,` + `]`
-- `object` → `{` + `"key":value` pairs + `}`
-- Circular reference detection via a seen-set (`$ExternMap`)
+Result: accumulate into a `(array (mut i16))` builder, return as `$StringArr`.
 
-**Deserialiser** (`JSON.parse`):
-- Recursive-descent parser over a WasmGC string (array i16)
-- Returns `externref` (boxed JS value) for each JSON value type
-- Validates UTF-16 input; throws `SyntaxError` (Wasm trap in standalone) on malformed input
+### Deserialiser (`JSON.parse`) — `src/codegen/wasm-helpers/json-parse.ts`
 
-### Recommended approach
+Recursive-descent parser over a `$StringArr` (array i16, UTF-16). JSON grammar
+has no lookahead beyond one character:
 
-Land Phase 1 (refuse) immediately as part of the host-independence series.
-Phase 2 as a follow-up with Option A (cJSON side module) — lower implementation
-risk, correct spec behaviour, small binary.
+```
+value    := null | true | false | number | string | array | object
+string   := '"' chars '"'
+array    := '[' (value (',' value)*)? ']'
+object   := '{' (string ':' value (',' string ':' value)*)? '}'
+number   := '-'? int frac? exp?
+```
+
+- Parser state: `(local $pos i32)` cursor into the string array
+- `skipWhitespace`: advance past space/tab/CR/LF
+- `parseString`: scan code units, handle `\uXXXX` and standard escapes, allocate `$StringArr`
+- `parseNumber`: accumulate digits, call `__parse_f64` (or inline) → f64 → box as externref
+- `parseArray`: allocate `$Array`, push parsed values
+- `parseObject`: allocate `$PlainObject`, set key-value pairs via existing property-set helper
+- Error: on malformed input, emit `unreachable` (Wasm trap in standalone; caller catches as SyntaxError in JS-host mode)
+
+~350 LOC of helper emitters total across both files. No new WasmGC types needed.
 
 ## Files
 
@@ -108,8 +123,9 @@ risk, correct spec behaviour, small binary.
 - `tests/issue-1593-json-standalone-refuse.test.ts` — refusal tests
 
 ### Phase 2
-- `vendor/cjson.wasm` (Option A) + `src/codegen/json-link.ts` — side-module linker
-- OR `src/codegen/wasm-helpers/json.ts` (Option B) — pure Wasm emitters
+- `src/codegen/wasm-helpers/json-stringify.ts` — serialiser helper emitter
+- `src/codegen/wasm-helpers/json-parse.ts` — recursive-descent parser helper emitter
+- `src/codegen/declarations.ts` — wire up helpers when `ctx.standalone && state.jsonNeed*`
 
 ## Acceptance criteria
 
@@ -126,5 +142,4 @@ risk, correct spec behaviour, small binary.
 ## Effort
 
 Phase 1: ~30 LOC, easy.
-Phase 2 (Option A): ~200 LOC (linker + ABI shims), medium. Rust/C toolchain for artifact.
-Phase 2 (Option B): ~800 LOC (full recursive-descent parser + serialiser), hard.
+Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolchain.
