@@ -57,6 +57,11 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Issue integrity + link gate (#1616)
+        # Fails on duplicate IDs, filename/frontmatter ID mismatch, dangling
+        # depends_on, or broken plan/issues/<id>-<slug>.md links in tracked *.md.
+        run: pnpm run check:issues
+
       - name: Host-import allowlist + strict-mode gate (#1524)
         env:
           # PRs that intentionally grow the allowlist must include

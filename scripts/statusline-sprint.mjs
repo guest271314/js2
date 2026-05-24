@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Sprint progress statusline for Claude Code.
 // Prefers dashboard/data/sprints.json (accurate deduplicated view) when available.
-// Falls back to scanning plan/issues/sprints/{N}/*.md directly.
+// Falls back to scanning the flat plan/issues/*.md tree, reading the `sprint:`
+// and `status:` frontmatter fields (#1616 — sprint membership is frontmatter,
+// not directory).
 // Emits a colored badge: "sprint N  NN%"
 
 import { readdirSync, readFileSync, existsSync } from "node:fs";
@@ -9,7 +11,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SPRINTS_DIR = join(ROOT, "plan", "issues", "sprints");
+const ISSUES_DIR = join(ROOT, "plan", "issues");
 const SPRINTS_JSON = join(ROOT, "dashboard", "data", "sprints.json");
 
 function fromJson() {
@@ -30,28 +32,50 @@ function fromJson() {
   }
 }
 
-function currentSprint() {
-  const dirs = readdirSync(SPRINTS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && /^\d+$/.test(d.name))
-    .map((d) => Number(d.name))
-    .sort((a, b) => b - a); // descending — find latest with issues first
-  for (const n of dirs) {
-    const dir = join(SPRINTS_DIR, String(n));
-    const hasIssues = readdirSync(dir).some((f) => f.endsWith(".md") && f !== "sprint.md");
-    if (hasIssues) return n;
+const ISSUE_FILE_RE = /^\d+[a-z]?(?:[-_].+)?\.md$/i;
+const NON_ISSUE = new Set(["backlog.md", "index.md", "SCHEMA.md", "log.md", "1578-test262-analysis.md"]);
+
+// Scan the flat issue tree once, bucketing by numeric `sprint:` value.
+function scanFlatTree() {
+  const bySprint = new Map(); // sprintNum -> { total, done }
+  let names = [];
+  try {
+    names = readdirSync(ISSUES_DIR);
+  } catch {
+    return bySprint;
   }
-  return dirs.at(0) ?? 0;
+  for (const f of names) {
+    if (NON_ISSUE.has(f) || !ISSUE_FILE_RE.test(f)) continue;
+    let content;
+    try {
+      content = readFileSync(join(ISSUES_DIR, f), "utf8");
+    } catch {
+      continue;
+    }
+    const sprintRaw = content.match(/^sprint:\s*(\S+)/m)?.[1] ?? "";
+    if (!/^\d+$/.test(sprintRaw)) continue; // skip Backlog / 0 / unset
+    const n = Number(sprintRaw);
+    const bucket = bySprint.get(n) ?? { total: 0, done: 0 };
+    bucket.total++;
+    if (/^status:\s*(done|wont-fix)\b/m.test(content)) bucket.done++;
+    bySprint.set(n, bucket);
+  }
+  return bySprint;
+}
+
+let _flatCache = null;
+function flatTree() {
+  return (_flatCache ??= scanFlatTree());
+}
+
+function currentSprint() {
+  const buckets = flatTree();
+  const nums = [...buckets.keys()].sort((a, b) => b - a);
+  return nums[0] ?? 0;
 }
 
 function sprintProgress(n) {
-  const dir = join(SPRINTS_DIR, String(n));
-  const files = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "sprint.md");
-  let done = 0;
-  for (const f of files) {
-    const content = readFileSync(join(dir, f), "utf8");
-    if (/^status:\s*(done|wont-fix)\b/m.test(content)) done++;
-  }
-  return { done, total: files.length };
+  return flatTree().get(n) ?? { done: 0, total: 0 };
 }
 
 function interpolateColor(pct) {

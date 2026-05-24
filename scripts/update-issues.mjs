@@ -38,6 +38,7 @@ const targets = argv.filter((a) => !a.startsWith("--")).map((a) => resolve(ROOT,
 const NON_ISSUE_BASENAMES = new Set([
   "1034-report.md",
   "82-findings.md",
+  "1578-test262-analysis.md",
   "backlog.md",
   "index.md",
   "log.md",
@@ -63,6 +64,7 @@ const ORDERED_KEYS = [
   "area",
   "language_feature",
   "goal",
+  "sprint",
   "renumbered_from",
   "parent",
   "depends_on",
@@ -70,7 +72,7 @@ const ORDERED_KEYS = [
   "blocked_by",
 ];
 
-const DROPPED_KEYS = new Set(["sprint"]);
+const DROPPED_KEYS = new Set();
 
 const STATUS_ALIASES = {
   backlog: "backlog",
@@ -130,12 +132,25 @@ function isIssueFile(file) {
   return /^\d+[a-z]?(?:[-_].+)?\.md$/i.test(name);
 }
 
+// Fallback only: under the flat layout (#1616) sprint membership lives in the
+// `sprint:` frontmatter field. This path-derivation is retained for any stray
+// file that predates the backfill.
 function sprintFromPath(file) {
   const m = file.match(/\/sprints\/(\d+)\//);
   if (m) return m[1];
-  if (/\/backlog\//.test(file)) return "backlog";
-  if (/\/wont-fix\//.test(file)) return "wont-fix";
+  if (/\/backlog\//.test(file) || /\/wont-fix\//.test(file)) return "Backlog";
   return "";
+}
+
+// Normalize a frontmatter sprint scalar to the canonical form used by the
+// indexes: numeric sprints stay as their digit string, "0" is pre-sprint
+// history, anything backlog-ish becomes "Backlog", empty stays empty.
+function normalizeSprint(raw) {
+  const v = String(raw || "").trim();
+  if (v === "") return "";
+  if (/^\d+$/.test(v)) return v;
+  if (/^backlog$/i.test(v)) return "Backlog";
+  return v;
 }
 
 function relPath(file) {
@@ -338,6 +353,7 @@ function processAllIssues() {
       area: readScalar(map.get("area")),
       language_feature: readScalar(map.get("language_feature")),
       goal: readScalar(map.get("goal")),
+      sprint: normalizeSprint(readScalar(map.get("sprint"))) || normalizeSprint(sprintFromPath(file)),
       renumbered_from: readScalar(map.get("renumbered_from")),
       parent: readScalar(map.get("parent")),
       depends_on: readArray(map.get("depends_on")),
@@ -345,8 +361,8 @@ function processAllIssues() {
       blocked_by: readScalar(map.get("blocked_by")),
     };
 
-    const sprint = sprintFromPath(file);
-    const sprintNum = sprint && sprint !== "backlog" && sprint !== "wont-fix" ? parseInt(sprint, 10) : null;
+    const sprint = fields.sprint;
+    const sprintNum = /^\d+$/.test(sprint) ? parseInt(sprint, 10) : null;
 
     const record = { file, originalText, blocks, body, fields, sprint, sprintNum };
     records.push(record);
@@ -526,7 +542,7 @@ function generateSprintsIndex(records) {
 // ── plan/issues/backlog/index.md ─────────────────────────────────────────────
 
 function generateBacklogIndex(records) {
-  const backlogRecs = records.filter((r) => r.sprint === "backlog");
+  const backlogRecs = records.filter((r) => r.sprint === "Backlog" && r.fields.status !== "wont-fix");
 
   const ready = backlogRecs.filter((r) => r.fields.status === "ready").sort(prioritySort);
   const blocked = backlogRecs.filter((r) => r.fields.status === "blocked").sort(prioritySort);
@@ -589,7 +605,7 @@ function generateBacklogIndex(records) {
 
 function generateWontFixIndex(records) {
   const wontFixRecs = records
-    .filter((r) => r.sprint === "wont-fix" || r.fields.status === "wont-fix")
+    .filter((r) => r.fields.status === "wont-fix")
     .sort((a, b) => String(b.fields.id).localeCompare(String(a.fields.id), undefined, { numeric: true }));
 
   const lines = [
@@ -695,4 +711,48 @@ if (dangling.length) {
 if (resolved.length) {
   console.log(`\nRESOLVED dependencies (${resolved.length}) — can unblock:`);
   for (const { from, dep, depStatus } of resolved) console.log(`  ${from} → #${dep} (${depStatus})`);
+}
+
+// Intra-repo broken-link check (#1616): every plan/issues/<id>-<slug>.md link in
+// tracked *.md must resolve to an existing issue file. Only meaningful once the
+// flat layout exists; harmless before (no flat links yet).
+const brokenLinks = [];
+{
+  const validIssuePaths = new Set([...byId.values()].map((r) => relPath(r.file).replace(/\\/g, "/")));
+  let trackedMd = [];
+  try {
+    trackedMd = execFileSync("git", ["ls-files", "*.md"], { cwd: ROOT, encoding: "utf8" })
+      .split("\n")
+      .filter((f) => f && !f.startsWith("test262/"));
+  } catch {}
+  const linkRe = /plan\/issues\/(\d+[a-z]?-[^)\s"'#]+\.md)/g;
+  for (const f of trackedMd) {
+    let text = "";
+    try {
+      text = readFileSync(join(ROOT, f), "utf8");
+    } catch {
+      continue;
+    }
+    let m;
+    while ((m = linkRe.exec(text))) {
+      const target = `plan/issues/${m[1]}`;
+      if (!validIssuePaths.has(target)) brokenLinks.push({ from: f, target });
+    }
+  }
+}
+if (brokenLinks.length) {
+  console.log(`\nBROKEN issue links (${brokenLinks.length}):`);
+  for (const { from, target } of brokenLinks) console.log(`  ${from} → ${target} (no such issue file)`);
+}
+
+if (CHECK) {
+  const failures = [];
+  if (duplicates.length) failures.push(`${duplicates.length} duplicate IDs`);
+  if (idMismatches.length) failures.push(`${idMismatches.length} filename/frontmatter ID mismatches`);
+  if (dangling.length) failures.push(`${dangling.length} dangling depends_on`);
+  if (brokenLinks.length) failures.push(`${brokenLinks.length} broken issue links`);
+  if (failures.length) {
+    console.error(`\n--check FAILED: ${failures.join(", ")}`);
+    process.exit(1);
+  }
 }
