@@ -185,3 +185,24 @@ once #1617 and #1618 land.
 
 - **#1617** — `plan/issues/1628-wasi-raw-byte-stdout.md` (raw-byte stdout)
 - **#1618** — `plan/issues/1618-wasi-runtime-string-stdout-corrupt.md` (runtime-string corruption bug)
+
+## Aligning with the AssemblyScript reference (follow-ups)
+
+Full convergence on
+[`nm_assemblyscript.ts`](https://github.com/guest271314/native-messaging-webassembly/blob/main/nm_assemblyscript.ts)
+— the binary incremental stdin read, the ArrayBuffer/DataView framing, and
+the continuous `while (true)` port loop — is blocked on three compiler gaps:
+
+- **#1653** — `process.stdin.read(buffer, offset?)`: binary incremental stdin
+  read into a typed buffer (keystone; unlocks both the read side and the
+  continuous-loop design). Depends on #1654.
+- **#1654** — DataView/ArrayBuffer-backed TypedArrays emit an **invalid wasm
+  module** under `--target wasi` (the dual-mode heap/memory-global gap).
+- **#1655** — `process.stdout.write(ArrayBuffer)`: accept an `ArrayBuffer`
+  (and non-literal `Uint8Array`/`.subarray`) argument, not only a
+  `Uint8Array` literal. Depends on #1654.
+
+Until those land, `examples/native-messaging/host.ts` **deliberately** uses
+the string-based `readStdin()` (#1481) for input and the `Uint8Array`-literal
+`process.stdout.write` (#1651) for the length prefix — the working subset the
+current compiler supports. `host.ts` is intentionally left unchanged.
