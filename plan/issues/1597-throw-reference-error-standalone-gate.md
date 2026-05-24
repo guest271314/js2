@@ -1,7 +1,7 @@
 ---
 id: 1597
 title: "host-indep: gate __throw_reference_error in standalone mode"
-status: ready
+status: in-review
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
@@ -63,3 +63,29 @@ No host import is registered; no import appears in the output module.
 ## Effort
 
 ~20 LOC across 3 sites. No new types or helpers needed.
+
+## Resolution (2026-05-24)
+
+All three call sites in `src/codegen/expressions/identifiers.ts`
+(`emitLocalTdzCheck`, `emitStaticTdzThrow`, and the unresolved-identifier
+path in `compileIdentifier`) are **already gated** by `noJsHost(ctx)`
+(`ctx.wasi || ctx.standalone`) as a consequence of the #1473 errors/exceptions
+host-independence work. In no-JS-host mode they build a ReferenceError
+*instance* in-module and trap (`unreachable`) — strictly better than the bare
+`unreachable` the spec sketched, since `e instanceof ReferenceError` works
+under wasmtime. No host import is registered.
+
+Empirically verified against current main:
+
+- `--target standalone` TDZ violation and unresolved-identifier modules
+  compile with **zero** env imports (no `__throw_reference_error`).
+- Standalone module instantiates with `{}` imports — no panic at
+  instantiation. A try/catch-wrapped TDZ access catches the in-module
+  ReferenceError.
+- `--target wasi` likewise omits the import.
+- Default (gc / JS-host) mode is unchanged — import still present.
+
+The remaining deliverable for this issue is the regression-guard test
+`tests/issue-1597-standalone-reference-error.test.ts`, which pins all four
+of the above behaviours so the dual-mode gating cannot silently regress.
+No source change was required.
