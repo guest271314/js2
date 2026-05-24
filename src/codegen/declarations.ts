@@ -1052,10 +1052,18 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectJsonImports finalize ──
-  if (state.jsonNeedStringify || state.jsonNeedParse) {
+  // (#1599 Phase 1) In standalone (no-JS-host) / WASI mode there is no JS
+  // host to provide `env::JSON_stringify` / `env::JSON_parse`. Registering
+  // them would produce a module that fails at instantiation with
+  // `unknown import env::JSON_*`. Skip the import registration here; the
+  // call site in expressions/calls.ts emits a clear compile error for the
+  // unsupported (non-primitive) shapes. The primitive `JSON.stringify`
+  // slice (#1324) is still lowered to pure Wasm and needs no host import.
+  const jsonHostUnavailable = ctx.wasi || ctx.standalone;
+  if (!jsonHostUnavailable && (state.jsonNeedStringify || state.jsonNeedParse)) {
     addUnionImports(ctx);
   }
-  if (state.jsonNeedStringify) {
+  if (!jsonHostUnavailable && state.jsonNeedStringify) {
     // (value: externref, replacer: externref, space: externref) -> externref
     const typeIdx = addFuncType(
       ctx,
@@ -1064,7 +1072,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     );
     addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
   }
-  if (state.jsonNeedParse) {
+  if (!jsonHostUnavailable && state.jsonNeedParse) {
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
   }
