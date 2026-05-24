@@ -94,7 +94,7 @@ sign-off.
 
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
-| 1656 | Consolidate all website/frontend files under website/ | medium | medium | **Ready** — needs architect spec (`arch(#1656)`) before dev; one PR. Related: #1583, #1590 |
+| 1656 | Consolidate all website/frontend files under website/ | medium | medium | **Ready — specced** (`## Implementation Plan` in issue file). Dev-claimable; one PR. NOTE: site config is `playground/vite.config.ts` (NOT root `vite.config.ts` = library build); wide `..`→repo-root fan-out in playground plugins + scripts. `deploy-pages.yml` edit needs CODEOWNERS review. Related: #1583, #1590 |
 | 1657 | Skip merge_group test262 shards for non-src changes (keep required check green) | medium | medium | **In review** — `changes` job + conservative path detector gates the merge_group shard matrix; "merge shard reports" always green. Related: #1656 |
 
 ---
