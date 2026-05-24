@@ -319,6 +319,7 @@ GitHub branch protection is the hard block.
 8. **After merge**: dev marks task `completed`, claims next task
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
+11. **Public `main` is append-only — never force-push or rewrite published history** (it breaks every external clone/fork). Fix bad commits forward via revert PRs. See `docs/ci-policy.md`.
 
 ### Issue status lifecycle
 The issue frontmatter `status:` field tracks where an issue is, set by whichever agent drives the transition:
