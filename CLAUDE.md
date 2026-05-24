@@ -268,6 +268,9 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 ### Agent work dispatch
 - **Tech lead populates TaskList** — devs self-serve from it. No per-task dispatch messages needed.
+- **Owner pins + scope are how the auto-dispatcher is steered.** The native agent-teams auto-dispatcher only auto-offers tasks with **no `owner`**, and it does **not** read role. So the tech lead encodes routing in two places the dispatcher/agents actually honor:
+  - **Set `owner` immediately** on any task pinned to a specific agent (e.g. an in-flight `[CONFLICT]` for a named senior-dev, or a one-PR migration). An ownerless `in_progress` task is the #1 mis-route cause — the dispatcher re-offers it. Reconcile (`TaskUpdate status=completed` the moment a PR merges) so stale entries never get re-offered.
+  - **Tag role/scope in the subject** so agents can self-gate: `[SENIOR-DEV ONLY]`, `[CONFLICT]` (senior-dev), `arch(...)`/`[ARCH]` (architect), `po:`/`[PO]` (product owner), `[PARKED …]`/`[PAUSE]` (not ready). Plain `fix(...)`/`refactor(...)`/`dev:` = developer-claimable. Agents skip tasks owned by others or tagged outside their lane (see the pre-claim gate in `developer.md`/`senior-developer.md`).
 - **Dev loop**: claim task from TaskList → implement → push PR → wait for CI → self-merge if green → mark completed → claim next task.
 - **Dev self-merge**: when `.claude/ci-status/pr-<N>.json` has matching SHA, `net_per_test > 0`, ratio <10%, no bucket >50 — run `gh pr merge <N> --merge --auto` (queues for the merge queue; queue re-runs required checks on the merged state and lands the PR). Escalate to tech lead only when criteria fail. `--admin --merge` is reserved for workflow-only / hotfix bypass. See `.claude/skills/dev-self-merge.md`.
 - **Tech lead reading ci-status files**: always verify `head_sha` matches current PR HEAD (`gh pr view N --json headRefOid`) before interpreting `net_per_test` or regression counts. A SHA mismatch means CI ran on a stale commit — the numbers are misleading. Also check `baseline_staleness_commits` > 0 as a secondary signal.
@@ -310,6 +313,12 @@ GitHub branch protection is the hard block.
 8. **After merge**: dev marks task `completed`, claims next task
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
+
+### Issue status lifecycle
+The issue frontmatter `status:` field tracks where an issue is, set by whichever agent drives the transition:
+- `ready`/`in-progress` → dev starts work (sets `in-progress` when claiming).
+- **`in-review`** — set by the agent the moment it **opens a PR** for the issue. An open PR ⇒ the issue is no longer `in-progress`.
+- **`done`** — set when the **PR merges** (by the dev who observes the merge, or by the merge queue's observer). A merged PR ⇒ `done`. Never leave a merged issue at `in-review`.
 
 ### Issue completion (post-merge)
 1. Set `status: done` in the issue file at `plan/issues/sprints/{N}/{ID}.md`
