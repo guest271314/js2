@@ -1196,8 +1196,15 @@ function compileNewFunctionExpression(
     compileExpression(ctx, fctx, flatArgs[i]!, formalParams[i]);
   }
 
-  // Call the lifted function
-  fctx.body.push({ op: "call", funcIdx: liftedFuncIdx });
+  // Call the lifted function. Re-resolve its index from funcMap: compiling the
+  // arguments above may have added late imports (e.g. an object-spread arg like
+  // `{...null}` pulls in `__new_plain_object`/`__object_assign`), which shifts
+  // every defined-function index up. The shift machinery patches funcMap and the
+  // already-emitted `ref.func` instruction, but the `liftedFuncIdx` captured at
+  // registration time is stale — using it here would make `call` and `ref.func`
+  // disagree, emitting an invalid module (#1602).
+  const resolvedLiftedIdx = ctx.funcMap.get(closureName) ?? liftedFuncIdx;
+  fctx.body.push({ op: "call", funcIdx: resolvedLiftedIdx });
 
   // new expression returns the constructed object — produce externref null
   // since we don't construct actual objects, and callers typically discard the result

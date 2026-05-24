@@ -39,6 +39,7 @@ import {
   repairStructTypeMismatches,
 } from "./fixups.js";
 import { emitInlineMathFunctions } from "./math-helpers.js";
+import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
 import {
@@ -840,6 +841,11 @@ export function generateModule(
 
     // Third pass: compile function bodies
     compileDeclarations(ctx, ast.sourceFile);
+
+    // (#1602) Rebuild object-method-as-closure trampoline bodies against the
+    // method's now-final signature (param types/order may have been re-resolved
+    // during body compilation above).
+    finalizeMethodTrampolines(ctx);
 
     // Experimental IR path: for functions selected by `planIrCompilation`,
     // rebuild their bodies via the middle-end IR (AST → IR → Wasm). Runs
@@ -3172,6 +3178,9 @@ export function generateMultiModule(
     for (const sf of multiAst.sourceFiles) {
       compileDeclarations(ctx, sf);
     }
+
+    // (#1602) Rebuild method-closure trampolines against final method sigs.
+    finalizeMethodTrampolines(ctx);
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
     fixupStructNewArgCounts(ctx);
