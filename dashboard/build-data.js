@@ -257,9 +257,20 @@ console.log(`Test262 runs: ${runs.length} entries (filtered from raw data)`);
 function findSprintFiles() {
   const files = [];
   for (const file of walkFiles(SPRINT_ROOT)) {
-    if (!file.endsWith("/sprint.md")) continue;
-    const sprintNumber = extractSprintNumber(basename(dirname(file)));
-    if (Number.isFinite(sprintNumber)) files.push({ file, sprintNumber });
+    // Post-flatten (#576): sprint docs are `plan/issues/sprints/<N>.md` directly
+    // under SPRINT_ROOT. Match the numbered filename only when it sits directly
+    // in SPRINT_ROOT so leftover sub-directory artifacts (e.g.
+    // sprints/54/sprint-candidates.md) are ignored.
+    if (dirname(file) === SPRINT_ROOT && /^\d+\.md$/.test(basename(file))) {
+      const sprintNumber = extractSprintNumber(basename(file));
+      if (Number.isFinite(sprintNumber)) files.push({ file, sprintNumber });
+      continue;
+    }
+    // LEGACY layout: `plan/issues/sprints/<N>/sprint.md`.
+    if (file.endsWith("/sprint.md")) {
+      const sprintNumber = extractSprintNumber(basename(dirname(file)));
+      if (Number.isFinite(sprintNumber)) files.push({ file, sprintNumber });
+    }
   }
   if (existsSync(LEGACY_SPRINT_ROOT)) {
     for (const name of readdirSync(LEGACY_SPRINT_ROOT)) {
@@ -329,8 +340,14 @@ for (const entry of sprintFiles) {
 // only compared against other legacy sprints so that new "planning" sprints don't
 // push the current active sprint into isClosed.
 const CLOSED_STATUSES = new Set(["closed", "done"]);
-const ACTIVE_STATUSES = new Set(["planned", "active"]);
-const PLANNING_STATUSES = new Set(["planning"]);
+// "planned" is a not-yet-current state: such a sprint exists and renders in the
+// dashboard sprint list, but it is NOT the active sprint. It must be excluded
+// from "current active" selection (statusline + dashboard getLatestActiveSprint),
+// which select the highest sprintNumber with !isClosed && !isPlanning. Treating
+// "planned" as planning (isClosed=false, isPlanning=true) keeps it visible as an
+// upcoming sprint while preventing it from shadowing the truly "active" sprint.
+const ACTIVE_STATUSES = new Set(["active"]);
+const PLANNING_STATUSES = new Set(["planning", "planned"]);
 const explicitlyClosedMax = Math.max(
   ...sprints.filter((s) => CLOSED_STATUSES.has(s.status)).map((s) => s.sprintNumber || 0),
   0,
