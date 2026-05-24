@@ -1,9 +1,10 @@
 ---
 id: 1553b
 title: "decl-dstr: route typed-struct object declaration through destructureParamObject (decl-mode)"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-23
+updated: 2026-05-24
+resolution: "Covered by #1553c externref delegation work (commit d447400e9). The typed-struct path in compileObjectDestructuring already delegates to destructureParamObject({mode:'decl', bindingKind}) — see the `// #1553b` block at src/codegen/statements/destructuring.ts:500-570. Verified 2026-05-24 with cases: nested-default-fires, nested-no-default, simple-typed, top-level-default, nested-null-throws. Locked in with regression tests in tests/issue-1553b.test.ts (9 cases)."
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -231,3 +232,29 @@ TDZ-flag emission timing and the null-guard. Mitigate by:
 - Array decl path → #1553d.
 - Bug 5 (f64 explicit-undefined sentinel) → #1553e.
 - NamedEvaluation → #1450 (in-review).
+
+## Resolution (verified 2026-05-24)
+
+This slice was **skipped in sprint 55** (the team went straight to #1553c).
+On verification against current `main` (post-#1553c/#1553d), the typed-struct
+path is **already implemented** exactly as this spec describes: the
+`// #1553b`-tagged delegation block in
+`src/codegen/statements/destructuring.ts:500-570` stashes the RHS into a
+struct-typed temp local and calls
+`destructureParamObject(ctx, fctx, tmpLocal, pattern, paramType, {mode:'decl', bindingKind})`,
+keeping `syncDestructuredLocalsToGlobals` in the caller and routing
+`...rest` patterns to the externref fallback. This landed as part of the
+#1553c PR (commit `d447400e9`).
+
+Verified all repro/acceptance cases compile + run correctly on current main:
+
+| Case | Source | Result |
+| --- | --- | --- |
+| nested default fires | `let {w:{x,y,z}={x:1,y:2,z:3}}={w:undefined}` (typed) | PASS (`x=1,y=2,z=3`) |
+| nested, no default | `let {a, b:{c,d}} = {a:1,b:{c:2,d:3}}` (typed) | PASS |
+| simple typed | `let {x,y} = p` | PASS |
+| top-level default | `let {x=99,y} = {y:5}` | PASS (`x=99`) |
+| nested null guard | `let {w:{x}} = {w:null}` (typed) | PASS (throws TypeError) |
+
+No code change was required. Regression coverage added in
+`tests/issue-1553b.test.ts` (9 cases, all green) to lock the behaviour in.
