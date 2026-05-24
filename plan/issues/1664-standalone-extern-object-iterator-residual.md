@@ -1,8 +1,10 @@
 ---
 id: 1664
 title: "host-indep: residual __extern_* / __register_* / __iterator* / __array_* leaks after #1472"
-status: ready
+status: done
 created: 2026-05-25
+updated: 2026-05-25
+completed: 2026-05-25
 priority: medium
 feasibility: hard
 task_type: bugfix
@@ -85,3 +87,55 @@ bridge are genuine missing Wasm-native pieces.
 Resolve **#1666** (invalid-wasm cluster) first — several of these probes
 fail WASM validation, masking whether the leak is intrinsic or a fallout of
 the broken lowering path.
+
+## Resolution (2026-05-25)
+
+After #1666 landed, probing `--target wasi` showed most constructs already
+clean: `class B extends A { … super.get() }`, `Map`/`Set` construction, and
+`Array.from([…])` emit **zero** `__register_*` / `__extern_*` /
+`__array_from_iter` imports. The residual leak was isolated to **TypedArray
+`.set` and `.subarray`**: neither was in the native array-method dispatch
+table (`ARRAY_METHODS` in `src/codegen/array-methods.ts`), so they fell
+through to the generic externref method-call path, which read source elements
+via `__extern_get` and length via `__extern_length`.
+
+Fix: added `set` and `subarray` to `ARRAY_METHODS` with native WasmGC
+lowering:
+
+- `compileTypedArraySet(source, offset?)` — extracts the source vec's backing
+  array + length, then bulk `array.copy` when source/dest element wasm types
+  match, else an element-wise loop through an f64 bridge (so e.g.
+  `Float64Array.set([1,2,3])` with an i32-typed literal writes correct
+  values). Mutates in place; returns `VOID_RESULT`. Bails (returns the
+  generic-dispatch sentinel) when the source isn't a known WasmGC array.
+- `compileTypedArraySubarray(begin?, end?)` — returns a fresh vec over the
+  clamped `[begin, end)` slice by reusing `compileArraySlice` (the vec-struct
+  model has no shared ArrayBuffer, so this copies; the acceptance criteria
+  only require correct element values + zero host imports, not buffer
+  aliasing).
+
+`set` was also added to the `MUTATING` set so module-global receivers write
+back.
+
+**Remaining out of scope (separate issues):** standalone `Map`/`Set`
+construction still requires `env.Map_new`/`Map_set`/`Map_get` host imports —
+that is the Wasm-native Map/Set work tracked by #1103/#1105, not a residual
+extern-leak. This issue's `__get_undefined` note is subsumed there.
+
+## Test Results
+
+`tests/issue-1664.test.ts` — 7/7 pass:
+- `set([…])`, `set(typedArray)`, `set([…], offset)` — correct values, zero
+  host imports under `--target wasi`
+- `Float64Array.set([i32 literal])` element-type bridge → correct values
+- `subarray(begin)` / `subarray(begin, end)` — correct slice values, no leaks
+- regression guard: `class extends` + `super` call leak-free (from #1666)
+
+`check:ir-fallbacks` gate: OK (no unintended increases). Existing
+`issue-1666-standalone-valid-wasm` (incl. its `Uint8Array .set validates`
+case) and `issue-1654-wasi-dataview-arraybuffer` suites green.
+
+(Note: `tests/typed-array-basic.test.ts` and `tests/array-methods.test.ts`
+fail with a `string_constants` import error in this environment, but that is
+a pre-existing harness condition — identical on clean `origin/main` with this
+change stashed — and unrelated to `.set`/`.subarray`.)
