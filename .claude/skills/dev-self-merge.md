@@ -265,16 +265,23 @@ The `--auto` flag enqueues the PR. GitHub will:
 3. Fast-forward main if checks pass — usually within minutes of CI completing
 4. Trigger `auto-refresh-prs.yml` after the merge, which pushes a fresh `git merge origin/main` to every other open PR branch
 
+**The issue file already carries `status: done`.** Under self-merge there is
+no separate post-merge observer who can commit a status flip — and once the
+queue lands the PR you cannot make a follow-up commit from `/workspace`. So the
+**implementation PR itself sets `status: done` + `completed: <date>`** in the
+issue frontmatter when you open it (by merge time it IS done; queue rejections
+are rare, and the gate already verified what the queue re-verifies). Do NOT
+open the PR at `in-review` and plan a later flip — that is exactly what orphans
+issues at `in-review` (see #1602/#1603/#1606).
+
 **Once queued, your job is done.** Do not wait for the actual merge. Proceed immediately:
-1. Optimistically set `status: done` in the issue file (queue rejections are rare — the gate already verified what the queue re-verifies):
-   ```bash
-   issue_num=$(echo "<branch>" | grep -oE '[0-9]+' | head -1)
-   file=$(find /workspace/plan/issues -name "${issue_num}-*.md" | head -1)
-   sed -i "s/^status: .*/status: done/" "$file"
-   ```
+1. (Status already `done` in the merged PR — no separate flip needed.)
 2. `TaskUpdate taskId=<your-task> status=completed`
 3. Remove your worktree: `git worktree remove /workspace/.claude/worktrees/<branch>`
 4. `TaskList` → claim next unowned task (or message tech lead if empty)
+
+> If the queue *rejects* the PR (rare — see below), the `status: done` you set
+> has not yet landed on main, so nothing is orphaned; re-evaluate and re-queue.
 
 ### If the queue rejects your PR
 
