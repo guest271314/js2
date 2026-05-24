@@ -253,9 +253,11 @@ Any bucket with count > 50 → **ESCALATE** with the bucket name and count (crit
 All criteria passed. **Add the PR to the merge queue** (do NOT use `--admin` direct merge — main is now protected by a merge queue ruleset):
 
 ```bash
-gh pr merge <N> --merge --auto \
+gh pr merge <N> --auto \
   --body "Self-merged via queue. net_per_test=+$(jq .net_per_test .claude/ci-status/pr-<N>.json) ($(jq .improvements .claude/ci-status/pr-<N>.json) improvements, $(jq .regressions .claude/ci-status/pr-<N>.json) regressions). Criteria: /dev-self-merge."
 ```
+
+> **Enqueue with `gh pr merge <N> --auto` — do NOT pass `--merge` (or any strategy flag) alongside `--auto`.** This repo's merge queue owns the merge strategy and rejects `--merge --auto` ("The merge strategy for main is set by the merge queue"), which fails silently and leaves the PR green but never queued. A strategy flag is only valid with `--admin` (direct bypass).
 
 The `--auto` flag enqueues the PR. GitHub will:
 1. Place the PR on a temp branch (`gh-readonly-queue/main/pr-<N>-...`)
@@ -279,7 +281,7 @@ The `--auto` flag enqueues the PR. GitHub will:
 GitHub will comment on the PR if the final queue checks fail (rare — would mean something flipped between your CI run and the queue's re-run, likely main moved). In that case:
 - The auto-refresh workflow may have already pushed a merge of main into your branch — fetch and review
 - Re-evaluate /dev-self-merge against the new CI run
-- If still good, re-queue with `gh pr merge <N> --merge --auto`
+- If still good, re-queue with `gh pr merge <N> --auto`
 
 ### Admin direct-merge — only when
 
