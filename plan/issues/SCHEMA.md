@@ -13,12 +13,19 @@ files are generated from issue frontmatter and should not be edited manually.
 Canonical issue files live under sprint-grouped folders in `plan/issues/`.
 Status is expressed only in frontmatter, not in directory placement.
 
-Current layout:
+Current layout (flat, #1616):
 
-- numbered sprint issues: `plan/issues/sprints/<number>/<issue>.md`
-- numbered sprint docs: `plan/issues/sprints/<number>/sprint.md`
-- non-sprint buckets:
-  - `plan/issues/backlog/`
+- numbered issues: `plan/issues/<id>-<slug>.md` — flat, one stable location for
+  every issue regardless of sprint. The file never moves when an issue is
+  scheduled or rescheduled; only its `sprint:` frontmatter value changes.
+- sprint docs: `plan/issues/sprints/<number>/sprint.md` — the planning doc and
+  any sprint-scoped planning artifacts stay under the sprint dir.
+- sprint membership / bucket is frontmatter only: `sprint: <N>` (numbered
+  sprint), `sprint: 0` (pre-sprint history), `sprint: Backlog` (unscheduled);
+  wont-fix is a `status: wont-fix`, not a sprint value.
+- `plan/issues/backlog/index.md` and `plan/issues/wont-fix/index.md` are
+  generated indexes (link to `../<id>-<slug>.md`); `backlog/backlog.md` is the
+  curated backlog doc.
 
 ## Canonical Frontmatter
 
