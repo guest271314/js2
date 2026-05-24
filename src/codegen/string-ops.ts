@@ -169,8 +169,18 @@ export function compileNativeTemplateExpression(
 ): ValType | null {
   const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
-  ensureNativeStringExternBridge(ctx);
-  flushLateImportShifts(ctx, fctx);
+  // #1618: the extern bridge (__str_to_extern/__str_from_extern) is JS-host-only
+  // — it marshals via __str_to_mem/__str_from_mem host imports that don't exist
+  // under --target wasi/standalone, where they collapse to bogus indices and
+  // produce an invalid module. Only emit it when the template actually needs
+  // externref marshaling, i.e. it has a NON-string substitution (number/bigint/
+  // object → number_toString returns externref → __str_from_extern). A template
+  // whose spans are all strings concatenates natively with zero host calls.
+  const hasNonStringSpan = expr.templateSpans.some((s) => !isStringType(ctx.checker.getTypeAtLocation(s.expression)));
+  if (hasNonStringSpan) {
+    ensureNativeStringExternBridge(ctx);
+    flushLateImportShifts(ctx, fctx);
+  }
   const fromExternIdx = ctx.nativeStrHelpers.get("__str_from_extern");
   if (concatIdx === undefined) return null;
 
@@ -182,7 +192,20 @@ export function compileNativeTemplateExpression(
     const span = expr.templateSpans[i]!;
 
     const spanType = compileExpression(ctx, fctx, span.expression);
-    if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
+    const spanIsString =
+      spanType &&
+      (spanType.kind === "ref" || spanType.kind === "ref_null") &&
+      isStringType(ctx.checker.getTypeAtLocation(span.expression));
+    if (spanIsString) {
+      // #1618: a string-typed substitution is ALREADY a native string ref
+      // (AnyString / NativeString). Concat it directly — do NOT round-trip
+      // through externref via __str_to_extern/__str_from_extern. That bridge is
+      // JS-host-only (__str_to_mem / __str_from_mem imports) and produces an
+      // invalid module under --target wasi/standalone, where those host imports
+      // don't exist and collapse to bogus function indices. __str_concat accepts
+      // the AnyString supertype, so a ref_null is fine to pass straight through.
+      // (No marshaling instructions emitted — value stays on the stack.)
+    } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
       // number_toString returns externref, marshal to native string
       if (fromExternIdx !== undefined) {

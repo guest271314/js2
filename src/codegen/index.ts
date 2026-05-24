@@ -3388,8 +3388,18 @@ function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
 
 /** Register WASI imports: fd_write, proc_exit, path_open, fd_close, linear memory, bump pointer global */
 function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  // Add linear memory (1 page = 64KB) for string data + iovec structs
-  ctx.mod.memories.push({ min: 1 });
+  // Add linear memory for string data + iovec structs.
+  //
+  // Layout (#1618 collision fix): page 0 (0..64KB) holds the iovec/nwritten
+  // scratch (0..15) and the bump-allocated data segments for string literals
+  // (`wasiAllocStringData`, from offset 1024 up). The stdin read buffer and the
+  // raw-byte write scratch MUST NOT alias those data segments — previously both
+  // the literal segments and the stdin buffer started at 1024, so reading stdin
+  // overwrote the initialized literal/newline bytes, corrupting console.log
+  // output. We now place the stdin buffer in page 1 (WASI_STDIN_BUF_START) and
+  // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
+  // data segment, and reserve 3 pages so both regions always exist.
+  ctx.mod.memories.push({ min: 3 });
   // WASI requires the memory to be exported as "memory"
   ctx.mod.exports.push({ name: "memory", desc: { kind: "memory", index: 0 } });
 
@@ -3447,6 +3457,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         propAccess.name.text === "exit"
       ) {
         needsProcExit = true;
+      }
+      // #1651: process.stdout.write(...) / process.stderr.write(...) need
+      // fd_write. The callee is `process.<stream>.write` — a PropertyAccess
+      // (name="write") whose receiver is itself `process.stdout|stderr`.
+      if (
+        propAccess.name.text === "write" &&
+        ts.isPropertyAccessExpression(propAccess.expression) &&
+        ts.isIdentifier(propAccess.expression.expression) &&
+        propAccess.expression.expression.text === "process" &&
+        (propAccess.expression.name.text === "stdout" || propAccess.expression.name.text === "stderr")
+      ) {
+        needsFdWrite = true;
+        if (propAccess.expression.name.text === "stderr") {
+          needsConsoleStderr = true;
+        }
       }
       // #1322: Math.random() in WASI mode uses random_get for entropy
       if (
@@ -3858,6 +3883,300 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
 }
 
 /**
+ * WASI linear-memory layout constants (#1618 collision fix).
+ *
+ * The iovec lives at memory[0..7] and nwritten at memory[8..11] (shared by all
+ * __wasi_write_* helpers). String-literal data segments are bump-allocated in
+ * page 0 from offset 1024 (`wasiAllocStringData`). To avoid aliasing those
+ * segments, the stdin read buffer and the raw-byte write scratch live in
+ * dedicated higher pages:
+ *   - WASI_STDIN_BUF_START  = 64KB  (page 1) — fd_read accumulation buffer
+ *   - WASI_WRITE_SCRATCH_START = 128KB (page 2) — fd_write staging buffer
+ * `registerWasiImports` reserves 3 pages so both always exist.
+ */
+const WASI_STDIN_BUF_START = 64 * 1024;
+const WASI_WRITE_SCRATCH_START = 128 * 1024;
+
+/**
+ * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
+ * return its function index (lazy, emitted during expression compilation).
+ *
+ * Writes a *runtime* string (variable, concatenation, template span) to fd=1
+ * (stdout) or fd=2 (stderr). Previously these refs fell through to the
+ * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
+ *
+ * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
+ * NativeString via the existing __str_flatten helper, then copy the low byte
+ * of each i16 code unit into linear memory and issue a single fd_write. This
+ * mirrors readStdin's byte-per-i16 model (#1481), so a `readStdin()` →
+ * `console.log` round-trip is byte-exact for ASCII / Latin-1 content (the
+ * Native Messaging JSON case). Non-Latin-1 code points are truncated to their
+ * low byte — acceptable for the protocol use-case and consistent with how
+ * stdin bytes are stored.
+ *
+ * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
+ * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
+ * accepts the NativeString supertype (AnyString) and returns the flat form.
+ */
+export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: boolean = false): number {
+  const helperName = useStderr ? "__wasi_write_any_string_stderr" : "__wasi_write_any_string";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined || ctx.nativeStrTypeIdx < 0) return -1;
+
+  // Make sure the native-string runtime (incl. __str_flatten) is emitted.
+  ensureNativeStringHelpers(ctx);
+  // __str_flatten via funcMap (shift-maintained), not nativeStrHelpers (which can
+  // be stale-low after late imports). See the registration in
+  // ensureNativeStringHelpers. (#1618)
+  const flattenIdx = ctx.funcMap.get("__str_flatten");
+  if (flattenIdx === undefined) return -1;
+
+  const fd = useStderr ? 2 : 1;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+
+  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5)
+  const S = 0;
+  const FLAT = 1;
+  const LEN = 2;
+  const OFF = 3;
+  const DATA = 4;
+  const I = 5;
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: strTypeIdx }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    // flat = __str_flatten(s)
+    { op: "local.get", index: S } as Instr,
+    { op: "call", funcIdx: flattenIdx } as Instr,
+    { op: "local.set", index: FLAT } as Instr,
+
+    // len = flat.len (field 0)
+    { op: "local.get", index: FLAT } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: LEN } as Instr,
+
+    // off = flat.off (field 1)
+    { op: "local.get", index: FLAT } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: OFF } as Instr,
+
+    // data = flat.data (field 2)
+    { op: "local.get", index: FLAT } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "local.set", index: DATA } as Instr,
+
+    // i = 0
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: I } as Instr,
+
+    // while (i < len) mem[SCRATCH+i] = (u8) data[off+i]; i++
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I } as Instr,
+            { op: "local.get", index: LEN } as Instr,
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 } as Instr,
+
+            // address = SCRATCH_START + i
+            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.add" } as Instr,
+
+            // value = data[off + i] (i16, unsigned) — low byte kept by i32.store8
+            { op: "local.get", index: DATA } as Instr,
+            { op: "local.get", index: OFF } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+
+            { op: "i32.store8", align: 0, offset: 0 },
+
+            // i++
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: I } as Instr,
+
+            { op: "br", depth: 0 } as Instr,
+          ],
+        },
+      ],
+    },
+
+    // iovec.buf = SCRATCH_START at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = len at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: fd } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "flat", type: { kind: "ref", typeIdx: strTypeIdx } },
+      { name: "len", type: { kind: "i32" } },
+      { name: "off", type: { kind: "i32" } },
+      { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
+ * #1617/#1651: Ensure __wasi_write_uint8array(arr: ref __vec_f64) -> void
+ * exists and return its function index (lazy).
+ *
+ * Writes raw bytes from a typed-array (Uint8Array) GC object to fd=1 (stdout)
+ * or fd=2 (stderr) with NO trailing newline. Backs the
+ * `process.stdout.write(new Uint8Array([...]))` path (the standard Node API
+ * that supersedes the bespoke `writeStdout` builtin from #1617). A Uint8Array
+ * compiles to a "vec" struct:
+ *   field 0: length (i32)
+ *   field 1: data    (ref array<f64>) — each element is a byte value
+ *
+ * We truncate each f64 element to its byte and stage it in linear memory at
+ * WASI_WRITE_SCRATCH_START, then issue a single fd_write. This is what the
+ * Native Messaging host (#1530) needs to emit the 4-byte little-endian length
+ * prefix that console.log (UTF-8 + "\n") cannot.
+ */
+export function ensureWasiWriteUint8ArrayHelper(
+  ctx: CodegenContext,
+  vecTypeIdx: number,
+  useStderr: boolean = false,
+): number {
+  const helperName = useStderr ? "__wasi_write_uint8array_stderr" : "__wasi_write_uint8array";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return -1;
+
+  const fd = useStderr ? 2 : 1;
+
+  // param: arr(0); locals: len(1), data(2), i(3)
+  const ARR = 0;
+  const LEN = 1;
+  const DATA = 2;
+  const I = 3;
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    // len = arr.length (field 0)
+    { op: "local.get", index: ARR } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: LEN } as Instr,
+
+    // data = arr.data (field 1)
+    { op: "local.get", index: ARR } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: DATA } as Instr,
+
+    // i = 0
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: I } as Instr,
+
+    // while (i < len) mem[SCRATCH+i] = (u8) trunc(data[i]); i++
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I } as Instr,
+            { op: "local.get", index: LEN } as Instr,
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 } as Instr,
+
+            // address = SCRATCH_START + i
+            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.add" } as Instr,
+
+            // value = (i32) data[i] — low byte kept by i32.store8
+            { op: "local.get", index: DATA } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+            { op: "i32.trunc_sat_f64_s" } as Instr,
+
+            { op: "i32.store8", align: 0, offset: 0 },
+
+            // i++
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: I } as Instr,
+
+            { op: "br", depth: 0 } as Instr,
+          ],
+        },
+      ],
+    },
+
+    // iovec.buf = SCRATCH_START at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = len at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: fd } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "len", type: { kind: "i32" } },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
  * Emit __wasi_write_file_sync(pathPtr: i32, pathLen: i32, dataPtr: i32, dataLen: i32) helper.
  * Opens a file via path_open, writes data via fd_write, then closes via fd_close.
  *
@@ -4038,9 +4357,11 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
  * sized to fit comfortably inside the initial 1 page (64KB) of memory.
  */
 function emitWasiReadStdinAllHelper(ctx: CodegenContext): void {
-  const STDIN_BUF_START = 1024;
+  // #1618: stdin buffer lives in its own page (64KB), above the page-0 string
+  // literal data segments, so fd_read can't clobber initialized literal bytes.
+  const STDIN_BUF_START = WASI_STDIN_BUF_START;
   const CHUNK = 1024;
-  const MAX_BYTES = 60 * 1024; // ~60KB cap; first page is 64KB
+  const MAX_BYTES = 60 * 1024; // ~60KB cap; fits in the dedicated stdin page
 
   // () -> ref NativeString
   const funcTypeIdx = addFuncType(ctx, [], [{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }]);

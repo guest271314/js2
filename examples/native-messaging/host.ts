@@ -7,22 +7,25 @@
 // the host process's stdin (fd=0) and stdout (fd=1). See:
 //   https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 //
-// js2wasm support today (see README.md → "What works / what doesn't"):
+// js2wasm support today:
 //   - stdin  : readStdin() drains fd=0 to EOF and returns it as a string (#1481)
-//   - stdout : console.log writes a UTF-8 string + newline to fd=1 (#1480/#1493)
+//   - stdout : process.stdout.write(bytes|str) writes raw bytes / a string to
+//              fd=1 with NO trailing newline (#1651) — used for the binary
+//              4-byte length prefix and the JSON body. console.log(str) also
+//              writes runtime strings correctly now (#1618).
 //   - stderr : console.error / console.warn write to fd=2 (#1493) — use these
 //              for debug output so they never corrupt the stdout protocol stream
 //
-// IMPORTANT — read the README before wiring this into Chrome. The compiler
-// cannot yet emit the *binary* 4-byte length prefix on stdout (there is no
-// raw-byte stdout API; console.log UTF-8-encodes and appends a newline). This
-// host therefore demonstrates the *message-processing core* — reading the JSON
-// body off stdin and producing a JSON response — but is NOT yet a drop-in
-// Chrome host until raw-byte framing lands (tracked as a follow-up issue,
-// see README). Run it with the wrapper in run.sh under wasmtime/wasmer to see
-// the read → process → respond loop end to end.
+// This is a drop-in Chrome host: it reads the framed JSON message off stdin,
+// builds a JSON response, and writes it back to stdout with the correct
+// 4-byte little-endian length prefix. Run it with the wrapper in run.sh under
+// wasmtime/wasmer to exercise the read -> process -> respond loop end to end.
 
 declare function readStdin(): string;
+declare const process: {
+  stdout: { write(chunk: Uint8Array | string): void };
+  stderr: { write(chunk: Uint8Array | string): void };
+};
 
 // Strip Chrome's 4-byte little-endian length prefix from a framed message,
 // returning just the JSON body. readStdin() hands us the whole stdin buffer
@@ -42,6 +45,16 @@ function decodeLength(framed: string): number {
   return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
 }
 
+// Write a framed Native Messaging response: the 4-byte little-endian length
+// prefix followed by the JSON body, both on stdout (fd=1), no newline.
+function writeMessage(body: string): void {
+  const len = body.length;
+  // Binary 4-byte LE length prefix via raw-byte stdout (#1651).
+  process.stdout.write(new Uint8Array([len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >> 24) & 0xff]));
+  // JSON body — runtime string, written verbatim with no trailing newline.
+  process.stdout.write(body);
+}
+
 export function main(): void {
   // Read the whole framed message from stdin (Chrome sends one per launch in
   // the simplest "stdio" wiring; a long-lived port would loop here).
@@ -56,5 +69,6 @@ export function main(): void {
   // Application logic: echo the received JSON body back inside a wrapper
   // object. Real hosts would parse `body`, dispatch on a command field, and
   // build a structured response.
-  console.log(`{"received":${body},"runtime":"js2wasm+wasi"}`);
+  const response = `{"received":${body},"runtime":"js2wasm+wasi"}`;
+  writeMessage(response);
 }

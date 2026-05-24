@@ -810,6 +810,16 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const typeIdx = addFuncType(ctx, [strRef], [flatStrRef]);
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.nativeStrHelpers.set("__str_flatten", funcIdx);
+    // Also register in funcMap so the deferred late-import shift
+    // (flushLateImportShifts walks ctx.funcMap) keeps __str_flatten's index
+    // correct when imports are added after this registration. Internal callers
+    // that emit a `call __str_flatten` between flatten's registration and a
+    // late-import addition (notably ensureNativeStringExternBridge's
+    // __str_to_extern, which adds 3 fd-bridge imports first) would otherwise
+    // read a stale-low nativeStrHelpers index. funcMap is the authoritative,
+    // shift-maintained map; no code looks up __str_flatten via funcMap so adding
+    // it is side-effect-free. (#1618)
+    ctx.funcMap.set("__str_flatten", funcIdx);
 
     const copyTreeIdx = ctx.nativeStrHelpers.get("__str_copy_tree")!;
     // #1588 PR-B part 2: present iff --utf8-storage is on.
@@ -3345,14 +3355,36 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
     ctx.nativeStrHelpers.set("__str_to_extern", funcIdx);
     ctx.funcMap.set("__str_to_extern", funcIdx);
 
+    // The param is typed as the AnyString supertype, but the body reads
+    // NativeString (FlatString) fields. We must flatten first: a ConsString /
+    // Utf8String / template-literal result is NOT a NativeString, so reading
+    // its fields via `struct.get NativeString` on the raw param produces an
+    // invalid module (struct.get expected NativeString, found AnyString). For
+    // an already-flat input __str_flatten is a cheap identity. (#1618 family —
+    // surfaced by `process.stdout.write`/`console.log` of a template literal
+    // under --target wasi, which emits this bridge.)
+    //
+    // __str_flatten via funcMap (NOT nativeStrHelpers): this body emits a `call
+    // __str_flatten` after the three fd-bridge late imports above have been
+    // queued, so the nativeStrHelpers index is stale-low (it's never rewritten by
+    // the deferred shift). funcMap IS shift-maintained — __str_flatten is now
+    // registered there too — so this resolves and shifts correctly. (#1618)
+    const flattenIdx = ctx.funcMap.get("__str_flatten")!;
+    const FLAT_LOCAL = 5;
+
     const body: Instr[] = [
+      // flat = __str_flatten(s)  (locals[5])
       { op: "local.get", index: 0 },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "local.set", index: FLAT_LOCAL },
+
+      { op: "local.get", index: FLAT_LOCAL },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 1 },
-      { op: "local.get", index: 0 },
+      { op: "local.get", index: FLAT_LOCAL },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
       { op: "local.set", index: 4 },
-      { op: "local.get", index: 0 },
+      { op: "local.get", index: FLAT_LOCAL },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
       { op: "local.set", index: 3 },
       { op: "i32.const", value: 0 },
@@ -3400,6 +3432,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
         { name: "i", type: { kind: "i32" } },
         { name: "data", type: strDataRef },
         { name: "sOff", type: { kind: "i32" } },
+        { name: "flat", type: { kind: "ref", typeIdx: strTypeIdx } },
       ],
       body,
       exported: false,

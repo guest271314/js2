@@ -9,7 +9,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { flushLateImportShifts } from "../expressions/late-imports.js";
-import { addFuncType } from "../index.js";
+import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
 import { ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { compileExpression, VOID_RESULT } from "../shared.js";
@@ -1545,7 +1545,7 @@ function emitWasiValueToStdout(
   ctx: CodegenContext,
   fctx: FunctionContext,
   exprType: InnerResult,
-  _node: ts.Node,
+  node: ts.Node,
   useStderr: boolean = false,
 ): void {
   // #1493: pick stdout (fd=1) or stderr (fd=2) helper based on call site.
@@ -1574,8 +1574,42 @@ function emitWasiValueToStdout(
     } else {
       fctx.body.push({ op: "drop" } as Instr);
     }
+  } else if (
+    (exprType.kind === "ref" || exprType.kind === "ref_null") &&
+    isStringType(ctx.checker.getTypeAtLocation(node)) &&
+    ctx.nativeStrTypeIdx >= 0
+  ) {
+    // #1618: runtime string value (variable / concatenation / template span).
+    // The compiled value is a NativeString ref (or its AnyString supertype).
+    // Flatten + write its bytes to fd=1/fd=2 instead of dropping it and
+    // emitting the "[object]" placeholder. The value on the stack may be typed
+    // as the AnyString supertype after a concat; cast to NativeString so it
+    // matches the helper's param type (__str_flatten accepts the supertype, so
+    // any non-flat tree is handled there — but the static cast is required for
+    // the call to typecheck against the helper signature).
+    const refKind = exprType.kind;
+    if (
+      refKind === "ref" &&
+      "typeIdx" in exprType &&
+      (exprType as { typeIdx: number }).typeIdx !== ctx.nativeStrTypeIdx
+    ) {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+    } else if (refKind === "ref_null") {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+    }
+    const writeAnyIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
+    if (writeAnyIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: writeAnyIdx } as Instr);
+    } else {
+      // Helper unavailable (no native strings) — fall back to placeholder.
+      fctx.body.push({ op: "drop" } as Instr);
+      const placeholder = wasiAllocStringData(ctx, "[object]");
+      fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
+      fctx.body.push({ op: "i32.const", value: placeholder.length } as Instr);
+      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+    }
   } else {
-    // For other types (externref, ref, etc.), just drop and write a placeholder
+    // For other types (externref, etc.), just drop and write a placeholder
     fctx.body.push({ op: "drop" } as Instr);
     const placeholder = wasiAllocStringData(ctx, "[object]");
     fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);

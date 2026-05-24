@@ -42,6 +42,8 @@ import {
   addUnionImports,
   ensureExnTag,
   ensureI32Condition,
+  ensureWasiWriteAnyStringHelper,
+  ensureWasiWriteUint8ArrayHelper,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
@@ -1195,6 +1197,36 @@ function emitVirtualMethodDispatchByTag(
   return resultType;
 }
 
+/**
+ * #1651: recognise `process.stdout.write(x)` / `process.stderr.write(x)` under
+ * --target wasi. Returns `{ useStderr }` when the callee is exactly the
+ * `write` method of `process.stdout` / `process.stderr` (with exactly one
+ * argument and `process` not shadowed by a local), else null.
+ *
+ * Shape: CallExpression.expression is `PropertyAccess(name="write")` whose
+ * `.expression` is `PropertyAccess(name="stdout"|"stderr")` whose `.expression`
+ * is the identifier `process`.
+ */
+function matchProcessStdStreamWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): { useStderr: boolean } | null {
+  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined || ctx.wasiFdWriteIdx < 0) return null;
+  if (expr.questionDotToken || expr.arguments.length !== 1) return null;
+  const writeAccess = expr.expression;
+  if (!ts.isPropertyAccessExpression(writeAccess) || writeAccess.name.text !== "write") return null;
+  const streamAccess = writeAccess.expression;
+  if (!ts.isPropertyAccessExpression(streamAccess)) return null;
+  const streamName = streamAccess.name.text;
+  if (streamName !== "stdout" && streamName !== "stderr") return null;
+  const procIdent = streamAccess.expression;
+  if (!ts.isIdentifier(procIdent) || procIdent.text !== "process") return null;
+  // Don't hijack a user-shadowed `process` local/capture.
+  if (fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false)) return null;
+  return { useStderr: streamName === "stderr" };
+}
+
 function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
   // Optional chaining on calls: obj?.method()
   if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
@@ -1259,6 +1291,67 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (helperIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
       return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
+    }
+  }
+
+  // #1651 (GitHub #572): process.stdout.write(x) / process.stderr.write(x)
+  // under --target wasi → write x to fd=1 / fd=2 with NO trailing newline
+  // (unlike console.log). Supersedes the bespoke `writeStdout` builtin from
+  // #1617 with the standard Node.js API. Accepts a string (UTF-8/Latin-1 bytes)
+  // or a Uint8Array (raw bytes — the 4-byte LE length prefix the Native
+  // Messaging host #1530 needs).
+  {
+    const stdoutWrite = matchProcessStdStreamWrite(ctx, fctx, expr);
+    if (stdoutWrite) {
+      const { useStderr } = stdoutWrite;
+      const argExpr = expr.arguments[0]!;
+      const argTsType = ctx.checker.getTypeAtLocation(argExpr);
+      if (isStringType(argTsType)) {
+        // String → reuse the runtime-string byte writer (#1618). It flattens
+        // and writes the string bytes verbatim, no newline.
+        const compiled = compileExpression(ctx, fctx, argExpr);
+        flushLateImportShifts(ctx, fctx);
+        if (compiled && ctx.nativeStrTypeIdx >= 0) {
+          if (compiled.kind === "ref_null") {
+            fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+          } else if (compiled.kind === "ref" && "typeIdx" in compiled && compiled.typeIdx !== ctx.nativeStrTypeIdx) {
+            fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+          }
+          const writeStrIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
+          if (writeStrIdx >= 0) {
+            fctx.body.push({ op: "call", funcIdx: writeStrIdx } as Instr);
+            return VOID_RESULT;
+          }
+        }
+        // Fallback: drop to keep the stack balanced.
+        if (compiled) fctx.body.push({ op: "drop" } as Instr);
+        return VOID_RESULT;
+      }
+
+      // Uint8Array (or other typed array) → raw bytes. Uint8Array compiles to a
+      // "vec" struct wrapping an f64 GC array (new-super.ts `new Uint8Array`).
+      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+      const argType = compileExpression(ctx, fctx, argExpr);
+      flushLateImportShifts(ctx, fctx);
+      // The helper takes a non-null ref; cast a mismatched ref / assert non-null.
+      if (argType) {
+        if (argType.kind === "ref_null") {
+          if ("typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
+            fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+          } else {
+            fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          }
+        } else if (argType.kind === "ref" && "typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
+          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+        }
+      }
+      const helperIdx = ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
+      if (helperIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
+        return VOID_RESULT;
+      }
+      if (argType) fctx.body.push({ op: "drop" } as Instr);
+      return VOID_RESULT;
     }
   }
 
