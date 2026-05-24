@@ -85,6 +85,14 @@ You'll see the host's stderr diagnostic (received-length + decoded body
 length) and its stdout response, framed with the binary 4-byte LE length
 prefix followed by the JSON body — exactly the bytes Chrome expects.
 
+For an automated byte-exact check (build + run under wasmtime, asserting the
+stdout frame and a clean stderr), run [`smoke-test.sh`](./smoke-test.sh) —
+the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
+
+```bash
+./examples/native-messaging/smoke-test.sh
+```
+
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
 > snippet does — `WebAssembly.compile(readFileSync('out/host.wasm'))` — and
