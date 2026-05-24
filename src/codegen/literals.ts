@@ -50,6 +50,7 @@ import {
   ensureLateImport,
   flushLateImportShifts,
   registerResolveComputedKeyExpression,
+  valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
 
@@ -1103,22 +1104,50 @@ export function compileObjectLiteralForStruct(
       newParams.push(wasmType);
     }
 
-    // Compare against existing function's param count. (Result-type comparison
-    // is harder; param count is the canonical mismatch that causes
-    // "not enough arguments on the stack" trampoline failures.)
+    // Compare against the existing function's signature. A mismatched param
+    // count causes "not enough arguments on the stack" trampoline failures.
+    // (#1602) A param-type/order mismatch with the SAME count is just as
+    // breaking: two structurally-deduped sibling literals (e.g.
+    // `{ *m(x = 42, y) {} }` → params [f64, externref] and
+    // `{ *m(x, y = 42) {} }` → params [externref, f64]) share one funcMap
+    // entry, so the second body-compile overwrites the func's typeIdx and any
+    // method-as-closure trampoline built for the first literal forwards args in
+    // the wrong order, emitting an invalid `call`. Treat any per-position type
+    // divergence as a mismatch too, so each literal gets its own funcIdx.
     const localIdx = existingFuncIdx - ctx.numImportFuncs;
     const existingFunc = ctx.mod.functions[localIdx];
     if (!existingFunc) continue;
     const existingType = ctx.mod.types[existingFunc.typeIdx];
     if (!existingType || existingType.kind !== "func") continue;
-    if (existingType.params.length === newParams.length) continue;
+    const sameArity = existingType.params.length === newParams.length;
+    const sameParamTypes = sameArity && existingType.params.every((p, i) => valTypesMatch(p, newParams[i]!));
+    if (sameArity && sameParamTypes) continue;
 
     // Mismatch — allocate a fresh funcIdx for this literal's method without
     // touching the shared funcMap entry.
+    //
+    // (#1602) Seed the fresh func with a type built from THIS literal's actual
+    // params (`newParams`) and result, not the colliding sibling's type. A
+    // method-as-closure trampoline emitted for this literal reads the func's
+    // signature up front (before the body-compile pass refines it); a stale
+    // placeholder type would make the trampoline forward args in the wrong
+    // order/type and emit an invalid `call`.
+    const isGen = prop.asteriskToken !== undefined;
+    const methodSig = ctx.checker.getSignatureFromDeclaration(prop);
+    let methodResult: ValType[] = [];
+    if (isGen) {
+      methodResult = [{ kind: "externref" }];
+    } else if (methodSig) {
+      let rt = ctx.checker.getReturnTypeOfSignature(methodSig);
+      const isAsync = prop.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+      if (isAsync) rt = unwrapPromiseType(rt, ctx.checker);
+      if (rt && !isVoidType(rt)) methodResult = [resolveWasmType(ctx, rt)];
+    }
+    const freshTypeIdx = addFuncType(ctx, newParams, methodResult, `${fullName}__lit_type`);
     const freshFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.mod.functions.push({
       name: `${fullName}__lit${freshFuncIdx}`,
-      typeIdx: existingFunc.typeIdx, // placeholder; the body-compile step rewrites this
+      typeIdx: freshTypeIdx, // seeded from this literal's params; body-compile may refine
       locals: [],
       body: [],
       exported: false,

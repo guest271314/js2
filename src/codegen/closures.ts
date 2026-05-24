@@ -3086,11 +3086,62 @@ export function emitObjectMethodAsClosure(
   });
   ctx.funcMap.set(trampolineName, trampolineFuncIdx);
 
+  // (#1602) The method's `func.typeIdx` may be re-resolved after this point
+  // (generator/default-param methods finalize their param types/order during
+  // body compilation). The forwarding body built above snapshots the CURRENT
+  // signature; record it so a post-pass can rebuild it against the method's
+  // final signature once all function bodies are compiled.
+  ctx.pendingMethodTrampolines.push({
+    trampolineBody,
+    methodFuncIdx,
+    objStructTypeIdx,
+    userParamCount: userParams.length,
+  });
+
   // Emit: ref.func $trampoline, struct.new $closure_struct
   fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
   fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
 
   return { kind: "ref", typeIdx: structTypeIdx };
+}
+
+/**
+ * (#1602) Rebuild every object-method-as-closure trampoline body against the
+ * method's FINAL signature. Must run after all function bodies are compiled
+ * (so `func.typeIdx` re-resolution has settled) and BEFORE late-import index
+ * shifting, since the rebuilt body re-emits `call methodFuncIdx` at the current
+ * (pre-shift) index — the shift machinery then walks it like any other body.
+ *
+ * The trampoline's own signature (its wrapper func type) is left untouched; we
+ * only fix the forwarding body so its `local.get` count and the `call`'s
+ * operand types match the method's resolved params. The wrapper's user-param
+ * count is invariant (derived from the same method), so the trampoline param
+ * indices stay valid; only the per-arg coercion is what could drift, and any
+ * coercion the call needs is applied by mirroring the method's param types.
+ */
+export function finalizeMethodTrampolines(ctx: CodegenContext): void {
+  for (const t of ctx.pendingMethodTrampolines) {
+    const sig = getFuncSignature(ctx, t.methodFuncIdx);
+    if (!sig || sig.params.length === 0) continue;
+    const userParams = sig.params.slice(1);
+    // Only rebuild when the user-param arity is unchanged. The trampoline's
+    // OWN func type (its wrapper type) was fixed at registration with
+    // `userParamCount` params and is shared/cached, so it cannot change here;
+    // forwarding a different number of params would violate that contract and
+    // produce an invalid `local.get` index. An arity change (e.g. async method
+    // param injection) is a separate concern handled by its own codegen path.
+    if (userParams.length !== t.userParamCount) continue;
+    // Rebuild the body in place: ref.null <objStruct>, forward each user param,
+    // call the method. Mutate the existing array so the already-registered
+    // function keeps the same body reference.
+    t.trampolineBody.length = 0;
+    t.trampolineBody.push({ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr);
+    for (let i = 0; i < userParams.length; i++) {
+      t.trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+    }
+    t.trampolineBody.push({ op: "call", funcIdx: t.methodFuncIdx } as Instr);
+  }
+  ctx.pendingMethodTrampolines.length = 0;
 }
 
 /**

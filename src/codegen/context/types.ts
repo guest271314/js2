@@ -586,6 +586,22 @@ export interface CodegenContext {
   externrefAccessorVars: Set<string>;
   /** Math methods that need inline Wasm implementations */
   pendingMathMethods: Set<string>;
+  /**
+   * (#1602) Object-method-as-closure trampolines whose body forwards the
+   * method's params positionally. The method's `func.typeIdx` can be
+   * re-resolved (param types / order finalized) AFTER the trampoline was
+   * emitted, which would leave the eagerly-built forwarding body referencing a
+   * stale signature and produce an invalid module. We rebuild each trampoline
+   * body against the method's FINAL signature in a post-pass after all function
+   * bodies are compiled.
+   */
+  pendingMethodTrampolines: {
+    trampolineBody: Instr[];
+    methodFuncIdx: number;
+    objStructTypeIdx: number;
+    /** User-param count the wrapper func type was built with (excludes self). */
+    userParamCount: number;
+  }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
   /** Map from class name → class AST declaration node */

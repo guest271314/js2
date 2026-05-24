@@ -128,6 +128,7 @@ export function createCodegenContext(
     widenedVarStructMap: new Map(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),
+    pendingMethodTrampolines: [],
     needsToUint32: false,
     classDeclarationMap: new Map(),
     wrapperNumberTypeIdx: -1,
