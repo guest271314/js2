@@ -1763,10 +1763,21 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
       ],
     },
 
-    // Call __wasi_write_string(buf_pos, buf_start + 12 - buf_pos)
+    // Call __wasi_write_string(buf_pos, (buf_start + 11) - buf_pos)
+    //
+    // Off-by-one fix (pre-existing, surfaced by real-wasmtime testing of the
+    // #1530 Native Messaging host's stderr debug line): the digit buffer is
+    // bytes [buf_start .. buf_start+11]. buf_pos starts at buf_start+11 and each
+    // digit is written with a PRE-decrement, so the rightmost digit lands at
+    // buf_start+10 and the byte one-past-the-last-written is buf_start+11. The
+    // length must therefore be (buf_start + 11) - buf_pos, NOT +12 — using +12
+    // appended the uninitialized byte at buf_start+11 (observed as a stray 'i'
+    // after the number, e.g. "17i" instead of "17"). The 0 special-case writes
+    // its single byte at +11 via an early return and is unaffected; negatives
+    // are also correct (e.g. -17 → buf_pos at the '-', length = 3).
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "local.get", index: bufStartLocal } as Instr,
-    { op: "i32.const", value: 12 } as Instr,
+    { op: "i32.const", value: 11 } as Instr,
     { op: "i32.add" } as Instr,
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "i32.sub" } as Instr,

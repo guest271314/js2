@@ -127,3 +127,52 @@ describe("#1651 process.stdout.write under --target wasi", () => {
     }
   });
 });
+
+// Pre-existing off-by-one in the WASI integer-print helper
+// (ensureWasiWriteI32Helper), surfaced by real-wasmtime testing of the #1530
+// host's stderr debug line. The 12-byte digit buffer's last written byte is at
+// buf_start+10, so the write length must be (buf_start+11)-buf_pos; the helper
+// previously used +12, appending the uninitialized byte at buf_start+11 — a
+// stray char after every printed integer (e.g. "17i" instead of "17"). The f64
+// print helper delegates to the i32 helper, so template-literal number
+// interpolation inherited the same stray byte.
+describe("WASI integer print has no trailing stray byte", () => {
+  it("console.log(int) on stdout prints exactly the digits, no stray char", () => {
+    // 17 is the length the real-wasmtime repro produced ("17i").
+    const src = `export function main(): void { const n = 17; console.log(n); }`;
+    const result = compile(src, { fileName: "x.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+    const out = new TextDecoder().decode(runWasiCaptureFd(result.binary, 1));
+    // console.log appends a newline; the integer itself must be exactly "17".
+    expect(out).toBe("17\n");
+    expect(out).not.toMatch(/17[^\n]/); // no character wedged between digits and newline
+  });
+
+  it("console.error(`x=${n}`) on stderr prints the number with no stray char", () => {
+    // Drives the f64 print path via template-literal interpolation (the #1530
+    // debug line shape: `declared body length ${n}`), routed to fd=2.
+    const src = `export function main(): void { const n = 13; console.error(\`len=\${n}\`); }`;
+    const result = compile(src, { fileName: "x.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+    const out = new TextDecoder().decode(runWasiCaptureFd(result.binary, 2));
+    expect(out).toBe("len=13\n");
+    expect(out).not.toContain("13i");
+  });
+
+  it("prints a range of integer widths cleanly (boundary + multi-digit)", () => {
+    for (const [value, digits] of [
+      [0, "0"],
+      [7, "7"],
+      [42, "42"],
+      [100, "100"],
+      [99999, "99999"],
+      [-17, "-17"],
+    ] as Array<[number, string]>) {
+      const src = `export function main(): void { const n = ${value}; console.log(n); }`;
+      const result = compile(src, { fileName: "x.ts", target: "wasi" });
+      expect(result.success).toBe(true);
+      const out = new TextDecoder().decode(runWasiCaptureFd(result.binary, 1));
+      expect(out).toBe(`${digits}\n`);
+    }
+  });
+});
