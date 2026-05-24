@@ -1,6 +1,5 @@
 ---
 id: 1609
-sprint: 56
 title: "codegen: non-literal spread argument in new-expression not supported"
 status: ready
 created: 2026-05-24

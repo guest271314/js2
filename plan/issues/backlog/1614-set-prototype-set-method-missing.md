@@ -1,6 +1,5 @@
 ---
 id: 1614
-sprint: 56
 title: "codegen: Set set-method intrinsics missing ('Cannot find method size/...' on parent class Set)"
 status: ready
 created: 2026-05-24

@@ -1,6 +1,5 @@
 ---
 id: 1610
-sprint: 56
 title: "codegen: for-of over non-array iterables rejected ('for-of requires an array expression')"
 status: ready
 created: 2026-05-24
