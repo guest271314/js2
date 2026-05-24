@@ -18,13 +18,14 @@ examples/native-messaging/
   run.sh         ← wasmtime/wasmer wrapper Chrome invokes
 ```
 
-## Status: read this before wiring into Chrome
+## Status: a working drop-in Chrome host
 
-This example is **honest about what the WASI target can do today**. The
-message-processing core — reading the JSON body off stdin (fd=0), routing
-debug to stderr (fd=2), and emitting a JSON response on stdout (fd=1) — is the
-part js2wasm exercises. But two gaps mean it is **not yet a drop-in Chrome
-host**:
+This host now exercises the **full** Native Messaging loop under `--target
+wasi`: read the framed JSON message off stdin (fd=0), route debug to stderr
+(fd=2), and write a **correctly framed** JSON response — the binary 4-byte
+little-endian length prefix plus the JSON body — to stdout (fd=1) with no
+trailing newline. The two stdout gaps that previously blocked this are closed
+(#1618, #1651).
 
 | Capability | Status | Detail |
 |------------|--------|--------|
@@ -32,28 +33,15 @@ host**:
 | Decode the 4-byte LE length prefix | works | byte math on `charCodeAt` of the first 4 code units |
 | Route debug to stderr (fd=2) | works | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean |
 | Print a **string literal** to stdout | works | `console.log("…")` emits UTF-8 + `\n` (#1480) |
-| Print a **runtime/computed string** to stdout | **broken** | non-literal string values currently render as a corrupted `[object]` placeholder instead of their content — see "Known compiler gaps" below |
-| Emit the **binary 4-byte LE length prefix** on stdout | **not supported** | there is no raw-byte stdout API; `console.log` UTF-8-encodes its argument and appends a newline, so arbitrary bytes (including the NUL bytes a length prefix needs) can't be written |
+| Print a **runtime/computed string** to stdout | works | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618) |
+| Write a **string** to stdout with no newline | works | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651) |
+| Emit the **binary 4-byte LE length prefix** on stdout | works | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651) |
 
-So today this host demonstrates the **read → decode → process** path
-end-to-end, but it cannot frame its response the way Chrome's protocol
-requires. Until the gaps below close, treat this as a **protocol-integration
-walkthrough + working stdin reader**, not a production Chrome host.
-
-### Known compiler gaps (follow-up issues)
-
-- **Raw-byte stdout for the length prefix.** Chrome's framing needs four
-  arbitrary bytes (a little-endian `uint32`) written verbatim to fd=1. The
-  WASI stdout path only writes UTF-8-encoded strings via `console.log`, which
-  also appends a trailing newline. A raw-byte stdout primitive (e.g. a
-  `writeStdout(bytes: Uint8Array)` builtin lowering directly to `fd_write`
-  with no newline) is required. *Filed as a follow-up to this issue.*
-- **Runtime string content on stdout.** `console.log` of a non-literal string
-  (a variable, template interpolation, or concatenation) currently emits a
-  corrupted mix of the real bytes and the `[object]` placeholder under
-  `--target wasi`, because the WASI value-to-stdout path treats `ref`
-  (NativeString) values as the "other" fallback case. Only string literals and
-  numeric values print cleanly. *Filed as a follow-up to this issue.*
+The response is framed with `process.stdout.write` — a `Uint8Array` for the
+binary length prefix, then the JSON body string — mirroring the Node.js host
+API used by the AssemblyScript reference (`nm_assemblyscript.ts`). It is a
+drop-in Chrome host; the only external dependency is a WASI preview1 runtime to
+launch it (see "Run it" below).
 
 ## The host source
 
@@ -94,9 +82,16 @@ printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/run.sh
 ```
 
 You'll see the host's stderr diagnostic (received-length + decoded body
-length) and its stdout response. **Note** the response framing is subject to
-the stdout gaps documented above — verify against "Status" before relying on
-the exact bytes.
+length) and its stdout response, framed with the binary 4-byte LE length
+prefix followed by the JSON body — exactly the bytes Chrome expects.
+
+For an automated byte-exact check (build + run under wasmtime, asserting the
+stdout frame and a clean stderr), run [`smoke-test.sh`](./smoke-test.sh) —
+the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
+
+```bash
+./examples/native-messaging/smoke-test.sh
+```
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
@@ -140,8 +135,8 @@ the exact bytes.
    ```
 
    Chrome handles the 4-byte length framing on its side; the host sees the
-   raw bytes on stdin and must produce correctly framed bytes on stdout — the
-   piece blocked on the stdout gaps above.
+   raw bytes on stdin and produces correctly framed bytes on stdout via
+   `process.stdout.write` (a `Uint8Array` prefix + the JSON body).
 
 ## Reference hosts in other runtimes
 

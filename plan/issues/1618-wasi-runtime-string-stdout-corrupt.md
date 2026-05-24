@@ -1,7 +1,7 @@
 ---
 id: 1618
 title: "wasi: console.log of a runtime string emits corrupted [object] placeholder"
-status: backlog
+status: in-review
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
@@ -62,3 +62,42 @@ path uses via `wasiAllocStringData`), instead of falling through to the
 Filed from #1530 (Native Messaging host example). This bug — combined with the
 missing raw-byte stdout primitive (#1617) — is why the #1530 host can read and
 process a message but cannot yet emit a correct response.
+
+## Implementation notes (resolution)
+
+The `[object]` placeholder was only *one* of two distinct bugs the runtime-string
+output triggered. Both are fixed:
+
+1. **`emitWasiValueToStdout` ref fallback (the documented symptom).**
+   `src/codegen/expressions/builtins.ts` now has a `ref`/`ref_null` + string-type
+   case that casts to `NativeString` and calls a new
+   `__wasi_write_any_string` helper (`ensureWasiWriteAnyStringHelper` in
+   `src/codegen/index.ts`). The helper flattens any AnyString (Cons/Utf8/template
+   result) via `__str_flatten`, copies the low byte of each i16 code unit into a
+   dedicated linear-memory scratch region, and issues one `fd_write`.
+
+2. **WASI memory-layout collision (the *real* cause of the "corrupted mix").**
+   The stdin read buffer and the string-literal data segments BOTH started at
+   offset 1024, so `fd_read` clobbered the initialized `[object]`/newline literal
+   bytes — that is why the output was a *mix* of real bytes and placeholder, not
+   a clean placeholder. `registerWasiImports` now reserves 3 pages and places the
+   stdin buffer at page 1 (`WASI_STDIN_BUF_START`) and the write scratch at page 2
+   (`WASI_WRITE_SCRATCH_START`), well above any page-0 data segment.
+
+3. **Template-literal extern-bridge leak under WASI (surfaced while fixing #1).**
+   `compileNativeTemplateExpression` (`src/codegen/string-ops.ts`)
+   unconditionally emitted the JS-host string-marshal bridge
+   (`__str_to_extern` / `__str_from_extern`), whose `__str_to_mem` /
+   `__str_from_mem` host imports do not exist under `--target wasi` and collapsed
+   to bogus function indices (a `call 0` → `fd_write`), producing an **invalid
+   module** for *any* template literal under WASI — independent of stdout. The
+   fix: a string-typed substitution is already a NativeString, so it concatenates
+   natively with zero marshaling; the bridge is now emitted only when a template
+   has a genuinely non-string (number/bigint/object) substitution. As a
+   robustness fix, `__str_flatten` is now also registered in `ctx.funcMap` (the
+   shift-maintained map) so internal `call __str_flatten` sites that follow a
+   late-import addition resolve correctly.
+
+Tests: `tests/issue-1618-1651-wasi-stdout.test.ts` (console.log + template
+runtime strings, no host-import leak) and the byte-exact round-trip in
+`tests/issue-1530.test.ts`.

@@ -9,7 +9,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { flushLateImportShifts } from "../expressions/late-imports.js";
-import { addFuncType } from "../index.js";
+import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
 import { ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { compileExpression, VOID_RESULT } from "../shared.js";
@@ -1545,7 +1545,7 @@ function emitWasiValueToStdout(
   ctx: CodegenContext,
   fctx: FunctionContext,
   exprType: InnerResult,
-  _node: ts.Node,
+  node: ts.Node,
   useStderr: boolean = false,
 ): void {
   // #1493: pick stdout (fd=1) or stderr (fd=2) helper based on call site.
@@ -1574,8 +1574,42 @@ function emitWasiValueToStdout(
     } else {
       fctx.body.push({ op: "drop" } as Instr);
     }
+  } else if (
+    (exprType.kind === "ref" || exprType.kind === "ref_null") &&
+    isStringType(ctx.checker.getTypeAtLocation(node)) &&
+    ctx.nativeStrTypeIdx >= 0
+  ) {
+    // #1618: runtime string value (variable / concatenation / template span).
+    // The compiled value is a NativeString ref (or its AnyString supertype).
+    // Flatten + write its bytes to fd=1/fd=2 instead of dropping it and
+    // emitting the "[object]" placeholder. The value on the stack may be typed
+    // as the AnyString supertype after a concat; cast to NativeString so it
+    // matches the helper's param type (__str_flatten accepts the supertype, so
+    // any non-flat tree is handled there — but the static cast is required for
+    // the call to typecheck against the helper signature).
+    const refKind = exprType.kind;
+    if (
+      refKind === "ref" &&
+      "typeIdx" in exprType &&
+      (exprType as { typeIdx: number }).typeIdx !== ctx.nativeStrTypeIdx
+    ) {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+    } else if (refKind === "ref_null") {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+    }
+    const writeAnyIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
+    if (writeAnyIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: writeAnyIdx } as Instr);
+    } else {
+      // Helper unavailable (no native strings) — fall back to placeholder.
+      fctx.body.push({ op: "drop" } as Instr);
+      const placeholder = wasiAllocStringData(ctx, "[object]");
+      fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
+      fctx.body.push({ op: "i32.const", value: placeholder.length } as Instr);
+      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+    }
   } else {
-    // For other types (externref, ref, etc.), just drop and write a placeholder
+    // For other types (externref, etc.), just drop and write a placeholder
     fctx.body.push({ op: "drop" } as Instr);
     const placeholder = wasiAllocStringData(ctx, "[object]");
     fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
@@ -1729,10 +1763,21 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
       ],
     },
 
-    // Call __wasi_write_string(buf_pos, buf_start + 12 - buf_pos)
+    // Call __wasi_write_string(buf_pos, (buf_start + 11) - buf_pos)
+    //
+    // Off-by-one fix (pre-existing, surfaced by real-wasmtime testing of the
+    // #1530 Native Messaging host's stderr debug line): the digit buffer is
+    // bytes [buf_start .. buf_start+11]. buf_pos starts at buf_start+11 and each
+    // digit is written with a PRE-decrement, so the rightmost digit lands at
+    // buf_start+10 and the byte one-past-the-last-written is buf_start+11. The
+    // length must therefore be (buf_start + 11) - buf_pos, NOT +12 — using +12
+    // appended the uninitialized byte at buf_start+11 (observed as a stray 'i'
+    // after the number, e.g. "17i" instead of "17"). The 0 special-case writes
+    // its single byte at +11 via an early return and is unaffected; negatives
+    // are also correct (e.g. -17 → buf_pos at the '-', length = 3).
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "local.get", index: bufStartLocal } as Instr,
-    { op: "i32.const", value: 12 } as Instr,
+    { op: "i32.const", value: 11 } as Instr,
     { op: "i32.add" } as Instr,
     { op: "local.get", index: bufPosLocal } as Instr,
     { op: "i32.sub" } as Instr,
