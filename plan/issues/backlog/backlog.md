@@ -29,6 +29,7 @@ From the dev-1553b destructuring-lane verification sweep.
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
 - [#1657](../1657-mq-test262-paths-filter.md) — Skip `merge_group` test262 shards for non-src changes while keeping the "merge shard reports" required check green — medium, medium, **in-review (sprint 55)**. Conservative path detector (`scripts/test262-paths-match.sh`) + `changes` job gate the queue's shard matrix; fail-safe runs shards on any doubt. Related: #1656.
+- [#1661](../1661-readme-programmatic-api-host-imports.md) — README programmatic-API example fails: `instantiate(binary, {})` but default JS-host mode emits `string_constants` + `env.*` imports, so the empty-imports snippet throws `Import #0 "string_constants"`. Recommend switching the example to standalone / no-host mode (#1471–#1474) so it genuinely runs under `{}`, and document the default-vs-standalone import requirement — **high**, easy, **ready (sprint 55)**. Plan-only; from guest271314 GitHub #601. Same theme as #389 (docs imply standalone behavior default mode doesn't deliver). Related: #1471, #1472, #1473, #1474, #1530.
 
 ## WASI Native Messaging — AssemblyScript-reference alignment (2026-05-24)
 
