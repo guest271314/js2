@@ -41,15 +41,16 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Test262 runner (preferred): `pnpm run test:262` — vitest-based, auto-worktree, disk cache, default 3 forks. Use `TEST262_WORKERS=5` for solo runs (no dev agents).
 - Test262 runner history: `runs/index.json` is appended by the vitest runner after each run. `benchmarks/results/report.html` reads this for the trend graph.
 - Backlog: `plan/issues/backlog/backlog.md`
-- Sprints: `plan/issues/sprints/{N}/sprint.md` — planning, task queue, results, retrospective (living doc updated during sprint)
+- Sprints: `plan/issues/sprints/{N}.md` — planning, task queue, results, retrospective (living doc updated during sprint)
 - Issues: **flat** at `plan/issues/<id>-<slug>.md` (#1616). The on-disk
   location is stable; sprint membership and status live **only** in
   frontmatter, never in the directory:
   - `sprint: <N>` numbered sprint · `sprint: 0` pre-sprint history ·
     `sprint: Backlog` unscheduled
   - `status: ready|in-progress|in-review|done|wont-fix|blocked|backlog`
-  - `sprints/{N}/sprint.md` (the sprint doc) stays under its sprint dir; only
-    the numbered issue files are flat. See `plan/issues/SCHEMA.md`.
+  - `sprints/{N}.md` (the sprint doc) lives directly under `sprints/`; the
+    numbered issue files are flat under `plan/issues/`. See
+    `plan/issues/SCHEMA.md`.
 - Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
   - Goals are not sequential milestones — they form a DAG and multiple can be active in parallel

@@ -127,7 +127,10 @@ function isIssueFile(file) {
   const name = basename(file);
   if (NON_ISSUE_BASENAMES.has(name)) return false;
   if (EXPLICIT_ISSUE_BASENAMES.has(name)) return true;
-  if (name === "sprint.md") return false;
+  // Sprint docs are `plan/issues/sprints/<N>.md` directly under SPRINTS_ROOT
+  // (flattened from the legacy `sprints/<N>/sprint.md`). They look like
+  // numbered issue files but are planning docs — never treat them as issues.
+  if (dirname(file) === SPRINTS_ROOT && /^\d+\.md$/.test(name)) return false;
   // Accept: 1234.md  1234a.md  1234-slug.md  1234__slug_title.md
   return /^\d+[a-z]?(?:[-_].+)?\.md$/i.test(name);
 }
@@ -467,8 +470,8 @@ function generateSprintsIndex(records) {
     const isCurrentSprint = num === maxSprint;
     const allRecs = bySprint.get(num);
 
-    // Read sprint.md for metadata if available
-    const sprintMd = join(SPRINTS_ROOT, String(num), "sprint.md");
+    // Read the sprint doc for metadata if available
+    const sprintMd = join(SPRINTS_ROOT, `${num}.md`);
     let sprintMeta = "";
     try {
       const text = readFileSync(sprintMd, "utf8");
