@@ -748,10 +748,6 @@ export function compileOptionalPropertyAccess(
   const objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
 
-  const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
-  fctx.body.push({ op: "local.tee", index: tmp });
-  fctx.body.push({ op: "ref.is_null" });
-
   // Determine result type from the TS type of the property being accessed
   const tsPropType = ctx.checker.getTypeAtLocation(expr);
   let resultType: ValType = resolveWasmType(ctx, tsPropType);
@@ -759,6 +755,28 @@ export function compileOptionalPropertyAccess(
   if (resultType.kind === "ref" || resultType.kind === "ref_null") {
     resultType = { kind: "externref" };
   }
+
+  // `?.` short-circuits on null/undefined. `ref.is_null` only validates on a
+  // reference operand, but the receiver can lower to a non-reference value
+  // type — e.g. a module-level `const obj = undefined` is stored as an i32
+  // global, so reading it yields i32 (#1603). A non-reference receiver here is
+  // the compiler's representation of `undefined`/`null`, which always
+  // short-circuits the chain: drop the receiver and emit the default result.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    if (resultType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (resultType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return resultType;
+  }
+
+  const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
 
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);
