@@ -26,7 +26,11 @@ import { ts } from "../ts-api.js";
 
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
-import { ensureNativeStringHelpers } from "../codegen/native-strings.js";
+import {
+  ensureNativeStringHelpers,
+  nativeStringLiteralInstrs,
+  type StringEncoding,
+} from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../codegen/registry/imports.js";
 import { addFuncType, getOrRegisterRefCellType } from "../codegen/registry/types.js";
 import type { CodegenContext } from "../codegen/context/types.js";
@@ -64,7 +68,7 @@ import { UnionStructRegistry } from "./passes/tagged-union-types.js";
 import { taggedUnions } from "./passes/tagged-unions.js";
 import { planIrCompilation, type IrSelection } from "./select.js";
 import { verifyIrFunction } from "./verify.js";
-import { AllocSiteRegistry } from "./alloc-registry.js";
+import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
@@ -1014,8 +1018,17 @@ function makeResolver(
     nativeStrings(): boolean {
       return ctx.nativeStrings;
     },
-    emitStringConst(value: string): readonly Instr[] {
+    emitStringConst(value: string, alloc?: import("./nodes.js").AllocSiteId): readonly Instr[] {
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        // #1588 PR-B part 2: when --utf8-storage is on, read the encoding
+        // annotation off the string.const's alloc site and let
+        // nativeStringLiteralInstrs pick i8 (Utf8String) vs i16 (NativeString).
+        // When off, or the annotation is absent/wtf16, this is the i16 path —
+        // byte-identical to before.
+        if (ctx.utf8Storage && alloc !== undefined && ctx.allocRegistry) {
+          const enc = ctx.allocRegistry.read<StringEncoding>(alloc, ALLOC_NAMESPACES.encoding);
+          return nativeStringLiteralInstrs(ctx, value, enc);
+        }
         // Native strings: inline `array.new_fixed` of WTF-16 code units +
         // `struct.new $NativeString(len, off, data)` — same shape as
         // `compileNativeStringLiteral` in the legacy path.

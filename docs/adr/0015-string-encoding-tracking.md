@@ -140,21 +140,36 @@ on the WasmGC backend):
 - The live `AllocSiteRegistry` is exposed on `ctx.allocRegistry` from the IR
   pipeline so the lowering sites can read the `encoding` annotation.
 
-This part is **not yet reached at runtime**: the IR lowering resolver still
-calls `nativeStringLiteralInstrs(ctx, value)` without an encoding, so even with
-`--utf8-storage` on, literals currently take the i16 path. Wiring the resolver
-to pass the annotation + the access-primitive `Utf8String` dispatch arm is
-**PR-B part 2** (required before the path is correct end-to-end, since an
-i8 string must be readable by `charCodeAt`/`length`).
+**PR-B part 2 (landed — storage path now active under `--utf8-storage`).**
 
-**PR-B part 2 (next).** Thread `instr.alloc` through the `emitStringConst`
-resolver hook (`lower.ts`), read the annotation at the literal/concat/flatten
-sites, and add the third subtype-dispatch arm to the access primitives in
-`ensureNativeStringHelpers` so `Utf8String` interoperates with
-`NativeString`/`ConsString` in the same module. Round-trip + fuzz correctness
-tests. **Alias-fusion soundness guard** (issue §4): before any CSE may fuse
-string sites, enforce that a `wtf16` site never aliases into a `utf8`
-canonical (no string-fusing pass exists today — forward guard).
+- The `emitStringConst` resolver hook now takes the `string.const`'s
+  `alloc` id (`lower.ts` passes `instr.alloc`); the integration.ts resolver
+  reads the `encoding` annotation off `ctx.allocRegistry` and delegates to
+  `nativeStringLiteralInstrs(ctx, value, enc)`, so an `ascii`/`utf8-guaranteed`
+  literal is now actually materialized as an i8 `Utf8String` when the flag
+  is on.
+- **Interop is handled at the flatten boundary, not per primitive.** Rather
+  than adding a `Utf8String` arm to every access primitive, `__str_flatten`
+  gains one branch: a `Utf8String` input is decoded back to an i16
+  `NativeString` via a new `__str_utf8_to_flat` helper (a hand-written Wasm
+  UTF-8→UTF-16 decode loop: 1/2/3/4-byte sequences, astral scalars re-split
+  into surrogate pairs; output pre-sized to the stored code-unit `len`).
+  Since all access primitives (`charCodeAt`, `length` on ropes, substring,
+  …) already route through `__str_flatten`/`ref.cast` to `NativeString`, they
+  work on `Utf8String` values unchanged. This is the "abstract string
+  interface" the issue Risks call for, localized to one decode point.
+- **Round-trip correctness** verified by `tests/ir/utf8-storage-roundtrip.test.ts`
+  (10 cases): each program compiled with the flag OFF (i16) and ON (i8) returns
+  observably identical results across `.length`, `charCodeAt` (incl. multi-byte
+  decode and astral surrogate halves), `concat`, and `===` — for ascii,
+  multi-byte, astral, and lone-surrogate (stays i16) literals.
+
+**Still open (PR-B follow-up / PR-C):** the **alias-fusion soundness guard**
+(issue §4) — before any future CSE may fuse string sites, enforce that a
+`wtf16` site never aliases into a `utf8` canonical (no string-fusing pass
+exists today, so this is a forward guard, not a present bug). Concat-result
+i8 storage (`string.concat` still produces i16; only literals take i8 in this
+PR — concat decodes its operands via flatten, so it stays correct).
 
 **PR-C (deferred).** Component Model boundary lowering (Edge A `c-abi.ts` scan
 elision; Edge B `declarations.ts` import selection + standalone Wasm-native
