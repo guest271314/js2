@@ -1,9 +1,10 @@
 ---
 id: 1616
 title: "Flatten issue files into a stable location; sprint membership via frontmatter only"
-status: review
+status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: high

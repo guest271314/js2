@@ -1,9 +1,10 @@
 ---
 id: 1589a
 title: "Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes"
-status: ready
+status: done
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: hard
 area: codegen+runtime

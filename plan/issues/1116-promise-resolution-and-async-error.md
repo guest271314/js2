@@ -1,9 +1,10 @@
 ---
 id: 1116
 title: "Promise resolution and async error handling (210 tests)"
-status: ready
+status: done
 created: 2026-04-04
-updated: 2026-04-28
+updated: 2026-05-24
+completed: 2026-05-24
 priority: critical
 feasibility: hard
 reasoning_effort: max

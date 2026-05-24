@@ -1,9 +1,10 @@
 ---
 id: 1588
 title: "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop"
-status: in-review
+status: done
 created: 2026-05-23
 updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high

@@ -1,9 +1,10 @@
 ---
 id: 820d
 title: "class/dstr async-gen-meth default-init `unresolvable` illegal cast"
-status: ready
+status: done
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium

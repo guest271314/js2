@@ -1,9 +1,10 @@
 ---
 id: 747
 title: "Escape analysis for stack allocation"
-status: in-progress
+status: done
 created: 2026-03-22
-updated: 2026-05-23
+updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: hard
 goal: performance
