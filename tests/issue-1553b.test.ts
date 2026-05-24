@@ -157,4 +157,30 @@ describe("#1553b: typed-struct object destructuring decl → shared helper", () 
     `;
     expect(await run(src)).toBe(1);
   });
+
+  it("typed nested null source throws TypeError (spec-correct null guard)", async () => {
+    // Bug 4 — destructuring a nested pattern off a null field must throw a
+    // TypeError, not silently bind undefined. The shared helper emits the
+    // per-element null guard on the typed-struct path. The host stub for
+    // __throw_type_error_destructure_null raises; in no-JS-host paths the
+    // in-module guard raises a Wasm trap. Either way the call must throw.
+    const src = `
+      const obj: { w: { x: number } | null } = { w: null };
+      const { w: { x } } = obj;
+      if (x !== x) return 2;
+    `;
+    await expect(run(src)).rejects.toThrow();
+  });
+
+  it("typed top-level default fires when field is undefined", async () => {
+    // emitDefaultValueCheck on the typed-struct path: a top-level binding's
+    // default must fire when the source field is undefined.
+    const src = `
+      const obj: { x?: number; y: number } = { y: 5 };
+      const { x = 99, y } = obj;
+      if (x !== 99) return 2;
+      if (y !== 5) return 3;
+    `;
+    expect(await run(src)).toBe(1);
+  });
 });
