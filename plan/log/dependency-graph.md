@@ -67,6 +67,22 @@ example is being rewritten onto `process.stdin.read()` (#1653) + already-shipped
 #1628 (a.k.a. "#1617" in the #1530 history) -> wont-fix (superseded by #1651).
 ```
 
+## Governance / legal — CLA gate (added 2026-05-24)
+
+Gates merges of **external** PRs (including guest271314's PR #589, which is
+attached to #1530). The current `cla-check` workflow is a no-op placeholder that
+records no acceptance, so external contributions land with no auditable CLA
+sign-off.
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1660 | Replace placeholder cla-check with a real CLA signature/approval gate | high | medium | **Ready** — gates external-PR merges incl. guest271314's PR #589 (#1530 HOLD) |
+
+```
+#1660 (real CLA gate) -- gates all external-PR merges
+  └── PR #589 (guest271314, attached to #1530) -- HOLD until guest's CLA acceptance is recorded
+```
+
 ## Sprint 55 — repo structure / website (added 2026-05-24)
 
 | #    | Title | Priority | Feasibility | Status |
