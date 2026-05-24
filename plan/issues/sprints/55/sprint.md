@@ -102,7 +102,8 @@ until it lands, so it must be in P1 despite zero direct test262 yield.
 | [#1471](1471-no-js-host-boxing-unboxing.md) | host-indep: boxing/unboxing | medium | yes (in-issue) | +0 (WASI) | — |
 | [#1472](1472-no-js-host-object-property-ops.md) | host-indep: object/property ops | medium | yes (in-issue) | +0 (WASI) | #1471 (soft) |
 | [#1473](1473-no-js-host-error-exceptions.md) | host-indep: error/exception ops | medium | yes (in-issue) | +0 (WASI) | — |
-| [#1474](1474-no-js-host-regex-standalone.md) | host-indep: pure-Wasm RegExp | medium | yes (in-issue) | +0 (WASI) | — |
+| [#1474](1474-no-js-host-regex-standalone.md) | host-indep: pure-Wasm RegExp (Phase 1 — done) | medium | yes (in-issue) | +0 (WASI) | — |
+| [#1539](1539-wasm-native-regex-engine-regress.md) | standalone regex engine via regress (Phase 2 of #1474) | hard | yes (in-issue) | +400–800 (WASI) | #1474 ✓ |
 | [#747](747-escape-analysis-for-stack-allocation.md) | escape analysis for stack alloc (Phase 1 of #652) | hard | yes (re-scope) | strategic | #1586, #1587 |
 | [#1589A](1589A-object-literal-field-type-and-has-idx.md) | object-literal field-type + has_idx null semantics | hard | yes (fix plan) | +0 (tests skipped) | — |
 
@@ -111,9 +112,11 @@ until it lands, so it must be in P1 despite zero direct test262 yield.
 - **Single-owner serialization required:**
   - **decl-dstr chain** (#1553b → #1553c → #1553d) — one dev, sequential, same
     `src/codegen/statements/destructuring.ts` + `destructure-params.ts` regions.
-  - **host-independence series** (#1471 → #1472 → #1473 → #1474) — one "runtime
+  - **host-independence series** (#1471 → #1472 → #1473 → #1474 → #1539) — one "runtime
     owner" dev; all touch overlapping `src/runtime.ts` / `codegen/index.ts`
-    import-registration regions (per s54 conflict analysis).
+    import-registration regions (per s54 conflict analysis). #1539 depends on #1474 and
+    must follow it; #1474 Phase 1 is already merged so #1539 is unblocked once
+    #1471–#1473 land (or can run in parallel with them since Phase 1 gate is in place).
   - **IR foundation** (#1586 first, then #1587/#1588 in parallel, then #747) —
     #1586 is the gate; do not dispatch #1587/#1588/#747 until #1586 merges.
 - **Parallelisable now:** #820d, #1130, #1116 are independent of each other and
@@ -135,7 +138,7 @@ Plan` and must be spec'd by the architect first:
 
 Already-spec'd (dispatch-ready): #820d (in-issue), #1553b (in-issue),
 #1553c/#1553d (in-issue partial), #747 (has spec, re-scope to #1587 substrate),
-#1589A (has fix plan), #1471–#1474 (in-issue specs).
+#1589A (has fix plan), #1471–#1474 (in-issue specs), #1539 (in-issue spec).
 
 ## Theme
 
