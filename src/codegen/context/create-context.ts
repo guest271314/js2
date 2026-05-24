@@ -15,6 +15,21 @@ export function createCodegenContext(
   checker: ts.TypeChecker,
   options?: CodegenOptions,
 ): CodegenContext {
+  // #1524 — strict-mode default policy. WASI builds enforce the dual-mode
+  // architectural principle by default (`CLAUDE.md` → "JS host optional");
+  // pass `strictNoHostImports: false` to opt out (the CLI's
+  // `--allow-host-imports` does this). Strict mode also implies
+  // `nativeStrings` so the wasm:js-string namespace is not requested.
+  const strictNoHostImports = options?.strictNoHostImports ?? options?.wasi ?? false;
+  // #1470 — standalone target forces nativeStrings:true so the module has
+  // no `wasm:js-string` and no env JS-host string helpers. Use logical OR
+  // for the implication chain so `wasi: false` doesn't short-circuit
+  // `standalone: true` (`?? ` returns the LHS on `false`).
+  // #1588 PR-B: `utf8Storage` implies nativeStrings on the WasmGC backend —
+  // host-string mode has no in-heap bytes to choose a width for.
+  const nativeStrings =
+    options?.nativeStrings ??
+    !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports || options?.utf8Storage);
   const ctx: CodegenContext = {
     mod,
     checker,
@@ -87,14 +102,7 @@ export function createCodegenContext(
     sourceMap: options?.sourceMap ?? false,
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
-    // #1470 — standalone target forces nativeStrings:true so the module has
-    // no `wasm:js-string` and no env JS-host string helpers. Use logical OR
-    // for the implication chain so `wasi: false` doesn't short-circuit
-    // `standalone: true` (`?? ` returns the LHS on `false`).
-    // #1588 PR-B: `utf8Storage` implies nativeStrings on the WasmGC backend —
-    // host-string mode has no in-heap bytes to choose a width for.
-    nativeStrings:
-      options?.nativeStrings ?? !!(options?.fast || options?.wasi || options?.standalone || options?.utf8Storage),
+    nativeStrings,
     // #1588 PR-B: dual i8/i16 storage, default OFF.
     utf8Storage: !!options?.utf8Storage,
     testRuntime: options?.testRuntime ?? false,
@@ -156,6 +164,7 @@ export function createCodegenContext(
     wasiEnvGetStrIdx: -1,
     wasiNodeFsFuncs: options?.wasiNodeFsFuncs ?? new Set(),
     allowFs: options?.allowFs ?? false,
+    strictNoHostImports,
     tdzGlobals: new Map(),
     tdzLetConstNames: new Set(),
     definedPropertyFlags: new Map(),

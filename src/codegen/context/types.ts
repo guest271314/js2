@@ -55,6 +55,15 @@ export interface CodegenOptions {
   wasiNodeFsFuncs?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
+  /**
+   * Enforce dual-mode discipline (#1524): when set, `addImport` rejects any
+   * JS-host `env` import that is not on the
+   * `src/codegen/host-import-allowlist.ts` baseline. WASI builds enable this
+   * by default unless `allowHostImports` is set. Set this directly via
+   * `--no-host-imports` on the CLI or `strictNoHostImports: true` in
+   * `CompileOptions`.
+   */
+  strictNoHostImports?: boolean;
   /** JSX runtime import detected during preprocessing (#1540). */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
@@ -149,6 +158,15 @@ export interface FunctionContext {
   isDerivedConstructor?: boolean;
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
+  /**
+   * (#1042) True while {@link emitAsyncStateMachine} is driving an async
+   * function body through the CPS transform. Read by the `AwaitExpression`
+   * dispatcher in expressions.ts to decide between the legacy pass-through and
+   * a continuation split. Inert in #1042 PR1 (the activation hook is unwired
+   * and `ASYNC_CPS_ENABLED` is false), so it stays undefined/false and the
+   * emitted Wasm is byte-identical.
+   */
+  asyncCpsActive?: boolean;
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;
   /** Set of variable names that are const bindings — assignment throws TypeError at runtime */
@@ -679,6 +697,14 @@ export interface CodegenContext {
   wasiNodeFsFuncs: Set<string>;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
   allowFs: boolean;
+  /**
+   * #1524 — When true, `addImport` rejects any JS-host `env` import that is
+   * not on the dual-mode allowlist (`src/codegen/host-import-allowlist.ts`).
+   * Auto-enabled when `wasi: true` (unless the caller passes
+   * `strictNoHostImports: false` explicitly). Drives the architectural gate
+   * documented under "Architecture Principles → JS host optional" in CLAUDE.md.
+   */
+  strictNoHostImports: boolean;
   /** Map from let/const module global variable name → TDZ flag global index */
   tdzGlobals: Map<string, number>;
   /** Set of let/const module global variable names */

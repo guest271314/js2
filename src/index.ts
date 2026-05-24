@@ -187,6 +187,17 @@ export interface CompileOptions {
    *  to prevent accidental capability leakage when compiling third-party code.
    *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
   allowFs?: boolean;
+  /**
+   * Enforce dual-mode discipline (#1524): when true, codegen rejects any
+   * JS-host `env` import that is not on
+   * `src/codegen/host-import-allowlist.ts`. Auto-enabled under
+   * `target: "wasi"` unless this option is explicitly set to `false`
+   * (the `--allow-host-imports` CLI escape hatch).
+   *
+   * Compile errors raised by the gate name the offending import and the
+   * tracking issue that owns its Wasm-native replacement.
+   */
+  strictNoHostImports?: boolean;
 }
 
 import * as path from "path";

@@ -365,6 +365,7 @@ export function compileSource(
         nodeBuiltins: preprocessed.nodeBuiltins,
         wasiNodeFsFuncs,
         allowFs: options.allowFs ?? false,
+        strictNoHostImports: options.strictNoHostImports,
         jsxRuntime: preprocessed.jsxRuntime,
       });
       mod = result.module;
@@ -652,6 +653,7 @@ export function compileMultiSource(
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
       });
       mod = result.module;
@@ -898,6 +900,7 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
       });
       mod = result.module;

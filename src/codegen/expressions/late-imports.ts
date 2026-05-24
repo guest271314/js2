@@ -331,30 +331,37 @@ export function patchStructNewForAddedField(
     }
   }
 
-  function patchInstrs(instrs: Instr[]): void {
-    for (let i = instrs.length - 1; i >= 0; i--) {
-      const instr = instrs[i]!;
-      if (instr.op === "struct.new" && (instr as any).typeIdx === typeIdx) {
-        // Insert a default value right before the struct.new
-        instrs.splice(i, 0, defaultInstrFor(fieldType));
-      }
-      // Recurse into nested blocks
-      if ("body" in instr && Array.isArray((instr as any).body)) {
-        patchInstrs((instr as any).body);
-      }
-      if ("then" in instr && Array.isArray((instr as any).then)) {
-        patchInstrs((instr as any).then);
-      }
-      if ("else" in instr && Array.isArray((instr as any).else)) {
-        patchInstrs((instr as any).else);
-      }
-      if ("catches" in instr && Array.isArray((instr as any).catches)) {
-        for (const c of (instr as any).catches) {
-          if (Array.isArray(c.body)) patchInstrs(c.body);
+  // Iterative to avoid composing JS call-stack depth with the enclosing
+  // codegen stack: same reasoning as walkInstructions (#1087).
+  function patchInstrs(root: Instr[]): void {
+    const work: Instr[][] = [root];
+    while (work.length > 0) {
+      const arr = work.pop()!;
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const instr = arr[i]!;
+        if (instr.op === "struct.new" && (instr as any).typeIdx === typeIdx) {
+          // Insert a default value right before the struct.new. The inserted
+          // instr has no nested blocks, so enqueueing children of `instr`
+          // below is still correct — `instr` is captured by reference.
+          arr.splice(i, 0, defaultInstrFor(fieldType));
         }
-      }
-      if ("catchAll" in instr && Array.isArray((instr as any).catchAll)) {
-        patchInstrs((instr as any).catchAll);
+        if ("body" in instr && Array.isArray((instr as any).body)) {
+          work.push((instr as any).body);
+        }
+        if ("then" in instr && Array.isArray((instr as any).then)) {
+          work.push((instr as any).then);
+        }
+        if ("else" in instr && Array.isArray((instr as any).else)) {
+          work.push((instr as any).else);
+        }
+        if ("catches" in instr && Array.isArray((instr as any).catches)) {
+          for (const c of (instr as any).catches) {
+            if (Array.isArray(c.body)) work.push(c.body);
+          }
+        }
+        if ("catchAll" in instr && Array.isArray((instr as any).catchAll)) {
+          work.push((instr as any).catchAll);
+        }
       }
     }
   }
