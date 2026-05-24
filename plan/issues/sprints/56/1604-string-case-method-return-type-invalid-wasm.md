@@ -1,5 +1,6 @@
 ---
 id: 1604
+sprint: 56
 title: "codegen: String case methods (toUpperCase/toLowerCase/toLocale*) return i32 into f64 comparison — invalid wasm"
 status: ready
 created: 2026-05-24

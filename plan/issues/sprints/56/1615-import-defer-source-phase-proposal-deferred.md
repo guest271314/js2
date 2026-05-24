@@ -1,5 +1,6 @@
 ---
 id: 1615
+sprint: 56
 title: "deferred: import.defer / import.source phase proposal not supported (Stage-N) — tracking"
 status: ready
 created: 2026-05-24

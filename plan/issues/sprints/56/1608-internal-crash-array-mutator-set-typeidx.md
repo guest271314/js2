@@ -1,5 +1,6 @@
 ---
 id: 1608
+sprint: 56
 title: "codegen crash: 'Cannot set properties of undefined (setting typeIdx)' on Array push/pop/shift/join/unshift"
 status: ready
 created: 2026-05-24

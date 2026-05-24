@@ -1,5 +1,6 @@
 ---
 id: 1612
+sprint: 56
 title: "parser: top-level-await with array-literal operand misparsed as element access ('should take an argument')"
 status: ready
 created: 2026-05-24

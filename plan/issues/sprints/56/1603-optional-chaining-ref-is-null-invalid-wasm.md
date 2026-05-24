@@ -1,5 +1,6 @@
 ---
 id: 1603
+sprint: 56
 title: "codegen: optional-chaining short-circuit emits invalid wasm (ref.is_null expected i32, found ref)"
 status: ready
 created: 2026-05-24

@@ -1,5 +1,6 @@
 ---
 id: 1613
+sprint: 56
 title: "codegen: for-in head with binding pattern / non-identifier rejected ('for-in variable must be an identifier')"
 status: ready
 created: 2026-05-24

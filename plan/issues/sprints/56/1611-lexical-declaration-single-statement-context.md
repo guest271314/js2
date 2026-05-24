@@ -1,5 +1,6 @@
 ---
 id: 1611
+sprint: 56
 title: "parser: lexical declaration in single-statement context rejected for valid newline-separated cases"
 status: ready
 created: 2026-05-24

@@ -8,21 +8,6 @@ Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
 528 `invalid Wasm binary` CEs were sub-clustered by validator error; sub-causes
 already enumerated in #1522 / #1543 / #1556 are not re-filed.
 
-- [#1601](1601-array-iteration-callback-stack-underflow.md) — Array reduce/reduceRight/map/filter callback paths emit stack-underflow wasm — **156 CE**, high
-- [#1602](1602-call-arg-coercion-externref-invalid-wasm.md) — call-site arg coercion: `call expected externref, found f64` — **39 CE**, high
-- [#1603](1603-optional-chaining-ref-is-null-invalid-wasm.md) — optional-chaining short-circuit `ref.is_null expected i32` — **8 CE**, high
-- [#1604](1604-string-case-method-return-type-invalid-wasm.md) — String toUpperCase/toLowerCase/toLocale* return i32 into f64.ne — **8 CE**, high
-- [#1605](1605-class-computed-setter-scope-local-tee-invalid-wasm.md) — class computed-name / setter scope `local.tee` type mismatch — **6 CE**, medium
-- [#1606](1606-internal-crash-object-literal-undefined-declarations.md) — internal crash `reading 'declarations'` on object literals — **8 CE**, high
-- [#1607](1607-internal-crash-tdz-use-before-init-stack-overflow.md) — stack overflow on TDZ self-referential lexical initializers — **8 CE**, high
-- [#1608](1608-internal-crash-array-mutator-set-typeidx.md) — internal crash `setting 'typeIdx'` on Array push/pop/shift/join — **5 CE**, high
-- [#1609](1609-non-literal-spread-in-new-expression.md) — non-literal spread in `new F(...iter)` unsupported — **18 CE**, medium
-- [#1610](1610-for-of-requires-array-expression.md) — for-of over non-array iterables rejected — **13 CE**, medium
-- [#1611](1611-lexical-declaration-single-statement-context.md) — valid newline `let` misclassified as lexical decl in single-stmt context — **16 CE**, medium
-- [#1612](1612-tla-array-literal-element-access-misparse.md) — top-level-await array-literal operand misparsed as element access — **14 CE**, medium
-- [#1613](1613-for-in-variable-must-be-identifier.md) — for-in head binding-pattern / non-identifier targets rejected — **10 CE**, low
-- [#1614](1614-set-prototype-set-method-missing.md) — Set union/isDisjointFrom etc. cannot resolve `size` on subclass receivers — **7 CE**, low
-- [#1615](1615-import-defer-source-phase-proposal-deferred.md) — import.defer / import.source phase proposal (deferred/proposal tracking) — **152 CE**, low
 
 ## Harvest 2026-05-24 (new issues from test262 error analysis)
 
