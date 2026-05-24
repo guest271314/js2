@@ -17,10 +17,10 @@ if (!N || isNaN(Number(N))) {
 }
 
 const root = new URL("..", import.meta.url).pathname;
-const sprintFile = join(root, `plan/issues/sprints/${N}/sprint.md`);
+const sprintFile = join(root, `plan/issues/sprints/${N}.md`);
 
 if (!existsSync(sprintFile)) {
-  console.error(`❌ plan/issues/sprints/${N}/sprint.md not found`);
+  console.error(`❌ plan/issues/sprints/${N}.md not found`);
   process.exit(1);
 }
 

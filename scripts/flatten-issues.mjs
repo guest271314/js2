@@ -7,7 +7,10 @@
 //
 // Sprint membership is carried by the `sprint:` frontmatter field (backfilled
 // by scripts/backfill-issue-sprint-frontmatter.mjs before this runs), so the
-// directory no longer encodes it. `sprint.md` files STAY under sprints/<N>/.
+// directory no longer encodes it. NOTE (post-flatten): sprint docs were later
+// moved from `sprints/<N>/sprint.md` to `sprints/<N>.md`; this one-shot
+// migration script is historical and not re-run, so its `sprint.md` filter
+// below is kept as-is for the record.
 //
 // Idempotent: re-running finds nothing to move (files already flat) and the
 // link rewrite is a no-op on already-rewritten links.

@@ -91,7 +91,7 @@ Only to claim a shared file/function that would conflict:
 
 ## TaskList Protocol
 
-- **Tech lead populates TaskList** at sprint start from `plan/issues/sprints/{N}/` (filter `status: ready`) and whenever new issues are created mid-sprint
+- **Tech lead populates TaskList** at sprint start from the issues tagged `sprint: {N}` in frontmatter (flat `plan/issues/<id>-<slug>.md`, filter `status: ready`) and whenever new issues are created mid-sprint
 - **Devs claim tasks** via `TaskUpdate(owner: "name")` — lowest ID first
 - **Devs mark completed** via `TaskUpdate(status: completed)` immediately after merge
 - **If TaskList is empty**: dev messages tech lead `"Queue empty."` and stops. Tech lead either dispatches a new task or sends `shutdown_request`. Devs never run `tmux kill-pane` themselves — the lead manages pane cleanup (per Claude Code teammate lifecycle docs).
