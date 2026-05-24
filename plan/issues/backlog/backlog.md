@@ -18,6 +18,16 @@ already enumerated in #1522 / #1543 / #1556 are not re-filed.
 - [#1595](1595-arraybuffer-transfer-methods-not-implemented.md) — ArrayBuffer.prototype.transfer / transferToFixedLength / transferToImmutable not implemented — **~40 fails**, medium
 - [#1596](1596-function-prototype-apply-call-not-accessible.md) — Function.prototype.apply / .call not accessible on compiled Wasm functions — **~46 fails**, high
 
+## WASI Native Messaging — AssemblyScript-reference alignment (2026-05-24)
+
+Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
+(#1530) on the reference `nm_assemblyscript.ts`. #1654 is the root (unblocks
+both others); #1653 is the keystone for the read side + continuous loop.
+
+- [#1654](../1654-wasi-dataview-arraybuffer-invalid-module.md) — DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under `--target wasi` — high, medium, **root (ready)**
+- [#1653](../1653-wasi-process-stdin-read-binary.md) — `process.stdin.read(buffer, offset?)` binary incremental stdin read (keystone) — high, hard, **depends on #1654**
+- [#1655](../1655-wasi-process-stdout-write-arraybuffer.md) — `process.stdout.write(ArrayBuffer)` accept ArrayBuffer arg, not only Uint8Array literal — medium, easy, **depends on #1654**
+
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 
 - [#1564](1564-toNumeric-symbol-throws-typeError.md) — ToNumeric: Symbol argument must throw TypeError (§7.1.3 step 3) — ~12 fails, easy

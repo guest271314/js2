@@ -28,6 +28,23 @@ Pulled into S50 alongside the original closure/dispatch cohort. Direct-dispatch 
 - File icons show which codegen file is primarily touched:
   `[E]` = expressions.ts, `[S]` = statements.ts, `[I]` = index.ts, `[T]` = test262-runner.ts
 
+## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
+
+Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
+(#1530) on the AssemblyScript reference `nm_assemblyscript.ts`.
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1654 | DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under --target wasi | high | medium | **Ready** (root) |
+| 1653 | process.stdin.read(buffer, offset?) — binary incremental stdin read (keystone) | high | hard | Blocked by #1654 |
+| 1655 | process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal | medium | easy | Blocked by #1654 |
+
+```
+#1654 (ArrayBuffer/DataView valid standalone) -- root, unblocks both
+  ├── #1653 (binary stdin read) -- keystone
+  └── #1655 (stdout write ArrayBuffer)
+```
+
 ---
 
 ## TOP PRIORITY: Highest-impact runtime failures `[E][S][I]`
