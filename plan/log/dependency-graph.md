@@ -362,10 +362,17 @@ All independent — can run in parallel.
 #681 (pure Wasm iterators) -- enables broader standalone coverage
 #682 (RegExp standalone) ──→ #1105 Tier 2 string methods (match, replace, search)
 #1101 (WeakRef) ──→ #1103 WeakMap/WeakSet (strong-ref fallback available without #1101)
+#1666 (invalid-wasm cluster) ──→ #1664 (residual object/extern leaks), #1665 (native generators)
+#1662 (audit) -- empirical --target wasi host-import map; spawned #1663–#1666
 ```
 
 | #   | Title | Impact | Ready? |
 |-----|-------|--------|--------|
+| 1662 | Audit: standalone (--target wasi) host-import leaks per construct | Standalone gap map | **Done** (audit record) |
+| 1666 | Bug: --target wasi emits invalid wasm (class/closure/number→string/typed-array) | Standalone correctness | **Ready** (H) |
+| 1663 | Pure-Wasm parseInt / parseFloat / Number(string) | Standalone numerics | **Ready** (M, #1471 closed without it) |
+| 1664 | Residual __extern_/__register_/__iterator/__array_ leaks after #1472 | Standalone objects/iterators | **Ready** (H, after #1666) |
+| 1665 | Wasm-native generators (retire __gen_/__create_generator) | Standalone generators | **Ready** (H, after #1666) |
 | 1099 | Standalone execution demo — FizzBuzz on Wasmtime, zero JS | Production credibility | **Ready** (H, depends on #1094) |
 | 1103 | Wasm-native Map, Set, WeakMap, WeakSet | Standalone collections | **Ready** (H) |
 | 1105 | Wasm-native String methods on i16 arrays | Standalone string ops | **Ready** (H) |

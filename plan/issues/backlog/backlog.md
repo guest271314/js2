@@ -2,6 +2,16 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Standalone (--target wasi) host-import audit (2026-05-25) — goal `standalone-mode`
+
+Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.
+
+- [#1662](../1662-standalone-host-import-audit.md) — Audit record + findings table (done) — high, easy.
+- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
+- [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
+- [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
+- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, ready (after #1666).
+
 ## Harvest 2026-05-24b (fixable test262 compile-error causes — CE decomposition)
 
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
