@@ -173,3 +173,50 @@ All carry-in issues were physically moved into `plan/issues/sprints/55/` at the
 s54 closeout (#1471–#1474 from s52, #1116/#1130 from backlog, #1589A/#1553*/#820d
 from s53/s54) and have `sprint: 55` set. #1553b's `in-progress` status is stale —
 no work landed; it is `ready` for this sprint.
+
+<!-- GENERATED_ISSUE_TABLES_START -->
+## Issue Tables
+
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+
+### Ready
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #820d | class/dstr async-gen-meth default-init `unresolvable` illegal cast | high | ready |
+| #1116 | Promise resolution and async error handling (210 tests) | critical | ready |
+| #1116b | Promise subclass: Wasm-compiled class extends Promise must be a valid JS constructor (Wasm-class-as-JS-ctor bridge) | high | ready |
+| #1130 | Array methods — getter-observing property access on indices and length | medium | ready |
+| #1539 | Standalone Wasm RegExp engine via regress (Phase 2 of #1474) | high | ready |
+| #1553b | decl-dstr: route typed-struct object declaration through destructureParamObject (decl-mode) | high | ready |
+| #1589a | Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes | medium | ready |
+| #1597 | host-indep: gate __throw_reference_error in standalone mode | medium | ready |
+| #1598 | host-indep: pure-Wasm String.fromCharCode / fromCodePoint in standalone mode | medium | ready |
+| #1599 | host-indep: JSON.parse / JSON.stringify in standalone mode | medium | ready |
+| #1616 | Flatten issue files into a stable location; sprint membership via frontmatter only | high | ready |
+
+### In Progress
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #747 | Escape analysis for stack allocation | medium | in-progress |
+| #1471 | host-independence: eliminate JS host boxing/unboxing for standalone Wasm | high | in-progress |
+| #1472 | host-independence: eliminate JS host object/property ops for standalone Wasm | high | in-progress |
+| #1473 | host-independence: eliminate JS host error/exception ops for standalone Wasm | high | in-progress |
+| #1474 | host-independence: eliminate JS host RegExp for standalone Wasm | high | in-progress |
+| #1553c | decl-dstr: route externref-fallback object declaration through destructureParamObject (decl-mode) | high | in-progress |
+| #1553d | decl-dstr: route array declaration (typed-vec + externref) through destructureParamArray (decl-mode) | high | in-progress |
+| #1586 | IR preparation: explicit allocation sites with stable identity and metadata hooks | medium | in-progress |
+| #1587 | Static analysis pass: ownership and access semantics on IR values | medium | in-progress |
+| #1588 | String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop | medium | in-progress |
+
+### Done
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1530 | wasi: Native Messaging host example (Chrome extension integration) | medium | done |
+| #1565 | ToBoolean BigInt: must use i64.eqz, not f64.convert_i64_s (§7.1.2) | medium | done |
+| #1566 | ToNumber: Symbol argument must throw TypeError (§7.1.4) | medium | done |
+| #1590 | Improve first-5-minutes UX: Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, comparison section | high | done |
+
+<!-- GENERATED_ISSUE_TABLES_END -->

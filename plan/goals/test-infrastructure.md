@@ -98,7 +98,7 @@ shipping trustworthy compiler work.
 | **689** | Dynamic worker pool: memory-aware scaling with dead worker recovery | 0 | done | high |
 | **694** | Migrate test262 runner to vitest with per-test disk cache | 0 | done | low |
 | **699** | Shared compiler pool for vitest test262 runner | Backlog | ready | high |
-| **700** | Superseded: reuse TypeScript host state across test262 compilations |  | wont-fix | high |
+| **700** | Superseded: reuse TypeScript host state across test262 compilations | Backlog | wont-fix | high |
 | **715** | - Fix 3,622 test262 crashes: emitNullGuardedStructGet missing ctx parameter | 0 | done | critical |
 | **717** | Regression: import.source/defer stub breaks 117 negative parse tests | 0 | done | high |
 | **725** | Local HTTP server for wasm source map stack traces | 16 | done | medium |

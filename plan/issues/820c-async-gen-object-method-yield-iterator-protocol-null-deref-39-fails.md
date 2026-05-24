@@ -1,0 +1,38 @@
+---
+id: 820c
+title: "Async-gen object-method yield* iterator-protocol null deref (~39 fails)"
+status: done
+created: 2026-05-21
+updated: 2026-05-23
+completed: 2026-05-23
+priority: high
+feasibility: medium
+reasoning_effort: high
+goal: test262-conformance
+sprint: 53
+parent: 820
+test262_fail: 39
+note: "Verified 2026-05-21: closures.ts __obj_meth_tramp emit at L3019/L3085; calls.ts:965 (compileCallExpression)"
+---
+# #820c — Async-gen object-method yield* iterator-protocol null deref
+
+## Problem
+39 fails in language/expressions/object/method-definition/async-gen-yield-star-*.
+Error: "dereferencing a null pointer [in __anon_N_method() ← __obj_meth_tramp_*]"
+
+## Root cause hypothesis
+1. Object-method trampoline (__obj_meth_tramp_*) doesn't propagate async-gen
+   state into the resumable shells (.next/.throw/.return).
+2. yield* iterator-result reads (.value/.done) skip the spec-required
+   non-object check before field access.
+
+## Fix location
+- `src/codegen/closures.ts` — `__obj_meth_tramp_*` emission at lines 3019
+  (per-call-site) and 3085 (cached variant — verified 2026-05-21); confirm
+  `isAsyncGenerator` survives the trampoline.
+- `src/codegen/expressions/calls.ts` (compileCallExpression at line 965) —
+  yield* lowering, add IteratorStep result non-object guard.
+- `src/runtime.ts` — new `__yieldstar_async_*` helper (does not yet exist
+  in main as of 2026-05-21).
+
+## Impact: ~39 fails

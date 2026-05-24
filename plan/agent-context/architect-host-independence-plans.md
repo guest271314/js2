@@ -939,7 +939,7 @@ end
 # #1474 — eliminate JS host RegExp (Phase 1: refuse-and-document)
 
 > Note: the full plan also lives in
-> `plan/issues/sprints/52/1474-no-js-host-regex-standalone.md` lines
+> `plan/issues/1474-no-js-host-regex-standalone.md` lines
 > 169-364 (intact). This is a condensed copy for handoff
 > completeness. Issue status currently `in-progress`.
 

@@ -69,6 +69,7 @@
     "test:262:validate-baseline": "npx tsx scripts/validate-test262-baseline.ts",
     "baseline:fetch": "node scripts/fetch-baseline-jsonl.mjs",
     "check:ir-fallbacks": "npx tsx scripts/check-ir-fallbacks.ts",
+    "check:issues": "node scripts/update-issues.mjs --check",
     "test:diff": "npx tsx scripts/diff-test.ts",
     "test:diff:triage": "npx tsx scripts/diff-triage.ts",
     "test:diff:gate": "npx tsx scripts/diff-test-gate.ts",

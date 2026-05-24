@@ -7,7 +7,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Run a specific test file: `npm test -- tests/issue-277.test.ts`
 - Run equivalence tests only: `npm test -- tests/equivalence.test.ts`
 - Test262: `pnpm run test:262` — vitest-based runner, creates its own worktree, writes to `benchmarks/results/`. Default 3 workers.
-- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/backlog/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
+- **Local CI on Claude Code on Web** (or any 16GB+ container): `JS2WASM_LOCAL_CI=1 ./scripts/local-ci.sh` — idempotent pnpm install + test262 submodule init, then `pnpm run test:262` with `COMPILER_POOL_SIZE=$(nproc)`. Baseline 2026-05-20 on a 4-core/16GB container: ~68 min wall-clock, ~2.8 GB peak RAM. CI sharded is still faster end-to-end; this is for in-container validation runs. See `plan/issues/1522-race-local-test262-vs-ci.md` for the scoped pre-flight design.
 
 ## Dev scratch
 - **All ad-hoc probe / debug / repro files go in `.tmp/`** — gitignored, not picked up by vitest, doesn't pollute `git status`.
@@ -42,10 +42,14 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - Test262 runner history: `runs/index.json` is appended by the vitest runner after each run. `benchmarks/results/report.html` reads this for the trend graph.
 - Backlog: `plan/issues/backlog/backlog.md`
 - Sprints: `plan/issues/sprints/{N}/sprint.md` — planning, task queue, results, retrospective (living doc updated during sprint)
-- Issues: `plan/issues/` — organized by sprint:
-  - `sprints/{N}/` — all issues for sprint N (status tracked via `status:` frontmatter field)
-  - `backlog/` — unscheduled issues (no sprint assigned yet)
-  - `wont-fix/` — decided against implementing
+- Issues: **flat** at `plan/issues/<id>-<slug>.md` (#1616). The on-disk
+  location is stable; sprint membership and status live **only** in
+  frontmatter, never in the directory:
+  - `sprint: <N>` numbered sprint · `sprint: 0` pre-sprint history ·
+    `sprint: Backlog` unscheduled
+  - `status: ready|in-progress|in-review|done|wont-fix|blocked|backlog`
+  - `sprints/{N}/sprint.md` (the sprint doc) stays under its sprint dir; only
+    the numbered issue files are flat. See `plan/issues/SCHEMA.md`.
 - Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
   - Goals are not sequential milestones — they form a DAG and multiple can be active in parallel
@@ -250,7 +254,7 @@ End of sprint:
 10. **PO** grooms backlog for next sprint
 
 **Tech lead discipline:**
-- **Populate TaskList** at sprint start from `plan/issues/sprints/{N}/` (current sprint dir) and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
+- **Populate TaskList** at sprint start from the issues with `sprint: {N}` frontmatter (flat `plan/issues/<id>-<slug>.md`) and immediately whenever new issues are added mid-sprint. Empty queue = agents spin idle.
 - Batch doc/plan commits on main AFTER all pending agent merges, not between them (doc commits force agents to re-merge main)
 - Complete post-merge issue cleanup (set `status: done` in sprint dir issue file, update dep graph) after each merge
 - **Tag sprints**: `git tag sprint-N/begin` when starting a sprint, `git tag sprint/N` when it finishes. Sprint stats (duration, commits, issues) are auto-generated from tags during `build:pages`.
@@ -322,7 +326,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 - **`done`** — set when the **PR merges** (by the dev who observes the merge, or by the merge queue's observer). A merged PR ⇒ `done`. Never leave a merged issue at `in-review`.
 
 ### Issue completion (post-merge)
-1. Set `status: done` in the issue file at `plan/issues/sprints/{N}/{ID}.md`
+1. Set `status: done` in the issue file at `plan/issues/<id>-<slug>.md`
 2. Update `plan/log/dependency-graph.md` — remove/strikethrough completed issue
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 

@@ -197,17 +197,35 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1337 | spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails) | medium | ready |
 | #1338 | spec gap: Array.from / Array.of constructor semantics (39 test262 fails, wasm_compile dominant) | medium | ready |
 | #1339 | spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails) | medium | ready |
-| #1340 | spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails) | medium | ready |
-| #1341 | spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails) | high | ready |
-| #1343 | spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails) | medium | ready |
-| #1344 | spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails) | medium | ready |
-| #1345 | spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails) | medium | ready |
-| #1346 | spec gap: Reflect.* invariant checks mirror internal-method bugs (83 test262 fails) | medium | ready |
+| #1340 | spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails) | high | ready |
+| #1343 | spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails) | medium | ready |
+| #1344 | spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails) | medium | ready |
+| #1345 | spec gap: Reflect.* invariant checks mirror internal-method bugs (83 test262 fails) | medium | ready |
+| #1346 | spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails) | medium | ready |
 | #1347 | spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails) | high | ready |
+| #1348 | spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails) | high | ready |
 | #1349 | spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime) | medium | ready |
 | #1350 | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | medium | ready |
-| #1351 | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | medium | ready |
 | #1353 | JSON.stringify (objects/arrays) + JSON.parse: architect spec for Wasm shape-walking and recursive-descent parser | medium | ready |
+| #1629 | spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket) | high | ready |
+| #1630 | spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fails) | medium | ready |
+| #1631 | spec gap: Object.create(proto, descriptors) ignores descriptor map (162 test262 fails) | medium | ready |
+| #1632 | spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails) | medium | ready |
+| #1633 | spec gap: Array.from / Array.of constructor semantics (39 test262 fails, wasm_compile dominant) | medium | ready |
+| #1634 | spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails) | medium | ready |
+| #1635 | spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails) | high | ready |
+| #1636 | spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails) | medium | ready |
+| #1637 | spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails) | medium | ready |
+| #1638 | spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails) | medium | ready |
+| #1639 | spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails) | medium | ready |
+| #1640 | spec gap: Reflect.* invariant checks mirror internal-method bugs (83 test262 fails) | medium | ready |
+| #1641 | spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails) | medium | ready |
+| #1643 | spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails) | high | ready |
+| #1644 | spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime) | medium | ready |
+| #1645 | spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails) | medium | ready |
+| #1646 | spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails) | medium | ready |
+| #1648 | spec gap: Object.create(proto, descriptors) ignores descriptor map (162 test262 fails) | medium | ready |
+| #1649 | spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails) | medium | ready |
 
 ### In Progress
 
@@ -218,8 +236,8 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1325 | instanceof against built-in types: compile-time type-tag registry eliminates JS host for common cases | medium | in-progress |
 | #1336 | spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fails) | medium | in-progress |
 | #1342 | spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails) | medium | in-progress |
-| #1348 | spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails) | high | in-progress |
-| #1352 | spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails) | medium | in-progress |
+| #1627 | spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails) | medium | in-progress |
+| #1642 | spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails) | high | in-progress |
 
 ### Review
 
@@ -258,7 +276,8 @@ _Generated from issue files. Update issue `status`, then rerun `node scripts/syn
 | #1316 | illegal cast error: add expected type and actual value context (142 opaque runtime failures) | medium | done |
 | #1317 | null dereference error: add expression / variable context (573 opaque runtime failures) | medium | done |
 | #1324 | JSON.stringify and JSON.parse: implement in pure Wasm, eliminate JS host dependency | medium | done |
-| #1334 | ECMAScript spec compliance audit: section-by-section review, gap issues, HTML report | high | done |
+| #1334 | spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket) | high | done |
+| #1647 | ECMAScript spec compliance audit: section-by-section review, gap issues, HTML report | high | done |
 
 <!-- GENERATED_ISSUE_TABLES_END -->
 

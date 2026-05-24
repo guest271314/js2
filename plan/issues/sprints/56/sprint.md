@@ -96,3 +96,31 @@ Conservative sum: ~1,213 addressable. Target +518 is the bottom 40%.
 ## Theme
 
 **Destructuring fidelity + class-body coverage.** Fix three independent but thematically linked spec violations in destructuring (null guard, elision holes, iterator fidelity), then clear the class-body emitter bugs that cost ~550 tests across same-line class elements and method-tramp patterns.
+
+<!-- GENERATED_ISSUE_TABLES_START -->
+## Issue Tables
+
+_Generated from issue files. Update issue `status`, then rerun `node scripts/sync-sprint-issue-tables.mjs`._
+
+### Ready
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1601 | codegen: Array.prototype reduce/reduceRight/map/filter callback paths emit invalid wasm (stack underflow at local.set/if/array.set) | high | ready |
+| #1602 | codegen: call-site argument coercion emits invalid wasm (call expected externref, found f64/other) | high | ready |
+| #1603 | codegen: optional-chaining short-circuit emits invalid wasm (ref.is_null expected i32, found ref) | high | ready |
+| #1604 | codegen: String case methods (toUpperCase/toLowerCase/toLocale*) return i32 into f64 comparison — invalid wasm | high | ready |
+| #1605 | codegen: class computed-property-name / setter param-scope emits invalid wasm (local.tee externref mismatch) | medium | ready |
+| #1606 | codegen crash: 'Cannot read properties of undefined (reading declarations)' on object-literal expressions | high | ready |
+| #1607 | codegen crash: 'Maximum call stack size exceeded' on use-before-initialization (TDZ) in declaration statements | high | ready |
+| #1608 | codegen crash: 'Cannot set properties of undefined (setting typeIdx)' on Array push/pop/shift/join/unshift | high | ready |
+| #1611 | parser: lexical declaration in single-statement context rejected for valid newline-separated cases | medium | ready |
+| #1620 | $IteratorResult struct: eliminate __iterator_done/__iterator_value host imports (runtime wiring gap) | medium | ready |
+
+### Done
+
+| Issue | Title | Priority | Status |
+|---|---|---|---|
+| #1617 | codegen: loop pre-box wrongly boxes body-local let/const captured by closure → ref.is_null over f64 (invalid wasm) | high | done |
+
+<!-- GENERATED_ISSUE_TABLES_END -->

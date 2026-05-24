@@ -57,8 +57,9 @@ and hide real ones.
 | **1080** | [umbrella] Fix CI baseline-drift regression gate — main is not self-healing | 45 | done | critical |
 | **1081** | Index test262 runs by commit hash — enable merge-base comparisons without re-running | Backlog | ready | critical |
 | **1082** | ci-status-feed delta is absolute snapshot not per-test regression — lies to dev-self-merge gate | 40 | done | critical |
-| **1083** | codegen: extras-forward call sites recompile trailing args after emitSetExtrasArgv — double codegen + duplicate module registrations |  | wont-fix | low |
+| **1083** | codegen: extras-forward call sites recompile trailing args after emitSetExtrasArgv — double codegen + duplicate module registrations | Backlog | wont-fix | low |
 | **1084** | compileCount bypass in compiler-fork-worker.mjs — RECREATE never fires when errors dominate a chunk | 40 | done | critical |
+| **1087** | codegen: iterative walkInstructions + patchStructNewForAddedField to stop recursive walker composing with compile stack under tight CI stack budgets | Sprint-41 | ready | critical |
 | **1106** | CI baseline-refresh bot wipes plan/ and .claude/memory/ on every run | 42 | done | high |
 | **1117** | Expected TypeError but got wrong error type (136 tests) | 42 | done | medium |
 | **1167a** | IR Phase 3a — hygiene passes: constant-fold, dead-code, simplify-cfg | 44 | done | high |

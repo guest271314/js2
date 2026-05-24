@@ -12,7 +12,7 @@
 | File | Resolution |
 |------|-----------|
 | `src/codegen/expressions/calls.ts` | Took HEAD — local 113-line `Object()` addition was duplicate of PR #460 / #1129 already on origin/main |
-| `plan/issues/sprints/53/1129-toobject-7-1-18-not.md` | Took HEAD (`status: done`, task #77 completed) |
+| `plan/issues/1129-toobject-7-1-18-not.md` | Took HEAD (`status: done`, task #77 completed) |
 | `plan/issues/sprints/53/1559-resolver-...-codegen.md` | Took HEAD (`status: needs-spec`, team disagreed with local `ready`) |
 | `plan/issues/sprints/53/1560-cjs-class-reexport-...md` | Took HEAD (`status: done`, task #76 completed) |
 | `benchmarks/results/test262-report.json` + `~Updated upstream` orphan | Took HEAD symlink; removed orphan |
