@@ -1,5 +1,6 @@
 ---
 id: 1602
+sprint: 56
 title: "codegen: call-site argument coercion emits invalid wasm (call expected externref, found f64/other)"
 status: ready
 created: 2026-05-24
