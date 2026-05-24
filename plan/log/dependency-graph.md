@@ -38,6 +38,12 @@ coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 land
 | 1659 | CI does not run tests/equivalence/ (OOM) — equivalence regressions land silently | high | medium | **Ready** (gates CI-visibility of #1658) |
 | 1658 | Destructured/scalar function-parameter default not applied (returns 30, expects 40) | high | medium | **Ready** (depends on #1659 for CI gating) |
 
+## Sprint 55 — docs (added 2026-05-25)
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1661 | README programmatic-API example fails — `instantiate(binary, {})` vs default-mode host imports (guest #601) | high | easy | **Ready** (sprint 55, docs, plan-only) |
+
 ## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
 
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
