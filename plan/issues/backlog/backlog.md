@@ -40,6 +40,10 @@ both others); #1653 is the keystone for the read side + continuous loop.
 - [#1653](../1653-wasi-process-stdin-read-binary.md) — `process.stdin.read(buffer, offset?)` binary incremental stdin read (keystone) — high, hard, **depends on #1654**
 - [#1655](../1655-wasi-process-stdout-write-arraybuffer.md) — `process.stdout.write(ArrayBuffer)` accept ArrayBuffer arg, not only Uint8Array literal — medium, easy, **depends on #1654**
 
+## Governance / legal — CLA gate (2026-05-24)
+
+- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate (CLA-assistant bot or DCO `Signed-off-by`), made a required check on `main` — **high**, medium, **ready**. The current `cla-check` is a no-op that records nothing, so external contributions land with no auditable CLA acceptance. **Gates external-PR merges, including guest271314's PR #589 (see #1530 HOLD).** Related: #1530.
+
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 
 - [#1564](1564-toNumeric-symbol-throws-typeError.md) — ToNumeric: Symbol argument must throw TypeError (§7.1.3 step 3) — ~12 fails, easy

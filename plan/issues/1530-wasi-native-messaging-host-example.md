@@ -298,6 +298,11 @@ two flaws**:
 - The rewrite is **dispatched after #1653 + #1654 land** (depends_on). Do not
   start the `host.ts` rewrite before the binary stdin read + ArrayBuffer/DataView
   validity are in.
+- **HOLD — do not merge guest271314's PR #589 until guest has an affirmative
+  CLA acceptance recorded (gated on #1660).** Our current `cla-check` workflow
+  is a no-op placeholder that records nothing, so we have no evidence guest271314
+  ever accepted the CLA. PR #589 must wait behind a real CLA gate (#1660) before
+  it can land.
 - **How to integrate vs guest271314's PR #589 is a maintainer decision.** Do
   **not** clobber the external PR — coordinate so guest's contribution lands
   with attribution rather than being silently re-implemented. This plan
