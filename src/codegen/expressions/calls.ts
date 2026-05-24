@@ -2558,13 +2558,39 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return { kind: "i32" };
     }
 
-    // Handle String.fromCharCode(code) — host import
+    // Handle String.fromCharCode(code) — native helper (nativeStrings) or host import
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "String" &&
       propAccess.name.text === "fromCharCode" &&
       expr.arguments.length >= 1
     ) {
+      // #1598: nativeStrings mode (forced on for --target wasi / standalone) uses
+      // a pure-Wasm __str_fromCharCode helper — no env.String_fromCharCode import.
+      if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        const helperIdx = ctx.nativeStrHelpers.get("__str_fromCharCode");
+        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+        if (helperIdx !== undefined) {
+          // First arg → string
+          const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+          if (a0 && a0.kind !== "i32") {
+            fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          }
+          fctx.body.push({ op: "call", funcIdx: helperIdx });
+          // Multi-arg: concat each subsequent code unit's string (spec: join).
+          if (expr.arguments.length > 1 && concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind !== "i32") {
+                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx: helperIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+          return nativeStringType(ctx);
+        }
+      }
       const funcIdx = ctx.funcMap.get("String_fromCharCode");
       if (funcIdx !== undefined) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
@@ -4343,6 +4369,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             }
             return { kind: "externref" };
           }
+        }
+        // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
+        // WASI mode there is no `env::JSON_*` host import to fall back to.
+        // The primitive `JSON.stringify` slice above (#1324) already handles
+        // null / undefined / boolean / number as pure Wasm; everything else
+        // (objects, arrays, strings, and all `JSON.parse`) needs the pure-Wasm
+        // codec from Phase 2, which is not yet implemented. Emit a clear
+        // compile error rather than a module that traps at instantiation.
+        if (ctx.standalone || ctx.wasi) {
+          reportError(
+            ctx,
+            expr,
+            `Codegen error: JSON.${method} of this value is not yet supported in --target standalone/wasi (#1599). ` +
+              `Pure-Wasm JSON.stringify of null/undefined/boolean/number works standalone; ` +
+              `objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
+              `Avoid JSON for these shapes in standalone/WASI targets for now.`,
+          );
+          return null;
         }
         const importName = `JSON_${method}`;
         const funcIdx = ctx.funcMap.get(importName);
