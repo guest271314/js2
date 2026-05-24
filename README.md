@@ -143,17 +143,38 @@ Programmatic API:
 ```ts
 import { compile } from "js2wasm";
 
-const result = compile(`
+const result = compile(
+  `
   export function add(a: number, b: number): number {
     return a + b;
   }
-`);
+`,
+  { target: "standalone" },
+);
 
 if (result.success) {
+  // standalone modules have no host imports, so {} is sufficient
   const { instance } = await WebAssembly.instantiate(result.binary, {});
-  console.log((instance.exports as any).add(2, 3));
+  console.log((instance.exports as any).add(2, 3)); // → 5
 }
 ```
+
+### Compile modes and imports
+
+The imports a module needs depend on the compile target:
+
+- **Default (JS-host) mode** (no `target`, or `target: "gc"`) emits runtime
+  imports — a `string_constants` module plus `env.*` helpers such as
+  `__box_number`, `__extern_get`, and `__throw_reference_error`. These are
+  supplied by the js2wasm JS runtime, so instantiating with an empty `{}`
+  throws `Import #0 "string_constants": module is not an object or function`.
+  Use this mode when you run the output alongside the JS runtime that provides
+  those imports.
+- **Standalone mode** (`target: "standalone"`, also `target: "wasi"`) emits a
+  pure WasmGC module with Wasm-native intrinsics and **no host imports**, so it
+  instantiates with `WebAssembly.instantiate(binary, {})` and runs anywhere
+  WasmGC is available. Prefer this for portable, host-independent output — it is
+  what the snippet above uses.
 
 Useful local commands:
 
