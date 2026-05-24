@@ -175,20 +175,44 @@ maturing, so compiled output is not guaranteed to run there yet. Browser hosts
 (Chrome 119+, Firefox 120+) and Node.js 22+ run the JS-host target without extra
 flags.
 
-## What Works Today
+## Current coverage and limitations
 
-The compiler already covers a meaningful subset of the language and runtime surface. Current work is concentrated on steadily expanding spec coverage while reducing dependence on JS-host fallbacks.
+`js2wasm` passes roughly two-thirds of Test262 in a JS host (see the conformance
+figure above and the full [Test262 report](./benchmarks/results/report.html)).
+That means a large, useful subset of the language works — but there are real
+gaps, and you will hit them. This section is the honest high-level shape; the
+report is the authoritative per-feature detail.
 
-Areas with meaningful progress today include:
+**Solid** (broadly works):
 
-- arithmetic and basic scalar operations
-- functions, closures, and many control-flow forms
-- classes, inheritance, and object operations
-- arrays, strings, destructuring, and template literals
-- significant portions of built-in and host interop behavior
-- a public conformance workflow based on Test262
+- arithmetic, comparison, and scalar operations
+- functions, closures, recursion, and most control-flow forms
+- classes, inheritance, methods, and object operations
+- arrays and array methods, destructuring, spread, template literals
+- strings and common string methods
+- `try`/`catch`/`finally` and `throw`
+- `async`/`await`, generators, and iterators
 
-This is not yet a “drop in any npm package” story. It is a serious compiler with a growing compatibility baseline and a clear infrastructure target.
+**Partial** (works in common cases, with gaps):
+
+- standard-library built-ins — many are implemented, but not the full surface;
+  some methods are missing or only handle the common overloads
+- `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
+- standalone (no-JS-host) mode — actively in progress; conformance there is
+  lower than the JS-host figure and it is not yet the primary path
+- getters/setters and other highly dynamic patterns — limited
+
+**Not yet** (intentionally unsupported or out of scope today):
+
+- `eval`, `with`, and dynamic `Function` construction
+- `Proxy` and `Reflect`-driven metaprogramming
+- `SharedArrayBuffer` / threads, `WeakRef` / `FinalizationRegistry`, `Temporal`
+- dropping in an arbitrary npm package unchanged
+
+If a pattern you rely on does not work, check the [Test262 report](./benchmarks/results/report.html)
+or open an issue. This is a serious compiler with a growing compatibility
+baseline and a clear infrastructure target — not yet a "drop in any npm package"
+story.
 
 ## The Methodology
 
