@@ -375,3 +375,35 @@ All 4 tests pass locally.
   recursive `destructureParamArray` call into a `ref_null` tuple-struct
   paramType, which hits the existing tuple-struct walk (lines 797-901)
   without needing to extract a helper. Shorter and functionally equivalent.
+
+---
+
+## Stale PR #344 — SUPERSEDED (investigated 2026-05-23, dev-344)
+
+PR #344 (branch `issue-862-iterator-step-errors`) was an earlier competing
+attempt at this issue that never merged. It is now **obsolete** — both of its
+mechanisms are already on main via different, merged work:
+
+1. **Binding-pattern param → externref widening** (PR #344 touched
+   class-bodies.ts, function-body.ts, literals.ts, nested-declarations.ts):
+   already landed as the merged #862 fix — `bindingPatternParamNeedsWiden`
+   (`declarations.ts:2306`, applied at 2317/2375) plus the #1151 Gap-B guard
+   (`closures.ts:1229-1230`).
+2. **`__extern_to_array` runtime import + `destructuring.ts` hook** to drive
+   the iterator protocol via `Array.from`: main already has the equivalent
+   `__array_from_iter` (`runtime.ts:3810`) doing the same synchronous
+   `Array.from`-based conversion, with `.next()` throws propagating naturally.
+
+Additionally, PR #344 rewrites `src/codegen/statements/destructuring.ts`,
+which was replaced by the #1553 delegation series — that rewrite is a
+guaranteed source conflict for zero residual benefit.
+
+**Smoke test on current main (2026-05-23):** PR #344's two non-skipped tests
+(`ary-ptrn-rest-id-iter-step-err` for arrow + function-declaration forms)
+both PASS. `meth-ary-ptrn-rest-id-iter-step-err` also passes.
+`ary-ptrn-elem-id-iter-step-err` still FAILs — but that case is **not** in
+PR #344's scope (its test file `it.skip`'d the elem/elision step-err cases
+pending a separate default-param fix), so #344 would not close it either.
+
+**Recommendation: CLOSE PR #344 as superseded. No residual gap warrants a
+slim re-PR.**
