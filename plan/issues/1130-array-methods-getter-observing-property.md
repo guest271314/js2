@@ -688,3 +688,227 @@ decide the vec-accessor dispatch strategy above before further dev work.
 Branch with the (working-for-sidecar, harmless) machinery:
 `issue-1130-getter-observe`. NOT opened as a PR — it changes 4 files but
 flips 0 target tests, so it is net-neutral churn until the re-spec lands.
+
+---
+
+## Implementation Plan (authoritative — 2026-05-24, re-spec from corrected premise)
+
+Author: architect. **Supersedes all plans above.** Written after
+re-measuring current `main` (HEAD `92c7483a4`) end-to-end with the live
+compiler (`compileToWat` + `compileToWasm` probes), not from the stale
+2026-05-23 source snapshot. **Read this section and ignore the two earlier
+"authoritative" plans** — both rested on premises that current `main`
+falsifies.
+
+### TL;DR for the dev
+
+- **The dev-1130-6 blocker is STALE.** Its claim — "statically-typed vecs
+  compile `defineProperty(arr,"1",{get})` into a `<struct>_get_1` Wasm
+  accessor and never touch `_wasmStructProps`" — is **false on current
+  main**. Verified by WAT inspection across `var`/`const`/`number[]`/`any`
+  array shapes: *every* shape routes the accessor through
+  `__defineProperty_accessor`, which stores `sc["__get_1"]` in
+  `_wasmStructProps` keyed on the vec's `extern.convert_any` externref.
+  No `_get_1` struct accessor is emitted for arrays (arrays never resolve
+  to a named `structName`, so the struct branch at
+  `object-ops.ts:690` is not taken). The JS-sidecar mechanism the
+  2026-05-23 plan assumed **is** the real mechanism. It is unblocked.
+- **BUT the 2026-05-23 plan's scope is wrong in three material ways**
+  (below). Implementing it verbatim still flips far fewer tests than
+  promised. This re-spec corrects the scope and adds the two prerequisites
+  it missed.
+
+### Corrected scope (measured, not estimated)
+
+I classified every getter-observing test across the 7 methods
+(`forEach map every some filter reduce reduceRight`) by receiver shape
+(regex over `Object.defineProperty(.., "length"|<digits>, .. get:)`):
+
+| Receiver shape | Count | Owner |
+|----------------|------:|-------|
+| **Native vec** — `arr.method()`, getter on own index/length | **96** | **#1130 (this issue)** |
+| `Array.prototype.method.call(plainObj, cb)` | 233 | the **array-like `.call` path**, already largely handled — NOT #1130 |
+| getter installed on `Array.prototype[k]` (prototype chain) | 48 | separate prototype-visiting problem — NOT #1130 PR-1/2 |
+
+**The issue header's "~80" and its three "sample failing tests" are
+mis-scoped.** Two of the three samples are *not* native-vec receivers:
+- `every/15.4.4.16-7-b-3.js` → `Array.prototype.every.call({2:6.99,8:19}, cb)` (array-like `.call`).
+- `reduceRight/15.4.4.22-5-10.js` → `Array.prototype.reduceRight.call({0:11,1:12}, fn)` (array-like `.call`).
+- `filter/15.4.4.20-3-11.js` (listed in "Sample failing tests") → `Array.prototype.filter.call({1:11,2:9,length:"2"}, cb)` (array-like `.call`).
+
+**The array-like `.call` path is already correct** for these. Verified by
+probe: `Array.prototype.filter.call({1:11,2:9,length:"2"}, cb)` returns
+`newArr.length === 1` today — spec-correct. `compileArrayLikePrototypeCall`
+(`array-methods.ts:377`) routes plain-object/anonymous-struct receivers
+through `__extern_get_idx` / `__extern_length` (`runtime.ts:3371` / nearby),
+which **do** invoke accessor getters via `_safeGet`/sidecar. That path
+*deliberately bails on `__vec_*`/`__arr_*`* receivers (line 427) — which is
+exactly the gap #1130 must fill. **#1130's true domain is the 96 native-vec
+tests only.** (Note: every reference to "#1131 (the B fix / array-like
+receiver)" in the older notes is a wrong issue number — #1131 is the SSA-IR
+issue. The array-like path is `compileArrayLikePrototypeCall`, already in
+tree; there is no separate open issue to wait on.)
+
+### Three prerequisites the 2026-05-23 plan MISSED (load-bearing)
+
+These are not edge cases — the *clean native-vec targets require all three*:
+
+1. **Array-index-exotic `length` growth on `defineProperty`.** Per spec
+   (ArraySetLength / `[[DefineOwnProperty]]` on array exotic objects),
+   `Object.defineProperty(arr, "2", {get})` when `2 >= arr.length` sets
+   `arr.length = 3`. Targets like `forEach/15.4.4.18-7-c-i-10.js`
+   (`var arr = []; defineProperty(arr,"2",{get:()=>12})`) depend on this:
+   the loop bound must become 3 so index 2 is visited. **Measured today:
+   `arr.length` stays 0** after such a defineProperty (probe confirmed).
+   The accessor-probe element read is useless if the loop never reaches the
+   index. **This must be fixed first** (in the vec defineProperty path),
+   independent of the element-read change.
+2. **`HasProperty` / hole semantics are central, not deferred.** The clean
+   targets use holes (`[0, , ]`, `[9, , 12]`, `[]`) plus an accessor on a
+   specific index. `forEach`/`every`/`some`/`reduce`(no-init) MUST skip
+   absent indices and visit accessor-defined ones. So the loop needs a
+   per-index `HasProperty(arr, k)` that is true iff the index is a real
+   backing element OR has a sidecar accessor. The 2026-05-23 plan
+   explicitly deferred this ("out of strict scope for first PR") — but
+   without it the clean targets don't pass.
+3. **Prototype-chain getters appear even in native-receiver tests.**
+   `forEach/15.4.4.18-7-b-11.js` defines `Array.prototype[1]` and toggles
+   it inside an own-index getter. Spec `Get`/`HasProperty` walk the
+   prototype chain. This subset (and the 48 proto-getter tests) needs
+   prototype-chain consultation, which the sidecar probe does not do.
+   **Defer the prototype-chain subset to a follow-up** (see sequencing).
+
+### Mechanism (confirmed correct, reused from `_safeGet`)
+
+The element-read and length-read slow paths use the **exact pattern
+`_safeGet` already uses** (`runtime.ts:1729-1733`):
+```ts
+const getter = _wasmStructProps.get(obj)?.[`__get_${key}`];
+if (typeof getter === "function") return getter.call(obj);
+```
+`obj` is the vec's `extern.convert_any` externref. **Externref-wrapper
+identity is stable** for a WasmGC ref within an instance — this is already
+relied upon in production by the `#856` `defineProperty value` + sidecar
+read/write paths (`object-ops.ts:1374` comment), so the assumption is not
+new risk. The getter stored by `__defineProperty_accessor`
+(`runtime.ts:4121`, `_maybeWrapCallable`) is already JS-callable through the
+`__call_fn_<arity>` bridge — `getter.call(obj)` is correct, no new bridge.
+
+The host-import + sentinel design from the 2026-05-23 plan
+(`__array_idx_accessor_get`, `__array_length_accessor_get`,
+`__is_array_no_accessor`, `__to_length`, module-private `__array_no_accessor`
+sentinel) is **sound and is adopted verbatim** for the element/length reads
+— see that section above for the import signatures and the
+`emitElementLoad` codegen sketch. The compile-time whole-program gate
+(`ctx.arrayAccessorObserved` set from `state.getterCallbackFound` in
+`finalizeUnifiedCollector`, declarations.ts ~1091) is also adopted verbatim
+— re-verified the anchors (`getterCallbackFound` @declarations.ts:96/559,
+`finalizeUnifiedCollector` @814, the `if (state.getterCallbackFound)` block
+@1091; `CodegenContext` `nativeStrings` @types.ts:523;
+`setupArrayLoop` @array-methods.ts:4472, element loads @4538-4540 /
+@4592-4594). Add `__array_has_idx_accessor(obj, idx) -> i32` (returns 1 iff
+`_wasmStructProps.get(obj)?["__get_"+idx]` is a function) for the
+`HasProperty` slow path.
+
+### What this re-spec ADDS on top of the 2026-05-23 element/length design
+
+**A. Vec array-index-exotic length growth (new, prerequisite — PR-0).**
+- File: `src/codegen/object-ops.ts`, the vec/non-struct accessor branch
+  that reaches `emitExternDefinePropertyValue` / the `__defineProperty_accessor`
+  call path (the branch taken when `structName === undefined`, i.e. arrays).
+- When the prop key is a canonical array index `n` (`ToString(ToUint32(n)) === key`
+  and `n < 2^32-1`) and the receiver is a `__vec_*`, after the
+  `__defineProperty_accessor`/`__defineProperty_value` call, emit a guarded
+  length bump: `if (n >= vec.len) vec.len = n + 1` via `struct.get/struct.set`
+  on field 0. This mirrors array `[[DefineOwnProperty]]`. Gate on
+  `ctx.arrayAccessorObserved` is NOT required here (it is correct
+  unconditionally and cheap), but scope it to the vec-accessor branch so
+  non-array defineProperty is unaffected.
+- Add a runtime sentinel store so the accessor index is recoverable: the
+  getter is already in `_wasmStructProps[obj]["__get_n"]`; no extra runtime
+  store needed. The length bump is pure Wasm on the vec struct.
+- **Verify**: `compileToWasm` probe — `[]; defineProperty(arr,"2",{get}); arr.length` must return 3.
+
+**B. HasProperty in the callback loop (new, promoted from "deferred").**
+- In `setupArrayLoop` slow path and the per-method loop body: before the
+  element load, when `ctx.arrayAccessorObserved`, compute presence:
+  `present = (i < backingLen) ? array data has index (always true for dense vec, false for hole)` OR `__array_has_idx_accessor(vecExtern, i)`.
+  For a WasmGC vec the backing array is dense up to `vec.len`; holes from
+  `[0, , ]` literals are represented as the default element value, **not**
+  as true absences — so HasProperty for a hole index needs care. **Audit
+  how array-literal holes are currently encoded** (`array.new_default`
+  vs a hole bitmap): if holes are *not* tracked, `forEach` over `[0, , ]`
+  cannot distinguish hole index 1 from a real 0. This is the single biggest
+  open implementation question (see Risks). If holes are not represented,
+  PR-1 should target only the **non-hole** native targets first (e.g.
+  `7-c-i-10` uses `[]` + accessor, no interior hole) and the hole-dependent
+  targets (`map/15.4.4.19-8-9` uses `[9, , 12]`) move to a follow-up tied
+  to hole representation.
+- `forEach`/`every`/`some`/`find*`/`reduce`(no-init) skip when `!present`;
+  `map`/`filter` produce a hole in the result when `!present` (match
+  `map/15.4.4.19-8-9`: result keeps length 3 with `result[2]` undefined and
+  index 1 skipped after `arr.length=2` mutation).
+
+**C. Element + length read slow path** — exactly the 2026-05-23
+`emitElementLoad` + `__array_length_accessor_get` + `__to_length` design.
+No change.
+
+### Recommended PR sequencing (revised, honest)
+
+- **PR-0 (prerequisite, ~3-5 native tests)**: vec array-index-exotic
+  `length` growth on `defineProperty` (item A). Standalone, low-risk,
+  independently valuable (fixes `arr.length` after numeric-index
+  defineProperty). Land first; it unblocks any later loop-bound work.
+- **PR-1 (machinery + forEach, non-hole subset)**: ctx flag + 4 host
+  imports + sentinel + `__to_length` + `__array_has_idx_accessor`;
+  `setupArrayLoop` length-getter + element-accessor probe + HasProperty;
+  gate to `compileArrayForEach`. Land `tests/issue-1130.test.ts`:
+  getter-on-index fires (`[]`+accessor@2 → val 12); getter-on-length fires
+  + ToLength on string `"2"`; **externref-identity round-trip assertion**
+  (store getter, read back via helper in a later call — guards the
+  load-bearing assumption); **byte-equality microcheck** (getter-free
+  forEach emits identical bytes pre/post change, proving the gate).
+- **PR-2 (fan-out)**: map/every/some/filter/reduce/reduceRight via the
+  shared builders; `local`-elemSource audit; the `map` result-hole
+  semantics. Target the remaining clean native tests.
+- **Follow-up issues (NOT #1130)**: (i) interior-hole representation if
+  absent (blocks `[9, , 12]`-style targets); (ii) prototype-chain
+  `Get`/`HasProperty` for the 48 proto-getter tests + native tests that
+  toggle `Array.prototype[k]`.
+
+### Honest acceptance criteria (replaces the header's "≥60 of 80")
+
+The header's "≥60 of 80" is **not achievable in #1130's true scope** — only
+96 tests are native-receiver, and an unknown fraction depend on hole
+representation / prototype chain that are out of scope. Realistic targets:
+- **PR-0**: `arr.length` reflects numeric-index defineProperty (3-5 tests
+  + the length-read direct cases).
+- **PR-1+PR-2**: clear the **non-hole, own-accessor, native-receiver**
+  subset of the 96 — estimate **30-45 tests** (exact count to be measured
+  by the dev with a scoped test262 run on the 7 method dirs before/after).
+  Treat 30 as the floor for "worth merging"; if PR-1's scoped run shows
+  <15 in the non-hole subset, re-evaluate with the architect.
+
+### Why this is still worth doing (not wont-fix)
+
+The mechanism is proven (`_safeGet` already does it), the externref
+identity risk is already retired in production, and PR-0 alone fixes a
+visible correctness bug (`arr.length` after numeric defineProperty). The
+work is real and bounded; only the *headline test count* was inflated. Keep
+`status: ready`. Dispatch PR-0 first as a small, independent task; gate
+PR-1/2 on the dev's scoped before/after measurement so the team commits to
+real, measured numbers rather than the stale "~80".
+
+### Open question the dev MUST resolve early (could re-block)
+
+**Interior-hole representation.** If WasmGC array literals encode `[0, , 2]`
+as a dense `array.new` with a default value at index 1 (no hole bitmap),
+then `HasProperty(arr, 1)` cannot return false for the literal hole, and
+the hole-dependent targets are unreachable without a representation change
+(a follow-up issue, larger than #1130). The dev should answer this in the
+first hour (inspect `array.new`/`array.new_default`/literal-with-elision
+codegen) and, if holes are not tracked, **scope PR-1/2 to the `[]`-or-dense
++ own-accessor subset** and file the hole-representation follow-up rather
+than expanding #1130. This is the one place this issue could legitimately
+need more than a spec — flag it to the architect/PO if hole tracking turns
+out to be a prerequisite for a majority of the 96.
