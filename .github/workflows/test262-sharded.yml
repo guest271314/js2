@@ -61,19 +61,31 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
-  # Per-ref concurrency. Global serialization (test262-sharded-global) was
-  # causing push:main runs to cancel within 8 seconds of start — most push:main
-  # test262 runs since 2026-05-23T02:00Z were aborted before baselines could
-  # refresh. The exact cancellation mechanism appears to be GitHub's merge
-  # queue rebuilding merge_groups whenever main moves, which cascaded through
-  # the shared concurrency group to abort the unrelated push:main runs queued
-  # behind them.
+  # Per-EVENT-and-ref concurrency. Global serialization (test262-sharded-global)
+  # was causing push:main runs to cancel within 8 seconds of start — most
+  # push:main test262 runs since 2026-05-23T02:00Z were aborted before baselines
+  # could refresh. The mechanism: GitHub's merge queue rebuilds merge_groups
+  # whenever main moves, which cascaded through the shared concurrency group to
+  # abort the unrelated push:main runs queued behind them.
   #
-  # Per-ref concurrency: each ref (main, gh-readonly-queue/main/pr-N, PR N)
-  # gets its own slot. push:main runs no longer compete with merge_group runs.
-  # PR-level pushes still cancel previous in-flight runs for the same PR
-  # (cancel-in-progress: true) — that's the right behavior for PR updates.
-  group: test262-sharded-${{ github.ref }}
+  # The fix has two parts and BOTH are load-bearing for baseline-refresh:
+  #   1. The group key includes github.event_name, so a push:main run can never
+  #      share a slot with a merge_group run (they previously collided on
+  #      refs/heads/main vs the merge_group ref via a global group). A push:main
+  #      run also never shares with a workflow_dispatch run on main — important
+  #      because the manual authoritative-number runs and the auto push runs
+  #      must not cancel each other.
+  #   2. cancel-in-progress is TRUE only for pull_request. For push,
+  #      workflow_dispatch and merge_group it is FALSE — a newer run QUEUES
+  #      behind the in-flight one instead of cancelling it. This guarantees a
+  #      baseline-refresh run (push:main / workflow_dispatch) always runs to
+  #      completion and reaches promote-baseline. PR-level pushes still cancel
+  #      previous in-flight runs for the same PR (the right behavior for PR
+  #      iteration; PRs never promote a baseline).
+  #
+  # DO NOT reintroduce a single global group or set cancel-in-progress: true for
+  # push/workflow_dispatch — either change re-breaks the baseline refresh.
+  group: test262-sharded-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -773,22 +785,89 @@ jobs:
             git push
           fi
 
-      # Step removed (2026-05-22): the post-baseline commit to main was blocked
-      # by the merge_queue ruleset ('Changes must be made through the merge queue').
-      # Baseline data now lives only in loopdive/js2wasm-baselines (pushed by
-      # the previous step). The landing page reads from there via raw URL.
-      # Local devs running `pnpm build:pages` etc. fetch the same data from
-      # the baselines repo at build time.
+      # RESTORED (2026-05-25): commit the small summary JSON files back to main.
       #
-      # NOTE (#1522): The original PR added a "Sync conformance numbers into docs"
-      # step plus extra `git add` lines (ROADMAP.md, plan/goals/goal-graph.md,
-      # README.md, CLAUDE.md) to this commit step. Since the commit step itself
-      # was removed by the merge_queue ruleset, the conformance-sync mechanism
-      # needs to be re-attached to a workflow that CAN push to main (e.g. the
-      # baselines-repo push or a follow-up scheduled workflow). Tracking issue
-      # remains open at plan/issues/backlog/1522-race-local-test262-vs-ci.md.
-
-
+      # History: this step was removed on 2026-05-22 (36d8eb849) because the
+      # merge_queue ruleset blocked the push with GH013 ('Changes must be made
+      # through the merge queue'). BUT those GH013 failures predated 15ff85dda
+      # (landed 37 min earlier), which switched the `Checkout` step above to
+      # `ssh-key: MAIN_DEPLOY_KEY` precisely so this push CAN bypass the ruleset
+      # (the deploy key is in the ruleset's bypass_actors). Removing the step
+      # threw out the working push and left the committed
+      # benchmarks/results/test262-current.json frozen at its 2026-05-22 value
+      # (28842/43159) while the baselines repo moved on — so `git status`, the
+      # dashboard build's committed-file fallback, and fresh clones all showed a
+      # phantom ~500-test regression. This step restores main/baselines parity.
+      #
+      # Only the *small* JSON files go to main (the large jsonl lives only in the
+      # baselines repo, per #1528). `[skip ci]` prevents self-retrigger. Pushes
+      # over the SSH remote that the checkout configured (origin = git@github:…),
+      # which is what makes the bypass work — do NOT add an https token here.
+      - name: Commit refreshed summary JSON to main repo
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.pass)")
+          TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.total)")
+          # Sanity check: never promote a corrupt/empty report to main.
+          if [ "$PASS" -lt 1000 ] || [ "$TOTAL" -lt 40000 ]; then
+            echo "ABORT: report looks corrupt (pass=$PASS total=$TOTAL). Not committing to main."
+            exit 0
+          fi
+          stage_files() {
+            git add -f benchmarks/results/test262-current.json \
+              benchmarks/results/test262-report.json \
+              public/benchmarks/results/test262-report.json
+            # editions JSON is regenerated into public/ by the earlier step
+            [ -f public/benchmarks/results/test262-editions.json ] && \
+              git add -f public/benchmarks/results/test262-editions.json || true
+          }
+          stage_files
+          if git diff --cached --quiet; then
+            echo "No JSON changes to commit to main."
+            exit 0
+          fi
+          # Skip when only volatile metadata (timestamp / baseline_sha) changed —
+          # avoids a churn commit on every push that produced identical results.
+          if [ -f /tmp/js2wasm-before-refresh/test262-current.json ] && \
+            node scripts/compare-test262-artifact.mjs \
+              --type report \
+              --baseline /tmp/js2wasm-before-refresh/test262-current.json \
+              --candidate benchmarks/results/test262-current.json; then
+            echo "Only volatile test262 report metadata changed — skipping main commit."
+            exit 0
+          fi
+          git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
+          # Race handling: another push to main may have landed while this job
+          # ran. Rebase onto the latest main and re-stage the (regenerated)
+          # summary files, then retry the push. GIT_LFS_SKIP_SMUDGE avoids LFS
+          # smudge on the shallow checkout.
+          push_ok=0
+          for attempt in 1 2 3; do
+            if GIT_LFS_SKIP_SMUDGE=1 git push origin HEAD:main; then
+              push_ok=1
+              break
+            fi
+            echo "Push attempt $attempt failed — rebasing onto origin/main and retrying."
+            GIT_LFS_SKIP_SMUDGE=1 git fetch origin main || true
+            if ! GIT_LFS_SKIP_SMUDGE=1 git rebase origin/main; then
+              git rebase --abort 2>/dev/null || true
+              GIT_LFS_SKIP_SMUDGE=1 git reset --hard origin/main
+              # Re-apply the fresh artifacts on top of the new main tip.
+              cp shard-artifacts/test262-report-merged.json benchmarks/results/test262-current.json
+              cp shard-artifacts/test262-report-merged.json benchmarks/results/test262-report.json
+              cp shard-artifacts/test262-report-merged.json public/benchmarks/results/test262-report.json
+              node --experimental-strip-types scripts/generate-editions.ts \
+                --results shard-artifacts/test262-results-merged.jsonl || true
+              stage_files
+              git diff --cached --quiet && { echo "Nothing to commit after reset — done."; push_ok=1; break; }
+              git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
+            fi
+          done
+          if [ "$push_ok" -ne 1 ]; then
+            echo "::warning::Could not push refreshed baseline to main after retries; baselines repo is still authoritative for the landing page."
+          fi
 
       - name: Audit forced baseline refresh
         if: github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES'
