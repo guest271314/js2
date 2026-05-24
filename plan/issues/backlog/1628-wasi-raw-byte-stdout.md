@@ -1,9 +1,9 @@
 ---
 id: 1628
-renumbered_from: 1617
 title: "wasi: raw-byte stdout primitive (writeStdout(bytes)) for binary protocols"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,10 +11,11 @@ task_type: feature
 area: wasi, codegen, runtime
 language_feature: stdout
 goal: wasi-completeness
-related: [1530, 1480, 1481]
+sprint: Backlog
+renumbered_from: 1617
 parent: 1530
+related: [1530, 1480, 1481]
 ---
-
 ## Problem
 
 The WASI stdout path only writes UTF-8-encoded strings via `console.log`,

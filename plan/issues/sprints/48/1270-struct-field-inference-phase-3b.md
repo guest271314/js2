@@ -1,10 +1,10 @@
 ---
 id: 1270
-sprint: 48
 title: "struct field inference Phase 3b: eliminate null-checks on (ref null $T) locals via peephole"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen, optimizer
 language_feature: object-literal, property-access
 goal: performance
+sprint: 48
 depends_on: [1231, 1269]
 ---
 # #1270 — Struct field inference Phase 3b: peephole null-check elimination

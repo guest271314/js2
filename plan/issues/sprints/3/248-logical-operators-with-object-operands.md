@@ -1,12 +1,12 @@
 ---
 id: 248
-sprint: 3
 title: "Issue #248: Logical operators with object operands returning wrong values"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 3
 ---
 # Issue #248: Logical operators with object operands returning wrong values
 

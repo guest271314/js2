@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: contributor-readiness
+sprint: Backlog
 ---
 ## Problem
 

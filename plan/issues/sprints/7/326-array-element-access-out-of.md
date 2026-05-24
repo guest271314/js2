@@ -1,6 +1,5 @@
 ---
 id: 326
-sprint: 7
 title: "- Array element access out of bounds"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: crash-free
+sprint: 7
 test262_fail: 17
 test262_refs:
   - test/language/expressions/assignment/dstr/array-elem-init-evaluation.js

@@ -8,6 +8,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: spec-completeness
+sprint: Backlog
 files:
   src/optimize.ts:
     modify:

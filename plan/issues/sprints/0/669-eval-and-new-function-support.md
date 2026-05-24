@@ -1,6 +1,5 @@
 ---
 id: 669
-sprint: 0
 title: "eval() and new Function() support"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: spec-completeness
+sprint: 0
 test262_fail: 2500
 files:
   src/codegen/expressions.ts:

@@ -1,10 +1,9 @@
 ---
 id: 1553
-sprint: 52
 title: "spec gap: let/const/var destructuring declarations — residuals after #1432/#1450/#1454/#1550"
-status: decomposed
+status: ready
 created: 2026-05-20
-investigated: 2026-05-20
+updated: 2026-05-21
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +11,9 @@ task_type: bugfix
 area: codegen
 language_feature: declarations, destructuring
 goal: spec-completeness
+sprint: 52
 parent: 779
+investigated: 2026-05-20
 related: [1432, 1450, 1454, 1550]
 ---
 # #1553 — `let`/`const`/`var [pattern] = value` declaration-form destructuring residuals

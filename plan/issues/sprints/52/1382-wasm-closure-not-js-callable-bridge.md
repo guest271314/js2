@@ -1,6 +1,5 @@
 ---
 id: 1382
-sprint: 52
 title: "structural: Wasm closures not JS-callable from host imports — bridge gap"
 status: done
 created: 2026-05-08
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: closures, callbacks
 goal: ir-full-coverage
+sprint: 52
 ---
 # #1382 — Wasm closures not JS-callable from host imports
 

@@ -1,6 +1,5 @@
 ---
 id: 527
-sprint: 0
 title: "Fix test262 script: use tsx instead of node"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 files:
   package.json:
     new: []

@@ -1,6 +1,5 @@
 ---
 id: 994
-sprint: 45
 title: "Class static-private-getter test hits 30s compiler timeout"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: compilable
+sprint: 45
 resolved_by: "#1085 (iterative bodyUsesArguments, PR #127)"
 test262_ct: 1
 ---

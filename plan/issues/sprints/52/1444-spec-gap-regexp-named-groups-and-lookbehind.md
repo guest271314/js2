@@ -1,9 +1,9 @@
 ---
 id: 1444
-sprint: 52
 title: "spec gap: RegExp named groups (unmatched + duplicate) and lookbehind edge cases"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: regexp-named-groups, regexp-lookbehind
 goal: spec-completeness
+sprint: 52
 related: []
 ---
 # #1444 - RegExp named groups and lookbehind

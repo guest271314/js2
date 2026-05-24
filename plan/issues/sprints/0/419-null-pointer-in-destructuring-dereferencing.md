@@ -1,6 +1,5 @@
 ---
 id: 419
-sprint: 0
 title: "Null pointer in destructuring -- dereferencing null struct during pattern matching"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: crash-free
+sprint: 0
 test262_fail: 116
 complexity: M
 files:

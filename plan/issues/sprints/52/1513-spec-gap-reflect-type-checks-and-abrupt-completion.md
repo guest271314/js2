@@ -1,9 +1,9 @@
 ---
 id: 1513
-sprint: 52
 title: "spec gap: Reflect — TypeError on non-object/Symbol target + abrupt-completion propagation"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: reflect
 goal: spec-completeness
+sprint: 52
 related: [1460, 1466]
 ---
 # #1513 — Reflect: type checks + abrupt completions

@@ -1,6 +1,5 @@
 ---
 id: 883
-sprint: 33
 title: "Deploy playground + dashboard to GitHub Pages"
 status: done
 created: 2026-03-31
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: ci-hardening
+sprint: 33
 required_by: [886]
 ---
 # #883 -- Deploy playground + dashboard to GitHub Pages

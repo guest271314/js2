@@ -1,6 +1,5 @@
 ---
 id: 1528
-sprint: 52
 title: "spec gap: non-constructor TypeError — Promise.all / allSettled species and executor paths"
 status: ready
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: medium
 task_type: bugfix
 area: codegen
 language_feature: promise, species, constructor-invariants
+sprint: 52
 es_edition: ES2015+
 test262_category: built-ins/Promise, language/function-code
 test262_count: 79
 related: [1519]
 ---
-
 # #1528 — `[object Object] is not a constructor` instead of spec TypeError
 
 ## Problem

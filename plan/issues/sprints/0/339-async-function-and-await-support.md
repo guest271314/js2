@@ -1,6 +1,5 @@
 ---
 id: 339
-sprint: 0
 title: "Async function and await support"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: high
 goal: async-model
+sprint: 0
 ---
 # Issue #339: Async function and await support
 

@@ -1,10 +1,10 @@
 ---
 id: 1308
-sprint: 50
 title: "Wasm closure struct returned to JS host is not JS-callable"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: runtime
 language_feature: closures, externref, js-interop
 goal: npm-library-support
+sprint: 50
 related: [1292, 1304]
 ---
 # #1308 — Wasm closure struct returned to JS host is not JS-callable

@@ -1,6 +1,5 @@
 ---
 id: 1195
-sprint: 47
 title: "perf: escape-analysis scalarization for non-escaping arrays (eliminate array allocation in array-sum)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: async-model
+sprint: 47
 es_edition: n/a
 related: [1126, 1179, 1196, 1197, 1198, 1199, 1200]
 origin: surfaced by 2026-04-27 competitive-benchmark refresh — array-sum is ~9× slower than Node and tied with Javy. Escape analysis is the single biggest leverage point on this workload.

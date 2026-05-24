@@ -1,6 +1,5 @@
 ---
 id: 583
-sprint: 0
 title: "Stack not empty at fallthrough in Wasm:test (82 CE) + stack-related fails"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_ce: 763
 test262_fail: 82
 files:

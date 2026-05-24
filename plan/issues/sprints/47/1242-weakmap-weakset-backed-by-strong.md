@@ -1,10 +1,10 @@
 ---
 id: 1242
-sprint: 47
 title: "WeakMap / WeakSet backed by strong references (lodash memoize / cloneDeep)"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -12,9 +12,9 @@ task_type: feature
 area: codegen, runtime
 language_feature: WeakMap, WeakSet
 goal: spec-completeness
+sprint: 47
 related: [1101, 1103, 1283]
 ---
-
 ## Implementation note (2026-05-02, dev-1245)
 
 Split scope per tech-lead direction.

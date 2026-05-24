@@ -1,6 +1,5 @@
 ---
 id: 1005
-sprint: 42
 title: "Benchmark cold-start startup across Wasmtime, Wasm in Node.js, and native JS in Node.js"
 status: done
 created: 2026-04-09
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: test
 language_feature: benchmark-cold-start
 goal: ci-hardening
+sprint: 42
 es_edition: n/a
 ---
 # #1005 -- Benchmark cold-start startup across Wasmtime, Wasm in Node.js, and native JS in Node.js

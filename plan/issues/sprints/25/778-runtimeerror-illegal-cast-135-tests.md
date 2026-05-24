@@ -1,6 +1,5 @@
 ---
 id: 778
-sprint: 25
 title: "- RuntimeError: illegal cast (135 tests)"
 status: done
 created: 2026-03-23
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: crash-free
+sprint: 25
 test262_fail: 134
 ---
 # #778 -- RuntimeError: illegal cast (135 tests)

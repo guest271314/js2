@@ -1,6 +1,5 @@
 ---
 id: 737
-sprint: 24
 title: "- Undefined-handling edge cases (276 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: core-semantics
+sprint: 24
 test262_fail: 276
 files:
   src/codegen/expressions.ts:

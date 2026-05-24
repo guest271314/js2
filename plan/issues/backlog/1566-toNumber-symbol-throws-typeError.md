@@ -2,19 +2,20 @@
 id: 1566
 title: "ToNumber: Symbol argument must throw TypeError (§7.1.4)"
 status: done
-sprint: 55
+created: 2026-05-21
+updated: 2026-05-23
+completed: 2026-05-23
 priority: medium
 feasibility: easy
 reasoning_effort: low
-task_type: bug
+task_type: bugfix
 area: codegen
-goal: spec-completeness
-es_edition: ES2015
 language_feature: type-conversion
+goal: spec-completeness
+sprint: 55
+es_edition: ES2015
 test262_fail: 10
-created: 2026-05-21
 ---
-
 # ToNumber: Symbol argument must throw TypeError
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 979
-sprint: 40
 title: "Add site-nav to report page and align styling with landing page"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: 40
 depends_on: [976]
 ---
 # #979 — Report page: add nav bar + landing page styling

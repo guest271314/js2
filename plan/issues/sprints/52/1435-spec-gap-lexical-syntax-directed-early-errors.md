@@ -1,8 +1,7 @@
 ---
 id: 1435
-sprint: 52
 title: "spec gap: lexical grammar and syntax-directed early errors"
-status: in-review
+status: review
 created: 2026-05-11
 updated: 2026-05-11
 priority: medium
@@ -12,6 +11,7 @@ task_type: bugfix
 area: compiler
 language_feature: lexical-grammar, early-errors
 goal: spec-completeness
+sprint: 52
 related: [833, 990, 1315, 1390]
 ---
 # #1435 - Lexical grammar and syntax-directed early errors

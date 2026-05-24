@@ -1,6 +1,5 @@
 ---
 id: 653
-sprint: 0
 title: "Timeout epidemic: 6,715 tests (Temporal + statements)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: spec-completeness
+sprint: 0
 test262_fail: 6715
 files:
   tests/test262-runner.ts:

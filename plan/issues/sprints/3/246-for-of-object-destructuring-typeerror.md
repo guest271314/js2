@@ -1,12 +1,12 @@
 ---
 id: 246
-sprint: 3
 title: "Issue #246: For-of object destructuring -- TypeError on primitive coercion"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 3
 ---
 # Issue #246: For-of object destructuring -- TypeError on primitive coercion
 

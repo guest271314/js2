@@ -1,12 +1,12 @@
 ---
 id: 175
-sprint: 2
 title: "Bug: Negative zero not preserved in arithmetic operations"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #175 — Bug: Negative zero not preserved in arithmetic operations
 

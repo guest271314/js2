@@ -1,9 +1,10 @@
 ---
 id: 1386
-sprint: 51
 title: "HANG: Promise/race/invoke-then.js — compilation or runtime infinite loop"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: promise
 goal: spec-completeness
+sprint: 51
 related: 860
 ---
 # #1386 — Promise.race invoke-then hang

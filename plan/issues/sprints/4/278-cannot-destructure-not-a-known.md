@@ -1,6 +1,5 @@
 ---
 id: 278
-sprint: 4
 title: "Issue #278: Cannot destructure -- not a known struct type"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: core-semantics
+sprint: 4
 files:
   src/codegen/statements.ts:
     new: []

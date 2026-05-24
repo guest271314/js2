@@ -1,6 +1,5 @@
 ---
 id: 178
-sprint: 0
 title: "Wasm validation errors: type mismatches in emitted binary"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: compilable
+sprint: 0
 required_by: [315]
 files:
   src/codegen/index.ts:

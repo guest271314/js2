@@ -1,10 +1,10 @@
 ---
 id: 1310
-sprint: 50
 title: "vm.createContext sandbox isolation for test262 global contamination"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: test-infra
 area: runtime, tests
 language_feature: vm-sandbox, test262
 goal: test262-conformance
+sprint: 50
 related: [1160]
 ---
 # #1310 — vm.createContext sandbox isolation for test262 global contamination

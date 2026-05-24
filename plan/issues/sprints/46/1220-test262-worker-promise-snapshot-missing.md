@@ -1,6 +1,5 @@
 ---
 id: 1220
-sprint: 46
 title: "test262-worker: Promise snapshot missing + prototype poisoning leaks across fork tests (+29 conformance)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: ci
 language_feature: n/a
 goal: async-model
+sprint: 46
 es_edition: n/a
 related: []
 origin: "senior-promise-leaks investigation 2026-05-01 — test isolation bugs in scripts/test262-worker.mjs causing 29 false failures"

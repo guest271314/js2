@@ -1,6 +1,5 @@
 ---
 id: 769
-sprint: 26
 title: "- Missing RegExp_new import after lib.d.ts refactoring (~600 CE)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-22
 priority: critical
 feasibility: easy
 goal: compilable
+sprint: 26
 depends_on: [740]
 test262_ce: 600
 ---

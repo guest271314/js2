@@ -1,6 +1,5 @@
 ---
 id: 815
-sprint: 25
 title: "- Regression: -617 pass from patch-rescue commits"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: ci-hardening
+sprint: 25
 test262_fail: 617
 ---
 # #815 -- Regression: -617 pass from patch-rescue commits

@@ -1,6 +1,5 @@
 ---
 id: 1156
-sprint: 44
 title: "Array.prototype method-as-value called with non-function arg produces 'number N is not a function' (~164 tests)"
 status: done
 created: 2026-04-21
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: array-builtins
 goal: developer-experience
+sprint: 44
 depends_on: [1152]
 closed: 2026-04-23
 pr: 250

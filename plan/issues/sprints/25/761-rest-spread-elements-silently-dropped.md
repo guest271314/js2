@@ -1,6 +1,5 @@
 ---
 id: 761
-sprint: 25
 title: "- Rest/spread elements silently dropped in destructuring (5 codegen paths)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: iterator-protocol
+sprint: 25
 test262_fail: ~200
 files:
   src/codegen/statements.ts:

@@ -1,12 +1,12 @@
 ---
 id: 2
-sprint: 0
 title: "Issue 2: switch statements"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-27
 goal: core-semantics
+sprint: 0
 ---
 # Issue 2: switch statements
 

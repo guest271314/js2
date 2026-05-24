@@ -1,6 +1,5 @@
 ---
 id: 154
-sprint: 1
 title: "Issue #154: while/do-while loop condition evaluation"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: spec-completeness
+sprint: 1
 files:
   src/codegen/statements.ts:
     new: []

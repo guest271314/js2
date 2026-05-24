@@ -1,12 +1,13 @@
 ---
 id: 1569
 title: "#779 bucket decomposition — 2026-05-21"
-parent: 779
-status: analysis
+status: ready
 created: 2026-05-21
+updated: 2026-05-21
+sprint: Backlog
+parent: 779
 baseline: "benchmarks/results/test262-current.jsonl (21.5.2026 00:24)"
 ---
-
 # #779 Bucket Decomposition — 2026-05-21
 
 Baseline: `test262-current.jsonl` 21.5.2026 00:24. Filtering `scope_official=true, status=fail, error_category=assertion_fail`.

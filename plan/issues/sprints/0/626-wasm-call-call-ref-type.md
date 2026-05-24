@@ -1,6 +1,5 @@
 ---
 id: 626
-sprint: 0
 title: "Wasm call/call_ref type mismatch (378 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 0
 required_by: [659]
 test262_ce: 378
 files:

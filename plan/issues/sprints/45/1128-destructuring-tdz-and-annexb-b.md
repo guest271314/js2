@@ -1,6 +1,5 @@
 ---
 id: 1128
-sprint: 45
 title: "Destructuring TDZ and AnnexB B.3.3 function-in-block hoisting (≥211 tests)"
 status: done
 created: 2026-04-18
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
+sprint: 45
 ---
 # #1128 — Destructuring TDZ and AnnexB B.3.3 function-in-block hoisting (≥211 tests)
 

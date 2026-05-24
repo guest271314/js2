@@ -1,9 +1,9 @@
 ---
 id: 1473
-sprint: 55
 title: "host-independence: eliminate JS host error/exception ops for standalone Wasm"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,10 +11,10 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: exceptions, throw/try/catch
 goal: host-independence
+sprint: 55
 related: []
 note: "Line numbers verified against main 2026-05-21: __throw_type_error registration moved 2464→2527; destructuring-params.ts:148, calls.ts:5600, expressions.ts:269, identifiers.ts:28 all still valid"
 ---
-
 # #1473 — Eliminate JS host error/exception ops for standalone Wasm
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 575
-sprint: 0
 title: "Class statement tests all return 0 (651 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: class-system
+sprint: 0
 test262_fail: 651
 files:
   src/codegen/statements.ts:

@@ -1,9 +1,10 @@
 ---
 id: 1374
-sprint: 51
 title: "IR: string for-of and for-in through IR (removes legacy fallback for string iteration)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: iteration, strings
 goal: ir-full-coverage
+sprint: 51
 ---
 # #1374 — IR: string for-of and for-in
 

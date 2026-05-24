@@ -1,6 +1,5 @@
 ---
 id: 593
-sprint: 0
 title: "- Minor security/correctness fixes across emit + runtime"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: low
 feasibility: easy
 goal: class-system
+sprint: 0
 files:
   src/emit/wat.ts:
     new: [escapeWatString]

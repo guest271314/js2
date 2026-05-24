@@ -2,7 +2,6 @@
 id: 1616
 title: "Flatten issue files into a stable location; sprint membership via frontmatter only"
 status: ready
-sprint: 55
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
@@ -12,8 +11,8 @@ task_type: infrastructure
 area: tooling
 language_feature: n/a
 goal: process
+sprint: 55
 ---
-
 # Issue #1616 — Flatten issue files into a stable location; sprint membership via frontmatter only
 
 ## Problem

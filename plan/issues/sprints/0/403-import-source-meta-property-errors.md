@@ -1,6 +1,5 @@
 ---
 id: 403
-sprint: 0
 title: "import.source meta-property errors"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 test262_ce: 86
 files:
   src/codegen/expressions.ts:

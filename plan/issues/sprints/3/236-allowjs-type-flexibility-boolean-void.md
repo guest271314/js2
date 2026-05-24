@@ -1,12 +1,12 @@
 ---
 id: 236
-sprint: 3
 title: "Issue #236: allowJs type flexibility -- boolean/void/string as function arguments"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 3
 ---
 # Issue #236: allowJs type flexibility -- boolean/void/string as function arguments
 

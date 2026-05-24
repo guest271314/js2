@@ -1,6 +1,5 @@
 ---
 id: 172
-sprint: 1
 title: "Array.isArray edge case"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: builtin-methods
+sprint: 1
 depends_on: [171]
 files:
   tests/test262-runner.ts:

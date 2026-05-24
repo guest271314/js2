@@ -1,6 +1,5 @@
 ---
 id: 368
-sprint: 7
 title: "- Global/arrow `this` reference"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: core-semantics
+sprint: 7
 test262_skip: 13
 files:
   src/codegen/expressions.ts:

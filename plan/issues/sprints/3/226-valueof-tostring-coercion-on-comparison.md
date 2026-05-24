@@ -1,12 +1,12 @@
 ---
 id: 226
-sprint: 3
 title: "Issue #226: valueOf/toString coercion on comparison operators"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 3
 ---
 # Issue #226: valueOf/toString coercion on comparison operators
 

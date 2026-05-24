@@ -1,9 +1,10 @@
 ---
 id: 1368
-sprint: 51
 title: "spec gap: Promise.{all,allSettled,any,race} — resolver-element semantics, ctor type-check (~109 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: runtime, codegen
 language_feature: promises
 goal: spec-completeness
+sprint: 51
 ---
 # #1368 — Promise.{all,allSettled,any,race}: resolver-element + ctor type-check
 

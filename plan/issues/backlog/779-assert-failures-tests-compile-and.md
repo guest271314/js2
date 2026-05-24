@@ -8,6 +8,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 8674
 sprint_role: analysis-only
 ---

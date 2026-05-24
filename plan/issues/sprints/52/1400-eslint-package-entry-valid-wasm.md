@@ -1,18 +1,19 @@
 ---
 id: 1400
-sprint: 52
 title: "npm: compile ESLint package entry to valid Wasm"
 status: done
 created: 2026-05-11
 updated: 2026-05-20
+completed: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: high
 task_type: feature
 area: compiler, resolver, codegen
-es_edition: n/a
 language_feature: commonjs, package-exports, classes
 goal: npm-library-support
+sprint: 52
+es_edition: n/a
 related: [1075, 1277, 1279, 1282, 1287, 1289]
 ---
 # #1400 - Compile ESLint package entry to valid Wasm

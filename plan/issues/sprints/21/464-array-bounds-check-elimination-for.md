@@ -1,6 +1,5 @@
 ---
 id: 464
-sprint: 21
 title: "Array bounds check elimination for loops with known bounds"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: crash-free
+sprint: 21
 files:
   src/codegen/expressions.ts:
     breaking:

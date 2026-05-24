@@ -1,6 +1,5 @@
 ---
 id: 375
-sprint: 0
 title: "- Unsupported expression: SuperKeyword"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_ce: 5
 files:
   src/codegen/expressions.ts:

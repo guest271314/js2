@@ -1,6 +1,5 @@
 ---
 id: 272
-sprint: 4
 title: "Issue #272: WebAssembly type mismatch -- externref vs f64/i32 in compiled output"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: compilable
+sprint: 4
 files:
   src/codegen/expressions.ts:
     new: []

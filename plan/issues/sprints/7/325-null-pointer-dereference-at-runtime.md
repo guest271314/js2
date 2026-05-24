@@ -1,6 +1,5 @@
 ---
 id: 325
-sprint: 7
 title: "- Null pointer dereference at runtime"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: crash-free
+sprint: 7
 test262_fail: 32
 test262_refs:
   - test/language/expressions/assignment/dstr/obj-rest-non-string-computed-property-1dot.js

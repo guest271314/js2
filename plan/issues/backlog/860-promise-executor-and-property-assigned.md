@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: Backlog
 branch: issue-825-null-deref
 test262_fail: 1
 ---

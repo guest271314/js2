@@ -1,12 +1,12 @@
 ---
 id: 71
-sprint: 0
 title: "Issue 71: Fast mode — WasmGC-native strings"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-07
 goal: standalone-mode
+sprint: 0
 ---
 # Issue 71: Fast mode — WasmGC-native strings
 

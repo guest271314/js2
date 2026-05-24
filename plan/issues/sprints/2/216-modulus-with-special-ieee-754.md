@@ -1,12 +1,12 @@
 ---
 id: 216
-sprint: 2
 title: "Issue #216: Modulus with special IEEE 754 values"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: platform
+sprint: 2
 ---
 # Issue #216: Modulus with special IEEE 754 values
 

@@ -1,6 +1,5 @@
 ---
 id: 530
-sprint: 0
 title: "Unsupported call expression — remaining 1,745 CE"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: async-model
+sprint: 0
 ---
 # Unsupported call expression — remaining 1,745 CE
 

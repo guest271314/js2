@@ -9,11 +9,11 @@ feasibility: medium
 task_type: feature
 area: codegen
 language_feature: for-of, iterator-protocol
-es_edition: es2015
 goal: compiler-correctness
+sprint: Backlog
+es_edition: es2015
 test262_count: 13
 ---
-
 # #1610 — for-of over a non-array iterable is rejected at compile time
 
 ## Problem

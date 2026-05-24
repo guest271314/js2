@@ -1,6 +1,5 @@
 ---
 id: 703
-sprint: 0
 title: "Negative tests: strict-mode validation for ES-spec parse errors"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: medium
 goal: core-semantics
+sprint: 0
 ---
 # Issue #703: Negative tests -- strict-mode validation for ES-spec parse errors
 

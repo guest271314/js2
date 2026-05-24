@@ -1,6 +1,5 @@
 ---
 id: 1107
-sprint: 42
 title: "lodash-es Tier 1 E2E harness — identity, clamp, add compile and run"
 status: done
 created: 2026-04-12
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 42
 depends_on: [1074]
 required_by: [1108, 1109]
 ---

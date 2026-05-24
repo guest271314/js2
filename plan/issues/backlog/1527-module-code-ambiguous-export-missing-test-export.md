@@ -1,6 +1,5 @@
 ---
 id: 1527
-sprint: backlog
 title: "module-code: ambiguous-export & re-export tests fail with 'no test export'"
 status: backlog
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: medium
 task_type: bugfix
 area: compiler
 language_feature: modules, export-bindings, re-exports
+sprint: Backlog
 es_edition: ES2015+
 test262_category: language/module-code
 test262_count: 54
 related: [1357]
 ---
-
 # #1527 — Module-mode tests collapse with `no test export`
 
 ## Problem

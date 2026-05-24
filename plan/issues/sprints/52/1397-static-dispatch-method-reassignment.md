@@ -1,16 +1,18 @@
 ---
 id: 1397
-sprint: 52
 title: "codegen: static method dispatch ignores runtime property reassignment on typed receivers"
 status: done
 created: 2026-05-09
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: max
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: method-calls, property-assignment
 goal: spec-completeness
+sprint: 52
 ---
 # #1397 — Static method dispatch ignores runtime reassignment on typed receivers
 

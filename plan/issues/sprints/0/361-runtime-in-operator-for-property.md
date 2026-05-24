@@ -1,12 +1,12 @@
 ---
 id: 361
-sprint: 0
 title: "Runtime `in` operator for property checks"
 status: done
 created: 2026-03-13
 updated: 2026-04-14
 completed: 2026-03-16
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #361: Runtime `in` operator for property checks
 

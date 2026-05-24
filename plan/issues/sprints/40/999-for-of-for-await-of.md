@@ -1,6 +1,5 @@
 ---
 id: 999
-sprint: 40
 title: "for-of / for-await-of destructuring still emits f64↔externref and struct field mismatches (75 CE)"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 40
 test262_ce: 75
 ---
 # #999 -- for-of / for-await-of destructuring still emits f64↔externref and struct field mismatches (75 CE)

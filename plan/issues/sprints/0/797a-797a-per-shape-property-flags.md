@@ -1,6 +1,5 @@
 ---
 id: 797a
-sprint: 0
 title: "#797a -- Per-shape property flags table (compile-time)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: medium
 goal: property-model
+sprint: 0
 required_by: [797b, 797d]
 test262_fail: ~5000
 subtask_of: 797

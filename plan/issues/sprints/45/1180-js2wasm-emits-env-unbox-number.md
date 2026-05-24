@@ -1,6 +1,5 @@
 ---
 id: 1180
-sprint: 45
 title: "js2wasm emits `env::__unbox_number` (and sibling box/unbox helpers) host imports on `--target wasi` builds"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: number-boxing
 goal: compilable
+sprint: 45
 es_edition: n/a
 origin: surfaced as follow-up to #1173 during benchmark verification (2026-04-27)
 related: [1174, 1131, 1120, 1121]

@@ -1,12 +1,12 @@
 ---
 id: 111
-sprint: 1
 title: "Issue 111: Missing ES2015+ Math methods"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-11
 goal: npm-library-support
+sprint: 1
 ---
 # Issue 111: Missing ES2015+ Math methods
 

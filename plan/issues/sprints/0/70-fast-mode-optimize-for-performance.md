@@ -1,6 +1,5 @@
 ---
 id: 70
-sprint: 0
 title: "Issue 70: Fast mode — optimize for performance with restricted TypeScript"
 status: done
 created: 2026-03-03
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: core-semantics
+sprint: 0
 required_by: [74]
 files:
   src/compiler.ts:

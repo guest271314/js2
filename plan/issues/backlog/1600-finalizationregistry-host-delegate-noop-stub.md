@@ -3,14 +3,16 @@ id: 1600
 title: "FinalizationRegistry: host-delegate (JS mode) + no-op standalone stub (~12 CEs)"
 status: ready
 created: 2026-05-24
+updated: 2026-05-24
 priority: low
 feasibility: medium
 reasoning_effort: medium
 task_type: feature
-goal: npm-library-support
-related: [1101]
 area: codegen+runtime
 language_feature: FinalizationRegistry
+goal: npm-library-support
+sprint: Backlog
+related: [1101]
 es_edition: ES2021
 ---
 # #1600 — FinalizationRegistry: host-delegate + no-op standalone stub

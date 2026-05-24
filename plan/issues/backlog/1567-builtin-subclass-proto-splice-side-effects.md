@@ -1,17 +1,17 @@
 ---
 id: 1567
-title: Builtin subclass prototype splice leaks side effects (TypedArray length descriptor + RegExp brand)
+title: "Builtin subclass prototype splice leaks side effects (TypedArray length descriptor + RegExp brand)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 feasibility: hard
+sprint: Backlog
 owner: senior-developer
 type: fix
-created: 2026-05-21
 source: plan/issues/sprints/53/post-wave-regression-investigation.md
 blocks: []
-depends_on: []
 labels: [test262, regression, builtin-subclass]
 ---
-
 # #1567 — Builtin subclass proto splice leaks side effects
 
 ## Background

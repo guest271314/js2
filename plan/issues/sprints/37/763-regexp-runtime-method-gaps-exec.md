@@ -1,6 +1,5 @@
 ---
 id: 763
-sprint: 37
 title: "- RegExp runtime method gaps (exec, match, replace, split)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: builtin-methods
+sprint: 37
 test262_fail: ~400
 files:
   src/codegen/expressions.ts:

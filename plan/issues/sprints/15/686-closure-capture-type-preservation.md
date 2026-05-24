@@ -1,6 +1,5 @@
 ---
 id: 686
-sprint: 15
 title: "Closure capture type preservation"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: performance
+sprint: 15
 files:
   src/codegen/expressions.ts:
     breaking:

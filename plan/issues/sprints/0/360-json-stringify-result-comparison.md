@@ -1,6 +1,5 @@
 ---
 id: 360
-sprint: 0
 title: "- JSON.stringify result comparison"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: compilable
+sprint: 0
 test262_skip: 30
 files:
   src/codegen/expressions.ts:

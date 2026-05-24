@@ -1,6 +1,5 @@
 ---
 id: 484
-sprint: 0
 title: "Well-known Symbol.species for constructor delegation (52 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: async-model
+sprint: 0
 depends_on: [481]
 test262_skip: 52
 files:

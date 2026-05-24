@@ -1,9 +1,10 @@
 ---
 id: 1535
-sprint: 52
 title: "research: JS host dependency audit — identify gaps and evaluate standalone Wasm/JS replacements"
 status: done
 created: 2026-05-20
+updated: 2026-05-20
+completed: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +12,9 @@ task_type: research
 area: runtime
 language_feature: host-imports
 goal: standalone-wasm
+sprint: 52
 related: [1470, 1471, 1472, 1473, 1474]
 ---
-
 # #1535 — JS host dependency audit and standalone gap research
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 343
-sprint: 0
 title: "Narrow prototype chain skip filter in test262 runner"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #343: Narrow prototype chain skip filter
 

@@ -1,6 +1,5 @@
 ---
 id: 800
-sprint: 0
 title: "- Audit: replace runtime emulation with compile-time resolution"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 0
 required_by: [906]
 commit: 70e0d837, 4748538d, d8f3dfba
 ---

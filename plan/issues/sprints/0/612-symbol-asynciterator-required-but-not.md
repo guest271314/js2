@@ -1,6 +1,5 @@
 ---
 id: 612
-sprint: 0
 title: "Symbol.asyncIterator required but not implemented (367+ CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_ce: 367
 files:
   src/codegen/expressions.ts:

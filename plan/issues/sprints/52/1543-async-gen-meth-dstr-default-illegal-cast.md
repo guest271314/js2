@@ -3,17 +3,18 @@ id: 1543
 title: "Async-generator method with destructured default params throws illegal cast instead of expected error"
 status: ready
 created: 2026-05-20
-spec_done: 2026-05-20
-parent: 820
+updated: 2026-05-21
 priority: high
 feasibility: medium
 goal: test262-conformance
+sprint: 52
+parent: 820
+spec_done: 2026-05-20
 test262_fail: 74
 shares_fix_with: [1544]
 root_cause_doc: 1556
 note: "Line numbers verified against main 2026-05-21: literals.ts:447 (binding-element exclusion) and destructuring-params.ts:620 (default-value check) both confirmed present and unchanged"
 ---
-
 # #1543 — Async-gen-meth destructured default param → illegal cast
 
 ## Problem

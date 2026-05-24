@@ -1,9 +1,10 @@
 ---
 id: 1558
-sprint: 53
 title: "ESLint linter.js direct compile: Linter_verifyAndFix f64.eq missing i32→f64 coercion on call result"
 status: done
 created: 2026-05-20
+updated: 2026-05-21
+completed: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,11 +12,11 @@ task_type: bugfix
 area: codegen, type-coercion
 language_feature: equality, numeric-coercion, async
 goal: npm-library-support
+sprint: 53
 related: [1400, 1289, 1287, 1282]
 blocks: [eslint-tier-1d]
 note: "Verified 2026-05-21: BinaryExpression codegen lives in src/codegen/binary-ops.ts:173 (not expressions.ts); coerceType in type-coercion.ts"
 ---
-
 ## Resolution
 
 Root cause: `compileBinaryExpression` in `src/codegen/binary-ops.ts` had a

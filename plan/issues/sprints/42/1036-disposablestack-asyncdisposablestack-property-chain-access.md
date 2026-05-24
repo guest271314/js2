@@ -1,6 +1,5 @@
 ---
 id: 1036
-sprint: 42
 title: "DisposableStack/AsyncDisposableStack property-chain access produces Wasm null trap (94 FAIL)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: explicit-resource-management
 goal: crash-free
+sprint: 42
 es_edition: es2026
 test262_fail: 94
 ---

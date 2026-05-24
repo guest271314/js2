@@ -1,6 +1,5 @@
 ---
 id: 1531
-sprint: 52
 title: "JSX syntax is not parsed when compiling .tsx/.jsx input"
 status: ready
 created: 2026-05-20
@@ -8,15 +7,15 @@ updated: 2026-05-20
 priority: medium
 feasibility: easy
 reasoning_effort: low
-task_type: bug
+task_type: bugfix
 area: parser
-es_edition: n/a
 language_feature: jsx
 goal: npm-library-support
-depends_on: []
+sprint: 52
+required_by: [1540]
+es_edition: n/a
 note: "Verified 2026-05-21: checker/index.ts L276-277 has analyzeSource() ScriptKind logic (only handles .jsx but NOT .tsx — confirms bug); L357-361 has scriptKindFor() in project-level path which DOES handle .tsx/.jsx — fix needs to thread tsx detection into analyzeSource"
 ---
-
 # #1522 — JSX syntax is not parsed when compiling .tsx/.jsx input
 
 ## Problem

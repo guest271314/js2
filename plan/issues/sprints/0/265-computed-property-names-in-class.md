@@ -1,6 +1,5 @@
 ---
 id: 265
-sprint: 0
 title: "Issue #265: Computed property names in class declarations (TypeScript diagnostic)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: test-infrastructure
+sprint: 0
 required_by: [173]
 files:
   src/compiler.ts:

@@ -1,6 +1,5 @@
 ---
 id: 724
-sprint: 26
 title: "Object.defineProperty: throw TypeError for invalid operations (150 FAIL)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 26
 test262_fail: 150
 files:
   src/codegen/expressions.ts:

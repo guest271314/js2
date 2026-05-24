@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: platform
+sprint: Backlog
 depends_on: [578]
 files:
   src/codegen/index.ts:

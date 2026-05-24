@@ -1,10 +1,10 @@
 ---
 id: 1296
-sprint: 49
 title: "Dogfood: compile dashboard/landing page JS to Wasm using js2wasm"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: feature
 area: compiler
 language_feature: dom-host-imports
 goal: compilable
+sprint: 49
 depends_on: [1045]
 related: [1033]
 ---

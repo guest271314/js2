@@ -1,6 +1,5 @@
 ---
 id: 549
-sprint: 0
 title: "Security: playground path traversal via symlinks"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: developer-experience
+sprint: 0
 ---
 # Issue #549: Security — playground path traversal via symlinks
 

@@ -1,16 +1,18 @@
 ---
 id: 1621
-renumbered_from: 1392
-sprint: 52
 title: "infra: refresh:benchmarks hangs in browser runtime Playwright eval"
 status: done
 created: 2026-05-08
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
-task_type: infra
+task_type: infrastructure
 area: benchmarks
 goal: developer-experience
+sprint: 52
+renumbered_from: 1392
 ---
 # #1392 — refresh:benchmarks hangs in browser runtime Playwright eval
 

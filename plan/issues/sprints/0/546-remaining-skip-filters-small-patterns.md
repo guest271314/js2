@@ -1,6 +1,5 @@
 ---
 id: 546
-sprint: 0
 title: "Remaining skip filters: small patterns (460 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: varies
 goal: core-semantics
+sprint: 0
 test262_skip: 460
 files:
   tests/test262-runner.ts:

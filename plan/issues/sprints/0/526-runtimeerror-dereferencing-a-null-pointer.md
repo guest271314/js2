@@ -1,6 +1,5 @@
 ---
 id: 526
-sprint: 0
 title: "RuntimeError: dereferencing a null pointer (129 FAIL)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_fail: 129
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 602
-sprint: 0
 title: "- Tail call optimization: emit return_call for recursive functions"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: easy
 goal: compilable
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

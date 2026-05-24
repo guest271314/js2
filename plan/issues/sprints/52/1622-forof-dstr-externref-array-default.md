@@ -1,10 +1,10 @@
 ---
 id: 1622
-renumbered_from: 1396
-sprint: 52
 title: "for-of/dstr + assignment/dstr default initializers don't fire on OOB extenref-array reads"
 status: done
 created: 2026-05-09
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, iteration
 goal: spec-completeness
+sprint: 52
+renumbered_from: 1396
 ---
 # #1396 — Destructuring defaults skipped for OOB extern-array reads
 

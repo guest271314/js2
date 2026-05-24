@@ -1,6 +1,5 @@
 ---
 id: 935
-sprint: 36
 title: "Add String.fromCodePoint() static method"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: standalone-mode
+sprint: 36
 required_by: [940]
 tags: [good-first-issue, codegen, string]
 files:

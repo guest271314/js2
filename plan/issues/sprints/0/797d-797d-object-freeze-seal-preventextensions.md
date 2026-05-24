@@ -1,6 +1,5 @@
 ---
 id: 797d
-sprint: 0
 title: "#797d -- Object.freeze/seal/preventExtensions compile-away"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 depends_on: [797a]
 subtask_of: 797
 commit: 2c91aa49

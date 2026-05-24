@@ -1,6 +1,5 @@
 ---
 id: 262
-sprint: 0
 title: "Issue #262: Argument type assignability -- allowJs flexibility for test262"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: iterator-protocol
+sprint: 0
 files:
   src/compiler.ts:
     new: []

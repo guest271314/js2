@@ -1,6 +1,5 @@
 ---
 id: 794
-sprint: 0
 title: "- BindingElement null guard over-triggering in destructuring (537 fail)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 0
 required_by: [801]
 test262_fail: 537
 commit: d85ec591

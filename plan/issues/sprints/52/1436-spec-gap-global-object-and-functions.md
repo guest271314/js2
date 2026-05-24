@@ -1,8 +1,7 @@
 ---
 id: 1436
-sprint: 52
 title: "spec gap: global object descriptors and global function coercion/URI semantics"
-status: in-review
+status: review
 created: 2026-05-11
 updated: 2026-05-11
 priority: medium
@@ -12,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: global-object
 goal: spec-completeness
+sprint: 52
 related: [1006, 1066, 1073, 1129, 1319, 1434]
 ---
 # #1436 - Global object descriptors and global function coercion/URI semantics

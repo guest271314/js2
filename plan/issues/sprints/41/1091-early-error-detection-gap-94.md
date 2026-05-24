@@ -1,6 +1,5 @@
 ---
 id: 1091
-sprint: 41
 title: "Early error detection gap — 94 tests compile when they should throw SyntaxError"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: early-errors
 goal: test-infrastructure
+sprint: 41
 es_edition: multi
 ---
 # #1091 — Early error detection: 94 tests compile when they should throw SyntaxError

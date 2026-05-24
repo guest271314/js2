@@ -1,6 +1,5 @@
 ---
 id: 300
-sprint: 0
 title: "Issue #300: Runtime failures -- object to primitive conversion"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: high
 goal: error-model
+sprint: 0
 depends_on: [138, 139]
 files:
   src/codegen/expressions.ts:

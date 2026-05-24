@@ -1,6 +1,5 @@
 ---
 id: 1164
-sprint: 45
 title: "Dynamic eval via JS host import — compile eval string to ad-hoc Wasm module (~416 tests)"
 status: done
 created: 2026-04-22
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: eval
 goal: spec-completeness
+sprint: 45
 depends_on: [1163]
 required_by: [1066, 1165]
 ---

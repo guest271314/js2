@@ -1,6 +1,5 @@
 ---
 id: 139
-sprint: 0
 title: "Issue #139: valueOf/toString coercion on arithmetic operators"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 required_by: [300]
 files:
   src/codegen/expressions.ts:

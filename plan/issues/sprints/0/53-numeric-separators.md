@@ -1,12 +1,12 @@
 ---
 id: 53
-sprint: 0
 title: "Issue 53: Numeric separators"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: compilable
+sprint: 0
 ---
 # Issue 53: Numeric separators
 

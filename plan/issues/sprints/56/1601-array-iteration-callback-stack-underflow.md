@@ -1,21 +1,20 @@
 ---
 id: 1601
-sprint: 56
 title: "codegen: Array.prototype reduce/reduceRight/map/filter callback paths emit invalid wasm (stack underflow at local.set/if/array.set)"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: array-iteration-methods
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 156
 related: [1522]
 ---
-
 # #1601 — Array iteration methods emit stack-underflow wasm in callback path
 
 ## Problem

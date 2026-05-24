@@ -1,6 +1,5 @@
 ---
 id: 913
-sprint: 39
 title: "Split compiler.ts into validation, orchestration, and output modules"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 39
 files:
   src/compiler.ts:
     modify:

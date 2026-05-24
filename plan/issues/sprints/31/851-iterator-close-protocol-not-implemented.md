@@ -1,6 +1,5 @@
 ---
 id: 851
-sprint: 31
 title: "Iterator close protocol not implemented (147 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 31
 test262_fail: 147
 ---
 # #851 -- Iterator close protocol not implemented (147 tests)

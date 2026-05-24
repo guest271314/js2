@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: architectural
 language_feature: async-functions
 goal: async-model
+sprint: Backlog
 es_edition: es2017
 note: "Verified 2026-05-21: function-body.ts isAsync/effectiveRetType drifted from L127-130 to L567-569; wrapAsyncReturn from expressions.ts:163 → L184"
 ---

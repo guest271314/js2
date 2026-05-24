@@ -1,6 +1,5 @@
 ---
 id: 412
-sprint: 9
 title: "Yield outside generator -- generator function body not recognized"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 9
 test262_ce: 166
 complexity: M
 files:

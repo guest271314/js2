@@ -1,10 +1,10 @@
 ---
 id: 1200
-sprint: 48
 title: "perf: loop-invariant code motion in optimizer pass (hoist `arr.length` etc. out of `for` conditions)"
 status: done
 created: 2026-04-27
 updated: 2026-04-27
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: performance
+sprint: 48
 es_edition: n/a
 related: [1126, 1179, 1195, 1196, 1197, 1198, 1199]
 origin: 2026-04-27 array-sum perf analysis — Tier 2 #5. Wasm-opt likely already does some of this with -O; verify and document, then add what it doesn't catch.

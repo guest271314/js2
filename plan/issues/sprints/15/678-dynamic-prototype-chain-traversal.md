@@ -1,6 +1,5 @@
 ---
 id: 678
-sprint: 15
 title: "Dynamic prototype chain traversal"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: property-model
+sprint: 15
 depends_on: [631]
 required_by: [729, 732, 738]
 test262_fail: 625

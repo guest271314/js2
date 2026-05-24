@@ -1,6 +1,5 @@
 ---
 id: 1147
-sprint: 45
 title: "Add a public Docs page to the site"
 status: ready
 created: 2026-04-20
@@ -11,6 +10,7 @@ reasoning_effort: medium
 task_type: feature
 language_feature: n/a
 goal: platform
+sprint: 45
 es_edition: n/a
 ---
 # #1147 -- Add a public Docs page to the site

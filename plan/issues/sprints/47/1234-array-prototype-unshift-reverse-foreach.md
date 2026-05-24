@@ -1,6 +1,5 @@
 ---
 id: 1234
-sprint: 47
 title: "Array.prototype.{unshift,reverse,forEach,…} on non-Array receivers iterate [0, length) instead of defined props"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: ci-hardening
+sprint: 47
 related: [1207, 1227]
 es_edition: ES5
 test262_fail: 2

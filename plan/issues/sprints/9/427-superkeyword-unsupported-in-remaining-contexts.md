@@ -1,6 +1,5 @@
 ---
 id: 427
-sprint: 9
 title: "SuperKeyword unsupported in remaining contexts (11 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: compilable
+sprint: 9
 files:
   src/codegen/expressions.ts:
     new: []

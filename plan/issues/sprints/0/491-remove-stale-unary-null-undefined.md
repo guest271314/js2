@@ -1,6 +1,5 @@
 ---
 id: 491
-sprint: 0
 title: "Remove stale unary +/- null/undefined skip filter (480 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: maintainability
+sprint: 0
 test262_skip: 480
 files:
   src/codegen/expressions.ts:

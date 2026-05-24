@@ -1,9 +1,10 @@
 ---
 id: 1370
-sprint: 51
 title: "IR: claim class methods and constructors (largest legacy bypass)"
 status: done
 created: 2026-05-08
+updated: 2026-05-20
+completed: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: classes
 goal: ir-full-coverage
+sprint: 51
 ---
 # #1370 — IR: claim class methods and constructors
 

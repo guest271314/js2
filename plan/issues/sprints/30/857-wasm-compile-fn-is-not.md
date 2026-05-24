@@ -1,6 +1,5 @@
 ---
 id: 857
-sprint: 30
 title: "wasm_compile: 'fn is not a function' in Array callback methods (247 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 30
 test262_fail: 247
 ---
 # #857 -- wasm_compile: "fn is not a function" in Array callback methods (247 tests)

@@ -3,14 +3,15 @@ id: 1562
 title: "Architect audit: review all open issues for codebase consistency — update stale line numbers, function names, and file paths"
 status: ready
 created: 2026-05-21
+updated: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: max
 task_type: maintenance
 area: planning
 goal: maintainability
+sprint: Backlog
 ---
-
 # #1562 — Issue audit: cross-reference open issues against current codebase
 
 ## Motivation

@@ -1,12 +1,12 @@
 ---
 id: 101
-sprint: 1
 title: "Issue 101: Test262 — language/statements remaining"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: async-model
+sprint: 1
 ---
 # Issue 101: Test262 — language/statements remaining
 

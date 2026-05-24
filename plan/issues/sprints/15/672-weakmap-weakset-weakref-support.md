@@ -1,6 +1,5 @@
 ---
 id: 672
-sprint: 15
 title: "WeakMap, WeakSet, WeakRef support"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 15
 test262_fail: 580
 files:
   src/codegen/expressions.ts:

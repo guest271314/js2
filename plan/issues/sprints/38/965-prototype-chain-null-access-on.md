@@ -1,6 +1,5 @@
 ---
 id: 965
-sprint: 38
 title: "Prototype chain null access on static methods (71 tests) and broken Array methods (28 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: 38
 ---
 # #965 — Prototype chain null access + broken Array methods
 

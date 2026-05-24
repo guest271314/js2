@@ -1,6 +1,5 @@
 ---
 id: 420
-sprint: 9
 title: "Cannot destructure non-array types (34 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 9
 test262_ce: 34
 files:
   src/codegen/expressions.ts:

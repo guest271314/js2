@@ -1,6 +1,5 @@
 ---
 id: 522
-sprint: 0
 title: "Object.keys() requires struct type argument (43 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: contributor-readiness
+sprint: 0
 test262_ce: 43
 files:
   src/codegen/expressions.ts:

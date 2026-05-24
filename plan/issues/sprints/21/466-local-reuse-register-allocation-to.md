@@ -1,6 +1,5 @@
 ---
 id: 466
-sprint: 21
 title: "Local reuse / register allocation to reduce local section bloat"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: core-semantics
+sprint: 21
 files:
   src/codegen/index.ts:
     breaking:

@@ -11,6 +11,7 @@ task_type: feature
 area: codegen, cli
 language_feature: eval
 goal: performance
+sprint: Backlog
 depends_on: [1264]
 ---
 # #1266 — `--no-eval-scope-write`: opt-in TypeError for eval scope mutations

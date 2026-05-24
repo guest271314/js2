@@ -1,6 +1,5 @@
 ---
 id: 474
-sprint: 21
 title: "delete operator support (229 skipped tests)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: test-infrastructure
+sprint: 21
 ---
 # #474 -- delete operator support
 

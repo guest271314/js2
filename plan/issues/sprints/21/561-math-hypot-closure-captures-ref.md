@@ -1,6 +1,5 @@
 ---
 id: 561
-sprint: 21
 title: "Math.hypot closure captures ref instead of f64 (1 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 21
 test262_ce: 1
 files:
   src/codegen/expressions.ts:

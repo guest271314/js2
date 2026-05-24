@@ -1,6 +1,5 @@
 ---
 id: 677
-sprint: 0
 title: "Full property descriptor support (writable/enumerable/configurable)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: error-model
+sprint: 0
 depends_on: [1113]
 test262_fail: 1000
 files:

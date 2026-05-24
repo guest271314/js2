@@ -4,10 +4,12 @@ title: "Extract increment/decrement from expressions/unary.ts → unary-updates.
 status: done
 created: 2026-03-26
 updated: 2026-05-21
+completed: 2026-05-21
 priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: maintainability
+sprint: 53
 subtask_of: 688
 ---
 # #806 — Extract increment/decrement → unary-updates.ts

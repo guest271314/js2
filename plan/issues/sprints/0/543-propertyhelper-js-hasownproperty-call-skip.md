@@ -1,6 +1,5 @@
 ---
 id: 543
-sprint: 0
 title: "propertyHelper.js + hasOwnProperty.call skip filters (1,294 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: property-model
+sprint: 0
 test262_skip: 1294
 files:
   tests/test262-runner.ts:

@@ -1,10 +1,10 @@
 ---
 id: 1292
-sprint: 48
 title: "lodash Tier 2 stress test — memoize, flow, partial application"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: npm-package-imports, closures, higher-order-functions
 goal: npm-library-support
+sprint: 48
 depends_on: [1291]
 related: [1278, 1276, 1279]
 ---

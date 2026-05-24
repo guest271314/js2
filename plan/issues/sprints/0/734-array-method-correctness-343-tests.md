@@ -1,6 +1,5 @@
 ---
 id: 734
-sprint: 0
 title: "- Array method correctness (343 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: medium
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_fail: 343
 files:
   src/codegen/array-methods.ts:

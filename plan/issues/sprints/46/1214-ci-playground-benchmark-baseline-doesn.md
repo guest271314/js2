@@ -1,6 +1,5 @@
 ---
 id: 1214
-sprint: 46
 title: "ci: playground benchmark baseline doesn't survive on CI runners — wasm/js timing 4x off committed numbers"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: infrastructure
 area: ci
 language_feature: n/a
 goal: ci-hardening
+sprint: 46
 required_by: [1216]
 pr: 108
 es_edition: n/a

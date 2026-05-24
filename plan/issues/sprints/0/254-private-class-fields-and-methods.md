@@ -1,6 +1,5 @@
 ---
 id: 254
-sprint: 0
 title: "Issue #254: Private class fields and methods (#field)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: class-system
+sprint: 0
 files:
   src/compiler.ts:
     new: []

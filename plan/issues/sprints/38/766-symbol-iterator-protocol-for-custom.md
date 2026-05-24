@@ -1,6 +1,5 @@
 ---
 id: 766
-sprint: 38
 title: "- Symbol.iterator protocol for custom iterables"
 status: done
 created: 2026-03-23
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: iterator-protocol
+sprint: 38
 test262_fail: ~500
 files:
   src/codegen/expressions.ts:

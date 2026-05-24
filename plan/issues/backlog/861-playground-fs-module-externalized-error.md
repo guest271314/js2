@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: performance
+sprint: Backlog
 required_by: [867, 870, 871]
 ---
 # #861 -- Playground: fs module externalized for browser compatibility

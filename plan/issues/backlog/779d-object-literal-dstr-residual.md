@@ -2,19 +2,20 @@
 id: 779d
 title: "Object-literal destructuring (non-class, non-for-of) residuals (~132 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: codegen
+language_feature: object-destructuring
 goal: property-model
+sprint: Backlog
 parent: 779
 es_edition: ES2018
-language_feature: object-destructuring
 test262_fail: 132
-created: 2026-05-21
 ---
-
 # #779d — Object-literal destructuring residuals
 
 ## Problem

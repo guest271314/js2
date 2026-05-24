@@ -1,6 +1,5 @@
 ---
 id: 664
-sprint: 0
 title: "Use source maps for runtime error line numbers in test262 report"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: easy
 goal: crash-free
+sprint: 0
 files:
   tests/test262-runner.ts:
     breaking:

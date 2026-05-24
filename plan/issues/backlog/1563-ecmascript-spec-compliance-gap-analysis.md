@@ -3,15 +3,16 @@ id: 1563
 title: "Architect: compare compiler codebase against ECMAScript spec — identify compliance gaps"
 status: ready
 created: 2026-05-21
+updated: 2026-05-21
 priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: research+architecture
 area: spec-compliance
 goal: spec-completeness
+sprint: Backlog
 related: [779, 820, 1042, 1116, 1151]
 ---
-
 # #1563 — ECMAScript spec compliance gap analysis
 
 ## Motivation

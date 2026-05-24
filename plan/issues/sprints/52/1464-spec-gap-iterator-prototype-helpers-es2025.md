@@ -1,9 +1,9 @@
 ---
 id: 1464
-sprint: 52
 title: "spec gap: Iterator.prototype helpers + Iterator.zip / Iterator.concat (ES2025)"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: iterator-helpers
 goal: spec-completeness
+sprint: 52
 related: [1367]
 ---
 # #1464 - spec gap: Iterator.prototype helpers + Iterator.zip / Iterator.concat (ES2025)

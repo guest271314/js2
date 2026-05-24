@@ -1,6 +1,5 @@
 ---
 id: 598
-sprint: 0
 title: "Typed export signatures: avoid externref at module boundary"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: performance
+sprint: 0
 required_by: [600]
 files:
   src/codegen/index.ts:

@@ -1,6 +1,5 @@
 ---
 id: 928
-sprint: 0
 title: "Unknown failure tests with empty error message (209 FAIL)"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 0
 parent: 779
 test262_fail: 209
 ---

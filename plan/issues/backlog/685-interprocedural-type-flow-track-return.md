@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: performance
+sprint: Backlog
 files:
   src/codegen/index.ts:
     new:

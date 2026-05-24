@@ -1,6 +1,5 @@
 ---
 id: 332
-sprint: 7
 title: "- Export declaration at top level errors"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: low
 goal: standalone-mode
+sprint: 7
 test262_ce: 17
 test262_refs:
   - test/language/expressions/dynamic-import/assignment-expression/module-code-other_FIXTURE.js

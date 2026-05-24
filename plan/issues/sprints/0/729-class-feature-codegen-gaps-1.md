@@ -1,6 +1,5 @@
 ---
 id: 729
-sprint: 0
 title: "- Class feature codegen gaps (1,161 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: high
 feasibility: hard
 goal: class-system
+sprint: 0
 depends_on: [678]
 test262_fail: 1161
 files:

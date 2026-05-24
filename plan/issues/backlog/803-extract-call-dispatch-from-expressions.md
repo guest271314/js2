@@ -8,6 +8,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: maintainability
+sprint: Backlog
 subtask_of: 688
 ---
 # #803 — Extract call dispatch from expressions.ts → calls.ts

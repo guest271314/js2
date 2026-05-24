@@ -1,6 +1,5 @@
 ---
 id: 298
-sprint: 0
 title: "Issue #298: Runtime failures -- function statement edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: test-infrastructure
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

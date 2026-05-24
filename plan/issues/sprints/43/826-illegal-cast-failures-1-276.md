@@ -1,6 +1,5 @@
 ---
 id: 826
-sprint: 43
 title: "Illegal cast failures (1,276 runtime failures)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: 43
 parent: 820
 test262_fail: 1276
 ---

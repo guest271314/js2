@@ -1,6 +1,5 @@
 ---
 id: 1056
-sprint: 41
 title: "DataView setUintN / setIntN / setFloatN instance methods missing"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: 41
 es_edition: multi
 ---
 # #1056 — DataView setUintN / setIntN / setFloatN instance methods missing

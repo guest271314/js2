@@ -1,6 +1,5 @@
 ---
 id: 744
-sprint: 45
 title: "Function monomorphization for polymorphic call sites"
 status: ready
 created: 2026-03-21
@@ -12,6 +11,7 @@ task_type: performance
 area: codegen
 language_feature: monomorphization
 goal: performance
+sprint: 45
 depends_on: [743, 1124]
 files:
   src/codegen/index.ts:

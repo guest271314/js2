@@ -3,17 +3,18 @@ id: 1618
 title: "wasi: console.log of a runtime string emits corrupted [object] placeholder"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: wasi, codegen
 language_feature: stdout, string
 goal: wasi-completeness
-related: [1530, 1480]
+sprint: Backlog
 parent: 1530
+related: [1530, 1480]
 ---
-
 ## Problem
 
 Under `--target wasi`, `console.log` of a **non-literal string** (a variable,

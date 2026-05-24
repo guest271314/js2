@@ -1,6 +1,5 @@
 ---
 id: 875
-sprint: 0
 title: "Research: ES standard support matrix for all JS-to-Wasm engines"
 status: done
 created: 2026-03-30
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: async-model
+sprint: 0
 ---
 # Research: ES standard support matrix for all JS-to-Wasm engines
 

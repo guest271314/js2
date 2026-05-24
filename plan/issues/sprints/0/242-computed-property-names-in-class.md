@@ -1,6 +1,5 @@
 ---
 id: 242
-sprint: 0
 title: "Issue #242: Computed property names in class declarations (remaining 57 errors)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: compilable
+sprint: 0
 required_by: [173]
 files:
   src/compiler.ts:

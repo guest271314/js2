@@ -2,7 +2,6 @@
 id: 1245
 title: "Investigate #1177 Stage 1 regressions — 59 compile_timeouts + 81 real regressions in PR#125"
 status: done
-sprint: 47
 created: 2026-05-02
 updated: 2026-05-02
 completed: 2026-05-02
@@ -13,11 +12,10 @@ task_type: investigation
 area: codegen
 language_feature: closures, TDZ
 goal: test262-conformance
-depends_on: []
+sprint: 47
 related: [1177, 1205, 1223, 1258, 1259, 1260]
 pr: 155
 ---
-
 ## Outcome (2026-05-02 close)
 
 Investigation closed as **done** — deliverable is the 252-line writeup below

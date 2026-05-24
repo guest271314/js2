@@ -1,6 +1,5 @@
 ---
 id: 663
-sprint: 0
 title: "- Null pointer dereferences from missing property access (2,050 FAIL)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: crash-free
+sprint: 0
 depends_on: [647]
 test262_fail: 2050
 files:

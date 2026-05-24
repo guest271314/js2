@@ -1,11 +1,10 @@
 ---
 id: 1250
-sprint: 47
 title: "logical assignment operators: ||=, &&=, ??= (ES2021)"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -13,10 +12,10 @@ task_type: feature
 area: codegen
 language_feature: operators, logical-assignment
 goal: npm-library-support
+sprint: 47
 es_edition: ES2021
 related: [1244]
 ---
-
 ## Investigation finding (2026-05-02, dev-1245)
 
 **The operators are already implemented.** Smoke-testing on `origin/main`

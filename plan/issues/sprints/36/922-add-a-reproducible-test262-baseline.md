@@ -1,6 +1,5 @@
 ---
 id: 922
-sprint: 36
 title: "Add a reproducible test262 baseline-diff workflow so regressions are compared against current clean HEAD"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: test-infrastructure
+sprint: 36
 files:
   scripts/:
     modify:

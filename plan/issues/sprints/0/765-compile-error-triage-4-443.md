@@ -1,6 +1,5 @@
 ---
 id: 765
-sprint: 0
 title: "- Compile error triage: 4,443 remaining CEs by pattern"
 status: done
 created: 2026-03-23
@@ -9,6 +8,7 @@ completed: 2026-03-23
 priority: critical
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_ce: 4443
 ---
 # #765 -- Compile error triage: 4,443 remaining CEs by pattern

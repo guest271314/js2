@@ -8,10 +8,10 @@ priority: medium
 feasibility: hard
 reasoning_effort: high
 goal: compiler-architecture
+sprint: Backlog
 related: [1058, 1059, 1042, 1044, 1046]
 labels: [stress-test, self-host, typescript, survey]
 ---
-
 # TypeScript self-host Tier 0 survey
 
 ## What this is

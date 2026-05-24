@@ -1,14 +1,15 @@
 ---
 id: 859
-sprint: 50
 title: "Map.forEach callback captures are immutable snapshots -- causes infinite loop on mutation during iteration"
 status: done
 created: 2026-03-28
 updated: 2026-05-07
+completed: 2026-05-07
 priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 50
 test262_fail: 1
 ---
 # #859 -- Map.forEach callback captures are immutable snapshots -- causes infinite loop on mutation during iteration

@@ -1,9 +1,9 @@
 ---
 id: 1378
-sprint: 51
 title: "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)"
 status: in-progress
 created: 2026-05-08
+updated: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: control-flow
 goal: spec-completeness
+sprint: 51
 ---
 # #1378 — try/catch/finally: completion values + error type fidelity
 

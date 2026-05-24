@@ -1,6 +1,5 @@
 ---
 id: 754
-sprint: 17
 title: "- RegExp_new import not registered from real TypeScript lib files (1,468 CE)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: compilable
+sprint: 17
 test262_ce: 1468
 ---
 # #754 -- RegExp_new import not registered from real TypeScript lib files (1,468 CE)

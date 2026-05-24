@@ -1,6 +1,5 @@
 ---
 id: 338
-sprint: 7
 title: "- Negative test support in test262 runner"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: 7
 test262_skip: 3317
 test262_fail: 393
 test262_categories:

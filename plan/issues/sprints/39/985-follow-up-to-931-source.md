@@ -1,6 +1,5 @@
 ---
 id: 985
-sprint: 39
 title: "Follow-up to #931: source-anchored locations for compiler catch paths"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: performance
+sprint: 39
 depends_on: [931]
 merged: 2026-04-06
 ---

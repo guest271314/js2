@@ -1,9 +1,7 @@
 ---
 id: 1364
-sprint: 52
 title: "spec gap: class elements — method/field descriptor enumerable/configurable/writable (~700 fails)"
 status: done
-worktree: /workspace/.claude/worktrees/issue-1364-class-element-descriptors
 created: 2026-05-08
 updated: 2026-05-20
 completed: 2026-05-20
@@ -14,7 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: classes
 goal: spec-completeness
+sprint: 52
 parent: 1334
+worktree: /workspace/.claude/worktrees/issue-1364-class-element-descriptors
 ---
 # #1364 — Class element descriptors (verifyProperty fails)
 

@@ -1,6 +1,5 @@
 ---
 id: 619
-sprint: 0
 title: "Residual undefined .kind crashes after null guard (4,230 CE)"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: compilable
+sprint: 0
 required_by: [646]
 ---
 # Issue #619: Residual undefined .kind crashes after null guard

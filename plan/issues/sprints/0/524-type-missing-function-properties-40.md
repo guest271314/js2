@@ -1,6 +1,5 @@
 ---
 id: 524
-sprint: 0
 title: "Type '{}' missing Function properties (40 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: contributor-readiness
+sprint: 0
 test262_ce: 40
 files:
   src/codegen/expressions.ts:

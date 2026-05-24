@@ -1,10 +1,10 @@
 ---
 id: 1373
-sprint: 52
 title: "IR: claim async functions (async/await through IR path)"
 status: done
 created: 2026-05-08
-closed: 2026-05-20
+updated: 2026-05-21
+completed: 2026-05-21
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -12,6 +12,8 @@ task_type: feature
 area: ir, codegen
 language_feature: async
 goal: ir-full-coverage
+sprint: 52
+closed: 2026-05-20
 ---
 # #1373 — IR: async function support
 

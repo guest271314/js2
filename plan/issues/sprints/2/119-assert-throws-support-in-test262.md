@@ -1,12 +1,12 @@
 ---
 id: 119
-sprint: 2
 title: "Issue 119: assert.throws support in test262 harness"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: error-model
+sprint: 2
 ---
 # Issue 119: assert.throws support in test262 harness
 

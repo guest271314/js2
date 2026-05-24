@@ -1,6 +1,5 @@
 ---
 id: 812
-sprint: 0
 title: "- Test262Error 'no dependency provided for extern class' (801 tests)"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: easy
 goal: error-model
+sprint: 0
 test262_fail: 801
 ---
 # #812 -- Test262Error "no dependency provided for extern class" (801 tests)

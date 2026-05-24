@@ -1,6 +1,5 @@
 ---
 id: 1253
-sprint: 47
 title: "OrdinaryToPrimitive returns undefined instead of throwing TypeError (§7.1.1.1 step 6)"
 status: done
 created: 2026-04-17
@@ -11,6 +10,7 @@ feasibility: easy
 task_type: bugfix
 language_feature: type-coercion
 goal: error-model
+sprint: 47
 depends_on: [1090]
 es_edition: es5
 found_by: "#1093 Phase 1 audit"

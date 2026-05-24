@@ -1,6 +1,5 @@
 ---
 id: 559
-sprint: 21
 title: "Addition/subtraction result not coerced to externref before call (10 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 21
 test262_ce: 10
 files:
   src/codegen/expressions.ts:

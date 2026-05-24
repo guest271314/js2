@@ -1,6 +1,5 @@
 ---
 id: 673
-sprint: 15
 title: "Reflect API support via compile-time rewrites"
 status: done
 created: 2026-03-20
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: medium
 goal: property-model
+sprint: 15
 ---
 # Reflect API support via compile-time rewrites
 

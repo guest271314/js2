@@ -1,6 +1,5 @@
 ---
 id: 1167
-sprint: 44
 title: "SSA IR Phase 3 — optimization passes (meta issue — see 1167a/b/c)"
 status: ready
 created: 2026-04-22
@@ -12,6 +11,7 @@ task_type: meta
 area: codegen
 language_feature: compiler-internals
 goal: compiler-architecture
+sprint: 44
 depends_on: [1131, 1166]
 ---
 # #1167 — SSA IR Phase 3: optimization passes (meta)

@@ -8,6 +8,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: Backlog
 depends_on: [861]
 ---
 # #871 -- Playground: default example throws WebAssembly.Exception

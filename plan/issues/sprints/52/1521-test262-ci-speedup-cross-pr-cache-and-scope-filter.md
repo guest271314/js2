@@ -2,12 +2,14 @@
 id: 1521
 title: "test262 CI speedup: cross-PR cache sharing + path-scoped test selection"
 status: done
+created: 2026-05-20
+updated: 2026-05-20
+completed: 2026-05-20
 priority: high
-reasoning_effort: medium
 feasibility: medium
+reasoning_effort: medium
 sprint: 52
 ---
-
 ## Problem
 
 test262 CI takes ~25 min per PR. With 70+ concurrent PRs each triggering 16 parallel shards,

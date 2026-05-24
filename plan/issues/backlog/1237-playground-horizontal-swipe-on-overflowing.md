@@ -12,6 +12,7 @@ task_type: bugfix
 area: playground
 language_feature: n/a
 goal: developer-experience
+sprint: Backlog
 related: []
 es_edition: n/a
 origin: reported 2026-05-01 by external user reviewing the deployed playground on mobile.

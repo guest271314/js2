@@ -1,12 +1,12 @@
 ---
 id: 21
-sprint: 0
 title: "Issue 21: Array Methods"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: platform
+sprint: 0
 ---
 # Issue 21: Array Methods
 

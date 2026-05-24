@@ -1,9 +1,9 @@
 ---
 id: 1494
-sprint: 52
 title: "nodejs: __dirname / __filename / import.meta.url for compiled modules"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: nodejs-support
+sprint: 52
 related: [1491, 1044]
 ---
-
 # #1494 — `__dirname` / `__filename` / `import.meta.url` for compiled modules
 
 ## Problem

@@ -8,6 +8,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: platform
+sprint: Backlog
 subtask_of: 688
 ---
 # #807 — Extract Date/Math/console built-ins from expressions.ts → builtins.ts

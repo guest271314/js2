@@ -1,9 +1,9 @@
 ---
 id: 1519
-sprint: 52
 title: "spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: new-expression, constructors
 goal: spec-completeness
+sprint: 52
 related: [1455]
 ---
 # #1519 — `new` edge cases

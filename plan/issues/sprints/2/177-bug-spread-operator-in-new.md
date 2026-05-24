@@ -1,12 +1,12 @@
 ---
 id: 177
-sprint: 2
 title: "- Bug: Spread operator in new expressions"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: class-system
+sprint: 2
 ---
 # #177 -- Bug: Spread operator in new expressions
 

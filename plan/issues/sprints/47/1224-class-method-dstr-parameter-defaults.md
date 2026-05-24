@@ -1,6 +1,5 @@
 ---
 id: 1224
-sprint: 47
 title: "class method dstr-parameter defaults: Cannot destructure null/undefined — guard fires before default is applied (408 failures)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: class-methods, destructuring, default-parameters
 goal: core-semantics
+sprint: 47
 es_edition: ES2015+
 test262_fail: 408
 ---

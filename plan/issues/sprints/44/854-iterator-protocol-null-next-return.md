@@ -1,6 +1,5 @@
 ---
 id: 854
-sprint: 44
 title: "Iterator protocol: null next/return/throw methods (126 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 44
 parent: 820
 closed: 2026-04-23
 pr: 144

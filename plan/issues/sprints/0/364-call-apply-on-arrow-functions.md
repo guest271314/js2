@@ -1,6 +1,5 @@
 ---
 id: 364
-sprint: 0
 title: "- call/apply on arrow functions"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: low
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 test262_skip: 15
 files:
   src/codegen/expressions.ts:

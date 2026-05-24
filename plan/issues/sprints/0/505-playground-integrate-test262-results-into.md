@@ -1,6 +1,5 @@
 ---
 id: 505
-sprint: 0
 title: "Playground: integrate test262 results into test262 browser panel"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 depends_on: [501]
 files:
   playground/vite-plugin-test262.ts:

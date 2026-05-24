@@ -1,6 +1,5 @@
 ---
 id: 541
-sprint: 0
 title: "Async flag skip filter blocks 1,311 tests"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: async-model
+sprint: 0
 test262_skip: 1311
 files:
   tests/test262-runner.ts:

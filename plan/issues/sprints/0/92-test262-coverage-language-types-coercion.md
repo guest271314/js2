@@ -1,12 +1,12 @@
 ---
 id: 92
-sprint: 0
 title: "Issue 92: Test262 coverage — language/types (coercion)"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-09
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue 92: Test262 coverage — language/types (coercion)
 

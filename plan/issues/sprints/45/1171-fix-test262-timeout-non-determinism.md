@@ -1,6 +1,5 @@
 ---
 id: 1171
-sprint: 45
 title: "Fix test262 timeout non-determinism — raise testTimeout to 30s, bust CI cache on config change"
 status: done
 created: 2026-04-24
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: bugfix
 area: ci
 goal: ci-hardening
+sprint: 45
 ---
 # #1171 — Fix test262 timeout non-determinism
 

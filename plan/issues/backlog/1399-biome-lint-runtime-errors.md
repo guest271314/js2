@@ -1,14 +1,15 @@
 ---
 id: 1399
-sprint: null
 title: "chore: fix 9 biome lint errors in src/runtime.ts"
 status: ready
 created: 2026-05-09
+updated: 2026-05-09
 priority: low
 feasibility: easy
 reasoning_effort: low
 task_type: chore
 area: runtime
+sprint: null
 ---
 # #1399 — Fix biome lint errors in src/runtime.ts
 

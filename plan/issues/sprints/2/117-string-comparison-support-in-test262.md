@@ -1,12 +1,12 @@
 ---
 id: 117
-sprint: 2
 title: "Issue 117: String comparison support in test262 harness"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: standalone-mode
+sprint: 2
 ---
 # Issue 117: String comparison support in test262 harness
 

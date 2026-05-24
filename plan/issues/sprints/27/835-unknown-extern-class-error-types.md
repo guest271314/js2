@@ -1,6 +1,5 @@
 ---
 id: 835
-sprint: 27
 title: "Unknown extern class: Error types (32 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: error-model
+sprint: 27
 test262_ce: 32
 ---
 # #835 -- Error types not registered as extern classes (32 CE)

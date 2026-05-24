@@ -1,6 +1,5 @@
 ---
 id: 1599
-sprint: 55
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
 status: ready
 created: 2026-05-24
@@ -11,10 +10,9 @@ task_type: feature
 area: codegen, runtime
 language_feature: json
 goal: standalone-wasm
+sprint: 55
 related: [1474, 1539]
-depends_on: []
 ---
-
 # #1599 — JSON standalone: refuse-and-document then pure-Wasm implementation
 
 ## Problem

@@ -1,9 +1,9 @@
 ---
 id: 1516
-sprint: 52
 title: "spec gap: GeneratorPrototype — this-value coercion + name/length/property descriptors"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: generators
 goal: spec-completeness
+sprint: 52
 related: [1364]
 ---
 # #1516 — GeneratorPrototype fidelity

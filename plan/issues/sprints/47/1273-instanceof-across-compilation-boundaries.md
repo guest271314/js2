@@ -1,10 +1,10 @@
 ---
 id: 1273
-sprint: 47
 title: "instanceof across compilation boundaries"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,9 +12,9 @@ task_type: feature
 area: codegen
 language_feature: instanceof, classes
 goal: npm-library-support
+sprint: 47
 related: [1244]
 ---
-
 ## Implementation note (2026-05-02, dev-1245)
 
 Same stale-issue pattern as #1250, #1271, #1272, #1275, #1276 — the

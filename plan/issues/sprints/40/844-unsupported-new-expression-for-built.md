@@ -1,6 +1,5 @@
 ---
 id: 844
-sprint: 40
 title: "Unsupported new expression for built-in classes (85 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: iterator-protocol
+sprint: 40
 test262_ce: 85
 ---
 # #844 -- Unsupported new expression for built-in classes (85 CE)

@@ -1,8 +1,9 @@
 ---
 id: 1383
 title: "narrower typeof-gated strict-equality fix (follow-up to closed PR #272 / #1380)"
-status: in-review
+status: review
 created: 2026-05-08
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -10,9 +11,9 @@ task_type: bugfix
 area: codegen
 language_feature: operators
 goal: spec-completeness
+sprint: Backlog
 related: [1380]
 ---
-
 # #1383 — Narrower typeof-gated strict-equality fix
 
 ## Background

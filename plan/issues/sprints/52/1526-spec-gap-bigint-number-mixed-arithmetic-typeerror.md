@@ -1,6 +1,5 @@
 ---
 id: 1526
-sprint: 52
 title: "spec gap: BigInt + Number mixed arithmetic should throw spec TypeError, not host error"
 status: ready
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: low
 task_type: bugfix
 area: codegen
 language_feature: bigint, type-coercion
+sprint: 52
 es_edition: ES2020
 test262_category: language/expressions/{addition,multiplication,division,exponentiation}, built-ins/BigInt
 test262_count: 30
 related: [1434, 1129]
 ---
-
 # #1526 — Mixed BigInt + Number arithmetic surfaces as host error string
 
 ## Problem

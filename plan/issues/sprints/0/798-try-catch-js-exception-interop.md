@@ -1,6 +1,5 @@
 ---
 id: 798
-sprint: 0
 title: "- try/catch JS exception interop (~3,000 tests)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: hard
 goal: error-model
+sprint: 0
 test262_fail: ~3000
 note: All subtasks done (798a catch_all, 798b catch variable unwrap, 798c rethrow)
 ---

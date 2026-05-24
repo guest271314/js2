@@ -1,6 +1,5 @@
 ---
 id: 596
-sprint: 0
 title: "Eliminate unnecessary ref.cast when type is statically known"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: compilable
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

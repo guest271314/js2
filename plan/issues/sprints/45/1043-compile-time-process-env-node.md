@@ -1,6 +1,5 @@
 ---
 id: 1043
-sprint: 45
 title: "Compile-time `process.env.NODE_ENV` substitution + dead-branch elimination"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 45
 parent: 1033
 required_by: [1033]
 pr: 40

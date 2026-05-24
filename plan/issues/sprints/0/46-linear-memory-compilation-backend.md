@@ -1,12 +1,12 @@
 ---
 id: 46
-sprint: 0
 title: "Issue 46: Linear-memory compilation backend"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-06
 goal: standalone-mode
+sprint: 0
 ---
 # Issue 46: Linear-memory compilation backend
 

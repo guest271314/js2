@@ -1,10 +1,10 @@
 ---
 id: 1434
-sprint: 52
 title: "spec gap: ToNumber/ToNumeric coercion and unary operator edge cases"
 status: done
 created: 2026-05-11
 updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: coercion, unary-operators
 goal: spec-completeness
+sprint: 52
 related: [1319, 1379, 1408, 1416, 1423, 1424]
 ---
 # #1434 - ToNumber/ToNumeric coercion and unary operator edge cases

@@ -1,12 +1,12 @@
 ---
 id: 134
-sprint: 2
 title: "Switch fallthrough"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 2
 ---
 # #134 — Switch fallthrough
 

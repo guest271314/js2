@@ -1,21 +1,20 @@
 ---
 id: 1604
-sprint: 56
 title: "codegen: String case methods (toUpperCase/toLowerCase/toLocale*) return i32 into f64 comparison — invalid wasm"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: string-methods
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 8
 related: [1105, 1522]
 ---
-
 # #1604 — String case-conversion method result type mismatch
 
 ## Problem

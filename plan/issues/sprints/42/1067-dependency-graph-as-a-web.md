@@ -1,6 +1,5 @@
 ---
 id: 1067
-sprint: 42
 title: "Dependency graph as a web component adopting the landing page color scheme"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: feature
 language_feature: n/a
 goal: ci-hardening
+sprint: 42
 es_edition: n/a
 ---
 # #1067 — Dependency graph as a web component

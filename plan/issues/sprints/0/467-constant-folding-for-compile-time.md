@@ -1,6 +1,5 @@
 ---
 id: 467
-sprint: 0
 title: "Constant folding for compile-time evaluable expressions"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: builtin-methods
+sprint: 0
 files:
   src/codegen/expressions.ts:
     breaking:

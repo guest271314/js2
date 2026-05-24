@@ -1,6 +1,5 @@
 ---
 id: 978
-sprint: 40
 title: "Add responsive burger menu to site-nav component"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: developer-experience
+sprint: 40
 depends_on: [976]
 ---
 # #978 — Responsive burger menu for site-nav

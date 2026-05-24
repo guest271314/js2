@@ -1,6 +1,5 @@
 ---
 id: 705
-sprint: 26
 title: "Wasm validation: not enough arguments on the stack (361 CE)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: async-model
+sprint: 26
 depends_on: [698]
 test262_ce: 362
 test262_ce_original: 361

@@ -1,9 +1,9 @@
 ---
 id: 1518
-sprint: 52
 title: "spec gap: Annex B.3.2 — sloppy-mode function-in-block hoisting (`var` shadow)"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: compiler
 language_feature: annex-b, function-declaration, hoisting
 goal: spec-completeness
+sprint: 52
 related: [1435]
 ---
 # #1518 — Annex B function-in-block hoisting

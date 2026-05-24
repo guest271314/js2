@@ -1,6 +1,5 @@
 ---
 id: 166
-sprint: 1
 title: "`in` operator runtime failures"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: contributor-readiness
+sprint: 1
 files:
   src/codegen/expressions.ts:
     new: []

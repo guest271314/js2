@@ -2,19 +2,20 @@
 id: 779a
 title: "class/dstr method-tramp residual (gen / async-gen / private / static) (~727 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: high
-task_type: bug
+task_type: bugfix
 area: codegen
+language_feature: class-destructuring-methods
 goal: property-model
+sprint: Backlog
 parent: 779
 es_edition: ES2017
-language_feature: class-destructuring-methods
 test262_fail: 727
-created: 2026-05-21
 ---
-
 # #779a — class/dstr method-tramp residual
 
 ## Problem

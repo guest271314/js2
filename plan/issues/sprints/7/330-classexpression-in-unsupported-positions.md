@@ -1,6 +1,5 @@
 ---
 id: 330
-sprint: 7
 title: "- ClassExpression in unsupported positions"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 7
 test262_ce: 25
 test262_refs:
   - test/language/expressions/assignment/fn-name-class.js

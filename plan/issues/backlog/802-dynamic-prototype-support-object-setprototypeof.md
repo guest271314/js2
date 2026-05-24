@@ -8,6 +8,7 @@ priority: low
 feasibility: medium
 reasoning_effort: high
 goal: property-model
+sprint: Backlog
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
 

@@ -1,6 +1,5 @@
 ---
 id: 509
-sprint: 0
 title: "Post-fix error analysis: create issues from fresh test262 run"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: ci-hardening
+sprint: 0
 depends_on: [501]
 ---
 # #509 -- Post-fix error analysis: create issues from fresh test262 run

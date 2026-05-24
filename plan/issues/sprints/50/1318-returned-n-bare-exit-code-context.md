@@ -1,6 +1,5 @@
 ---
 id: 1318
-sprint: 50
 title: "test harness: 'returned N' bare exit code — capture last assertion detail (~8,900 vague failures)"
 status: ready
 created: 2026-05-07
@@ -11,6 +10,7 @@ reasoning_effort: medium
 task_type: improvement
 area: test-infrastructure
 goal: spec-completeness
+sprint: 50
 ---
 # #1318 — `returned N` bare exit code (8,900+ vague assertion failures)
 

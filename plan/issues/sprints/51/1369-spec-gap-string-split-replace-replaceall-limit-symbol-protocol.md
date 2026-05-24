@@ -1,9 +1,10 @@
 ---
 id: 1369
-sprint: 51
 title: "spec gap: String.prototype.{split,replace,replaceAll,match,matchAll} — limit, @@split/@@replace/@@match protocol (~150 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: strings
 goal: spec-completeness
+sprint: 51
 ---
 # #1369 — String.prototype.{split,replace,replaceAll,match,matchAll}: separator/limit/RegExp-symbol protocol
 

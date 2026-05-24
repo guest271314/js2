@@ -1,6 +1,5 @@
 ---
 id: 586
-sprint: 0
 title: "Deduplicate array method callbacks (~1,500 lines)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: medium
 goal: maintainability
+sprint: 0
 required_by: [591]
 files:
   src/codegen/expressions.ts:

@@ -1,12 +1,12 @@
 ---
 id: 55
-sprint: 0
 title: "Issue 55: Function expressions"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: builtin-methods
+sprint: 0
 ---
 # Issue 55: Function expressions
 

@@ -1,6 +1,5 @@
 ---
 id: 323
-sprint: 0
 title: "[ts2wasm] Native type annotations for performance optimization"
 status: done
 created: 2026-03-12
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new:

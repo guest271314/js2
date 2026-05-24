@@ -1,12 +1,12 @@
 ---
 id: 33
-sprint: 0
 title: "Issue 33: Relocatable Wasm Object File (.o) Emission"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: maintainability
+sprint: 0
 required_by: [904]
 ---
 # Issue 33: Relocatable Wasm Object File (.o) Emission

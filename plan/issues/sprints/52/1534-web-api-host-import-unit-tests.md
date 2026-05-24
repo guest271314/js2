@@ -1,9 +1,9 @@
 ---
 id: 1534
-sprint: 52
 title: "test: Web API host import unit tests (fetch, timers, localStorage, crypto.getRandomValues)"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: test
 area: runtime
 language_feature: host-imports
 goal: browser-support
+sprint: 52
 related: [1500, 1501, 1502, 1503, 1504]
 ---
-
 # #1534 — Web API host import unit tests
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 840
-sprint: 32
 title: "Array.prototype.concat/push/splice require 0-arg support (31 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: property-model
+sprint: 32
 test262_ce: 31
 ---
 # #840 -- Array method arity: concat/push/splice called with 0 args (31 CE)

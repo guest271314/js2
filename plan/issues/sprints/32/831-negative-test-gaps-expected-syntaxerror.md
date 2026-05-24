@@ -1,6 +1,5 @@
 ---
 id: 831
-sprint: 32
 title: "Negative test gaps: expected SyntaxError but compiled (242 failures)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 32
 test262_fail: 242
 ---
 # #831 -- Negative test gaps: expected SyntaxError but compiled (242 failures)

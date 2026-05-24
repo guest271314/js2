@@ -1,6 +1,5 @@
 ---
 id: 560
-sprint: 0
 title: "BigInt + Number mixed arithmetic leaves stack dirty (2 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_ce: 2
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 341
-sprint: 7
 title: "- Property introspection (hasOwnProperty, propertyIsEnumerable)"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: property-model
+sprint: 7
 test262_skip: 1009
 test262_categories:
   - spread across 35 categories

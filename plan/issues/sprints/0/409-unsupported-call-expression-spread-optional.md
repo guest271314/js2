@@ -1,6 +1,5 @@
 ---
 id: 409
-sprint: 0
 title: "Unsupported call expression -- spread, optional chaining, super, property methods"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: compilable
+sprint: 0
 test262_ce: 1752
 complexity: L
 files:

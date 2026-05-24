@@ -1,6 +1,5 @@
 ---
 id: 624
-sprint: 0
 title: "Wasm struct type errors: struct.new/struct.get mismatches (1,092 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_ce: 1092
 files:
   src/codegen/expressions.ts:

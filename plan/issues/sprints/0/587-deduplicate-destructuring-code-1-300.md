@@ -1,6 +1,5 @@
 ---
 id: 587
-sprint: 0
 title: "Deduplicate destructuring code (~1,300 lines)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: ci-hardening
+sprint: 0
 required_by: [591]
 files:
   src/codegen/statements.ts:

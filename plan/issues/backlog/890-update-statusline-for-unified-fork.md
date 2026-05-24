@@ -8,6 +8,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: test-infrastructure
+sprint: Backlog
 files:
   .claude/statusline-command.sh:
     modify:

@@ -3,15 +3,16 @@ id: 1561
 title: "Architect review: decompose compiler into smaller, reviewable modules"
 status: ready
 created: 2026-05-21
+updated: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: max
 task_type: research+architecture
 area: codebase-structure
 goal: maintainability
+sprint: Backlog
 related: [804, 806, 688]
 ---
-
 # #1561 — Architect review: full codebase modularity analysis
 
 ## Motivation

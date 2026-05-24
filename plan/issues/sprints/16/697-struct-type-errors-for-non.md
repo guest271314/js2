@@ -1,6 +1,5 @@
 ---
 id: 697
-sprint: 16
 title: "- Struct type errors for non-class structs (944 CE residual)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 16
 test262_ce: 944
 test262_ce_original: 813
 files:

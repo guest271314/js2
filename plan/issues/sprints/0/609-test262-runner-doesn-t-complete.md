@@ -1,6 +1,5 @@
 ---
 id: 609
-sprint: 0
 title: "Test262 runner doesn't complete all 53,010 tests (13,323 missing)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 files:
   scripts/run-test262.ts:
     breaking:

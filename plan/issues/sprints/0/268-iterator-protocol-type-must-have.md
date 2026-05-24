@@ -1,6 +1,5 @@
 ---
 id: 268
-sprint: 0
 title: "Issue #268: Iterator protocol -- Type must have a Symbol.iterator method"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: medium
 goal: iterator-protocol
+sprint: 0
 required_by: [153]
 files:
   src/codegen/statements.ts:

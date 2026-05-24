@@ -1,6 +1,5 @@
 ---
 id: 259
-sprint: 4
 title: "Issue #259: ClassDeclaration in block/nested scope positions"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: compilable
+sprint: 4
 files:
   src/codegen/statements.ts:
     new: []

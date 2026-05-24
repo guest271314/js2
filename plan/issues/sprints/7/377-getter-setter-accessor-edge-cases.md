@@ -1,6 +1,5 @@
 ---
 id: 377
-sprint: 7
 title: "- Getter/setter accessor edge cases"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: class-system
+sprint: 7
 test262_ce: 10
 files:
   src/codegen/expressions.ts:

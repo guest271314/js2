@@ -1,6 +1,5 @@
 ---
 id: 312
-sprint: 0
 title: "Issue #312: Test262 category expansion -- built-ins/Number methods"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: builtin-methods
+sprint: 0
 files:
   tests/test262-runner.ts:
     new: []

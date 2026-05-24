@@ -1,6 +1,5 @@
 ---
 id: 849
-sprint: 31
 title: "Mapped arguments object does not sync with named parameters (200 tests)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-03-31
 priority: medium
 feasibility: medium
 goal: ci-hardening
+sprint: 31
 parent: 779
 branch: worktree-issue-849-mapped-arguments
 test262_fail: 200

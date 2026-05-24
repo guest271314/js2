@@ -1,6 +1,5 @@
 ---
 id: 492
-sprint: 0
 title: "delete operator via undefined sentinel (288 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: property-model
+sprint: 0
 test262_skip: 288
 files:
   src/codegen/expressions.ts:

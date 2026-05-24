@@ -1,10 +1,10 @@
 ---
 id: 1236
-sprint: 48
 title: "Premature i32 specialization for `let s = 0` accumulators silently saturates on overflow"
 status: done
 created: 2026-05-01
 updated: 2026-05-03
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: type-inference
 goal: core-semantics
+sprint: 48
 related: [595, 1166]
 es_edition: n/a
 origin: "surfaced 2026-05-01 while preparing the playground for an external compiler-engineer review. The 'Loop: sum 1..1M' benchmark returned 2147483647 instead of 499999500000."

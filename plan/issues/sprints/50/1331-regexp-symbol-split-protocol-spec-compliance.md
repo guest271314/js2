@@ -1,6 +1,5 @@
 ---
 id: 1331
-sprint: 50
 title: "RegExp host-mode: Symbol.split protocol spec compliance (123 fails)"
 status: ready
 created: 2026-05-08
@@ -12,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: regexp
 goal: spec-completeness
+sprint: 50
 parent: 1002
 ---
 # #1331 — RegExp host-mode: Symbol.split protocol spec compliance (123 fails)

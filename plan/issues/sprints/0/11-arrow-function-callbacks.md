@@ -1,12 +1,12 @@
 ---
 id: 11
-sprint: 0
 title: "Issue 11: Arrow Function Callbacks"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: async-model
+sprint: 0
 ---
 # Issue 11: Arrow Function Callbacks
 

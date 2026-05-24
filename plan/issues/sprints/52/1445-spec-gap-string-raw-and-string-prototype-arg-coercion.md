@@ -1,9 +1,9 @@
 ---
 id: 1445
-sprint: 52
 title: "spec gap: String.raw + String.prototype.* argument coercion (ToInteger / ToPrimitive)"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: easy
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: string-arg-coercion
 goal: spec-completeness
+sprint: 52
 related: [1434, 1442]
 ---
 # #1445 - String.raw + String.prototype argument coercion

@@ -1,16 +1,17 @@
 ---
 id: 1317
-sprint: 50
 title: "null dereference error: add expression / variable context (573 opaque runtime failures)"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: easy
 reasoning_effort: medium
 task_type: improvement
 area: runtime, error-messages
 goal: spec-completeness
+sprint: 50
 ---
 # #1317 — `dereferencing a null pointer` needs expression context (573 failures)
 

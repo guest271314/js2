@@ -1,6 +1,5 @@
 ---
 id: 930
-sprint: 37
 title: "Not-a-constructor detection: built-in methods callable with new (68 FAIL)"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 37
 parent: 846
 test262_fail: 68
 ---

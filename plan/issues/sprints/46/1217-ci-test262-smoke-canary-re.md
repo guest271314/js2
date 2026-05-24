@@ -1,6 +1,5 @@
 ---
 id: 1217
-sprint: 46
 title: "ci(test262): smoke-canary — re-run main HEAD twice with fresh cache, fail if flip rate > 0"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: infrastructure
 area: ci
 language_feature: n/a
 goal: ci-hardening
+sprint: 46
 es_edition: n/a
 related: [1190, 1191, 1192, 1189]
 origin: split from #1190 acceptance criterion #5 — "Land a canary mechanism to detect future drift regressions". Sprint 46 closed #1190 by splitting open work into sub-issues; this is the canary one.

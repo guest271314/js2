@@ -4,6 +4,7 @@ title: "ESLint entry-point compileProject emits invalid Wasm (`Type index 10 is 
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: extern, npm-package-imports
 goal: npm-library-support
+sprint: Backlog
 related: [1282, 1279, 1277]
 ---
-
 # #1287 — ESLint entry-point produces invalid Wasm (Type index 10 out of bounds)
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 288
-sprint: 0
 title: "Issue #288: Try/catch/finally compile errors -- complex patterns"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: medium
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

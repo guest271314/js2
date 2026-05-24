@@ -7,6 +7,7 @@ updated: 2026-04-28
 priority: medium
 feasibility: hard
 goal: compiler-architecture
+sprint: Backlog
 required_by: [905]
 files:
   src/codegen/index.ts:

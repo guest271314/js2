@@ -1,6 +1,5 @@
 ---
 id: 486
-sprint: 0
 title: "Well-known Symbol.toStringTag and Symbol.hasInstance (22 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: symbol-protocol
+sprint: 0
 depends_on: [481]
 test262_skip: 22
 files:

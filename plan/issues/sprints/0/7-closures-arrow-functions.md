@@ -1,12 +1,12 @@
 ---
 id: 7
-sprint: 0
 title: "Issue 7: Closures / Arrow functions"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-28
 goal: compilable
+sprint: 0
 ---
 # Issue 7: Closures / Arrow functions
 

@@ -1,10 +1,10 @@
 ---
 id: 1299
-sprint: 49
 title: "Virtual dispatch through abstract-base-typed dict values returns first stored subclass's method"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes, inheritance, abstract, dict
 goal: npm-library-support
+sprint: 49
 related: [1297, 1298]
 ---
 # #1299 — Virtual dispatch through abstract-base-typed dict values miscalls

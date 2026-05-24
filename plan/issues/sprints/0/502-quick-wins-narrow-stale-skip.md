@@ -1,6 +1,5 @@
 ---
 id: 502
-sprint: 0
 title: "Quick wins: narrow stale skip filters (~1,160 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: easy
 goal: iterator-protocol
+sprint: 0
 depends_on: [471]
 files:
   tests/test262-runner.ts:

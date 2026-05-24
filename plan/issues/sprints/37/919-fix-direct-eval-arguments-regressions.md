@@ -1,6 +1,5 @@
 ---
 id: 919
-sprint: 37
 title: "Fix direct-eval arguments regressions introduced since the April 1 test262 baseline"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 37
 files:
   src/:
     investigate:

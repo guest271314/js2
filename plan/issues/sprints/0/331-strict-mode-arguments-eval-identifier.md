@@ -1,6 +1,5 @@
 ---
 id: 331
-sprint: 0
 title: "- Strict mode arguments/eval identifier restriction"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 0
 test262_ce: 27
 test262_refs:
   - test/language/expressions/prefix-increment/arguments-nostrict.js

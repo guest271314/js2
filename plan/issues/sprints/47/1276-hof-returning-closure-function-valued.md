@@ -1,10 +1,10 @@
 ---
 id: 1276
-sprint: 47
 title: "HOF returning closure — function-valued module exports (createMathOperation pattern)"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,9 +12,10 @@ task_type: feature
 area: codegen
 language_feature: closures, HOF, module-exports
 goal: npm-library-support
+sprint: 47
+required_by: [1291]
 related: [1031, 1107]
 ---
-
 ## Implementation note (2026-05-02, dev-1245)
 
 Smoke-testing on origin/main shows the basic HOF-returning-closure

@@ -1,6 +1,5 @@
 ---
 id: 550
-sprint: 0
 title: "Security: XSS via error messages in report.html"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #550: Security — XSS via error messages in report.html
 

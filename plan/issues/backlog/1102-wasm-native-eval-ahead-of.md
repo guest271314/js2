@@ -10,6 +10,8 @@ reasoning_effort: max
 task_type: feature
 language_feature: eval
 goal: spec-completeness
+sprint: Backlog
+required_by: [1584]
 es_edition: ES5
 ---
 # #1102 — Wasm-native eval: ahead-of-time compilation strategy

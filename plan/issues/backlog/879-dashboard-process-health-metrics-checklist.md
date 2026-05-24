@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: Backlog
 depends_on: [876]
 ---
 # #879 -- Dashboard: process health metrics

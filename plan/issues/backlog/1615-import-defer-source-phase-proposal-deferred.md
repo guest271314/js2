@@ -9,12 +9,12 @@ feasibility: hard
 task_type: feature
 area: codegen
 language_feature: import-defer, import-source, module-phase-imports
-es_edition: proposal
 goal: compiler-correctness
+sprint: Backlog
+es_edition: proposal
 test262_count: 152
 related: [1315]
 ---
-
 # #1615 — import.defer / import.source phase imports (deferred proposal)
 
 ## Problem

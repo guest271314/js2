@@ -1,12 +1,12 @@
 ---
 id: 73
-sprint: 0
 title: "Issue 73: Benchmark — JS vs host-call vs GC-native vs linear-memory performance"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: ci-hardening
+sprint: 0
 ---
 # Issue 73: Benchmark — JS vs host-call vs GC-native vs linear-memory performance
 

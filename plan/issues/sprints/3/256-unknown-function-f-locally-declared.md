@@ -1,12 +1,12 @@
 ---
 id: 256
-sprint: 3
 title: "Issue #256: Unknown function: f -- locally declared functions not found"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 3
 ---
 # Issue #256: Unknown function: f -- locally declared functions not found
 

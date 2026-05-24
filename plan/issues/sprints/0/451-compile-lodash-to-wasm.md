@@ -1,6 +1,5 @@
 ---
 id: 451
-sprint: 0
 title: "Compile lodash to Wasm"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: npm-library-support
+sprint: 0
 ---
 # #451 — Compile lodash to Wasm
 

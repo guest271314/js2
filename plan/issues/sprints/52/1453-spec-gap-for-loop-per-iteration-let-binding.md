@@ -1,9 +1,9 @@
 ---
 id: 1453
-sprint: 52
 title: "spec gap: per-iteration fresh let/const binding in for-statements"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: for-statement, let, const, closures
 goal: spec-completeness
+sprint: 52
 related: [1128, 1452]
 ---
 # #1453 — `for (let i = …)` requires a *fresh* binding per iteration

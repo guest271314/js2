@@ -1,6 +1,5 @@
 ---
 id: 900
-sprint: 34
 title: "Move missing-main handling out of runtime execution"
 status: done
 created: 2026-04-02
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: contributor-readiness
+sprint: 34
 required_by: [907]
 files:
   playground/main.ts:

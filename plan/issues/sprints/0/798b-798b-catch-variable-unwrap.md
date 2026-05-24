@@ -1,6 +1,5 @@
 ---
 id: 798b
-sprint: 0
 title: "#798b -- Catch variable unwrap"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: easy
 goal: error-model
+sprint: 0
 depends_on: [798a]
 subtask_of: 798
 commit: 043a7b31

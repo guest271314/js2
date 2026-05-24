@@ -1,6 +1,5 @@
 ---
 id: 603
-sprint: 0
 title: "- Remove ~5,100 stale skip filters blocking already-implemented features"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: easy
 goal: spec-completeness
+sprint: 0
 test262_skip: 5100
 files:
   tests/test262-runner.ts:

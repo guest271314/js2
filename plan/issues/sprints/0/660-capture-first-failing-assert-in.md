@@ -1,6 +1,5 @@
 ---
 id: 660
-sprint: 0
 title: "Capture first failing assert in test output for returned-0 tests"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 test262_fail: 12974
 files:
   tests/test262-runner.ts:

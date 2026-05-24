@@ -1,6 +1,5 @@
 ---
 id: 1218
-sprint: 46
 title: "ci(test262): auto-validate committed baseline on PR — spot-check 50 random pass entries"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: infrastructure
 area: ci
 language_feature: n/a
 goal: async-model
+sprint: 46
 es_edition: n/a
 related: [1190, 1191, 1216]
 origin: split from #1190 research question Q4 — "How do we prevent baseline-file corruption from propagating?" The committed `test262-current.jsonl` is what the dev-self-merge bucket-by-path analysis reads; if it disagrees with reality, regression counts silently mislead.

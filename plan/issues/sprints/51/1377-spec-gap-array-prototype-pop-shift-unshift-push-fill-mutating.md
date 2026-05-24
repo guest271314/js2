@@ -1,9 +1,10 @@
 ---
 id: 1377
-sprint: 51
 title: "spec gap: Array.prototype.{push,pop,shift,unshift,fill,copyWithin,reverse} — mutation on array-like + length writes (~80 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: spec-completeness
+sprint: 51
 ---
 # #1377 — Array.prototype.{push,pop,shift,unshift,fill,copyWithin,reverse}: mutation + length
 

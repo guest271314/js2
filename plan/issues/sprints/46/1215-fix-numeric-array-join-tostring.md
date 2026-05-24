@@ -1,6 +1,5 @@
 ---
 id: 1215
-sprint: 46
 title: "fix: numeric-array .join() / .toString() must register number_toString — Wasm validation error"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: codegen
 area: array-methods
 language_feature: arrays
 goal: correctness
+sprint: 46
 es_edition: n/a
 related: [1203]
 origin: surfaced by the differential testing harness (#1203). 6 of 8 array-method failures + classes/08-fields share a common root cause: the unified collector does not register `number_toString` when the only consumer is `<numeric_array>.join(...)`, so `compileArrayJoin` silently drops the f64→externref conversion and emits a Wasm module that fails validation.

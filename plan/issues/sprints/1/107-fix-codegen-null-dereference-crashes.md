@@ -1,12 +1,12 @@
 ---
 id: 107
-sprint: 1
 title: "Issue 107: Fix codegen null-dereference crashes (90 occurrences)"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: crash-free
+sprint: 1
 ---
 # Issue 107: Fix codegen null-dereference crashes (90 occurrences)
 

@@ -1,10 +1,10 @@
 ---
 id: 1300
-sprint: 49
 title: "Closure capturing outer parameter inside an inline lambda passed as a Next callback null-derefs at call time"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: closures, function-types
 goal: npm-library-support
+sprint: 49
 related: [1297]
 ---
 # #1300 — Closure capturing outer param inside Next-callback lambda null-derefs

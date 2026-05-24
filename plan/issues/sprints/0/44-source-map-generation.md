@@ -1,12 +1,12 @@
 ---
 id: 44
-sprint: 0
 title: "Issue #44: Source Map Generation"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: generator-model
+sprint: 0
 ---
 # Issue #44: Source Map Generation
 

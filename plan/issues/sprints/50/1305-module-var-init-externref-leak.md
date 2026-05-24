@@ -1,10 +1,10 @@
 ---
 id: 1305
-sprint: 50
 title: "Module-level var init leaks externref into bitwise op codegen (legacy path)"
 status: done
 created: 2026-05-03
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: type-inference, globals, bitwise-ops
 goal: npm-library-support
-depends_on: []
+sprint: 50
 related: [1303, 1292]
 ---
 # #1305 — Module-level `var X = N` leaks externref into bitwise op codegen on the legacy path

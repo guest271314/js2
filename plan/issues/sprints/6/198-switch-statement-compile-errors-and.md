@@ -1,6 +1,5 @@
 ---
 id: 198
-sprint: 6
 title: "Switch statement compile errors and failures"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: core-semantics
+sprint: 6
 files:
   src/codegen/statements.ts:
     new: []

@@ -1,6 +1,5 @@
 ---
 id: 267
-sprint: 0
 title: "Issue #267: Yield expression outside of generator function"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: generator-model
+sprint: 0
 required_by: [287]
 files:
   src/compiler.ts:

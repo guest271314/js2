@@ -6,6 +6,7 @@ created: 2026-03-30
 updated: 2026-04-28
 priority: medium
 goal: spec-completeness
+sprint: Backlog
 ---
 # Benchmark: compare all JS-to-Wasm engines on standard performance benchmarks
 

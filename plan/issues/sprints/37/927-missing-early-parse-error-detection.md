@@ -1,6 +1,5 @@
 ---
 id: 927
-sprint: 37
 title: "Missing early/parse error detection: tests compile when they should reject (810 FAIL)"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: spec-completeness
+sprint: 37
 parent: 779
 test262_fail: 810
 ---

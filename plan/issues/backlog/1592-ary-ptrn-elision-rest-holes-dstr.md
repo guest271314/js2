@@ -3,6 +3,7 @@ id: 1592
 title: "Array pattern elision holes and rest-array in destructuring consume wrong iterator step (~305 fails)"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -10,10 +11,10 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, array-pattern, for-of, for-await-of, classes
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 305
 test262_category: language/statements/class/dstr, language/statements/for-await-of, language/statements/for-of, language/expressions/class/dstr
 ---
-
 # #1592 — Array pattern elision holes and rest-array in destructuring
 
 ## Problem

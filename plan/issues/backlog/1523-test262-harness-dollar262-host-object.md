@@ -1,6 +1,5 @@
 ---
 id: 1523
-sprint: backlog
 title: "test262 harness: provide `$262` host-object API (createRealm / detachArrayBuffer / agent / global)"
 status: backlog
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: medium
 task_type: feature
 area: test-runner
 language_feature: test262-harness
+sprint: Backlog
 es_edition: n/a
 test262_category: multiple (generators, Atomics, AbstractModuleSource)
 test262_count: 341
 related: [1357]
 ---
-
 # #1523 — Wire up the `$262` test262 host-object in the runner
 
 ## Problem

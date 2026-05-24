@@ -1,6 +1,5 @@
 ---
 id: 959
-sprint: 38
 title: "Auto-generate test262-editions.json from runner results"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 38
 ---
 # #959 — Auto-generate test262-editions.json from runner results
 

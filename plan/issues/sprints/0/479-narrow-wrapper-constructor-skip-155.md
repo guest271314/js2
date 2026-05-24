@@ -1,6 +1,5 @@
 ---
 id: 479
-sprint: 0
 title: "Narrow wrapper constructor skip — 155 tests"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: contributor-readiness
+sprint: 0
 ---
 # #479 — Narrow wrapper constructor skip (155 tests)
 

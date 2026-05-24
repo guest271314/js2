@@ -1,10 +1,10 @@
 ---
 id: 1233
-sprint: 48
 title: "IR Phase 4 Slice 13d — Array per-element-type methods through IR"
 status: done
 created: 2026-05-01
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: array-methods
 goal: builtin-methods
+sprint: 48
 depends_on: [1238]
 es_edition: ES2020
 related: [1169p, 1232]

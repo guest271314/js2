@@ -1,6 +1,5 @@
 ---
 id: 995
-sprint: 45
 title: "String.prototype.localeCompare 15.5.4.9_CE hits 30s compiler timeout"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: low
 feasibility: medium
 reasoning_effort: medium
 goal: iterator-protocol
+sprint: 45
 resolved_by: "#1085 (iterative bodyUsesArguments, PR #127)"
 test262_ct: 1
 ---

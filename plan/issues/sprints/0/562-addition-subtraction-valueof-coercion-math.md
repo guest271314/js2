@@ -1,6 +1,5 @@
 ---
 id: 562
-sprint: 0
 title: "Addition/subtraction valueOf coercion + Math special values (17 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_fail: 17
 files:
   src/codegen/expressions.ts:

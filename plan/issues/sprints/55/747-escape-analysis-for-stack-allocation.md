@@ -4,10 +4,10 @@ title: "Escape analysis for stack allocation"
 status: in-progress
 created: 2026-03-22
 updated: 2026-05-23
-sprint: 55
 priority: medium
 feasibility: hard
 goal: performance
+sprint: 55
 depends_on: [1586, 1587]
 files:
   src/codegen/index.ts:

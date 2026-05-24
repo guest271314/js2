@@ -1,6 +1,5 @@
 ---
 id: 830
-sprint: 40
 title: "DisposableStack extern class missing (39 failures)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: error-model
+sprint: 40
 test262_fail: 39
 ---
 # #830 -- DisposableStack extern class missing (39 failures)

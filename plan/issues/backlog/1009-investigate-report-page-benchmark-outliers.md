@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: planning
 language_feature: benchmark-outlier-analysis
 goal: contributor-readiness
+sprint: Backlog
 es_edition: multi
 ---
 # #1009 -- Investigate report-page benchmark outliers where Wasm is much slower than JS

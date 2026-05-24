@@ -1,6 +1,5 @@
 ---
 id: 847
-sprint: 30
 title: "for-await-of / for-of destructuring produces wrong values (660 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 30
 parent: 779
 completed_fix: module-global-assignment
 branch: issue-847-for-of-destructuring

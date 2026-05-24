@@ -1,11 +1,12 @@
 ---
 id: 1577
 title: "ECMAScript spec vs test262 coverage audit"
+status: ready
 created: 2026-05-21
+updated: 2026-05-21
+sprint: Backlog
 type: research
-status: research
 ---
-
 # ECMAScript Spec vs Test262 Coverage Audit
 
 ## Summary

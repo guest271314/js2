@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: maintainability
+sprint: Backlog
 subtask_of: 688
 ---
 # #810 — Extract class compilation from index.ts → class-codegen.ts

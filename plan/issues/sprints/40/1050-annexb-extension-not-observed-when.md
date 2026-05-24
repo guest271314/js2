@@ -1,6 +1,5 @@
 ---
 id: 1050
-sprint: 40
 title: "annexB: Extension not observed when variable binding would produce early error"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: spec-completeness
+sprint: 40
 es_edition: multi
 ---
 sprint: 40

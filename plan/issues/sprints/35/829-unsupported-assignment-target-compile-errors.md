@@ -1,6 +1,5 @@
 ---
 id: 829
-sprint: 35
 title: "Unsupported assignment target compile errors (141 tests)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: error-model
+sprint: 35
 test262_ce: 141
 ---
 # #829 -- Unsupported assignment target compile errors (141 tests)

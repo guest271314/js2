@@ -1,6 +1,5 @@
 ---
 id: 302
-sprint: 0
 title: "Issue #302: Runtime failures -- Math.min/max edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: builtin-methods
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

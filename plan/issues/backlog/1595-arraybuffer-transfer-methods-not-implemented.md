@@ -3,6 +3,7 @@ id: 1595
 title: "ArrayBuffer.prototype.transfer / transferToFixedLength / transferToImmutable not implemented (~40 fails)"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -10,11 +11,10 @@ task_type: feature
 area: codegen
 language_feature: ArrayBuffer, TypedArray
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 40
 test262_category: built-ins/ArrayBuffer
-depends_on: []
 ---
-
 # #1595 — ArrayBuffer.prototype.transfer / transferToFixedLength / transferToImmutable
 
 ## Problem

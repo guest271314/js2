@@ -1,6 +1,5 @@
 ---
 id: 862
-sprint: 45
 title: "Iterator protocol missing on function-declaration binding-pattern params"
 status: done
 created: 2026-03-29
@@ -10,6 +9,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: crash-free
+sprint: 45
 test262_fail: 212
 ---
 # #862 — Iterator protocol missing on function-declaration binding-pattern params

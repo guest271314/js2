@@ -1,6 +1,5 @@
 ---
 id: 984
-sprint: 40
 title: "Regression: compileExpression receives undefined AST nodes in class/private generator paths (154 CE)"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 40
 test262_ce: 154
 ---
 Already fixed by prior work (#611 null guard fix + subsequent class/generator codegen). Verified 2026-04-11: 0 undefined-AST CEs across 479 argument-object + async-gen-private-method-static tests, all 8 named samples pass. Regression tests in `tests/issue-984.test.ts`.

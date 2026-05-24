@@ -1,6 +1,5 @@
 ---
 id: 614
-sprint: 0
 title: "Unsupported new expression for ArrayBuffer/DataView (203+ CE)"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 0
 ---
 # Issue #614: Unsupported new expression for ArrayBuffer/DataView
 

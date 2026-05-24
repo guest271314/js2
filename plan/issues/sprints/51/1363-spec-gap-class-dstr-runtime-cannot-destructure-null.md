@@ -1,9 +1,10 @@
 ---
 id: 1363
-sprint: 51
 title: "spec gap: class dstr — 'Cannot destructure null/undefined' in method default-binding (~700 runtime_errors)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes
 goal: spec-completeness
+sprint: 51
 ---
 # #1363 — Class destructuring parameter defaults bind to null/undefined receiver
 

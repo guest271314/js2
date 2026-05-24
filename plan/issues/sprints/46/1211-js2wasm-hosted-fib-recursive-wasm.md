@@ -1,6 +1,5 @@
 ---
 id: 1211
-sprint: 46
 title: "js2wasm hosted fib-recursive: Wasm validator — call param types must match"
 status: done
 created: 2026-04-29
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: functions
 goal: compilable
+sprint: 46
 pr: 95
 origin: surfaced by competitive-benchmark run 2026-04-29
 ---

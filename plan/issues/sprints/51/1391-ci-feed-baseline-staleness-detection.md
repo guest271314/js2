@@ -1,15 +1,17 @@
 ---
 id: 1391
-sprint: 51
 title: "infra: CI feed baseline staleness detection — warn when baseline_sha diverges from current main"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: medium
-task_type: infra
+task_type: infrastructure
 area: ci
 goal: reliability
+sprint: 51
 ---
 # #1391 — CI feed baseline staleness detection
 

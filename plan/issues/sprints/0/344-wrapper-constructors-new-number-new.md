@@ -1,6 +1,5 @@
 ---
 id: 344
-sprint: 0
 title: "- Wrapper constructors (new Number, new String, new Boolean)"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: standalone-mode
+sprint: 0
 test262_skip: 762
 test262_categories:
   - spread across 88 categories

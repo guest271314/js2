@@ -1,6 +1,5 @@
 ---
 id: 1024
-sprint: 41
 title: "Destructuring rest elements + array holes drop null vs undefined"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 41
 parent: 1021
 ---
 # #1024 — Destructuring rest / hole paths still conflate null and undefined

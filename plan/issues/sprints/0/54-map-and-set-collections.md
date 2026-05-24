@@ -1,12 +1,12 @@
 ---
 id: 54
-sprint: 0
 title: "Issue 54: Map and Set collections"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 54: Map and Set collections
 

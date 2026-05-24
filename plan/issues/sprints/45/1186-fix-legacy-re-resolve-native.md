@@ -1,6 +1,5 @@
 ---
 id: 1186
-sprint: 45
 title: "fix(legacy): re-resolve native-string helpers post-shift in compileForOfString (stale __str_charAt funcIdx)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: strings
 goal: compilable
+sprint: 45
 es_edition: n/a
 related: [1183]
 origin: surfaced during #1183 implementation — the IR path sidesteps this bug by re-resolving funcref names via ctx.mod.functions[i].name; legacy compileForOfString still has the staleness.

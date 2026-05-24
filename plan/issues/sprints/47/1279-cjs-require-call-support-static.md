@@ -1,10 +1,10 @@
 ---
 id: 1279
-sprint: 47
 title: "CJS require() call support — static module graph via require() analysis"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,7 +12,9 @@ task_type: feature
 area: codegen, import-resolver
 language_feature: CommonJS, require
 goal: npm-library-support
+sprint: 47
 depends_on: [1277]
+required_by: [1282, 1291]
 related: [1031]
 ---
 # #1279 — CJS `require()` call support

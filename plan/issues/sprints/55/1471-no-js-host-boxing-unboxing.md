@@ -1,9 +1,9 @@
 ---
 id: 1471
-sprint: 55
 title: "host-independence: eliminate JS host boxing/unboxing for standalone Wasm"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +11,9 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: numbers, booleans, any-typed values
 goal: host-independence
+sprint: 55
 related: []
 ---
-
 # #1471 — Eliminate JS host boxing/unboxing for standalone Wasm
 
 ## Problem

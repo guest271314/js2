@@ -1,6 +1,5 @@
 ---
 id: 1192
-sprint: 45
 title: "ci(self-merge): exclude compile_timeout transitions from regression count (runner noise)"
 status: done
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: feature
 area: infrastructure
 goal: ci-hardening
+sprint: 45
 es_edition: n/a
 related: [1185, 1186, 1189, 1190]
 origin: PR #72 (233 pass→CE) and PR #74 (227 pass→CE) both showed roughly half their "regressions" as pass→compile_timeout transitions. CT is runner-load / timing noise, not real compiler regressions, but the merge gate currently counts them.

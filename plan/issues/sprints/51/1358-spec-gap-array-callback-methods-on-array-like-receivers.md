@@ -1,10 +1,10 @@
 ---
 id: 1358
-sprint: 51
 title: "spec gap: Array.prototype.{filter,map,every,some,forEach,reduce} on array-like (.call) receivers — ~452 assertion_fail"
 status: done
 created: 2026-05-08
 updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: spec-completeness
+sprint: 51
 parent: 1334
 ---
 # #1358 — Array callback methods on generic array-like receivers

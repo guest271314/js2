@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: feature
 language_feature: n/a
 goal: platform
+sprint: Backlog
 es_edition: n/a
 ---
 # #1254 -- Reference platform scenario: capability-safe DOM wrapper with explicit subtree authority

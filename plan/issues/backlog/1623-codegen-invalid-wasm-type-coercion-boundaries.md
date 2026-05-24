@@ -1,7 +1,5 @@
 ---
 id: 1623
-renumbered_from: 1522
-sprint: backlog
 title: "codegen: invalid Wasm binary at type-boundary coercion (extern/anyref + struct ref types)"
 status: backlog
 created: 2026-05-20
@@ -12,12 +10,13 @@ reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: type-coercion, externref, wasm-gc
+sprint: Backlog
+renumbered_from: 1522
 es_edition: n/a
 test262_category: multiple (Iterator, Promise, Temporal, super, class)
 test262_count: 530
 related: [1289, 1287, 1400]
 ---
-
 # #1522 — Codegen emits Wasm modules that fail validation at type boundaries
 
 ## Problem

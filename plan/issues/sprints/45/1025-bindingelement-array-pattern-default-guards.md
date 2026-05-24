@@ -1,6 +1,5 @@
 ---
 id: 1025
-sprint: 45
 title: "BindingElement array-pattern default guards still use ref.is_null"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: core-semantics
+sprint: 45
 parent: 1021
 ---
 # #1025 — BindingElement array-pattern paths missed by #1021

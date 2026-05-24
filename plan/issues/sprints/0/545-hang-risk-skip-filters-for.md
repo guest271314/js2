@@ -1,6 +1,5 @@
 ---
 id: 545
-sprint: 0
 title: "Hang-risk skip filters: for-of generators + throw/try (139 tests)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: test-infrastructure
+sprint: 0
 ---
 # #545: Remove hang-risk skip filters (for-of generators + throw/try)
 

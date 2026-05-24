@@ -1,6 +1,5 @@
 ---
 id: 1204
-sprint: 46
 title: "credibility: methodology document — how js2wasm is built by an AI agent team"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: docs
 area: n/a
 language_feature: n/a
 goal: contributor-readiness
+sprint: 46
 depends_on: [1201, 1202]
 pr: 107
 es_edition: n/a

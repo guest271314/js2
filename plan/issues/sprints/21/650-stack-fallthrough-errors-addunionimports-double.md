@@ -1,6 +1,5 @@
 ---
 id: 650
-sprint: 21
 title: "Stack fallthrough errors — addUnionImports double-shift"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: high
 goal: compilable
+sprint: 21
 ---
 # Stack fallthrough errors — addUnionImports double-shift
 

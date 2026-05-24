@@ -1,6 +1,5 @@
 ---
 id: 1169c
-sprint: 45
 title: "IR Phase 4 Slice 3 — closures (captures, ref cells, transitive captures) through the IR path"
 status: done
 created: 2026-04-26
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: ci-hardening
+sprint: 45
 depends_on: [1169a, 1169b, 1168]
 required_by: [1169d, 1169m]
 pr: 41

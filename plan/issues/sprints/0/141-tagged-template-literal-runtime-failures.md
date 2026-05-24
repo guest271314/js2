@@ -1,6 +1,5 @@
 ---
 id: 141
-sprint: 0
 title: "Issue #141: Tagged template literal runtime failures"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: compilable
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

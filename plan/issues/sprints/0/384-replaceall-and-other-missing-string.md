@@ -1,6 +1,5 @@
 ---
 id: 384
-sprint: 0
 title: "- replaceAll and other missing string methods"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: contributor-readiness
+sprint: 0
 test262_ce: 5
 files:
   src/codegen/index.ts:

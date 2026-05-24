@@ -1,6 +1,5 @@
 ---
 id: 720
-sprint: 0
 title: "Wasm validation: i32.add expects i32, got f64 (96 CE)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: core-semantics
+sprint: 0
 test262_ce: 96
 files:
   src/codegen/expressions.ts:

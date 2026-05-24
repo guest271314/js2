@@ -1,6 +1,5 @@
 ---
 id: 785
-sprint: 0
 title: "- Null pointer traps in compiled Wasm code (~1,604 tests)"
 status: done
 created: 2026-03-25
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: high
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 parent: 779
 test262_fail: 1604
 ---

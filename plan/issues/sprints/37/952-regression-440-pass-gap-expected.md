@@ -1,6 +1,5 @@
 ---
 id: 952
-sprint: 37
 title: "Regression: 440 pass gap — expected 17,688 but getting 17,248 after sprint 37 merges"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 37
 ---
 # #952 — Regression: 440 pass gap after sprint 37 merges
 

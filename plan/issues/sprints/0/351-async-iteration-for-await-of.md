@@ -1,6 +1,5 @@
 ---
 id: 351
-sprint: 0
 title: "Async iteration / for-await-of"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: iterator-protocol
+sprint: 0
 ---
 # Issue #351: Async iteration / for-await-of
 

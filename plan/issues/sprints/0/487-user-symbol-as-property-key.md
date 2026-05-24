@@ -1,6 +1,5 @@
 ---
 id: 487
-sprint: 0
 title: "User Symbol as property key via tagged struct variant (~60 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: symbol-protocol
+sprint: 0
 depends_on: [481, 483]
 test262_skip: 60
 files:

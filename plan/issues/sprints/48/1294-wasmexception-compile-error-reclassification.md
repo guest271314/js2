@@ -1,10 +1,10 @@
 ---
 id: 1294
-sprint: 48
 title: "test262 worker: reclassify WebAssembly.Exception compile-errors as fail + restart fork"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: high
 feasibility: easy
 reasoning_effort: low
@@ -12,6 +12,8 @@ task_type: bugfix
 area: test-infrastructure
 language_feature: test262-runner
 goal: conformance
+sprint: 48
+required_by: [1295]
 related: [1221, 1160]
 ---
 # #1294 — test262 worker: reclassify WebAssembly.Exception as fail + restart fork

@@ -1,6 +1,5 @@
 ---
 id: 1080
-sprint: 45
 title: "[umbrella] Fix CI baseline-drift regression gate — main is not self-healing"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: medium
 reasoning_effort: medium
 task_type: bugfix
 goal: ci-hardening
+sprint: 45
 blocks: [1076, 1077, 1078, 1079]
 ---
 > **Closed 2026-04-30 (PO).** All four umbrella children landed in

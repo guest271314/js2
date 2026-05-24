@@ -1,6 +1,5 @@
 ---
 id: 646
-sprint: 0
 title: "Residual undefined .kind: more AST node handlers (5,329 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: generator-model
+sprint: 0
 depends_on: [619]
 test262_ce: 5329
 files:

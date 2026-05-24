@@ -3,17 +3,18 @@ id: 1544
 title: "for-of / for-await-of destructuring of iterator results throws illegal cast"
 status: ready
 created: 2026-05-20
-spec_done: 2026-05-20
-parent: 820
+updated: 2026-05-21
 priority: high
 feasibility: medium
 goal: test262-conformance
+sprint: 52
+parent: 820
+spec_done: 2026-05-20
 test262_fail: 45
 shares_fix_with: [1543]
 root_cause_doc: 1556
 note: "Verified 2026-05-21 — shares fix with #1543; both gated by literals.ts:447 (confirmed present)"
 ---
-
 # #1544 — for-of / for-await-of dstr rest/elision → illegal cast
 
 ## Problem

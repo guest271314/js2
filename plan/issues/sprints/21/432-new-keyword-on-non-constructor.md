@@ -1,6 +1,5 @@
 ---
 id: 432
-sprint: 21
 title: "new keyword on non-constructor builtins causes stack underflow (42 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: medium
 goal: error-model
+sprint: 21
 files:
   src/codegen/index.ts:
     breaking:

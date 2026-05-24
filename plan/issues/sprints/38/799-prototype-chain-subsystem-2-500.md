@@ -1,6 +1,5 @@
 ---
 id: 799
-sprint: 38
 title: "- Prototype chain subsystem (~2,500 tests)"
 status: done
 created: 2026-03-26
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: platform
+sprint: 38
 test262_fail: ~2500
 note: "799a (__proto__ field) done but caused -2,788 regression → reverted to conditional approach in #802. 799b (compile-time chain walk) done and working. Remaining: #802 for dynamic proto support."
 ---

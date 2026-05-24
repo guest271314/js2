@@ -1,6 +1,5 @@
 ---
 id: 578
-sprint: 0
 title: "WASI target: console.log -> fd_write, process.exit -> proc_exit"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: medium
 goal: platform
+sprint: 0
 required_by: [640, 641]
 ---
 # Issue #578: WASI target support

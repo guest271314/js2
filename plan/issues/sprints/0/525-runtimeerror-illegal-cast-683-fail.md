@@ -1,6 +1,5 @@
 ---
 id: 525
-sprint: 0
 title: "RuntimeError: illegal cast (683 FAIL)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: crash-free
+sprint: 0
 test262_fail: 683
 files:
   src/codegen/expressions.ts:

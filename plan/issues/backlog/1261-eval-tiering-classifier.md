@@ -11,6 +11,7 @@ task_type: feature
 area: codegen, type-analysis
 language_feature: eval, strict-mode
 goal: performance
+sprint: Backlog
 required_by: [1262, 1263, 1264, 1265]
 ---
 # #1261 — eval tiering: classify eval sites into 5 tiers at compile time

@@ -1,9 +1,9 @@
 ---
 id: 1551
-sprint: 52
 title: "spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-21
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes, super, spread
 goal: spec-completeness
+sprint: 52
 parent: 779
 related: [1455, 1456]
 note: "Verified 2026-05-21: compileSuperPropertyAccess at new-super.ts:258, compileSuperCall at class-bodies.ts:1629. No src/codegen/expressions/object.ts file exists — that ref was speculative."

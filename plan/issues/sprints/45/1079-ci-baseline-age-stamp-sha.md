@@ -1,6 +1,5 @@
 ---
 id: 1079
-sprint: 45
 title: "CI: baseline age stamp + SHA on landing page — make drift observable before crisis"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: easy
 reasoning_effort: low
 task_type: feature
 goal: ci-hardening
+sprint: 45
 parent: 1080
 ---
 # #1079 — Baseline age stamp + SHA visibility

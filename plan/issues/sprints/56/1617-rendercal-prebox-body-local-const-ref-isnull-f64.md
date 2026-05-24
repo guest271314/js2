@@ -1,20 +1,20 @@
 ---
 id: 1617
-sprint: 56
 title: "codegen: loop pre-box wrongly boxes body-local let/const captured by closure → ref.is_null over f64 (invalid wasm)"
 status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: hard
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: closures-per-iteration-binding
-es_edition: es2015
 goal: compiler-correctness
+sprint: 56
+es_edition: es2015
 related: [1602, 1603, 1589, 1453]
 ---
-
 # #1617 — Loop pre-box boxes body-local let/const captured by a closure → `ref.is_null` over f64
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 955
-sprint: 38
 title: "Peephole: eliminate ref.test + ref.cast redundant type checks (8,642 pairs, 36% of modules)"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: builtin-methods
+sprint: 38
 ---
 # #955 — Eliminate redundant ref.test + ref.cast pairs
 

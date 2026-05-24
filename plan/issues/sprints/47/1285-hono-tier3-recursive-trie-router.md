@@ -1,10 +1,10 @@
 ---
 id: 1285
-sprint: 47
 title: "Hono Tier 3 stress test — recursive TrieRouter with class-typed Node children"
 status: done
 created: 2026-05-02
 updated: 2026-05-03
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,10 +12,10 @@ task_type: test
 area: tests
 language_feature: classes, index-signature, recursion
 goal: npm-library-support
+sprint: 47
 depends_on: [1284]
 related: [1244, 1274]
 ---
-
 # #1285 — Hono Tier 3: recursive TrieRouter with class-typed Node children
 
 ## Problem

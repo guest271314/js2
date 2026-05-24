@@ -1,6 +1,5 @@
 ---
 id: 902
-sprint: 34
 title: "Remove helper-call coercion from pure numeric recursive call/return paths"
 status: done
 created: 2026-04-02
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 34
 depends_on: [897]
 files:
   src/codegen/expressions.ts:

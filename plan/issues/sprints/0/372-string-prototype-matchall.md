@@ -1,6 +1,5 @@
 ---
 id: 372
-sprint: 0
 title: "- String.prototype.matchAll"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_skip: 7
 files:
   tests/test262-runner.ts:

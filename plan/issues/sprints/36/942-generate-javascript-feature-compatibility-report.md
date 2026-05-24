@@ -1,6 +1,5 @@
 ---
 id: 942
-sprint: 36
 title: "Generate JavaScript feature compatibility report ranked by real-world importance"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: async-model
+sprint: 36
 ---
 # #942 — JavaScript feature compatibility report ranked by real-world importance
 

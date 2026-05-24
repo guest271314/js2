@@ -1,10 +1,10 @@
 ---
 id: 1278
-sprint: 47
 title: "Update stale lodash-tier1 stress test — resolver fixed, clamp/add behavior changed"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-24
 priority: low
 feasibility: easy
 reasoning_effort: low
@@ -12,6 +12,7 @@ task_type: test
 area: tests
 language_feature: none
 goal: npm-library-support
+sprint: 47
 related: [1031, 1275, 1276, 1277]
 ---
 # #1278 — Update stale lodash-tier1 stress test

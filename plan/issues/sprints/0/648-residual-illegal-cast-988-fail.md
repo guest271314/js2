@@ -1,6 +1,5 @@
 ---
 id: 648
-sprint: 0
 title: "Residual illegal cast (988 FAIL)"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 0
 ---
 # Issue #648: Residual illegal cast (988 FAIL)
 

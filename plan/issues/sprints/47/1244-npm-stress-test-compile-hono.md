@@ -1,11 +1,10 @@
 ---
 id: 1244
-sprint: 47
 title: "npm stress test: compile Hono web framework to Wasm"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -13,6 +12,7 @@ task_type: stress-test
 area: codegen, runtime
 language_feature: classes, closures, routing, middleware
 goal: platform
+sprint: 47
 related: [1031, 1034, 1243]
 ---
 # #1244 — npm stress test: compile Hono web framework to Wasm

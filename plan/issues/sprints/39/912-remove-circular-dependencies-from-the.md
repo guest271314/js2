@@ -1,6 +1,5 @@
 ---
 id: 912
-sprint: 39
 title: "Remove circular dependencies from the core codegen backend"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: ci-hardening
+sprint: 39
 depends_on: [909, 910, 911]
 required_by: [1013]
 files:

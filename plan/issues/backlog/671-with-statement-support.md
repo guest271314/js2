@@ -7,6 +7,7 @@ updated: 2026-04-28
 priority: low
 feasibility: medium
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 272
 files:
   src/codegen/statements.ts:

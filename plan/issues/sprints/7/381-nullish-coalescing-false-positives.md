@@ -1,6 +1,5 @@
 ---
 id: 381
-sprint: 7
 title: "- Nullish coalescing false positives"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: core-semantics
+sprint: 7
 test262_ce: 4
 files:
   src/codegen/index.ts:

@@ -1,6 +1,5 @@
 ---
 id: 121
-sprint: 6
 title: "Issue 121: Function.prototype.call/apply"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: standalone-mode
+sprint: 6
 files:
   src/codegen/expressions.ts:
     new: []

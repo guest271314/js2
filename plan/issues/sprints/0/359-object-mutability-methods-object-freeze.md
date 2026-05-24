@@ -1,6 +1,5 @@
 ---
 id: 359
-sprint: 0
 title: "- Object mutability methods (Object.freeze/seal/preventExtensions)"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: low
 feasibility: medium
 goal: property-model
+sprint: 0
 test262_skip: 31
 files:
   src/codegen/expressions.ts:

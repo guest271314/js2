@@ -1,6 +1,5 @@
 ---
 id: 345
-sprint: 0
 title: "- Symbol.iterator and iterable protocol"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: core-semantics
+sprint: 0
 test262_skip: 702
 test262_categories:
   - spread across 19 categories

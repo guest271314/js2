@@ -1,6 +1,5 @@
 ---
 id: 227
-sprint: 0
 title: "Issue #227: BigInt comparison with Infinity causes float-unrepresentable trap"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: medium
 goal: crash-free
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

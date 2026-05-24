@@ -2,7 +2,6 @@
 id: 1588
 title: "String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop"
 status: in-progress
-sprint: 55
 created: 2026-05-23
 updated: 2026-05-23
 priority: medium
@@ -12,6 +11,7 @@ task_type: feature
 area: compiler
 language_feature: strings
 goal: platform
+sprint: 55
 depends_on: [1586]
 es_edition: multi
 ---

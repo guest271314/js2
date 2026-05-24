@@ -1,12 +1,12 @@
 ---
 id: 132
-sprint: 2
 title: "Logical operators returning values (short-circuit)"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: builtin-methods
+sprint: 2
 ---
 # #132 — Logical operators returning values (short-circuit)
 

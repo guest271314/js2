@@ -1,12 +1,12 @@
 ---
 id: 126
-sprint: 2
 title: "Issue 126: valueOf/toString coercion"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # Issue 126: valueOf/toString coercion
 

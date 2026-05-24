@@ -1,12 +1,12 @@
 ---
 id: 10
-sprint: 0
 title: "Issue 10: DOM Support"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 10: DOM Support
 

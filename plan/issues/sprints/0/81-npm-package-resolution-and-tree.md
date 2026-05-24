@@ -1,6 +1,5 @@
 ---
 id: 81
-sprint: 0
 title: "Issue 81: npm package resolution and tree-shaking"
 status: done
 created: 2026-03-08
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: platform
+sprint: 0
 files:
   src/import-resolver.ts:
     new: []

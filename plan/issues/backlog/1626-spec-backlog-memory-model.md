@@ -1,10 +1,9 @@
 ---
 id: 1626
-renumbered_from: 1353
-sprint: backlog
 title: "spec backlog: §29 Memory Model implementation (multi-thread Wasm)"
 status: backlog
 created: 2026-05-08
+updated: 2026-05-24
 priority: low
 feasibility: hard
 reasoning_effort: max
@@ -12,6 +11,8 @@ task_type: feature
 area: runtime, memory
 language_feature: memory-model
 goal: spec-completeness
+sprint: Backlog
+renumbered_from: 1353
 parent: 1334
 ---
 # #1353 — §29 Memory Model

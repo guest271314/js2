@@ -1,6 +1,5 @@
 ---
 id: 991
-sprint: 45
 title: "Iterator helper generator-reentrancy tests hit 30s compiler timeout"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 45
 resolved_by: "#1085 (iterative bodyUsesArguments, PR #127)"
 test262_ct: 3
 ---

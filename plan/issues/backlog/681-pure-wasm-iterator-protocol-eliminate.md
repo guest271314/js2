@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
+sprint: Backlog
 depends_on: [680]
 required_by: [735]
 files:

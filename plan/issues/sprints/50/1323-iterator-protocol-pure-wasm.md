@@ -1,8 +1,7 @@
 ---
 id: 1323
-sprint: 50
 title: "Iterator protocol bridging: implement $IteratorResult struct in pure Wasm, eliminate host bridge"
-status: in-review
+status: review
 created: 2026-05-07
 updated: 2026-05-07
 priority: medium
@@ -12,6 +11,7 @@ task_type: feature
 area: runtime, codegen
 language_feature: iterators, for-of
 goal: standalone-mode
+sprint: 50
 ---
 # #1323 — Iterator protocol: pure-Wasm $IteratorResult struct
 

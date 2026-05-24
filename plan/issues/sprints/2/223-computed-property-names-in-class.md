@@ -1,12 +1,12 @@
 ---
 id: 223
-sprint: 2
 title: "Issue #223: Computed property names in class declarations"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: class-system
+sprint: 2
 ---
 # Issue #223: Computed property names in class declarations
 

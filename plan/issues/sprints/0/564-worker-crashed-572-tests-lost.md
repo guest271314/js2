@@ -1,6 +1,5 @@
 ---
 id: 564
-sprint: 0
 title: "Worker crashed -- 572 tests lost to worker process crashes"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: async-model
+sprint: 0
 ---
 # Issue #564: Worker crashed -- 572 tests lost to worker process crashes
 

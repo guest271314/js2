@@ -8,6 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: high
 goal: npm-library-support
+sprint: Backlog
 depends_on: [1044]
 ---
 # #1032 — Compile axios to Wasm as a real-world I/O stress test

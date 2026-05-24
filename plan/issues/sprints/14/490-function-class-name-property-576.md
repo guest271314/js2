@@ -1,6 +1,5 @@
 ---
 id: 490
-sprint: 14
 title: "Function/class .name property (576 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: spec-completeness
+sprint: 14
 test262_skip: 576
 files:
   src/codegen/expressions.ts:

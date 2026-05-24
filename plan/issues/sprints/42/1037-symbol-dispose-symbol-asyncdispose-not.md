@@ -1,6 +1,5 @@
 ---
 id: 1037
-sprint: 42
 title: "Symbol.dispose / Symbol.asyncDispose not accessible (30 FAIL)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: explicit-resource-management
 goal: spec-completeness
+sprint: 42
 es_edition: es2026
 test262_fail: 30
 ---

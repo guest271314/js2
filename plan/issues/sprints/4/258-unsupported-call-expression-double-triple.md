@@ -1,6 +1,5 @@
 ---
 id: 258
-sprint: 4
 title: "Unsupported call expression -- double/triple nested calls"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 4
 ---
 # Issue #258: Unsupported call expression -- double/triple nested calls
 

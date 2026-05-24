@@ -1,6 +1,5 @@
 ---
 id: 1110
-sprint: 14
 title: "Wrapper object constructors: new Number/String/Boolean (648 tests)"
 status: done
 created: 2026-03-11
@@ -11,6 +10,7 @@ feasibility: medium
 task_type: feature
 language_feature: wrapper-objects
 goal: builtin-methods
+sprint: 14
 renumbered_from: 123
 test262_skip: 648
 files:

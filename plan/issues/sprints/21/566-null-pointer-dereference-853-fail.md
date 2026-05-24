@@ -1,6 +1,5 @@
 ---
 id: 566
-sprint: 21
 title: "Null pointer dereference (853 FAIL) - local index shift not recursive"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: critical
 goal: crash-free
+sprint: 21
 ---
 # Issue #566: Null pointer dereference (853 FAIL)
 

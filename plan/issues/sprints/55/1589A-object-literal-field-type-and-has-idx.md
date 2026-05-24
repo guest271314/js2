@@ -1,16 +1,17 @@
 ---
-id: 1589A
-parent: 1589
-title: Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes
+id: 1589a
+title: "Fix object-literal field-type inference + __extern_has_idx null semantics for Array.prototype.{indexOf,lastIndexOf}.call on length=2^32 array-likes"
 status: ready
-sprint: 55
+created: 2026-05-23
+updated: 2026-05-23
 priority: medium
 feasibility: hard
-type: bug
 area: codegen+runtime
+sprint: 55
+parent: 1589
+type: bug
 labels: [test262, codegen, runtime, struct-inference, has-property]
 ---
-
 ## Recap (from #1589 Findings — Hot spot A)
 
 Three test262 entries currently hang for ~30s and pin the `compile_timeout`

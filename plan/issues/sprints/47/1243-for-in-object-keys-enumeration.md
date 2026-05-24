@@ -1,10 +1,10 @@
 ---
 id: 1243
-sprint: 47
 title: "for...in / Object.keys enumeration of compiled-object properties (lodash Tier 3)"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: for-in, Object.keys, property-enumeration
 goal: npm-library-support
+sprint: 47
 related: [853, 983]
 ---
 # #1243 — for...in / Object.keys enumeration of compiled-object properties

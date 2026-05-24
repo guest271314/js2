@@ -1,6 +1,5 @@
 ---
 id: 426
-sprint: 0
 title: "Compound assignment on non-ref element (11 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: contributor-readiness
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

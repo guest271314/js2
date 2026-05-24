@@ -1,6 +1,5 @@
 ---
 id: 949
-sprint: 37
 title: "Research: Integrate Chris Fallin's JS-to-Wasm Blog Series into Documentation"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: high
 goal: platform
+sprint: 37
 tags: [documentation, competitive-analysis, strategy]
 ---
 # Research: Integrate Chris Fallin's JS-to-Wasm Blog Series into Documentation

@@ -8,6 +8,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: platform
+sprint: Backlog
 ---
 # #865 -- Console wrapper for fd_write in JavaScript environments
 

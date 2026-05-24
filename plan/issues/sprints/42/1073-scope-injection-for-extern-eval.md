@@ -1,6 +1,5 @@
 ---
 id: 1073
-sprint: 42
 title: "Scope injection for __extern_eval — pass harness environment bag to preserve caller-visible identifiers"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: max
 task_type: feature
 language_feature: eval
 goal: spec-completeness
+sprint: 42
 depends_on: [1006]
 es_edition: multi
 ---

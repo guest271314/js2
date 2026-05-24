@@ -1,10 +1,10 @@
 ---
 id: 1267
-sprint: 50
 title: "optimizer: method calls in expression-statement position silently dropped when return value unused"
 status: done
 created: 2026-05-02
 updated: 2026-05-07
+completed: 2026-05-07
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,8 @@ task_type: bugfix
 area: codegen, optimizer
 language_feature: method-calls, side-effects
 goal: correctness
+sprint: 50
+required_by: [1274]
 related: [1244, 1249]
 ---
 # #1267 — Optimizer drops side-effectful method calls in statement position

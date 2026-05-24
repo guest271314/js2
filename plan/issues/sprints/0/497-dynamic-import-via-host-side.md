@@ -1,6 +1,5 @@
 ---
 id: 497
-sprint: 0
 title: "Dynamic import() via host-side module loading (442 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 test262_skip: 442
 files:
   src/codegen/expressions.ts:

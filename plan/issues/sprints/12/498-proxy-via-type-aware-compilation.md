@@ -1,6 +1,5 @@
 ---
 id: 498
-sprint: 12
 title: "Proxy via type-aware compilation with trap inlining (70 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: spec-completeness
+sprint: 12
 required_by: [670]
 test262_skip: 70
 files:

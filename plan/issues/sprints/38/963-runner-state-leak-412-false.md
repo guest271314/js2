@@ -1,6 +1,5 @@
 ---
 id: 963
-sprint: 38
 title: "Runner state leak: 412 false compile errors from CompilerPool fork contamination"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 38
 required_by: [964]
 ---
 # #963 — Runner state leak: 412 false compile errors

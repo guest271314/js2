@@ -1,6 +1,5 @@
 ---
 id: 478
-sprint: 0
 title: "assert.throws side-effect assertions — 342 tests"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: error-model
+sprint: 0
 ---
 # #478 — assert.throws side-effect assertions (342 tests)
 

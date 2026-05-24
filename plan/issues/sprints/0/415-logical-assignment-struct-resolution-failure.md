@@ -1,6 +1,5 @@
 ---
 id: 415
-sprint: 0
 title: "Logical assignment struct resolution failure"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: contributor-readiness
+sprint: 0
 test262_ce: 14
 complexity: S
 files:

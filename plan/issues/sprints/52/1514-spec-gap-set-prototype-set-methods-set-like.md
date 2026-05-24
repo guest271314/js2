@@ -1,9 +1,9 @@
 ---
 id: 1514
-sprint: 52
 title: "spec gap: Set.prototype.{union,intersection,difference,…} accept set-like protocol"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: set-methods
 goal: spec-completeness
+sprint: 52
 related: [1438]
 ---
 # #1514 — Set methods accept any set-like

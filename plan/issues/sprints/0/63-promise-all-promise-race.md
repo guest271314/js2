@@ -1,12 +1,12 @@
 ---
 id: 63
-sprint: 0
 title: "Issue 63: Promise.all / Promise.race"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: async-model
+sprint: 0
 ---
 # Issue 63: Promise.all / Promise.race
 

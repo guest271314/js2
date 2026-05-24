@@ -1,6 +1,5 @@
 ---
 id: 722
-sprint: 26
 title: "Class private methods: hasOwnProperty check fails (484 FAIL)"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: high
 goal: property-model
+sprint: 26
 ---
 # Issue #722: hasOwnProperty returns true for class methods
 

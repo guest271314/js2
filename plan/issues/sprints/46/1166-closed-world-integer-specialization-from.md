@@ -1,6 +1,5 @@
 ---
 id: 1166
-sprint: 46
 title: "Closed-world integer specialization from literal call sites"
 status: blocked
 created: 2026-04-22
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: compiler-architecture
+sprint: 46
 depends_on: [1131, 1168]
 required_by: [1167, 1167a]
 ---

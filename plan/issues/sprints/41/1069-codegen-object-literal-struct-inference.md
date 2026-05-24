@@ -1,6 +1,5 @@
 ---
 id: 1069
-sprint: 41
 title: "codegen: object literal → struct inference fails on bundled JS config objects"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: object-literals
 goal: npm-library-support
+sprint: 41
 parent: 1034
 ---
 # #1069 — object literal → struct inference fails on bundled JS config objects

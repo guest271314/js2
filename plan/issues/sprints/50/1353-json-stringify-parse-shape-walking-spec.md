@@ -1,9 +1,7 @@
 ---
 id: 1353
-sprint: 50
 title: "JSON.stringify (objects/arrays) + JSON.parse: architect spec for Wasm shape-walking and recursive-descent parser"
 status: ready
-needs_architect_spec: true
 created: 2026-05-08
 updated: 2026-05-08
 priority: medium
@@ -13,6 +11,8 @@ task_type: feature
 area: runtime, codegen
 language_feature: json
 goal: standalone-mode
+sprint: 50
+needs_architect_spec: true
 related: [1324, 1321]
 ---
 # #1353 — JSON shape-walking + parser: architect spec needed

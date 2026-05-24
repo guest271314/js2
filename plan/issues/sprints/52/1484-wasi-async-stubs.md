@@ -1,9 +1,9 @@
 ---
 id: 1484
-sprint: 52
 title: "wasi: provide standalone setTimeout/setInterval via poll_oneoff (or fail loud)"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: codegen, runtime
 language_feature: timers, async
 goal: wasi-completeness
+sprint: 52
 related: []
 ---
-
 ## Problem
 
 Under `--target wasi`, `setTimeout` / `setInterval` / `setImmediate`

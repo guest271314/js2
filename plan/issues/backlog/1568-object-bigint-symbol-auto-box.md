@@ -1,17 +1,18 @@
 ---
 id: 1568
-title: Object(BigInt) and Object(Symbol) must auto-box to wrappers (typeof === "object")
+title: "Object(BigInt) and Object(Symbol) must auto-box to wrappers (typeof === \\\\\\\"object\\\\\\\")"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 feasibility: easy
+sprint: Backlog
+depends_on: [1129]
 owner: developer
 type: fix
-created: 2026-05-21
 source: plan/issues/sprints/53/post-wave-regression-investigation.md
 blocks: []
-depends_on: [1129]
 labels: [test262, regression, ToObject, ECMAScript-spec]
 ---
-
 # #1568 — Object(BigInt) and Object(Symbol) auto-box
 
 ## Background

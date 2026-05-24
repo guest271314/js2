@@ -1,10 +1,10 @@
 ---
 id: 1437
-sprint: 52
 title: "spec gap: Math numeric edge cases beyond random source"
 status: done
 created: 2026-05-11
 updated: 2026-05-20
+completed: 2026-05-20
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: runtime
 language_feature: math
 goal: spec-completeness
+sprint: 52
 related: [807, 1322]
 ---
 # #1437 - Math numeric edge cases beyond random source

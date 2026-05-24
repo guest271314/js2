@@ -1,6 +1,5 @@
 ---
 id: 1169i
-sprint: 45
 title: "IR Phase 4 Slice 10 — remaining builtins (RegExp, TypedArray, DataView) through the IR path"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: async-model
+sprint: 45
 depends_on: [1169d]
 required_by: [1169j, 1169k, 1169l, 1169m]
 pr: 86

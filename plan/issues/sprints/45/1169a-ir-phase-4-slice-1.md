@@ -1,6 +1,5 @@
 ---
 id: 1169a
-sprint: 45
 title: "IR Phase 4 Slice 1 — strings, typeof, null/undefined checks through the IR path"
 status: done
 created: 2026-04-25
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: core-semantics
+sprint: 45
 depends_on: [1169, 1168]
 required_by: [1169b, 1169c]
 ---

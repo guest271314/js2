@@ -1,6 +1,5 @@
 ---
 id: 665
-sprint: 14
 title: "Native Wasm Date implementation"
 status: done
 created: 2026-03-20
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: high
 goal: platform
+sprint: 14
 commit: d9c06d16
 ---
 # Issue #665: Native Wasm Date implementation

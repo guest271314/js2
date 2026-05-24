@@ -1,6 +1,5 @@
 ---
 id: 173
-sprint: 0
 title: "Computed property names in class declarations"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: class-system
+sprint: 0
 depends_on: [242, 265]
 files:
   src/codegen/expressions.ts:

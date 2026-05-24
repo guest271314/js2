@@ -1,6 +1,5 @@
 ---
 id: 453
-sprint: 0
 title: "Compile Three.js to Wasm"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: npm-library-support
+sprint: 0
 ---
 # #453 — Compile Three.js to Wasm
 

@@ -8,6 +8,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: Backlog
 files:
   playground/:
     new:

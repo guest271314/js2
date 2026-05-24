@@ -1,12 +1,12 @@
 ---
 id: 48
-sprint: 0
 title: "Issue 48: Cache string literals in locals"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: contributor-readiness
+sprint: 0
 ---
 # Issue 48: Cache string literals in locals
 

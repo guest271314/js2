@@ -1,12 +1,12 @@
 ---
 id: 113
-sprint: 1
 title: "Issue 113: Bug — 'Object literal type not mapped to struct'"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-11
 goal: builtin-methods
+sprint: 1
 ---
 # Issue 113: Bug — "Object literal type not mapped to struct"
 

@@ -1,6 +1,5 @@
 ---
 id: 1289
-sprint: 47
 title: "ESLint linter.js direct compile: array.set type mismatch in FileReport_addRuleMessage"
 status: done
 created: 2026-05-03
@@ -13,9 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: classes, arrays, struct-types
 goal: npm-library-support
+sprint: 47
 related: [1282, 1247]
 ---
-
 # #1289 — ESLint linter.js produces invalid Wasm in `FileReport_addRuleMessage`
 
 ## Problem

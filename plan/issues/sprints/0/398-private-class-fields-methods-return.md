@@ -1,6 +1,5 @@
 ---
 id: 398
-sprint: 0
 title: "Private class fields/methods return wrong values (98 FAIL)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: high
 feasibility: medium
 goal: class-system
+sprint: 0
 test262_fail: 98
 files:
   src/codegen/expressions.ts:

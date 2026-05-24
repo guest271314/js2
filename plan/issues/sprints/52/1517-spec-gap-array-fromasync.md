@@ -1,9 +1,9 @@
 ---
 id: 1517
-sprint: 52
 title: "spec gap: Array.fromAsync — ES2024 async-iteration constructor"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: array-builtin, async-iteration
 goal: spec-completeness
+sprint: 52
 related: [1373b, 1510]
 ---
 # #1517 — Array.fromAsync

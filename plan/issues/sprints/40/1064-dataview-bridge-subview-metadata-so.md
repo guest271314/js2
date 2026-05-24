@@ -1,6 +1,5 @@
 ---
 id: 1064
-sprint: 40
 title: "DataView bridge: subview metadata so bounds errors propagate"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: dataview
 goal: ci-hardening
+sprint: 40
 es_edition: multi
 ---
 sprint: 40

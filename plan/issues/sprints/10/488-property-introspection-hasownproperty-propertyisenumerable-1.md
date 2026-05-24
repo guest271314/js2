@@ -1,6 +1,5 @@
 ---
 id: 488
-sprint: 10
 title: "Property introspection: hasOwnProperty / propertyIsEnumerable (1,617 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: property-model
+sprint: 10
 required_by: [495, 499]
 test262_skip: 1617
 files:

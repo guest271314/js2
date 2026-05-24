@@ -9,11 +9,11 @@ feasibility: medium
 task_type: feature
 area: codegen
 language_feature: spread, new-expression
-es_edition: es2015
 goal: compiler-correctness
+sprint: Backlog
+es_edition: es2015
 test262_count: 18
 ---
-
 # #1609 — Non-literal spread in `new` expression unsupported
 
 ## Problem

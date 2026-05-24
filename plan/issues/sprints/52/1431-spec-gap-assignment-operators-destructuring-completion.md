@@ -1,10 +1,10 @@
 ---
 id: 1431
-sprint: 52
 title: "spec gap: assignment operators — destructuring completion, defaults, and compound side effects"
 status: done
 created: 2026-05-11
 updated: 2026-05-11
+completed: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: assignment, destructuring
 goal: spec-completeness
+sprint: 52
 related: [805, 1268, 1372, 1396, 1429]
 ---
 # #1431 - Assignment operators: destructuring completion and compound side effects

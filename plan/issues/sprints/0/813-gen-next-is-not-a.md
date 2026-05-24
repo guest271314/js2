@@ -1,6 +1,5 @@
 ---
 id: 813
-sprint: 0
 title: "- gen.next is not a function (1,164 tests)"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_fail: 1164
 ---
 # #813 -- gen.next is not a function (1,164 tests)

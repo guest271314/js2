@@ -1,6 +1,5 @@
 ---
 id: 393
-sprint: 0
 title: "- Compound assignment on externref element access (13 CE)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_ce: 13
 files:
   src/codegen/expressions.ts:

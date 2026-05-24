@@ -1,6 +1,5 @@
 ---
 id: 500
-sprint: 0
 title: "Remove cross-realm skip filter (33 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: low
 feasibility: easy
 goal: spec-completeness
+sprint: 0
 test262_skip: 33
 files:
   tests/test262-runner.ts:

@@ -1,6 +1,5 @@
 ---
 id: 496
-sprint: 0
 title: "eval() and new Function() source transform for test262 (533 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 test262_skip: 533
 files:
   tests/test262-runner.ts:

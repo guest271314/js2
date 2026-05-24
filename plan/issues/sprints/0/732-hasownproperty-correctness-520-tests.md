@@ -1,6 +1,5 @@
 ---
 id: 732
-sprint: 0
 title: "- hasOwnProperty correctness (520 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: medium
 feasibility: medium
 goal: property-model
+sprint: 0
 depends_on: [678]
 test262_fail: 520
 files:

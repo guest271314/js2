@@ -1,10 +1,9 @@
 ---
 id: 1633
-renumbered_from: 1339
-sprint: 50
 title: "spec gap: Array.from / Array.of constructor semantics (39 test262 fails, wasm_compile dominant)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +11,8 @@ task_type: bugfix
 area: codegen
 language_feature: array
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1339
 parent: 1328
 ---
 # #1339 — Array.from / Array.of: subclassing + iterable bridge

@@ -1,6 +1,5 @@
 ---
 id: 723
-sprint: 0
 title: "- TDZ violations: throw ReferenceError before let/const init (230 FAIL)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_fail: 230
 files:
   src/codegen/expressions.ts:

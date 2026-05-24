@@ -1,12 +1,12 @@
 ---
 id: 115
-sprint: 1
 title: "Issue 115: Bug — while/do-while loop internal variable scope crash"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 1
 ---
 # Issue 115: Bug — while/do-while loop internal variable scope crash
 

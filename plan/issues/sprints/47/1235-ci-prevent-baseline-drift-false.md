@@ -1,17 +1,17 @@
 ---
 id: 1235
-sprint: 47
 title: "ci: prevent baseline drift false-positive regressions after admin-merges"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: high
 feasibility: medium
 reasoning_effort: medium
 task_type: infrastructure
 area: ci
 goal: ci-hardening
+sprint: 47
 related: [1190, 1222, 1142, 1143, 1144]
 ---
 # #1235 — ci: prevent baseline drift false-positive regressions after admin-merges

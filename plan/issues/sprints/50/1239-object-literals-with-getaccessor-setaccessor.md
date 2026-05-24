@@ -1,11 +1,10 @@
 ---
 id: 1239
-sprint: 50
 title: "object literals with GetAccessor/SetAccessor — route to __defineProperty_accessor + force-externref var tagging"
 status: done
-needs_architect_spec: true
 created: 2026-05-02
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -13,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: object-literals
 goal: ci-hardening
+sprint: 50
+needs_architect_spec: true
 related: [1234, 1207, 1227]
 es_edition: ES5
 origin: "Surfaced during #1234. Tech-lead suggested path-2 (object-literal accessor fallback to plain JS host objects). Prototyped on the #1234 branch then reverted because it requires editing additional codegen files beyond #1234's scope."

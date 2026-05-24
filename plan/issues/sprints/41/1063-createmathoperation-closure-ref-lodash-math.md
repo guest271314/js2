@@ -1,6 +1,5 @@
 ---
 id: 1063
-sprint: 41
 title: "createMathOperation closure ref — lodash math ops (inliner shared-instr + externref callee)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: closures
 goal: ci-hardening
+sprint: 41
 parent: 1031
 ---
 # #1063 — createMathOperation closure ref (lodash math ops)

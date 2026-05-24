@@ -1,6 +1,5 @@
 ---
 id: 1004
-sprint: 45
 title: "Optimize repeated string concatenation via compile-time folding and counted-loop aggregation"
 status: ready
 created: 2026-04-09
@@ -11,6 +10,7 @@ reasoning_effort: high
 task_type: feature
 language_feature: strings-concat
 goal: generator-model
+sprint: 45
 es_edition: multi
 ---
 # #1004 -- Optimize repeated string concatenation via compile-time folding and counted-loop aggregation

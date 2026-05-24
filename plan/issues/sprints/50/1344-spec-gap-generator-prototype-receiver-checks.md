@@ -1,9 +1,9 @@
 ---
 id: 1344
-sprint: 50
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: generators
 goal: spec-completeness
+sprint: 50
 parent: 1328
 ---
 # #1344 — Generator / AsyncIterator prototype: receiver checks, .return/.throw

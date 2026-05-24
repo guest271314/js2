@@ -1,9 +1,10 @@
 ---
 id: 1530
-sprint: 55
 title: "wasi: Native Messaging host example (Chrome extension integration)"
 status: done
 created: 2026-05-20
+updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: low
@@ -11,12 +12,11 @@ task_type: example
 area: wasi, runtime, docs
 language_feature: stdin, stdout, process.env
 goal: wasi-completeness
+sprint: 55
 github_issue: 389
 filed_by: guest271314
-depends_on: []  # was [1480, 1481] — both LANDED (PR #391, #400); unblocked
 related: [1482, 1483, 1484]
 ---
-
 ## Problem
 
 Chrome's Native Messaging protocol lets extensions communicate with a

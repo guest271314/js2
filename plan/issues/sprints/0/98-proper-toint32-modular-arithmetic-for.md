@@ -1,12 +1,12 @@
 ---
 id: 98
-sprint: 0
 title: "Issue 98: Proper ToInt32 modular arithmetic for bitwise operations"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-09
 goal: core-semantics
+sprint: 0
 ---
 # Issue 98: Proper ToInt32 modular arithmetic for bitwise operations
 

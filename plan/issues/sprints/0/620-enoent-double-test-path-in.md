@@ -1,6 +1,5 @@
 ---
 id: 620
-sprint: 0
 title: "ENOENT: double test/ path in test262 runner (559 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 test262_ce: 559
 files:
   scripts/run-test262.ts:

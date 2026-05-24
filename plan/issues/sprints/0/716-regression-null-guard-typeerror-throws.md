@@ -1,6 +1,5 @@
 ---
 id: 716
-sprint: 0
 title: "Regression: null-guard TypeError throws cause pass-to-fail in struct-path property access"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: critical
 goal: error-model
+sprint: 0
 required_by: [768]
 ---
 # Issue #716: Regression from #695 null-guard TypeError throws

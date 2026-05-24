@@ -1,10 +1,9 @@
 ---
 id: 1624
-renumbered_from: 1552
-sprint: backlog
 title: "Tagged-union value representation: retire __box_*, __unbox_*, __typeof, __is_truthy"
 status: backlog
 created: 2026-05-20
+updated: 2026-05-24
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -12,9 +11,10 @@ task_type: refactor
 area: runtime
 language_feature: values
 goal: standalone-wasm
+sprint: Backlog
+renumbered_from: 1552
 related: [1535, 1471]
 ---
-
 # #1552 — Uniform tagged-union value representation
 
 ## Problem

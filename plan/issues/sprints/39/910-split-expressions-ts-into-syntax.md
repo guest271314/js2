@@ -1,6 +1,5 @@
 ---
 id: 910
-sprint: 39
 title: "Split expressions.ts into syntax-family modules"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: platform
+sprint: 39
 depends_on: [909]
 required_by: [912, 1013]
 files:

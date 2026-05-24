@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: Backlog
 test262_skip: 82
 ---
 # #832 -- Upgrade to TypeScript 6.x for Unicode 16.0.0 support

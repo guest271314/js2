@@ -8,7 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: ci-cost-reduction
-depends_on: []
+sprint: Backlog
 ---
 # #1522 — Race local test262 vs. CI, cancel the loser
 

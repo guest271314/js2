@@ -1,9 +1,9 @@
 ---
 id: 1463
-sprint: 52
 title: "spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: function-prototype
 goal: spec-completeness
+sprint: 52
 related: [1382]
 ---
 # #1463 - spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity

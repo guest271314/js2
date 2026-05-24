@@ -1,6 +1,5 @@
 ---
 id: 234
-sprint: 0
 title: "Issue #234: ClassDeclaration in nested/expression positions (remaining 681 errors)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: standalone-mode
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

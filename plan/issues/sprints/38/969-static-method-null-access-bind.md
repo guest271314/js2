@@ -1,6 +1,5 @@
 ---
 id: 969
-sprint: 38
 title: "Static method null access (bind/call) + DataView/TypedArray methods + String.split (22 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: property-model
+sprint: 38
 required_by: [971]
 ---
 # #969 — Misc method resolution regressions

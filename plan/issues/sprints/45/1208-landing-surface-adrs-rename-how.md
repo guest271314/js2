@@ -1,6 +1,5 @@
 ---
 id: 1208
-sprint: 45
 title: "landing: surface ADRs — rename 'How it works' to 'Approach', add Architecture section with ADR HTML renderings"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: landing-page
 language_feature: n/a
 goal: compiler-architecture
+sprint: 45
 depends_on: [1202]
 merged_pr: 79
 merge_commit: 0d7b438e3

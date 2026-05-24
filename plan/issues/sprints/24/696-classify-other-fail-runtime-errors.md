@@ -1,6 +1,5 @@
 ---
 id: 696
-sprint: 24
 title: "Classify 'other fail' runtime errors (4,649 FAIL)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: async-model
+sprint: 24
 test262_fail: 4649
 files:
   tests/test262-runner.ts:

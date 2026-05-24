@@ -1,6 +1,5 @@
 ---
 id: 336
-sprint: 7
 title: "- For-of assignment destructuring on non-struct refs"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: medium
 goal: core-semantics
+sprint: 7
 test262_ce: 11
 test262_refs:
   - test/language/statements/for-of/dstr/obj-empty-bool.js

@@ -1,9 +1,10 @@
 ---
 id: 1367
-sprint: 51
 title: "spec gap: Iterator.prototype helpers — get-next-once, non-constructible, return-on-throw (~244 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: iterators
 goal: spec-completeness
+sprint: 51
 parent: 1340
 ---
 # #1367 — Iterator helper protocol invariants

@@ -1,6 +1,5 @@
 ---
 id: 1319
-sprint: 50
 title: "Cannot convert object to primitive — Symbol.toPrimitive / valueOf / toString chain incomplete (234 failures)"
 status: ready
 created: 2026-05-07
@@ -12,6 +11,7 @@ task_type: bugfix
 area: codegen, type-coercion
 language_feature: Symbol.toPrimitive, type-coercion, object-model
 goal: spec-completeness
+sprint: 50
 ---
 # #1319 — `Cannot convert object to primitive` (234 failures)
 

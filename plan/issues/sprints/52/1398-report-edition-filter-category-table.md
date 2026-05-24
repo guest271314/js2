@@ -1,14 +1,16 @@
 ---
 id: 1398
-sprint: 52
 title: "report: edition filter on category table — per-category edition breakdown"
 status: done
 created: 2026-05-09
+updated: 2026-05-09
+completed: 2026-05-09
 priority: low
 feasibility: medium
 reasoning_effort: low
-task_type: infra
+task_type: infrastructure
 area: reporting
+sprint: 52
 ---
 # #1396 — Report: edition filter on category table
 

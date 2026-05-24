@@ -1,6 +1,5 @@
 ---
 id: 819
-sprint: 26
 title: "Multi-file compilation: resolve imports and compile module graphs"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: npm-library-support
+sprint: 26
 ---
 # #819 -- Multi-file compilation: resolve imports and compile module graphs
 

@@ -1,9 +1,9 @@
 ---
 id: 1465
-sprint: 52
 title: "spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: promise-combinators
 goal: spec-completeness
+sprint: 52
 related: [1326, 1368]
 ---
 # #1465 - spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity

@@ -1,6 +1,5 @@
 ---
 id: 981
-sprint: 40
 title: "Reuse t262-donut chart on report page, refactor as standalone component"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: 40
 ---
 # #981 — Reuse donut chart on report page
 

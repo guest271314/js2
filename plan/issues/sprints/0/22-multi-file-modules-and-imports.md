@@ -1,12 +1,12 @@
 ---
 id: 22
-sprint: 0
 title: "Issue 22: Multi-file Modules and Imports"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: maintainability
+sprint: 0
 ---
 # Issue 22: Multi-file Modules and Imports
 

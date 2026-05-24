@@ -1,6 +1,5 @@
 ---
 id: 1027
-sprint: 40
 title: "Missing __make_getter_callback late-import in PR #43 accessor paths"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: async-model
+sprint: 40
 parent: 929
 ---
 # #1027 — Missing `__make_getter_callback` late-import

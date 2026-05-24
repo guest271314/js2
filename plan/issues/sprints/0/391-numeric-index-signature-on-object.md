@@ -1,6 +1,5 @@
 ---
 id: 391
-sprint: 0
 title: "Numeric index signature on object types"
 status: done
 created: 2026-03-16
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #391: Numeric index signature on object types (30 CE)
 

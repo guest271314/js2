@@ -1,6 +1,5 @@
 ---
 id: 568
-sprint: 21
 title: "- Wasm validation: local.set type mismatch (198 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 21
 test262_ce: 198
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 386
-sprint: 7
 title: "- Remaining small CE patterns"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: core-semantics
+sprint: 7
 test262_ce: 200
 test262_fail: 5
 files:

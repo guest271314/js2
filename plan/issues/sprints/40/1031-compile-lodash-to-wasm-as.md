@@ -1,6 +1,5 @@
 ---
 id: 1031
-sprint: 40
 title: "Compile lodash to Wasm as a real-world stress test; harvest error patterns"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: high
 goal: core-semantics
+sprint: 40
 ---
 # #1031 — Compile lodash to Wasm as a real-world test corpus
 

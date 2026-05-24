@@ -1,12 +1,12 @@
 ---
 id: 137
-sprint: 2
 title: "Object literal getter/setter"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: class-system
+sprint: 2
 ---
 # #137 — Object literal getter/setter
 

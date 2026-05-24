@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: maintainability
+sprint: Backlog
 ---
 # #869 -- Refactor default params: compile-time insertion at call sites
 

@@ -1,6 +1,5 @@
 ---
 id: 1539
-sprint: 55
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
 status: ready
 created: 2026-05-20
@@ -12,10 +11,10 @@ task_type: feature
 area: codegen, runtime
 language_feature: regular expressions
 goal: standalone-wasm
-related: [1474, 682, 1535]
+sprint: 55
 depends_on: [1474]
+related: [1474, 682, 1535]
 ---
-
 # #1539 — Standalone Wasm RegExp engine via regress (Phase 2 of #1474)
 
 ## Decision

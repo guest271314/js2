@@ -1,9 +1,9 @@
 ---
 id: 1510
-sprint: 52
 title: "spec gap: for-await-of destructuring — await on IteratorStep + binding initialization"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: async-iteration, destructuring
 goal: spec-completeness
+sprint: 52
 related: [1373, 1373b, 1451, 1454]
 ---
 # #1510 — for-await-of destructuring shape/await errors

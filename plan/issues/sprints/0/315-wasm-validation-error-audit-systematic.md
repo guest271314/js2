@@ -1,6 +1,5 @@
 ---
 id: 315
-sprint: 0
 title: "Issue #315: Wasm validation error audit -- systematic fix for type mismatches"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: crash-free
+sprint: 0
 depends_on: [277, 178]
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 1122
-sprint: 45
 title: "Keep standalone recursive numeric benchmark stable across non-run entry exports"
 status: ready
 created: 2026-04-15
@@ -12,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: numeric-inference
 goal: performance
+sprint: 45
 ---
 # #1122 -- Keep standalone recursive numeric benchmark stable across non-run entry exports
 

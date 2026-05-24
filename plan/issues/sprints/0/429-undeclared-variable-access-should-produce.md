@@ -1,6 +1,5 @@
 ---
 id: 429
-sprint: 0
 title: "Undeclared variable access should produce ReferenceError (71 tests)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

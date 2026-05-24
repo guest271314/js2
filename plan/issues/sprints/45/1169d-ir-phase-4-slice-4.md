@@ -1,6 +1,5 @@
 ---
 id: 1169d
-sprint: 45
 title: "IR Phase 4 Slice 4 — class instantiation and method calls through the IR path"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: property-model
+sprint: 45
 depends_on: [1169c]
 required_by: [1169e, 1169i]
 pr: 50

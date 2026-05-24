@@ -1,6 +1,5 @@
 ---
 id: 390
-sprint: 0
 title: "- Assignment to non-array types (70 CE)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: platform
+sprint: 0
 test262_ce: 70
 files:
   src/codegen/expressions.ts:

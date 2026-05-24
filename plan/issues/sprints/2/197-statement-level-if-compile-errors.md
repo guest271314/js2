@@ -1,12 +1,12 @@
 ---
 id: 197
-sprint: 2
 title: "Statement-level `if` compile errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 2
 ---
 # #197 — Statement-level `if` compile errors
 

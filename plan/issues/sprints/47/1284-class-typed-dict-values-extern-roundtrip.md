@@ -1,10 +1,10 @@
 ---
 id: 1284
-sprint: 47
 title: "Class-typed values in index-signature dicts lose identity through extern_set/extern_get round-trip"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,9 +12,10 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: classes, index-signature, extern
 goal: npm-library-support
+sprint: 47
+required_by: [1285]
 related: [1274, 1285]
 ---
-
 # #1284 — Class-typed values in index-signature dicts lose identity through extern_set/extern_get
 
 ## Problem

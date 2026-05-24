@@ -1,6 +1,5 @@
 ---
 id: 574
-sprint: 21
 title: "Worker crashed -- 180 tests lost to worker process crashes"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: medium
 goal: performance
+sprint: 21
 ---
 # Worker crashed -- 180 tests lost to worker process crashes
 

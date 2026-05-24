@@ -1,9 +1,10 @@
 ---
 id: 1381
-sprint: 51
 title: "spec gap: String.prototype.{substring,slice,indexOf,search,charAt,charCodeAt,codePointAt,at,includes,startsWith,endsWith,trim,concat} edge cases (~128 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: strings
 goal: spec-completeness
+sprint: 51
 ---
 # #1381 — String.prototype scalar accessors: range/index coercion fidelity
 

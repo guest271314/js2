@@ -1,17 +1,18 @@
 ---
 id: 1313
-sprint: 50
 title: "await is a passthrough — does not unwrap Promise from async-call expressions"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-07
 priority: high
 feasibility: hard
 reasoning_effort: max
-task_type: bug
+task_type: bugfix
 area: codegen, runtime, async
 language_feature: async, await
 goal: npm-library-support
+sprint: 50
 related: [1309, 1314]
 ---
 # #1313 — `await` is a passthrough; doesn't unwrap Promise return values

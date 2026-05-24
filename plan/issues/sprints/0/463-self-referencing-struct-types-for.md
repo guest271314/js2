@@ -1,6 +1,5 @@
 ---
 id: 463
-sprint: 0
 title: "Self-referencing struct types for linked lists / fiber trees"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: npm-library-support
+sprint: 0
 ---
 # Self-referencing struct types for linked lists / fiber trees
 

@@ -1,12 +1,12 @@
 ---
 id: 14
-sprint: 0
 title: "Issue 14: String Methods"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: maintainability
+sprint: 0
 ---
 # Issue 14: String Methods
 

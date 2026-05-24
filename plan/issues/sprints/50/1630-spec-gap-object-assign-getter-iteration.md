@@ -1,10 +1,9 @@
 ---
 id: 1630
-renumbered_from: 1335
-sprint: 50
 title: "spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +11,8 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1335
 parent: 1328
 ---
 # #1335 — Object.assign: getter invocation + Symbol-key copying

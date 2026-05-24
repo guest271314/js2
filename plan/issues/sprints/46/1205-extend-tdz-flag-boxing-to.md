@@ -1,6 +1,5 @@
 ---
 id: 1205
-sprint: 46
 title: "Extend TDZ flag boxing to async functions / generators (#1177-followup) — async-fn closure capture path needs Stage 2/3 wiring"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: closures
 goal: async-model
+sprint: 46
 depends_on: [1177, 1185]
 required_by: [1223]
 es_edition: ES2017+

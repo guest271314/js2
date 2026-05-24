@@ -8,6 +8,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: developer-experience
+sprint: Backlog
 depends_on: [876]
 ---
 # #878 -- Dashboard: active agent status panel

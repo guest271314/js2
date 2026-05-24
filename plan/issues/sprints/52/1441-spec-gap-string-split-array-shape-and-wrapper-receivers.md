@@ -1,9 +1,9 @@
 ---
 id: 1441
-sprint: 52
 title: "spec gap: String.prototype.split — Array result shape + String wrapper receivers"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: string-split
 goal: spec-completeness
+sprint: 52
 related: [1439]
 ---
 # #1441 - String.prototype.split: Array shape + wrapper receivers

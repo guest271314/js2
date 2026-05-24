@@ -1,6 +1,5 @@
 ---
 id: 275
-sprint: 0
 title: "Issue #275: Left side of comma operator warning blocks compilation"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: core-semantics
+sprint: 0
 files:
   src/compiler.ts:
     new: []

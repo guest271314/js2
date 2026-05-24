@@ -1,6 +1,5 @@
 ---
 id: 1053
-sprint: 41
 title: "arguments.length wrong in class methods with trailing-comma call sites"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: 41
 es_edition: multi
 ---
 # #1053 — arguments.length wrong in class methods with trailing-comma call sites

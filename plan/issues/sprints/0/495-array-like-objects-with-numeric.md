@@ -1,6 +1,5 @@
 ---
 id: 495
-sprint: 0
 title: "Array-like objects with numeric keys (77 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 depends_on: [488]
 test262_skip: 77
 files:

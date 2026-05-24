@@ -1,12 +1,12 @@
 ---
 id: 80
-sprint: 0
 title: "Issue 80: JS file compilation via `.d.ts` types and TS inference"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 80: JS file compilation via `.d.ts` types and TS inference
 

@@ -8,6 +8,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: compiler-architecture
+sprint: Backlog
 depends_on: [743, 746]
 files:
   src/shape-inference.ts:

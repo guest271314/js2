@@ -1,6 +1,5 @@
 ---
 id: 367
-sprint: 7
 title: "- String variable concatenation in comparisons"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: compilable
+sprint: 7
 test262_skip: 14
 files:
   src/codegen/expressions.ts:

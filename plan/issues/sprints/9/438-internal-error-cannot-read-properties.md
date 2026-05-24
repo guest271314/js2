@@ -1,6 +1,5 @@
 ---
 id: 438
-sprint: 9
 title: "Internal error: Cannot read properties of undefined in expression compilation (20 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: error-model
+sprint: 9
 test262_ce: 20
 complexity: S
 files:

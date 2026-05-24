@@ -1,6 +1,5 @@
 ---
 id: 418
-sprint: 0
 title: "Missing SyntaxError validation -- invalid code compiles successfully"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: test-infrastructure
+sprint: 0
 test262_fail: 0
 complexity: M
 files:

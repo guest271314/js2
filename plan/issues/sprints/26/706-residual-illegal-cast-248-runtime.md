@@ -1,6 +1,5 @@
 ---
 id: 706
-sprint: 26
 title: "Residual illegal cast: 248 runtime failures"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: high
 goal: spec-completeness
+sprint: 26
 required_by: [726]
 ---
 # Issue #706: Residual illegal cast — 248 runtime failures

@@ -1,6 +1,5 @@
 ---
 id: 413
-sprint: 9
 title: "Parameter self-reference -- default param validation too strict"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: error-model
+sprint: 9
 test262_ce: 59
 complexity: S
 files:

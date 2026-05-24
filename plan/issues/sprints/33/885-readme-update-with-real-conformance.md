@@ -1,6 +1,5 @@
 ---
 id: 885
-sprint: 33
 title: "README: update with real conformance numbers, architecture diagram, comparison table"
 status: done
 created: 2026-03-31
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: platform
+sprint: 33
 ---
 # #885 -- README update for STF application
 

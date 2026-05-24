@@ -1,12 +1,12 @@
 ---
 id: 196
-sprint: 2
 title: "Try/catch/finally: 66 compile errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #196 — Try/catch/finally: 66 compile errors
 

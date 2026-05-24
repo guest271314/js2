@@ -1,6 +1,5 @@
 ---
 id: 520
-sprint: 21
 title: "Delete operator: operand must be optional (80 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: medium
 feasibility: medium
 goal: test-infrastructure
+sprint: 21
 test262_ce: 80
 files:
   src/compiler.ts:

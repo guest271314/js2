@@ -1,12 +1,12 @@
 ---
 id: 64
-sprint: 0
 title: "Issue 64: Generators and yield"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: iterator-protocol
+sprint: 0
 ---
 # Issue 64: Generators and yield
 

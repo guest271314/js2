@@ -1,12 +1,12 @@
 ---
 id: 210
-sprint: 2
 title: "Issue #210: for-of destructuring with default values"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # Issue #210: for-of destructuring with default values
 

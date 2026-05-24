@@ -1,6 +1,5 @@
 ---
 id: 887
-sprint: 33
 title: "Project roadmap document for STF funding application"
 status: done
 created: 2026-03-31
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: platform
+sprint: 33
 ---
 # #887 -- Project roadmap for STF application
 

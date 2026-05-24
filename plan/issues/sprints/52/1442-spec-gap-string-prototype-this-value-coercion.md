@@ -1,9 +1,9 @@
 ---
 id: 1442
-sprint: 52
 title: "spec gap: String.prototype methods — RequireObjectCoercible + ToString on this value"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: string-prototype-this
 goal: spec-completeness
+sprint: 52
 related: [1434, 1441]
 ---
 # #1442 - String.prototype methods: ToString on receiver

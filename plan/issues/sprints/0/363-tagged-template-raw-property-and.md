@@ -1,6 +1,5 @@
 ---
 id: 363
-sprint: 0
 title: "- Tagged template .raw property and identity"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: property-model
+sprint: 0
 test262_skip: 24
 files:
   src/codegen/expressions.ts:

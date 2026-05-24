@@ -1,17 +1,17 @@
 ---
 id: 1246
-sprint: 47
 title: "ci: differential test262 — compare branch tip vs main HEAD with src-tree-hash caching"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: infrastructure
 area: ci
 goal: ci-hardening
+sprint: 47
 related: [1235, 1222]
 ---
 # #1246 — ci: differential test262 with src-tree-hash caching

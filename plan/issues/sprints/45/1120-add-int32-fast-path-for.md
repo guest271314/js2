@@ -1,6 +1,5 @@
 ---
 id: 1120
-sprint: 45
 title: "Add int32 fast path for bitwise-coerced numeric loops in hot benchmarks"
 status: done
 created: 2026-04-15
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: numeric-optimization
 goal: core-semantics
+sprint: 45
 ---
 # #1120 -- Add int32 fast path for bitwise-coerced numeric loops in hot benchmarks
 

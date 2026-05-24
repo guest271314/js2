@@ -1,6 +1,5 @@
 ---
 id: 1172
-sprint: 45
 title: "Codebase modularity audit — reduce coupling, improve layering, harden interfaces"
 status: ready
 created: 2026-04-25
@@ -12,6 +11,7 @@ task_type: refactor
 area: architecture
 language_feature: compiler-internals
 goal: maintainability
+sprint: 45
 ---
 # #1172 — Codebase modularity audit: reduce coupling, improve layering, harden interfaces
 

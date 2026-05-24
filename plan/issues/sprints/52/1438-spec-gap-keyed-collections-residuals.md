@@ -1,8 +1,7 @@
 ---
 id: 1438
-sprint: 52
 title: "spec gap: Map, WeakMap, and WeakSet residual collection semantics"
-status: in-review
+status: review
 created: 2026-05-11
 updated: 2026-05-11
 priority: medium
@@ -12,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: keyed-collections
 goal: spec-completeness
+sprint: 52
 related: [837, 859, 1103, 1351]
 ---
 # #1438 - Map, WeakMap, and WeakSet residual collection semantics

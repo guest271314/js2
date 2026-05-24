@@ -1,6 +1,5 @@
 ---
 id: 1210
-sprint: 46
 title: "labs/benchmarks: js2wasm string-hash Wasmtime lane hits 20s timeout — WasmGC i16-array GC pressure"
 status: done
 created: 2026-04-29
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
+sprint: 46
 depends_on: [1178]
 pr: 96
 origin: surfaced by competitive-benchmark run 2026-04-29

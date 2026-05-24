@@ -1,6 +1,5 @@
 ---
 id: 943
-sprint: 37
 title: "Test262 runner instability — 1,400+ pass variance between identical runs"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: max
 goal: test-infrastructure
+sprint: 37
 related: [923]
 ---
 # #943 — Test262 runner instability — 1,400+ pass variance between identical runs

@@ -1,6 +1,5 @@
 ---
 id: 232
-sprint: 0
 title: "Issue #232: Unsupported call expression -- method calls on object literals"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: maintainability
+sprint: 0
 required_by: [149]
 files:
   src/codegen/expressions.ts:

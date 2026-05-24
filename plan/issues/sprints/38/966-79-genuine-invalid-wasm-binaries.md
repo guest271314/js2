@@ -1,6 +1,5 @@
 ---
 id: 966
-sprint: 38
 title: "79 genuine invalid Wasm binaries from static private fields + Promise arity"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 38
 ---
 # #966 — 79 genuine invalid Wasm binaries
 

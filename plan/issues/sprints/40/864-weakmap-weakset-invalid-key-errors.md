@@ -1,6 +1,5 @@
 ---
 id: 864
-sprint: 40
 title: "WeakMap/WeakSet invalid key errors (45 FAIL)"
 status: done
 created: 2026-03-29
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: compilable
+sprint: 40
 test262_fail: 45
 ---
 # #864 -- WeakMap/WeakSet invalid key errors (45 FAIL)

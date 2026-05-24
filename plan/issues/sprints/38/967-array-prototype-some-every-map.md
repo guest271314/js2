@@ -1,6 +1,5 @@
 ---
 id: 967
-sprint: 38
 title: "Array.prototype.some/every/map not resolving after #799 prototype chain (30 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: ci-hardening
+sprint: 38
 required_by: [971]
 ---
 # #967 — Array.prototype.some/every/map not a function

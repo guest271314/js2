@@ -1,6 +1,5 @@
 ---
 id: 856
-sprint: 32
 title: "Expected TypeError but got wrong error type (71 tests)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: ci-hardening
+sprint: 32
 test262_fail: 71
 ---
 # #856 -- Expected TypeError but got wrong error type (71 tests)

@@ -1,6 +1,5 @@
 ---
 id: 1203
-sprint: 46
 title: "credibility: differential testing harness — compare js2wasm output vs V8/SpiderMonkey on 1000+ programs"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: tooling
 area: ci
 language_feature: n/a
 goal: async-model
+sprint: 46
 es_edition: n/a
 related: [1201, 1202, 1204]
 origin: credibility infrastructure sprint — test262 conformance measures what the spec defines; differential testing measures what real programs actually do. A senior engine engineer will ask "how do you know you don't produce wrong answers for programs that pass?" Differential testing is the answer.

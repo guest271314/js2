@@ -1,6 +1,5 @@
 ---
 id: 917
-sprint: 36
 title: "Make lint, format, and typecheck apply consistently across the whole source tree"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: contributor-readiness
+sprint: 36
 files:
   package.json:
     modify:

@@ -1,6 +1,5 @@
 ---
 id: 918
-sprint: 36
 title: "Create a curated batch of contributor-friendly starter issues with exact file ownership and acceptance criteria"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: maintainability
+sprint: 36
 depends_on: [914, 915]
 files:
   plan/issues/ready/:

@@ -1,12 +1,12 @@
 ---
 id: 211
-sprint: 2
 title: "- Function statement runtime failures"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #211 -- Function statement runtime failures
 

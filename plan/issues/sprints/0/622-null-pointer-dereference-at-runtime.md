@@ -1,6 +1,5 @@
 ---
 id: 622
-sprint: 0
 title: "Null pointer dereference at runtime (707 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: high
 feasibility: medium
 goal: crash-free
+sprint: 0
 required_by: [647]
 test262_fail: 707
 files:

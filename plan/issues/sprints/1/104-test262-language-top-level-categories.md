@@ -1,12 +1,12 @@
 ---
 id: 104
-sprint: 1
 title: "Issue 104: Test262 — language/ top-level categories"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: core-semantics
+sprint: 1
 ---
 # Issue 104: Test262 — language/ top-level categories
 

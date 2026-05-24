@@ -1,6 +1,5 @@
 ---
 id: 651
-sprint: 13
 title: "Empty skip reason for 932 tests"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: contributor-readiness
+sprint: 13
 test262_skip: 932
 files:
   tests/test262-runner.ts:

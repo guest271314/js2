@@ -1,9 +1,10 @@
 ---
 id: 1493
-sprint: 52
 title: "nodejs: console.error / console.warn → stderr (fd=2) in WASI mode"
 status: done
 created: 2026-05-20
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +12,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: nodejs-support
+sprint: 52
 related: [578, 1035]
 ---
-
 # #1493 — `console.error` / `console.warn` route to fd=2 (stderr), not stdout
 
 ## Problem

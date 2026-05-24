@@ -1,6 +1,5 @@
 ---
 id: 1190
-sprint: 46
 title: "research: eliminate CI test262 baseline drift (umbrella for #1189, #1191, #1192)"
 status: done
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: max
 task_type: research
 area: infrastructure
 goal: ci-hardening
+sprint: 46
 resolution: split into sub-issues — major drift sources addressed in sprint 45/46, remaining work tracked discretely
 es_edition: n/a
 related: [1185, 1186, 1189, 1191, 1192]

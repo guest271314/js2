@@ -8,6 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: standalone-mode
+sprint: Backlog
 required_by: [681, 735, 762, 1042]
 files:
   src/codegen/statements.ts:

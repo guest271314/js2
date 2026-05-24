@@ -8,6 +8,7 @@ priority: low
 feasibility: medium
 reasoning_effort: high
 goal: symbol-protocol
+sprint: Backlog
 depends_on: [481]
 test262_skip: 87
 files:

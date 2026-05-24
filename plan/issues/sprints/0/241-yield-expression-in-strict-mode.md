@@ -1,6 +1,5 @@
 ---
 id: 241
-sprint: 0
 title: "Issue #241: Yield expression in strict mode / module context"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: test-infrastructure
+sprint: 0
 required_by: [287]
 files:
   src/compiler.ts:

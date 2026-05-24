@@ -1,6 +1,5 @@
 ---
 id: 774
-sprint: 19
 title: "- Missing early error checks: tests expect SyntaxError but compile successfully"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 19
 test262_fail: 2657
 ---
 # #774 -- Missing early error checks: tests expect SyntaxError but compile successfully

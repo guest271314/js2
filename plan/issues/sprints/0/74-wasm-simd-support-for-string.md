@@ -1,6 +1,5 @@
 ---
 id: 74
-sprint: 0
 title: "Issue 74: WASM SIMD support for string and array operations"
 status: done
 created: 2026-03-08
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: low
 goal: standalone-mode
+sprint: 0
 depends_on: [70]
 files:
   src/emit/:

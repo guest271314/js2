@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: developer-experience
+sprint: Backlog
 depends_on: [861]
 ---
 # #870 -- Playground: Monaco web workers fail to load

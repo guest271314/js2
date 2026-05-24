@@ -1,6 +1,5 @@
 ---
 id: 801
-sprint: 0
 title: "- Array literal type mismatch in nested destructuring defaults (537 fail)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 0
 depends_on: [794]
 test262_fail: 537
 commit: 254647b5

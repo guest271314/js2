@@ -1,6 +1,5 @@
 ---
 id: 594
-sprint: 0
 title: "Mark WasmGC struct types as final for V8 devirtualization"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: medium
 goal: standalone-mode
+sprint: 0
 ---
 # Issue #594: Mark WasmGC struct types as final for V8 devirtualization
 

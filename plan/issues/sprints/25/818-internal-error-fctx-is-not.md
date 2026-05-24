@@ -1,6 +1,5 @@
 ---
 id: 818
-sprint: 25
 title: "Internal error: fctx is not defined during compilation"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: error-model
+sprint: 25
 test262_fail: ~1
 ---
 # #818 -- Internal error: fctx is not defined during compilation

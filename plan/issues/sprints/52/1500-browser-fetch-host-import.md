@@ -1,9 +1,9 @@
 ---
 id: 1500
-sprint: 52
 title: "browser: fetch() host import with Response bridge"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: browser-support
+sprint: 52
 related: [1043, 1044, 1490]
 ---
-
 # #1500 — `fetch()` host import with Response bridge
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 797
-sprint: 37
 title: "- Property descriptor subsystem (~5,000 tests)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: ci-hardening
+sprint: 37
 test262_fail: ~5000
 note: "All phases done. 797a flags table, 797b getOwnPropertyDescriptor, 797c defineProperty/defineProperties runtime, 797d freeze/seal."
 ---

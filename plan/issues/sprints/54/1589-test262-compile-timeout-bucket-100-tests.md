@@ -1,14 +1,16 @@
 ---
 id: 1589
-title: Investigate 100 test262 tests that hit the 30s compile_timeout ceiling
+title: "Investigate 100 test262 tests that hit the 30s compile_timeout ceiling"
 status: done
-sprint: 54
+created: 2026-05-23
+updated: 2026-05-23
+completed: 2026-05-23
 priority: medium
 feasibility: medium
+sprint: 54
 type: perf
 labels: [test262, ci, compiler-perf]
 ---
-
 ## Problem
 
 100 tests in `benchmarks/results/test262-current.jsonl` carry `status:

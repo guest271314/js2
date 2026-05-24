@@ -1,6 +1,5 @@
 ---
 id: 456
-sprint: 10
 title: "Implement well-known Symbol support (Symbol.iterator, Symbol.toPrimitive)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: iterator-protocol
+sprint: 10
 ---
 # #456 — Implement well-known Symbol support
 

@@ -1,6 +1,5 @@
 ---
 id: 1169g
-sprint: 45
 title: "IR Phase 4 Slice 8 — destructuring and rest/spread through the IR path"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: core-semantics
+sprint: 45
 depends_on: [1169e, 1169f]
 ---
 # #1169g — IR Phase 4 Slice 8: destructuring and rest/spread through IR

@@ -1,9 +1,9 @@
 ---
 id: 1460
-sprint: 52
 title: "spec gap: Object.defineProperty / defineProperties descriptor fidelity"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: property-descriptors
 goal: spec-completeness
+sprint: 52
 related: [929, 1334, 1364]
 ---
 # #1460 - spec gap: Object.defineProperty / defineProperties descriptor fidelity

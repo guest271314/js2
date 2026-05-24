@@ -1,6 +1,5 @@
 ---
 id: 1030
-sprint: 40
 title: "Array.prototype method dispatch long tail — 372 'object is not a function'"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: 40
 parent: 1022
 ---
 ## Test Results (after fix)

@@ -1,6 +1,5 @@
 ---
 id: 628
-sprint: 0
 title: "Yield expression outside generator (283 CE)"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: generator-model
+sprint: 0
 required_by: [657]
 ---
 # Yield expression outside generator (283 CE)

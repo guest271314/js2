@@ -1,6 +1,5 @@
 ---
 id: 1057
-sprint: 42
 title: "String.prototype.split result constructor !== Array"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: 42
 closed: 2026-04-12
 pr: 130
 es_edition: multi

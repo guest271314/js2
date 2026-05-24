@@ -1,6 +1,5 @@
 ---
 id: 355
-sprint: 7
 title: "- Object.keys/values/entries completion"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: platform
+sprint: 7
 test262_skip: 74
 test262_categories:
   - spread across 15 categories

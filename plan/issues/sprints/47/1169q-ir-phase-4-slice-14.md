@@ -1,6 +1,5 @@
 ---
 id: 1169q
-sprint: 47
 title: "IR Phase 4 Slice 14 — retire legacy codegen: delete expressions.ts, statements.ts, repair passes"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: refactor
 area: ir
 language_feature: n/a
 goal: maintainability
+sprint: 47
 depends_on: [1169n, 1169o, 1169p]
 es_edition: n/a
 related: [1169]

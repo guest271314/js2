@@ -1,6 +1,5 @@
 ---
 id: 909
-sprint: 31
 title: "Split codegen/index.ts into context, registry, collect, and api modules"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-03
 priority: high
 feasibility: medium
 goal: maintainability
+sprint: 31
 required_by: [910, 911, 912]
 files:
   src/codegen/index.ts:

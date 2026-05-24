@@ -1,20 +1,19 @@
 ---
 id: 1606
-sprint: 56
 title: "codegen crash: 'Cannot read properties of undefined (reading declarations)' on object-literal expressions"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: object-literals
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 8
 ---
-
 # #1606 — Internal compiler crash on object-literal expressions
 
 ## Problem

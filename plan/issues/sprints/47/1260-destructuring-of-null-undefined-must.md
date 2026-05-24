@@ -1,10 +1,10 @@
 ---
 id: 1260
-sprint: 47
 title: "Destructuring of null/undefined must throw TypeError per §13.15.5.5"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,11 +12,10 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: test-infrastructure
+sprint: 47
 related: [1177, 1245, 1225]
-depends_on: []
 test262_fail: 10
 ---
-
 # #1260 — Destructuring `null` / `undefined` must throw TypeError
 
 ## Background

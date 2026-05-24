@@ -1,6 +1,5 @@
 ---
 id: 293
-sprint: 0
 title: "Issue #293: Runtime failures -- class method incorrect results"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

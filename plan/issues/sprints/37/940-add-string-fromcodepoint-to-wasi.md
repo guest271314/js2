@@ -1,6 +1,5 @@
 ---
 id: 940
-sprint: 37
 title: "Add String.fromCodePoint to WASI/standalone string helpers"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: platform
+sprint: 37
 depends_on: [935]
 tags: [good-first-issue, codegen, wasi, string]
 files:

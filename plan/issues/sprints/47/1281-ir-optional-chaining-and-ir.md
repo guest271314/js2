@@ -1,10 +1,10 @@
 ---
 id: 1281
-sprint: 47
 title: "IR: optional chaining `?.` and `?.()` — IR path support"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen, ir
 language_feature: optional-chaining
 goal: npm-library-support
+sprint: 47
 related: [1169, 1244, 1274]
 ---
 # #1281 — IR: optional chaining `?.` and `?.()` in IR path

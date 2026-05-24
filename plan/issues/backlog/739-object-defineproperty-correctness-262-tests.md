@@ -8,6 +8,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: property-model
+sprint: Backlog
 test262_fail: 262
 files:
   src/codegen/expressions.ts:

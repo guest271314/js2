@@ -2,19 +2,20 @@
 id: 820j
 title: "(Async)GeneratorPrototype brand check + receiver TypeError (~36 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: builtins
+language_feature: generator-prototype
 goal: async-model
+sprint: Backlog
 parent: 820
 es_edition: ES2017
-language_feature: generator-prototype
 test262_fail: 36
-created: 2026-05-21
 ---
-
 # #820j — Generator / AsyncGenerator prototype brand check
 
 ## Problem

@@ -1,9 +1,9 @@
 ---
 id: 1450
-sprint: 52
 title: "spec gap: NamedEvaluation — anonymous fn/class names from binding identifiers in destructuring defaults"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, function-name
 goal: spec-completeness
+sprint: 52
 related: [1431, 1432, 1364]
 ---
 # #1450 — NamedEvaluation: bind anonymous function/class names from destructuring identifiers

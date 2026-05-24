@@ -1,6 +1,5 @@
 ---
 id: 554
-sprint: 0
 title: "JSONL concurrent write corruption from parallel workers"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: async-model
+sprint: 0
 ---
 # JSONL concurrent write corruption from parallel workers
 

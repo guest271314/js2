@@ -1,6 +1,5 @@
 ---
 id: 1084
-sprint: 40
 title: "compileCount bypass in compiler-fork-worker.mjs — RECREATE never fires when errors dominate a chunk"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: easy
 reasoning_effort: low
 task_type: bugfix
 goal: ci-hardening
+sprint: 40
 parent: 1080
 ---
 # #1084 — Fork worker counter bypass starves GC and RECREATE

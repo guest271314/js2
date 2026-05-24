@@ -1,12 +1,12 @@
 ---
 id: 212
-sprint: 2
 title: "Issue #212: Object computed property name runtime failures"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # Issue #212: Object computed property name runtime failures
 

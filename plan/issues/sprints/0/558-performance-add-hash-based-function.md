@@ -1,6 +1,5 @@
 ---
 id: 558
-sprint: 0
 title: "Performance: add hash-based function type deduplication"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: medium
 goal: performance
+sprint: 0
 ---
 # Issue #558: Performance -- add hash-based function type deduplication
 

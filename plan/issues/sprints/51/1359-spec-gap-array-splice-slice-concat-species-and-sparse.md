@@ -1,9 +1,10 @@
 ---
 id: 1359
-sprint: 51
 title: "spec gap: Array.prototype.{splice,slice,concat,toSpliced,toReversed} — @@species, sparse handling, IsConcatSpreadable (~150 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: spec-completeness
+sprint: 51
 ---
 # #1359 — Array.prototype.{splice,slice,concat,…}: @@species + sparse + IsConcatSpreadable
 

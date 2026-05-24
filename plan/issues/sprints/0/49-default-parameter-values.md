@@ -1,12 +1,12 @@
 ---
 id: 49
-sprint: 0
 title: "Issue 49: Default parameter values"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: builtin-methods
+sprint: 0
 ---
 # Issue 49: Default parameter values
 

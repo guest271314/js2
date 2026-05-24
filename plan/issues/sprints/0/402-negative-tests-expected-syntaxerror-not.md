@@ -1,6 +1,5 @@
 ---
 id: 402
-sprint: 0
 title: "Negative tests: expected SyntaxError not raised"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_fail: 434
 files:
   tests/test262-runner.ts:

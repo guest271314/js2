@@ -1,6 +1,5 @@
 ---
 id: 1090
-sprint: 41
 title: "ToPrimitive 'Cannot convert object to primitive value' — 161 FAIL"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: type-coercion
 goal: error-model
+sprint: 41
 required_by: [1253]
 es_edition: ES2015
 ---

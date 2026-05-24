@@ -1,6 +1,5 @@
 ---
 id: 507
-sprint: 21
 title: "Run benchmark suite and generate latest.json"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: high
 feasibility: easy
 goal: standalone-mode
+sprint: 21
 files:
   benchmarks/run.ts:
     new: []

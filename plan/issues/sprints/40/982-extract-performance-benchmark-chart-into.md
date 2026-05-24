@@ -1,6 +1,5 @@
 ---
 id: 982
-sprint: 40
 title: "Extract performance benchmark chart into a reusable web component"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: ci-hardening
+sprint: 40
 ---
 # #982 — Extract performance benchmark chart into a web component
 

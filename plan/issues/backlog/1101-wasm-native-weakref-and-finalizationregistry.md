@@ -10,6 +10,7 @@ reasoning_effort: max
 task_type: feature
 language_feature: weak-references
 goal: spec-completeness
+sprint: Backlog
 es_edition: ES2021
 ---
 # #1101 — Wasm-native WeakRef and FinalizationRegistry via WasmGC

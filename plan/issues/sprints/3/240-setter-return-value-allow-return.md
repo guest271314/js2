@@ -1,12 +1,12 @@
 ---
 id: 240
-sprint: 3
 title: "Issue #240: Setter return value -- allow return in setter bodies"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 3
 ---
 # Issue #240: Setter return value -- allow return in setter bodies
 

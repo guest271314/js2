@@ -1,12 +1,12 @@
 ---
 id: 206
-sprint: 2
 title: "For-loop with function declarations: 182 compile errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # #206 — For-loop with function declarations: 182 compile errors
 

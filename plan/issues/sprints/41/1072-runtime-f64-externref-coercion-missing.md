@@ -1,6 +1,5 @@
 ---
 id: 1072
-sprint: 41
 title: "runtime: f64 → externref coercion missing on function return in bundled prettier (trimNewlinesEnd validation fail)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: type-coercion
 goal: npm-library-support
+sprint: 41
 parent: 1034
 ---
 # #1072 — Return-type coercion f64 → externref missing in bundled JS call site

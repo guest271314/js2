@@ -1,9 +1,9 @@
 ---
 id: 1354
-sprint: backlog
 title: "spec backlog: SharedArrayBuffer + Atomics (full implementation, requires multi-thread Wasm)"
 status: backlog
 created: 2026-05-08
+updated: 2026-05-08
 priority: low
 feasibility: hard
 reasoning_effort: max
@@ -11,6 +11,7 @@ task_type: feature
 area: runtime
 language_feature: sharedarraybuffer
 goal: spec-completeness
+sprint: Backlog
 parent: 1334
 related: 1353
 ---

@@ -1,6 +1,5 @@
 ---
 id: 151
-sprint: 1
 title: "`this` keyword in class methods for test262"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 1
 files:
   src/checker/index.ts:
     new: []

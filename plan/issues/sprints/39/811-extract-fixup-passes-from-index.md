@@ -1,6 +1,5 @@
 ---
 id: 811
-sprint: 39
 title: "Extract fixup passes from index.ts → fixups.ts"
 status: done
 created: 2026-03-26
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: maintainability
+sprint: 39
 subtask_of: 688
 ---
 # #811 — Extract fixup passes from index.ts → fixups.ts

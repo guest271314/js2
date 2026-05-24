@@ -1,6 +1,5 @@
 ---
 id: 371
-sprint: 0
 title: "- import.meta support"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: contributor-readiness
+sprint: 0
 test262_skip: 10
 files:
   src/codegen/expressions.ts:

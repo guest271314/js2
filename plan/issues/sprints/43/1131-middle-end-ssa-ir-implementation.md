@@ -1,6 +1,5 @@
 ---
 id: 1131
-sprint: 43
 title: "Middle-end SSA IR: implementation plan"
 status: ready
 created: 2026-04-19
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: compiler-architecture
+sprint: 43
 depends_on: [1124]
 required_by: [1166, 1167, 1167a, 1168]
 ---

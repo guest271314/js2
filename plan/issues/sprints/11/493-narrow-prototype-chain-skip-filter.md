@@ -1,6 +1,5 @@
 ---
 id: 493
-sprint: 11
 title: "- Narrow prototype chain skip filter (502 tests, was 233 at filing)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: low
 goal: property-model
+sprint: 11
 test262_skip: 502
 files:
   tests/test262-runner.ts:

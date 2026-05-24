@@ -1,6 +1,5 @@
 ---
 id: 138
-sprint: 0
 title: "Issue #138: valueOf/toString coercion on comparison operators"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: compilable
+sprint: 0
 required_by: [300]
 files:
   src/codegen/expressions.ts:

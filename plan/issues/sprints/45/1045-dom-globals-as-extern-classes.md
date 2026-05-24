@@ -1,6 +1,5 @@
 ---
 id: 1045
-sprint: 45
 title: "DOM globals as extern classes (DOM_HOST_GLOBALS, queueMicrotask, requestAnimationFrame)"
 status: ready
 created: 2026-04-11
@@ -9,9 +8,10 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: platform
+sprint: 45
 parent: 1033
 depends_on: [1041]
-required_by: [1033]
+required_by: [1033, 1296]
 ---
 # #1045 — DOM globals as extern classes
 

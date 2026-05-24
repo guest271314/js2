@@ -1,6 +1,5 @@
 ---
 id: 608
-sprint: 0
 title: "TypedArray support (108 tests)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 required_by: [645]
 files:
   src/codegen/expressions.ts:

@@ -8,6 +8,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: Backlog
 parent: 779
 test262_fail: 537
 ---

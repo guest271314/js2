@@ -1,6 +1,5 @@
 ---
 id: 1049
-sprint: 40
 title: "Destructuring default init fn-name-cover: wrong .name on covered function"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: 40
 es_edition: multi
 ---
 sprint: 40

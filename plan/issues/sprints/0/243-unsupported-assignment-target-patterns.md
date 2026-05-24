@@ -1,6 +1,5 @@
 ---
 id: 243
-sprint: 0
 title: "Issue #243: Unsupported assignment target patterns"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: medium
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

@@ -1,6 +1,5 @@
 ---
 id: 455
-sprint: 10
 title: "Compile React to Wasm"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: npm-library-support
+sprint: 10
 required_by: [469]
 ---
 # #455 — Compile React to Wasm

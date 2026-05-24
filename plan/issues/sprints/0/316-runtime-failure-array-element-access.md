@@ -1,6 +1,5 @@
 ---
 id: 316
-sprint: 0
 title: "Issue #316: Runtime failure -- array element access out of bounds"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: crash-free
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

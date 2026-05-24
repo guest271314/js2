@@ -1,6 +1,5 @@
 ---
 id: 292
-sprint: 0
 title: "Issue #292: Runtime failures -- for-loop incorrect computed values"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

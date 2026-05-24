@@ -4,12 +4,14 @@ title: "TypeScript 7 (@typescript/native-preview) support under --ts7 feature fl
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: high
 task_type: feature
 area: codegen, cli
 goal: platform
+sprint: 47
 related: [1029]
 ---
 # #1288 — TypeScript 7 (`@typescript/native-preview`) under `--ts7` feature flag

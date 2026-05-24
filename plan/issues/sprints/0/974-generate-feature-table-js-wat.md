@@ -1,6 +1,5 @@
 ---
 id: 974
-sprint: 0
 title: "Generate feature table JS/WAT examples from a TypeScript script"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: developer-experience
+sprint: 0
 ---
 # #974 — Generate feature table JS/WAT examples from TypeScript
 

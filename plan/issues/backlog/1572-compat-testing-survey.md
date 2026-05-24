@@ -1,10 +1,14 @@
 ---
+id: 1572
 title: "npm-package compat testing — 2026-05-20"
+status: ready
+created: 2026-05-21
+updated: 2026-05-21
+sprint: Backlog
 date: 2026-05-20
 author: product-owner
 type: report
 ---
-
 # Compat testing report — 2026-05-20
 
 Goal: stress-test the js2wasm `compile()` entry against representative

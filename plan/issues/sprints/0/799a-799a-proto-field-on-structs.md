@@ -1,6 +1,5 @@
 ---
 id: 799a
-sprint: 0
 title: "#799a -- __proto__ field on structs"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: property-model
+sprint: 0
 subtask_of: 799
 commit: 33400565
 note: caused -2,788 regression, being revised to conditional-only approach in #802

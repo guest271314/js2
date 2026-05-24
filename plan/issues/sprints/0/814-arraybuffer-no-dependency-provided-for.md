@@ -1,6 +1,5 @@
 ---
 id: 814
-sprint: 0
 title: "- ArrayBuffer 'no dependency provided for extern class' (413 tests)"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: easy
 goal: standalone-mode
+sprint: 0
 test262_fail: 413
 ---
 # #814 -- ArrayBuffer "no dependency provided for extern class" (413 tests)

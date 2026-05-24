@@ -1,6 +1,5 @@
 ---
 id: 380
-sprint: 7
 title: "- Unknown variable/function in test scope"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 7
 test262_ce: 25
 files:
   src/codegen/index.ts:

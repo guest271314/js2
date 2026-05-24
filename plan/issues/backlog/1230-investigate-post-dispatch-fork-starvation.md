@@ -11,6 +11,7 @@ task_type: investigation
 area: test-runner
 language_feature: n/a
 goal: contributor-readiness
+sprint: Backlog
 related: [1207, 1227, 1228, 1229]
 es_edition: n/a
 test262_fail: 73

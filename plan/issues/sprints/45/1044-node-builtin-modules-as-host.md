@@ -1,6 +1,5 @@
 ---
 id: 1044
-sprint: 45
 title: "Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization)"
 status: ready
 created: 2026-04-11
@@ -9,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 45
 parent: 1032
 depends_on: [1041]
 required_by: [1032, 1058]

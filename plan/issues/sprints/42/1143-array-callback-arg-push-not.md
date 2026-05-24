@@ -1,6 +1,5 @@
 ---
 id: 1143
-sprint: 42
 title: "Array callback arg push not gated on paramTypes.length — extra args emitted unconditionally"
 status: done
 created: 2026-04-20
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: low
 goal: correctness
+sprint: 42
 ---
 ## Problem
 

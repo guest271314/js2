@@ -1,6 +1,5 @@
 ---
 id: 595
-sprint: 0
 title: "Integer loop inference: emit i32 loop counters in default mode"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 ---
 # Integer loop inference: emit i32 loop counters in default mode
 

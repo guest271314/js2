@@ -1,6 +1,5 @@
 ---
 id: 460
-sprint: 0
 title: "Object.create for known prototypes"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: property-model
+sprint: 0
 ---
 # #460 — Object.create for known prototypes
 

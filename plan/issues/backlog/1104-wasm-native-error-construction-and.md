@@ -1,7 +1,7 @@
 ---
 id: 1104
 title: "Wasm-native Error construction and stack traces without JS host"
-status: suspended
+status: ready
 created: 2026-04-12
 updated: 2026-05-08
 priority: medium
@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: feature
 language_feature: error-handling
 goal: standalone-mode
+sprint: Backlog
 es_edition: ES5
 ---
 # #1104 — Wasm-native Error construction and stack traces

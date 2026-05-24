@@ -1,8 +1,7 @@
 ---
 id: 1095
-sprint: 45
 title: "Eliminate `as unknown as Instr` casts — extend Instr union to cover all emitted opcodes"
-status: in-review
+status: review
 created: 2026-04-12
 updated: 2026-04-12
 priority: medium
@@ -11,6 +10,7 @@ reasoning_effort: high
 task_type: refactor
 language_feature: compiler-internals
 goal: maintainability
+sprint: 45
 es_edition: n/a
 ---
 # #1095 — Eliminate `as unknown as Instr` casts (273 sites)

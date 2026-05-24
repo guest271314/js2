@@ -1,6 +1,5 @@
 ---
 id: 590
-sprint: 0
 title: "Generator for-of-string missing return depth update"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: easy
 goal: iterator-protocol
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

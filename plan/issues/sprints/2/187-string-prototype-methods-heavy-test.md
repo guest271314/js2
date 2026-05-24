@@ -1,12 +1,12 @@
 ---
 id: 187
-sprint: 2
 title: "String prototype methods: heavy test skipping due to include filters"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: property-model
+sprint: 2
 ---
 # #187 — String prototype methods: heavy test skipping due to include filters
 

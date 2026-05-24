@@ -1,9 +1,9 @@
 ---
 id: 1536
-sprint: backlog
 title: "Wasm-native exception types: $Error WasmGC struct + throw / try_table / catch_ref"
 status: backlog
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: errors
 goal: standalone-wasm
+sprint: Backlog
 related: [1535, 1470, 1471, 1472, 1473]
 ---
-
 # #1536 — Wasm-native exception types ($Error + Wasm 3.0 EH)
 
 ## Problem

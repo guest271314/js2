@@ -1,6 +1,5 @@
 ---
 id: 950
-sprint: 37
 title: "Compile error on calls with fewer arguments than TS signature expects"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: compilable
+sprint: 37
 ---
 # #950 -- Compile error on calls with fewer arguments than TS signature expects
 

@@ -1,6 +1,5 @@
 ---
 id: 396
-sprint: 0
 title: "Null pointer dereference in destructuring (118 FAIL)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: crash-free
+sprint: 0
 depends_on: [394]
 test262_fail: 118
 files:

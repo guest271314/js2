@@ -1,9 +1,9 @@
 ---
 id: 1357
-sprint: backlog
 title: "spec backlog: AbstractModuleSource constructor (Stage 3 import-source proposal, 8 test262 fails)"
 status: backlog
 created: 2026-05-08
+updated: 2026-05-08
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: feature
 area: runtime
 language_feature: modules
 goal: spec-completeness
+sprint: Backlog
 parent: 1334
 related: 1315
 ---

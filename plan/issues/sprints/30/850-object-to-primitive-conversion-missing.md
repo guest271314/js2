@@ -1,6 +1,5 @@
 ---
 id: 850
-sprint: 30
 title: "Object-to-primitive conversion missing: valueOf/toString not called (135 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
+sprint: 30
 test262_fail: 135
 ---
 # #850 -- Object-to-primitive conversion missing: valueOf/toString not called (135 tests)

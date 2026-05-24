@@ -1,6 +1,5 @@
 ---
 id: 939
-sprint: 37
 title: "Add Math.LOG2E and Math.LOG10E constant tests to equivalence suite"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 37
 tags: [good-first-issue, testing, math]
 files:
   tests/equivalence/:

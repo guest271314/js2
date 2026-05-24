@@ -1,6 +1,5 @@
 ---
 id: 1118
-sprint: 47
 title: "Worker/timeout exits and eval-code null deref (182 tests)"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 task_type: bugfix
 goal: spec-completeness
+sprint: 47
 renumbered_from: 858
 test262_fail: 182
 related: [1226, 1224]

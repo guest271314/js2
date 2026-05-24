@@ -1,6 +1,5 @@
 ---
 id: 1197
-sprint: 47
 title: "perf: i32 element specialization for `number[]` arrays under `| 0` / `& mask` / `>> n` patterns"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: performance
+sprint: 47
 required_by: [1199]
 es_edition: n/a
 related: [1126, 1179, 1195, 1196]

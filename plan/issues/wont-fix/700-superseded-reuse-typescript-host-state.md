@@ -8,6 +8,7 @@ completed: 2026-04-28
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: Backlog
 depends_on: [699]
 files:
   src/compiler.ts:

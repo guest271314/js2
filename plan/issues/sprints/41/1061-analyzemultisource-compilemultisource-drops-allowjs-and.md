@@ -1,6 +1,5 @@
 ---
 id: 1061
-sprint: 41
 title: "analyzeMultiSource / compileMultiSource drops allowJs and forces .js → .ts"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 41
 parent: 1031
 required_by: [1074, 1075]
 ---

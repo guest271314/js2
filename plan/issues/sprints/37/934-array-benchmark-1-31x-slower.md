@@ -1,6 +1,5 @@
 ---
 id: 934
-sprint: 37
 title: "Array benchmark 1.31x slower than JS — unnecessary f64 conversions in loop codegen"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: performance
+sprint: 37
 ---
 # #934 — Array benchmark 1.31x slower than JS — unnecessary f64 conversions in loop codegen
 

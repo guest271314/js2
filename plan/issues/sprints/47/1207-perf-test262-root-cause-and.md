@@ -1,6 +1,5 @@
 ---
 id: 1207
-sprint: 47
 title: "perf(test262): root-cause and fix the 136 compile_timeout tests (~7.6 min wall-clock cost per run)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: misc
 goal: ci-hardening
+sprint: 47
 required_by: [1227]
 es_edition: n/a
 related: [1171]

@@ -1,12 +1,12 @@
 ---
 id: 38
-sprint: 0
 title: "Issue 38: Implement `instanceof` operator"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: compilable
+sprint: 0
 ---
 # Issue 38: Implement `instanceof` operator
 

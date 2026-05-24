@@ -1,6 +1,5 @@
 ---
 id: 282
-sprint: 0
 title: "Issue #282: Variable declaration compile errors -- complex initializers"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: async-model
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

@@ -1,16 +1,17 @@
 ---
 id: 1316
-sprint: 50
 title: "illegal cast error: add expected type and actual value context (142 opaque runtime failures)"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: easy
 reasoning_effort: medium
 task_type: improvement
 area: runtime, error-messages
 goal: spec-completeness
+sprint: 50
 ---
 # #1316 — `illegal cast` needs type context (142 opaque failures)
 

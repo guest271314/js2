@@ -1,6 +1,5 @@
 ---
 id: 397
-sprint: 0
 title: "- assert.throws test support (952 SKIP)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: error-model
+sprint: 0
 test262_skip: 952
 files:
   tests/test262-runner.ts:

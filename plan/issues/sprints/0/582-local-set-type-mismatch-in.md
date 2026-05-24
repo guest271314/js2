@@ -1,6 +1,5 @@
 ---
 id: 582
-sprint: 0
 title: "local.set type mismatch in C_method (84 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_ce: 594
 files:
   src/codegen/index.ts:

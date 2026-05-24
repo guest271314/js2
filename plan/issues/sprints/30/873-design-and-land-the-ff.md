@@ -1,6 +1,5 @@
 ---
 id: 873
-sprint: 30
 title: "Design and land the ff-only integrated-branch merge protocol"
 status: done
 created: 2026-03-29
@@ -10,6 +9,7 @@ priority: high
 feasibility: easy
 reasoning_effort: medium
 goal: ci-hardening
+sprint: 30
 assigned: po
 ---
 # #873 -- Design and land the ff-only integrated-branch merge protocol

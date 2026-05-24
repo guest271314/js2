@@ -1,10 +1,10 @@
 ---
 id: 1295
-sprint: 48
 title: "compiler.ts: re-throw WebAssembly.Exception from internal catch blocks"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-24
 priority: high
 feasibility: easy
 reasoning_effort: low
@@ -12,6 +12,7 @@ task_type: bugfix
 area: test-infrastructure
 language_feature: test262-runner
 goal: conformance
+sprint: 48
 depends_on: [1294]
 related: [1221, 1160]
 ---

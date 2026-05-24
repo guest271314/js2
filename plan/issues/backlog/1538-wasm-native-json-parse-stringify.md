@@ -1,9 +1,9 @@
 ---
 id: 1538
-sprint: backlog
 title: "Wasm-native JSON.parse and JSON.stringify (standalone, no host)"
 status: backlog
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: json
 goal: standalone-wasm
+sprint: Backlog
 related: [1535, 1537]
 ---
-
 # #1538 — Wasm-native JSON.parse / JSON.stringify
 
 ## Problem

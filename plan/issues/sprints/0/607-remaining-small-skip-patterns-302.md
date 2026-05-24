@@ -1,6 +1,5 @@
 ---
 id: 607
-sprint: 0
 title: "Remaining small skip patterns (302 tests)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: varies
 goal: core-semantics
+sprint: 0
 test262_skip: 302
 files:
   tests/test262-runner.ts:

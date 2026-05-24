@@ -1,6 +1,5 @@
 ---
 id: 1022
-sprint: 40
 title: "Array built-in method 'object is not a function' (640 FAIL)"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 40
 ---
 sprint: 40
 # #1022 — Array built-in methods throw "object is not a function"

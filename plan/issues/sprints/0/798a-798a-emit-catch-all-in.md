@@ -1,6 +1,5 @@
 ---
 id: 798a
-sprint: 0
 title: "#798a -- Emit catch_all in try/catch compilation"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: easy
 goal: error-model
+sprint: 0
 required_by: [798b, 798c]
 test262_fail: ~3000
 subtask_of: 798

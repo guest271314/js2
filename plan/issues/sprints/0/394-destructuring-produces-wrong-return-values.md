@@ -1,6 +1,5 @@
 ---
 id: 394
-sprint: 0
 title: "Destructuring produces wrong return values"
 status: done
 created: 2026-03-16
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: critical
 goal: core-semantics
+sprint: 0
 required_by: [396]
 test262_fail: 1438
 ---

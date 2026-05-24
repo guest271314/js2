@@ -1,6 +1,5 @@
 ---
 id: 1184
-sprint: 46
 title: "__str_copy_tree worklist allocates O(node.len) per flatten — bound by depth instead"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: perf
 area: codegen
 language_feature: strings
 goal: performance
+sprint: 46
 es_edition: n/a
 origin: surfaced as follow-up to #1178 during regression analysis (2026-04-27); promoted to sprint 47 / priority high after 2026-04-27 competitive-benchmark rerun showed string-hash runs ~4,000× slower than Node (10:52 wasmtime CPU vs 162 ms Node) — the O(N²) regression dominates the headline.
 related: [1178, 1195, 1196, 1197, 1198]

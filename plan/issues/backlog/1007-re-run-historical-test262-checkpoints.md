@@ -9,6 +9,7 @@ feasibility: medium
 task_type: test
 language_feature: test262-history-normalization
 goal: test-infrastructure
+sprint: Backlog
 depends_on: [882, 884]
 es_edition: multi
 ---

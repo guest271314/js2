@@ -1,12 +1,12 @@
 ---
 id: 51
-sprint: 0
 title: "Issue 51: Functional array methods (filter, map, reduce, forEach, find)"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: compilable
+sprint: 0
 ---
 # Issue 51: Functional array methods (filter, map, reduce, forEach, find)
 

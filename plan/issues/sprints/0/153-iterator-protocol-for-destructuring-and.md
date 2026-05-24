@@ -1,6 +1,5 @@
 ---
 id: 153
-sprint: 0
 title: "- Iterator protocol for destructuring and for-of"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: core-semantics
+sprint: 0
 depends_on: [268]
 files:
   src/codegen/index.ts:

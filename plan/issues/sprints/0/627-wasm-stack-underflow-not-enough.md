@@ -1,6 +1,5 @@
 ---
 id: 627
-sprint: 0
 title: "Wasm stack underflow: not enough arguments (354 CE)"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: compilable
+sprint: 0
 required_by: [649]
 ---
 # Issue #627: Wasm stack underflow from void expressions in logical operators

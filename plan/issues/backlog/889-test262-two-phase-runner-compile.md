@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: contributor-readiness
+sprint: Backlog
 ---
 # #889 -- Test262 two-phase runner: compile → disk → execute with GC
 

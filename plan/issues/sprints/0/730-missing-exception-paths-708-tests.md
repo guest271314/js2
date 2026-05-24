@@ -1,6 +1,5 @@
 ---
 id: 730
-sprint: 0
 title: "- Missing exception paths: 708 tests expect throws but code runs to completion"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_fail: 708
 files:
   src/codegen/expressions.ts:

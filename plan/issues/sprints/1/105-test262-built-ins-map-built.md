@@ -1,12 +1,12 @@
 ---
 id: 105
-sprint: 1
 title: "Issue 105: Test262 — built-ins/Map, built-ins/Set, built-ins/Promise"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: async-model
+sprint: 1
 ---
 # Issue 105: Test262 — built-ins/Map, built-ins/Set, built-ins/Promise
 

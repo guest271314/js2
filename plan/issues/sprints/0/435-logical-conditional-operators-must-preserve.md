@@ -1,6 +1,5 @@
 ---
 id: 435
-sprint: 0
 title: "Logical/conditional operators must preserve object identity (16 fail)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

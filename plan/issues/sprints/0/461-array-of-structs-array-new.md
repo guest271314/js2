@@ -1,6 +1,5 @@
 ---
 id: 461
-sprint: 0
 title: "Array of structs: array.new_default fails for non-defaultable ref types"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: compilable
+sprint: 0
 files:
   src/codegen/expressions.ts:
     breaking:

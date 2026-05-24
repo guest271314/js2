@@ -1,6 +1,5 @@
 ---
 id: 334
-sprint: 7
 title: "- Private class fields and methods"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: class-system
+sprint: 7
 test262_ce: 15
 test262_refs:
   - test/language/expressions/compound-assignment/left-hand-side-private-reference-method-add.js

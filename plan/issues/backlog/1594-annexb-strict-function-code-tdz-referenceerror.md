@@ -3,6 +3,7 @@ id: 1594
 title: "AnnexB strict function-code / class name-binding TDZ: ReferenceError not thrown (~100 fails)"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -10,10 +11,10 @@ task_type: bugfix
 area: codegen
 language_feature: classes, annex-b, tdz, strict-mode, let, const
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 100
 test262_category: annexB/language/function-code, annexB/language/global-code, language/statements/class
 ---
-
 # #1594 — AnnexB strict function-code / class name-binding TDZ not throwing ReferenceError
 
 ## Problem

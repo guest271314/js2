@@ -1,12 +1,12 @@
 ---
 id: 76
-sprint: 0
 title: "Issue 76: Rope/cons-string for O(1) concatenation"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: compilable
+sprint: 0
 ---
 # Issue 76: Rope/cons-string for O(1) concatenation
 

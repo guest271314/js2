@@ -1,6 +1,5 @@
 ---
 id: 694
-sprint: 0
 title: "Migrate test262 runner to vitest with per-test disk cache"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: low
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 depends_on: [693]
 required_by: [699]
 ---

@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
+sprint: Backlog
 test262_ce: 0
 ---
 # #824 -- Timeout umbrella is stale: replace old 10s compile-timeout bucket with current 30s worker-timeout model

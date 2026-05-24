@@ -1,9 +1,9 @@
 ---
 id: 1352
-sprint: ~
 title: "RegExp exec result: wasmGC string struct ≠ externref string in strict equality (S15.10.2 cluster)"
 status: backlog
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime, codegen
 language_feature: regexp, strings
 goal: spec-completeness
+sprint: ~
 parent: 1333
 ---
 # #1352 — RegExp exec result: wasmGC string struct ≠ externref V8 string in strict equality

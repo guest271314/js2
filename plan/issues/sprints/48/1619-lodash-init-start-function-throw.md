@@ -1,11 +1,10 @@
 ---
 id: 1619
-renumbered_from: 1295
-sprint: 48
 title: "lodash transitive init: start-function throws WebAssembly.Exception during instantiate (clamp/add)"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -13,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: module-init, top-level-side-effects, host-globals
 goal: npm-library-support
+sprint: 48
+renumbered_from: 1295
 related: [1291, 1276]
 ---
 # #1295 — lodash transitive init throws during instantiate

@@ -1,6 +1,5 @@
 ---
 id: 727
-sprint: 0
 title: "- Sub-classify assertion failures (11,480 tests return wrong values)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-22
 priority: high
 feasibility: easy
 goal: spec-completeness
+sprint: 0
 test262_fail: 11480
 files: []
 ---

@@ -1,6 +1,5 @@
 ---
 id: 1058
-sprint: 45
 title: "Compile the TypeScript compiler itself to Wasm — self-hosting stress test"
 status: ready
 created: 2026-04-11
@@ -9,8 +8,9 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: compiler-architecture
+sprint: 45
 depends_on: [1042, 1044, 1046]
-required_by: [1059, 1066, 1165]
+required_by: [1059, 1066, 1165, 1584]
 ---
 # #1058 — Compile the TypeScript compiler to Wasm (self-hosting stress test)
 

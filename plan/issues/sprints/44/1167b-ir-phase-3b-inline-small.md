@@ -1,6 +1,5 @@
 ---
 id: 1167b
-sprint: 44
 title: "IR Phase 3b — inline-small: inline direct IR calls before lowering"
 status: done
 created: 2026-04-22
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: compiler-architecture
+sprint: 44
 depends_on: [1167a]
 required_by: [1167c]
 closed: 2026-04-23

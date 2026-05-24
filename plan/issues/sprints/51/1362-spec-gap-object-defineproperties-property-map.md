@@ -1,9 +1,10 @@
 ---
 id: 1362
-sprint: 51
 title: "spec gap: Object.defineProperties — apply full descriptor map (332 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
+sprint: 51
 ---
 # #1362 — Object.defineProperties: full descriptor map application
 

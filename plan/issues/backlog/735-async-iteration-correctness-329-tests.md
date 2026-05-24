@@ -7,6 +7,7 @@ updated: 2026-04-28
 priority: medium
 feasibility: hard
 goal: async-model
+sprint: Backlog
 depends_on: [680, 681]
 test262_fail: 329
 files:

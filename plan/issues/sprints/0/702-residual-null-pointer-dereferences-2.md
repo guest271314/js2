@@ -1,6 +1,5 @@
 ---
 id: 702
-sprint: 0
 title: "Residual null pointer dereferences: 2,767 runtime failures"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: critical
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_fail: 2767
 files:
   src/codegen/expressions.ts:

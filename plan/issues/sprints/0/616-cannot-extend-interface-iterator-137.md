@@ -1,6 +1,5 @@
 ---
 id: 616
-sprint: 0
 title: "Cannot extend interface 'Iterator' (137 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_ce: 137
 files:
   src/checker/lib-es2015.ts:

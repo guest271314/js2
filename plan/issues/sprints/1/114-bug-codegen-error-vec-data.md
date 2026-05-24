@@ -1,12 +1,12 @@
 ---
 id: 114
-sprint: 1
 title: "Issue 114: Bug — 'Codegen error: vec data field not ref'"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-11
 goal: class-system
+sprint: 1
 ---
 # Issue 114: Bug — "Codegen error: vec data field not ref"
 

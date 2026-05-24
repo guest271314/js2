@@ -1,7 +1,5 @@
 ---
 id: 1647
-renumbered_from: 1334
-sprint: 50
 title: "ECMAScript spec compliance audit: section-by-section review, gap issues, HTML report"
 status: done
 created: 2026-05-08
@@ -14,6 +12,8 @@ task_type: meta
 area: compliance, documentation
 language_feature: all
 goal: npm-library-support
+sprint: 50
+renumbered_from: 1334
 ---
 # #1334 — ECMAScript spec compliance audit
 

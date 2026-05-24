@@ -1,6 +1,5 @@
 ---
 id: 537
-sprint: 0
 title: "TypeScript diagnostic suppressions for test262 (62 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: async-model
+sprint: 0
 test262_ce: 62
 files:
   src/codegen/expressions.ts:

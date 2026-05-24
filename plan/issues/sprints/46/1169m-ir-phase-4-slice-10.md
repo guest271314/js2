@@ -1,6 +1,5 @@
 ---
 id: 1169m
-sprint: 46
 title: "IR Phase 4 Slice 10 step E — Promise through IR (best-effort)"
 status: done
 created: 2026-04-28
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: async-model
+sprint: 46
 depends_on: [1169i, 1169c]
 pr: 102
 ---

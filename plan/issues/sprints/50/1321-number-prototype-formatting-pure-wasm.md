@@ -1,8 +1,7 @@
 ---
 id: 1321
-sprint: 50
 title: "Number.prototype formatting methods (toString/toFixed/toPrecision/toExponential) rely on JS host unnecessarily"
-status: partial
+status: ready
 created: 2026-05-07
 updated: 2026-05-08
 priority: medium
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: number-formatting
 goal: standalone-mode
+sprint: 50
 ---
 # #1321 — Number.prototype formatting: eliminate JS host dependency
 

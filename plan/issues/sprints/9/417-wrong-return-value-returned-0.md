@@ -1,6 +1,5 @@
 ---
 id: 417
-sprint: 9
 title: "Wrong return value (returned 0) -- broad runtime correctness failures"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: core-semantics
+sprint: 9
 test262_fail: 1979
 complexity: L
 files:

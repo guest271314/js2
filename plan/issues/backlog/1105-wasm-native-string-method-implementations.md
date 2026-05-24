@@ -10,6 +10,7 @@ reasoning_effort: max
 task_type: feature
 language_feature: string-methods
 goal: standalone-mode
+sprint: Backlog
 es_edition: multi
 ---
 # #1105 — Wasm-native String method implementations for standalone mode

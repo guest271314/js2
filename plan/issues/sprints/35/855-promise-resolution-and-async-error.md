@@ -1,6 +1,5 @@
 ---
 id: 855
-sprint: 35
 title: "Promise resolution and async error handling (210 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 35
 depends_on: [944]
 test262_fail: 210
 ---

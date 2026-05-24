@@ -1,6 +1,5 @@
 ---
 id: 1068
-sprint: 41
 title: "parser: 'await' not allowed as label identifier — blocks prettier/index.mjs"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: bugfix
 language_feature: parser
 goal: npm-library-support
+sprint: 41
 parent: 1034
 ---
 # #1068 — parser: 'await' not allowed as label identifier

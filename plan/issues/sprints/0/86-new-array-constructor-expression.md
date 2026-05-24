@@ -1,12 +1,12 @@
 ---
 id: 86
-sprint: 0
 title: "Issue 86: `new Array()` constructor expression"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: compilable
+sprint: 0
 ---
 # Issue 86: `new Array()` constructor expression
 

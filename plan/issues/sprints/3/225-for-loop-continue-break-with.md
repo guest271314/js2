@@ -1,12 +1,12 @@
 ---
 id: 225
-sprint: 3
 title: "Issue #225: For-loop continue/break with string !== comparison"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 3
 ---
 # Issue #225: For-loop continue/break with string !== comparison
 

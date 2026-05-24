@@ -1,6 +1,5 @@
 ---
 id: 780
-sprint: 0
 title: "- TypeError (null/undefined access) in built-in method dispatch (~9,128 tests)"
 status: done
 created: 2026-03-25
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: critical
 feasibility: hard
 goal: async-model
+sprint: 0
 parent: 779
 test262_fail: 9128
 ---

@@ -1,6 +1,5 @@
 ---
 id: 440
-sprint: 10
 title: "Dynamic import specifier type error (16 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: async-model
+sprint: 10
 test262_ce: 16
 complexity: S
 files:

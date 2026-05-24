@@ -1,6 +1,5 @@
 ---
 id: 447
-sprint: 0
 title: "Wasm validation: stack fallthru type mismatch -- residual after #410 (48 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 0
 test262_ce: 48
 complexity: S
 files:

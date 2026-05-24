@@ -1,10 +1,10 @@
 ---
 id: 1324
-sprint: 50
 title: "JSON.stringify and JSON.parse: implement in pure Wasm, eliminate JS host dependency"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: runtime, codegen
 language_feature: json
 goal: standalone-mode
+sprint: 50
 ---
 # #1324 — JSON.stringify / JSON.parse in pure Wasm
 

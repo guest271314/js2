@@ -1,6 +1,5 @@
 ---
 id: 143
-sprint: 0
 title: "Issue #143: for-loop edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: async-model
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

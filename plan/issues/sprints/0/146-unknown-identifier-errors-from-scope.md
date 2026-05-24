@@ -1,6 +1,5 @@
 ---
 id: 146
-sprint: 0
 title: "- Unknown identifier errors from scope/hoisting issues"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

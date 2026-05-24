@@ -1,6 +1,5 @@
 ---
 id: 1161
-sprint: 44
 title: "Cannot destructure null/undefined in private class method params (~429 dstr tests)"
 status: done
 created: 2026-04-21
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: destructuring
 goal: crash-free
+sprint: 44
 closed: 2026-04-23
 pr: 12
 net_improvement: 396

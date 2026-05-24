@@ -1,6 +1,5 @@
 ---
 id: 691
-sprint: 0
 title: "Pipeline architecture: interleave stages and minimize memory pressure"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: async-model
+sprint: 0
 depends_on: [689, 690]
 required_by: [692]
 files:

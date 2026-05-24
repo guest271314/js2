@@ -1,6 +1,5 @@
 ---
 id: 454
-sprint: 10
 title: "Compile pako (zlib) to Wasm and benchmark vs JS"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: ci-hardening
+sprint: 10
 depends_on: [450]
 ---
 # #454 — Compile pako (zlib) to Wasm and benchmark vs JS

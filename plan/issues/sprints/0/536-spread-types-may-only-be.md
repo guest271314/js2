@@ -1,6 +1,5 @@
 ---
 id: 536
-sprint: 0
 title: "Spread types may only be created from object types (16 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: contributor-readiness
+sprint: 0
 test262_ce: 16
 files:
   src/codegen/expressions.ts:

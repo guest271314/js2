@@ -1,6 +1,5 @@
 ---
 id: 1018
-sprint: 41
 title: "Object.getOwnPropertyDescriptor returns null for missing/accessor properties (160 FAIL)"
 status: done
 created: 2026-04-10
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 41
 ---
 # #1018 — Object.getOwnPropertyDescriptor returns null (160 FAIL)
 

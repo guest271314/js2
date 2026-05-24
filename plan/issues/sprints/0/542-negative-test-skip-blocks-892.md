@@ -1,6 +1,5 @@
 ---
 id: 542
-sprint: 0
 title: "Negative test skip blocks 892 tests"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: spec-completeness
+sprint: 0
 ---
 # Issue #542: Negative test skip blocks 892 tests
 

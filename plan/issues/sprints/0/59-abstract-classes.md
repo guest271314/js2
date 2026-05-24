@@ -1,12 +1,12 @@
 ---
 id: 59
-sprint: 0
 title: "Issue 59: Abstract classes"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: compilable
+sprint: 0
 ---
 # Issue 59: Abstract classes
 

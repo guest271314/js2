@@ -1,6 +1,5 @@
 ---
 id: 719
-sprint: 26
 title: "Wasm validation: stack fallthrough mismatch (310 CE)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 26
 test262_ce: 103
 test262_ce_original: 310
 files:

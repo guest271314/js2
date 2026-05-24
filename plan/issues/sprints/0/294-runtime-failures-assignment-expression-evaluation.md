@@ -1,6 +1,5 @@
 ---
 id: 294
-sprint: 0
 title: "Issue #294: Runtime failures -- assignment expression evaluation order"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

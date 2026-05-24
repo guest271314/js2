@@ -7,6 +7,7 @@ updated: 2026-04-28
 completed: 2026-04-28
 priority: low
 goal: contributor-readiness
+sprint: Backlog
 required_by: [855, 1116]
 ---
 # #944 — DUPLICATE

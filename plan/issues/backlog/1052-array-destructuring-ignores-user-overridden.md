@@ -1,7 +1,7 @@
 ---
 id: 1052
 title: "Array destructuring ignores user-overridden Array.prototype[Symbol.iterator]"
-status: in-review
+status: review
 created: 2026-04-11
 updated: 2026-05-08
 priority: low
@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: Backlog
 es_edition: multi
 ---
 # #1052 — Array destructuring ignores user-overridden Array.prototype[Symbol.iterator]

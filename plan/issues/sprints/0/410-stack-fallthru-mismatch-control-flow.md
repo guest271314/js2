@@ -1,6 +1,5 @@
 ---
 id: 410
-sprint: 0
 title: "Stack fallthru mismatch -- control flow branches leave wrong stack state"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: compilable
+sprint: 0
 test262_ce: 590
 complexity: L
 files:

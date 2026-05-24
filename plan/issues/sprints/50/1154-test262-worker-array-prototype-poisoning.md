@@ -4,12 +4,14 @@ title: "test262 worker: Array.prototype poisoning leaks into TypeScript compiler
 status: done
 created: 2026-04-21
 updated: 2026-05-07
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix
 language_feature: test-infrastructure
 goal: async-model
+sprint: 50
 depends_on: [1119]
 ---
 # #1154 — Array.from compile-time failure from incomplete prototype-poisoning restore

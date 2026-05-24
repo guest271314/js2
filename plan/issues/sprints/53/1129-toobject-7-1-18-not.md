@@ -4,11 +4,14 @@ title: "ToObject (§7.1.18) not implemented — no primitive auto-boxing"
 status: done
 created: 2026-04-17
 updated: 2026-05-21
+completed: 2026-05-21
 priority: low
 feasibility: hard
 task_type: feature
 language_feature: type-coercion
 goal: core-semantics
+sprint: 53
+required_by: [1568]
 es_edition: es5
 found_by: "#1093 Phase 1 audit"
 ---

@@ -1,12 +1,12 @@
 ---
 id: 183
-sprint: 2
 title: "Template literal type coercion wasm errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: standalone-mode
+sprint: 2
 ---
 # #183 — Template literal type coercion wasm errors
 

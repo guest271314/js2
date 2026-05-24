@@ -1,12 +1,12 @@
 ---
 id: 32
-sprint: 0
 title: "Issue 32: Capacity-based array representation with `array.copy`"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 32: Capacity-based array representation with `array.copy`
 

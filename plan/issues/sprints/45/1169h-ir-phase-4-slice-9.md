@@ -1,6 +1,5 @@
 ---
 id: 1169h
-sprint: 45
 title: "IR Phase 4 Slice 9 — try/catch/finally and throw through the IR path"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: async-model
+sprint: 45
 depends_on: [1169e]
 pr: 84
 merged: 2026-04-28

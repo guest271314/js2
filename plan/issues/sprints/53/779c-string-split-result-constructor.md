@@ -2,21 +2,21 @@
 id: 779c
 title: "String.prototype.split result `.constructor` is not `Array`"
 status: done
-sprint: 53
 created: 2026-05-21
 updated: 2026-05-21
+completed: 2026-05-23
 priority: medium
 feasibility: easy
 reasoning_effort: low
+task_type: bugfix
+language_feature: string-prototype-split
 goal: property-model
+sprint: 53
 parent: 779
 es_edition: ES5.1
-language_feature: string-prototype-split
-task_type: bug
 test262_fail: 78
 note: "Verified 2026-05-21: corrected file path from builtins/string.ts (does not exist) to string-ops.ts (split branches at L1681, L1746)"
 ---
-
 # #779c — String.prototype.split result `.constructor` is not `Array`
 
 ## Problem

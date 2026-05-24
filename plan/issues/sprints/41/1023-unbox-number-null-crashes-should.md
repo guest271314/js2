@@ -1,6 +1,5 @@
 ---
 id: 1023
-sprint: 41
 title: "__unbox_number(null) crashes — should apply ToNumber(null) = +0"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: error-model
+sprint: 41
 parent: 1021
 ---
 # #1023 — `__unbox_number(null)` should not crash (ToNumber semantics)

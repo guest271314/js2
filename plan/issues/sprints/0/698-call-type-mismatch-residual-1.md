@@ -1,6 +1,5 @@
 ---
 id: 698
-sprint: 0
 title: "- Call type mismatch residual (1,044 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 0
 depends_on: [659]
 required_by: [705]
 test262_ce: 1250

@@ -1,6 +1,5 @@
 ---
 id: 1227
-sprint: 47
 title: "fix(runner): compiler-pool timeout starts at enqueue time, not dispatch time — causes 156 false compile_timeouts"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: test-runner
 language_feature: n/a
 goal: async-model
+sprint: 47
 depends_on: [1207]
 es_edition: n/a
 related: [1192, 1219, 1207]

@@ -1,9 +1,9 @@
 ---
 id: 1480
-sprint: 52
 title: "wasi: console.error and console.warn should write to stderr (fd=2)"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: console
 goal: wasi-completeness
+sprint: 52
 related: []
 ---
-
 ## Problem
 
 Under `--target wasi`, every `console.*` call routes through a single helper

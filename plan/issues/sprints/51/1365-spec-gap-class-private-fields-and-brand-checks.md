@@ -1,9 +1,10 @@
 ---
 id: 1365
-sprint: 51
 title: "spec gap: class private fields, methods, accessors and brand checks (~97 fails in elements/private-*)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: classes
 goal: spec-completeness
+sprint: 51
 ---
 # #1365 — Class private fields and brand checks
 

@@ -1,12 +1,12 @@
 ---
 id: 1
-sprint: 0
 title: "Issue 1: do-while loops"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-27
 goal: core-semantics
+sprint: 0
 ---
 # Issue 1: do-while loops
 

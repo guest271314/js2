@@ -1,9 +1,9 @@
 ---
 id: 1387
-sprint: 52
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: spec-ready
+status: ready
 created: 2026-05-08
+updated: 2026-05-21
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,6 +11,7 @@ task_type: feature
 area: codegen, ir
 language_feature: with
 goal: spec-completeness
+sprint: 52
 ---
 # #1387 — `with` statement: architect exploration
 

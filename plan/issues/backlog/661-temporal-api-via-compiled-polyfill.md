@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 1128
 files:
   src/codegen/expressions.ts:

@@ -1,10 +1,10 @@
 ---
 id: 1258
-sprint: 47
 title: "compileForOfAssignDestructuringExternref must route writes through boxedCaptures.struct.set"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,11 +12,10 @@ task_type: bugfix
 area: codegen
 language_feature: closures, destructuring, for-of
 goal: test-infrastructure
+sprint: 47
 related: [1177, 1245, 1205]
-depends_on: []
 test262_fail: 30
 ---
-
 # #1258 — Make `compileForOfAssignDestructuringExternref` box-aware (blocks Stage 1 of #1177)
 
 ## Background

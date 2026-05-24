@@ -1,12 +1,14 @@
 ---
 id: 1574
-title: IR Type Analysis & Optimization Pass Improvements
-status: research
+title: "IR Type Analysis & Optimization Pass Improvements"
+status: ready
+created: 2026-05-21
+updated: 2026-05-21
 goal: ir-retirement
+sprint: Backlog
 owner: architect
 related: 1131, 1167a, 1167b, 1167c, 1126, 1231, 1169, 1370, 1373
 ---
-
 # IR Type Analysis & Optimization Pass Improvements
 
 A research document scoping concrete, file/line-anchored improvements to the

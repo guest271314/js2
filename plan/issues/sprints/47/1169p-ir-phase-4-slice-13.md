@@ -1,6 +1,5 @@
 ---
 id: 1169p
-sprint: 47
 title: "IR Phase 4 Slice 13 — String + Array prototype methods through IR"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ir
 language_feature: string-methods, array-methods, prototype-dispatch
 goal: standalone-mode
+sprint: 47
 depends_on: [1169o]
 required_by: [1169q, 1231, 1238]
 es_edition: ES2020

@@ -2,7 +2,6 @@
 id: 1116b
 title: "Promise subclass: Wasm-compiled class extends Promise must be a valid JS constructor (Wasm-class-as-JS-ctor bridge)"
 status: ready
-sprint: 55
 created: 2026-05-20
 updated: 2026-05-23
 priority: high
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: classes, Promise, subclassing
 goal: spec-completeness
+sprint: 55
 parent: 1116
 related: [1455, 1326, 1366a, 1366b, 1382]
 test262_est: 65
@@ -22,7 +22,6 @@ note: "v2 spec (2026-05-23, arch). The 2026-05-21 plan below referenced
   line refs on origin/main e114fe378. PR #436 (ctx-non-object TypeError)
   and #379 (combinators) have landed; this builds on them."
 ---
-
 # #1116b — Wasm-class-as-JS-ctor bridge for Promise subclasses
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 1041
-sprint: 41
 title: "Pre-bundled single-file stress test scaffold — closed, superseded by #1046"
 status: wont-fix
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: low
 feasibility: n/a
 reasoning_effort: low
 goal: compiler-architecture
+sprint: 41
 parent: 1031
 required_by: [1044, 1045]
 superseded_by: 1046

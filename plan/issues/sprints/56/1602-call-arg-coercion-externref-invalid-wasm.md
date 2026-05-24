@@ -1,21 +1,20 @@
 ---
 id: 1602
-sprint: 56
 title: "codegen: call-site argument coercion emits invalid wasm (call expected externref, found f64/other)"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: type-coercion, call-expression
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 39
 related: [1522]
 ---
-
 # #1602 — Call-site argument coercion produces invalid wasm
 
 ## Problem

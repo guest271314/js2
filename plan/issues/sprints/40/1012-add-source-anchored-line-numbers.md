@@ -1,6 +1,5 @@
 ---
 id: 1012
-sprint: 40
 title: "Add source-anchored line numbers to all runtime error patterns"
 status: done
 created: 2026-04-10
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 40
 ---
 # #1012 — Add source-anchored line numbers to all runtime error patterns
 

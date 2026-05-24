@@ -8,6 +8,7 @@ priority: high
 feasibility: easy
 reasoning_effort: medium
 goal: performance
+sprint: Backlog
 ---
 # #872 -- Test262 report data should only update on complete runs
 

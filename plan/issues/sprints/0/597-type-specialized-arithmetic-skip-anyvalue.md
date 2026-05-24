@@ -1,6 +1,5 @@
 ---
 id: 597
-sprint: 0
 title: "Type-specialized arithmetic: skip AnyValue for known types"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: builtin-methods
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

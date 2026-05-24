@@ -1,6 +1,5 @@
 ---
 id: 519
-sprint: 0
 title: "Internal error: targetLocal is not defined (66 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_ce: 66
 files:
   src/codegen/statements.ts:

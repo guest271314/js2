@@ -1,10 +1,10 @@
 ---
 id: 1229
-sprint: 47
 title: "perf: eval(literal) and new RegExp(literal) re-compile every iteration in 65k-loop tests"
 status: done
 created: 2026-05-01
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: eval
 goal: spec-completeness
+sprint: 47
 related: [1207, 1227, 1234]
 es_edition: ES5
 test262_fail: 7

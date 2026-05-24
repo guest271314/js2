@@ -1,6 +1,5 @@
 ---
 id: 324
-sprint: 7
 title: "- Runtime test failures (wrong return values)"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: compilable
+sprint: 7
 test262_fail: 396
 test262_refs:
   - test/built-ins/Math/min/Math.min_each-element-coerced.js

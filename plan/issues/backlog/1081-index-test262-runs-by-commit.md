@@ -10,6 +10,7 @@ reasoning_effort: medium
 task_type: feature
 language_feature: n/a
 goal: ci-hardening
+sprint: Backlog
 parent: 1080
 depends_on: [1076]
 es_edition: n/a

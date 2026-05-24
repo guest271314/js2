@@ -1,15 +1,17 @@
 ---
 id: 1393
-sprint: 51
 title: "infra: content-hash CI cache + GitHub Merge Queue — eliminate baseline drift and redundant re-runs"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: medium
-task_type: infra
+task_type: infrastructure
 area: ci
 goal: ci-reliability
+sprint: 51
 ---
 # #1393 — Content-hash test262 cache + GitHub Merge Queue
 

@@ -8,6 +8,7 @@ priority: low
 feasibility: hard
 reasoning_effort: max
 goal: spec-completeness
+sprint: Backlog
 test262_fail: 493
 files:
   src/codegen/index.ts:

@@ -1,10 +1,10 @@
 ---
 id: 1309
-sprint: 50
 title: "Hono Tier 6 — Web API surface (Request/Response) + async handlers"
 status: done
 created: 2026-05-07
 updated: 2026-05-07
+completed: 2026-05-07
 priority: low
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: stress-test
 area: codegen, runtime, host-imports
 language_feature: async, web-api, classes, dynamic-methods
 goal: npm-library-support
+sprint: 50
 depends_on: [1298]
 related: [1297, 1244, 1274, 1285, 1293]
 ---

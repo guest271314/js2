@@ -1,12 +1,12 @@
 ---
 id: 40
-sprint: 0
 title: "Issue 40: String Enums"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: core-semantics
+sprint: 0
 ---
 # Issue 40: String Enums
 

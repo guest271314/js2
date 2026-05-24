@@ -1,6 +1,5 @@
 ---
 id: 444
-sprint: 9
 title: "Wasm validation: local.set type mismatch (292 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 9
 test262_ce: 292
 complexity: M
 files:

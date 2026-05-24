@@ -1,6 +1,5 @@
 ---
 id: 424
-sprint: 0
 title: "Logical assignment on unresolved struct type (14 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: contributor-readiness
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

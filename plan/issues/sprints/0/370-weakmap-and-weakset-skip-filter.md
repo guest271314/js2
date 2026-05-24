@@ -1,6 +1,5 @@
 ---
 id: 370
-sprint: 0
 title: "- WeakMap and WeakSet (skip filter narrowing)"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: hard
 goal: contributor-readiness
+sprint: 0
 test262_skip: 18
 files:
   tests/test262-runner.ts:

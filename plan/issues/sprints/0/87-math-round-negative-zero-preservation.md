@@ -1,12 +1,12 @@
 ---
 id: 87
-sprint: 0
 title: "Issue 87: Math.round negative zero preservation"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-10
 goal: platform
+sprint: 0
 ---
 # Issue 87: Math.round negative zero preservation
 

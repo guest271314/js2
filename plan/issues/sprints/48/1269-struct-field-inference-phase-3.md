@@ -1,10 +1,10 @@
 ---
 id: 1269
-sprint: 48
 title: "struct field inference Phase 3: consumer-side specialization — emit struct.get without unboxing"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +12,9 @@ task_type: feature
 area: codegen, ir
 language_feature: object-literal, property-access
 goal: performance
+sprint: 48
 depends_on: [1231]
+required_by: [1270]
 ---
 # #1269 — Struct field inference Phase 3: consumer-side direct struct.get
 

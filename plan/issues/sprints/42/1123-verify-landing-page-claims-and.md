@@ -1,6 +1,5 @@
 ---
 id: 1123
-sprint: 42
 title: "Verify landing page claims and code examples against current compiler behavior"
 status: done
 created: 2026-04-15
@@ -13,6 +12,7 @@ task_type: investigation
 area: website
 language_feature: n/a
 goal: spec-completeness
+sprint: 42
 ---
 # #1123 -- Verify landing page claims and code examples against current compiler behavior
 

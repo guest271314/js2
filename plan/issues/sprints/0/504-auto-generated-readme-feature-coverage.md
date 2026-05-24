@@ -1,6 +1,5 @@
 ---
 id: 504
-sprint: 0
 title: "Auto-generated README feature coverage + benchmark tables"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: async-model
+sprint: 0
 depends_on: [501]
 files:
   scripts/update-readme.ts:

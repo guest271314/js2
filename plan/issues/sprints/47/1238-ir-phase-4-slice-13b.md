@@ -1,6 +1,5 @@
 ---
 id: 1238
-sprint: 47
 title: "IR Phase 4 Slice 13b — pseudo-ExternClassInfo registration for String + Array"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: prototype-dispatch, extern-class
 goal: performance
+sprint: 47
 depends_on: [1169o, 1169p]
 required_by: [1232, 1233]
 related: [1232, 1233]

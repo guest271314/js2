@@ -1,6 +1,5 @@
 ---
 id: 328
-sprint: 7
 title: "- OmittedExpression (array holes/elision)"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: core-semantics
+sprint: 7
 test262_ce: 15
 test262_refs:
   - test/language/expressions/assignment/dstr/array-elem-init-assignment.js

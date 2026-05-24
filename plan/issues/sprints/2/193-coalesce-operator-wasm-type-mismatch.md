@@ -1,12 +1,12 @@
 ---
 id: 193
-sprint: 2
 title: "Coalesce operator wasm type mismatch"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # #193 — Coalesce operator wasm type mismatch
 

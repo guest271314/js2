@@ -1,9 +1,9 @@
 ---
 id: 1347
-sprint: 50
 title: "spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: iteration
 goal: spec-completeness
+sprint: 50
 parent: 1328
 ---
 # #1347 — for-of / for-await-of: IteratorClose on abrupt completion

@@ -1,10 +1,9 @@
 ---
 id: 1646
-renumbered_from: 1351
-sprint: 50
 title: "spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -12,6 +11,8 @@ task_type: bugfix
 area: runtime
 language_feature: set
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1351
 parent: 1328
 ---
 # #1351 — Set new methods: accept any set-like (size + has + keys)

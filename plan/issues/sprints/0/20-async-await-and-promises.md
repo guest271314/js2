@@ -1,12 +1,12 @@
 ---
 id: 20
-sprint: 0
 title: "Issue 20: Async/Await and Promises"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: async-model
+sprint: 0
 ---
 # Issue 20: Async/Await and Promises
 

@@ -1,9 +1,9 @@
 ---
 id: 1467
-sprint: 52
 title: "spec gap: Error / AggregateError / Symbol prototype protocol"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: error-symbol-protocol
 goal: spec-completeness
+sprint: 52
 related: [844, 1460]
 ---
 # #1467 - spec gap: Error / AggregateError / Symbol prototype protocol

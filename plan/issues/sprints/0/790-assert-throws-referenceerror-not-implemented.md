@@ -1,6 +1,5 @@
 ---
 id: 790
-sprint: 0
 title: "- assert.throws(ReferenceError) not implemented (788 tests)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_fail: 788
 commit: 3d6abd6b, c7573440
 ---

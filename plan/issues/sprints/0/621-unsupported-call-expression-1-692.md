@@ -1,6 +1,5 @@
 ---
 id: 621
-sprint: 0
 title: "Unsupported call expression (1,692 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 test262_ce: 1692
 files:
   src/codegen/expressions.ts:

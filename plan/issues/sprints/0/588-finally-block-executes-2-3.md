@@ -1,6 +1,5 @@
 ---
 id: 588
-sprint: 0
 title: "Finally block executes 2-3 times instead of once"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: contributor-readiness
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

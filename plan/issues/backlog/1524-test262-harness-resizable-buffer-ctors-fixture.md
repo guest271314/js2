@@ -1,6 +1,5 @@
 ---
 id: 1524
-sprint: backlog
 title: "test262 harness: TypedArray `ctors` fixture not visible in resizable-buffer tests"
 status: backlog
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: medium
 task_type: bugfix
 area: test-runner
 language_feature: test262-harness, typed-array
+sprint: Backlog
 es_edition: n/a
 test262_category: built-ins/Array/prototype, built-ins/TypedArray
 test262_count: 202
 related: []
 ---
-
 # #1524 — `ctors` fixture not exposed in resizable-buffer test262 tests
 
 ## Problem

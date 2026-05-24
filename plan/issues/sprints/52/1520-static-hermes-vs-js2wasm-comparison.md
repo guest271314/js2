@@ -1,18 +1,18 @@
 ---
 id: 1520
-sprint: 52
 title: "docs: architectural comparison — Static Hermes (native) vs js2wasm (WasmGC AOT)"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: research
 area: docs, architecture
 goal: developer-experience
+sprint: 52
 related: []
 ---
-
 # #1520 — Architectural comparison: Static Hermes vs js2wasm
 
 ## Goal

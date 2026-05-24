@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: Backlog
 files:
   benchmarks/report.html:
     breaking:

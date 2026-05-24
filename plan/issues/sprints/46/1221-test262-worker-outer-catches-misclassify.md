@@ -1,6 +1,5 @@
 ---
 id: 1221
-sprint: 46
 title: "test262-worker: outer catches misclassify WebAssembly.Exception as compile_error — fix harness to reclassify as fail (~256 flaky tests)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: ci
 language_feature: n/a
 goal: ci-hardening
+sprint: 46
 merged_at: 2026-05-01
 merged_pr: 115
 merge_commit: 6e9fdcb202ecb7e1d43b723c8bc720d56b20f2b5

@@ -1,6 +1,5 @@
 ---
 id: 389
-sprint: 0
 title: "- Element access on class instances (76 CE)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 test262_ce: 76
 files:
   src/codegen/expressions.ts:

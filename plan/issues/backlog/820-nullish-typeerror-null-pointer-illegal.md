@@ -8,6 +8,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: Backlog
 test262_fail: 6993
 ---
 # #820 -- Nullish TypeError / null-pointer / illegal-cast umbrella (6,993 FAIL)

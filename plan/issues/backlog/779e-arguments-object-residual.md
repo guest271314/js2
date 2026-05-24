@@ -2,19 +2,20 @@
 id: 779e
 title: "arguments-object mapped / trailing-comma / sloppy-strict residuals (~161 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: codegen
+language_feature: arguments-object
 goal: property-model
+sprint: Backlog
 parent: 779
 es_edition: ES5.1
-language_feature: arguments-object
 test262_fail: 161
-created: 2026-05-21
 ---
-
 # #779e — arguments-object residuals after #849
 
 ## Problem

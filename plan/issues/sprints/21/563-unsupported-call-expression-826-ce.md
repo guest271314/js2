@@ -1,6 +1,5 @@
 ---
 id: 563
-sprint: 21
 title: "Unsupported call expression (826 CE remaining)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: critical
 feasibility: hard
 goal: compilable
+sprint: 21
 test262_ce: 826
 files:
   src/codegen/expressions.ts:

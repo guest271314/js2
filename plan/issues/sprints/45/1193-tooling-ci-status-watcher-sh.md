@@ -1,6 +1,5 @@
 ---
 id: 1193
-sprint: 45
 title: "tooling: ci-status-watcher.sh hook doesn't push notifications to dev agents (uses gh @me which resolves to human, not agent)"
 status: done
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: tooling
 area: infrastructure
 goal: compiler-architecture
+sprint: 45
 es_edition: n/a
 related: []
 origin: surfaced 2026-04-27 — dev agents (this session) noticed they were learning about CI completion via team-lead SendMessage rather than via the FileChanged hook. Investigation showed the hook authors-by-GH-token match is wrong for the multi-agent / single-token setup.

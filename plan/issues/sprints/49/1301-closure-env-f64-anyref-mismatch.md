@@ -1,6 +1,5 @@
 ---
 id: 1301
-sprint: 49
 title: "Closure environment field-type mismatch: struct.new[0] expected f64, got anyref"
 status: done
 created: 2026-05-03
@@ -13,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: closures, arrow-functions
 goal: npm-library-support
-depends_on: []
+sprint: 49
 related: [1297, 1298, 1300, 1306]
 ---
 # #1301 — Wasm validator rejects closure env: struct.new[0] expected f64, found anyref

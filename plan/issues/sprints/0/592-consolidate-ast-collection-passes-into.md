@@ -1,6 +1,5 @@
 ---
 id: 592
-sprint: 0
 title: "Consolidate AST collection passes into single visitor"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: easy
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/index.ts:
     new:

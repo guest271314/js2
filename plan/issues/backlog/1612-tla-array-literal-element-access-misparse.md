@@ -6,14 +6,14 @@ created: 2026-05-24
 updated: 2026-05-24
 priority: medium
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: parser
 language_feature: top-level-await, array-literals
-es_edition: es2022
 goal: compiler-correctness
+sprint: Backlog
+es_edition: es2022
 test262_count: 14
 ---
-
 # #1612 — TLA + array-literal operand misparsed as element access
 
 ## Problem

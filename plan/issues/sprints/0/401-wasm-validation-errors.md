@@ -1,6 +1,5 @@
 ---
 id: 401
-sprint: 0
 title: "Wasm validation errors"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: compilable
+sprint: 0
 test262_ce: 3672
 files:
   src/codegen/expressions.ts:

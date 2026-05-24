@@ -1,12 +1,12 @@
 ---
 id: 24
-sprint: 0
 title: "Issue 24: Exponentiation operator"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: core-semantics
+sprint: 0
 ---
 # Issue 24: Exponentiation operator
 

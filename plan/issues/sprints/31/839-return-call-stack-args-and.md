@@ -1,6 +1,5 @@
 ---
 id: 839
-sprint: 31
 title: "return_call stack args and type mismatch in class constructors (158 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-03-31
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 31
 test262_ce: 158
 branch: issue-839-redo
 ---

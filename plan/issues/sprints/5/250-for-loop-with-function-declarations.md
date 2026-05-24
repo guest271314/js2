@@ -1,6 +1,5 @@
 ---
 id: 250
-sprint: 5
 title: "Issue #250: For-loop with function declarations (113 compile errors)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 5
 files:
   src/codegen/statements.ts:
     new: []

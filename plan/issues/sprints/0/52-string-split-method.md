@@ -1,12 +1,12 @@
 ---
 id: 52
-sprint: 0
 title: "Issue 52: String.split() method"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 52: String.split() method
 

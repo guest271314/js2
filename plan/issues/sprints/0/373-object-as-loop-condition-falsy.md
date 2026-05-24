@@ -1,6 +1,5 @@
 ---
 id: 373
-sprint: 0
 title: "Object as loop condition / falsy value handling"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #373: Object as loop condition / falsy value handling
 

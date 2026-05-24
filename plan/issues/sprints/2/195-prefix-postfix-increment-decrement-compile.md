@@ -1,12 +1,12 @@
 ---
 id: 195
-sprint: 2
 title: "Prefix/postfix increment/decrement compile errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #195 — Prefix/postfix increment/decrement compile errors
 

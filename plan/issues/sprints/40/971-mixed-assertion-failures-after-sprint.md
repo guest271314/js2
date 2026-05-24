@@ -1,6 +1,5 @@
 ---
 id: 971
-sprint: 40
 title: "Mixed assertion failures after sprint 38 merges (~180 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: core-semantics
+sprint: 40
 depends_on: [967, 968, 969]
 ---
 # #971 — Mixed assertion failures (~180 tests)

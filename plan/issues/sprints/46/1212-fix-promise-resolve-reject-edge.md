@@ -1,6 +1,5 @@
 ---
 id: 1212
-sprint: 46
 title: "fix: Promise resolve/reject edge cases regress after #1211 any-boxing fix"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: promises
 goal: async-model
+sprint: 46
 pr: 103
 origin: surfaced by test262 regression-gate on PR #95 (#1211 codegen fix)
 ---

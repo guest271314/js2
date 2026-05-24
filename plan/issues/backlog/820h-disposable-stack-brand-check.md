@@ -2,19 +2,20 @@
 id: 820h
 title: "DisposableStack / AsyncDisposableStack brand-check and protocol stubs (~74 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: builtins
+language_feature: explicit-resource-management
 goal: async-model
+sprint: Backlog
 parent: 820
 es_edition: ES2025
-language_feature: explicit-resource-management
 test262_fail: 74
-created: 2026-05-21
 ---
-
 # #820h — (Async)DisposableStack brand check + protocol
 
 ## Problem

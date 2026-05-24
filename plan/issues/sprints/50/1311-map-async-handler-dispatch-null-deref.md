@@ -1,17 +1,18 @@
 ---
 id: 1311
-sprint: 50
 title: "Map<string, AsyncHandler> dispatch null_deref in App.dispatch path"
 status: done
 created: 2026-05-07
 updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
-task_type: bug
+task_type: bugfix
 area: codegen, runtime, async
 language_feature: async, classes, map
 goal: npm-library-support
+sprint: 50
 related: [1309, 1306, 1298, 1300, 1314]
 resolved_by_pr: 264
 resolved_sha: 325d1ef16

@@ -1,6 +1,5 @@
 ---
 id: 796
-sprint: 0
 title: "- Destructuring initializer not evaluated when value is not undefined (121 fail)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_fail: 121
 commit: 4065c8f1
 ---

@@ -1,6 +1,5 @@
 ---
 id: 793
-sprint: 25
 title: "- Infinite compilation loop on private-methods class expressions (5 tests)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: async-model
+sprint: 25
 ---
 # #793 -- Infinite compilation loop on private-methods class expressions (5 tests)
 

@@ -1,23 +1,22 @@
 ---
 id: 1248
-sprint: 47
 title: "compiler: typeof x === 'string' guard breaks String.prototype.substring(start) — returns single char"
 status: done
+created: 2026-05-02
+updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: type-narrowing
 goal: npm-library-support
-depends_on: []
+sprint: 47
 related: [1244]
-created: 2026-05-02
-updated: 2026-05-02
 es_edition: ES5
 origin: "Surfaced by #1244 Hono Tier 1c stress test. The natural way to write a parameterised-route matcher uses `typeof seg === 'string'` as a type guard before calling `seg.substring(1)`; that path silently miscompiles."
 ---
-
 # #1248 — `typeof x === "string"` guard breaks `String.prototype.substring(start)` (single-arg form)
 
 ## Problem

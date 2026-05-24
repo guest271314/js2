@@ -1,6 +1,5 @@
 ---
 id: 630
-sprint: 0
 title: "Temporal API tests fail (888 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: test-infrastructure
+sprint: 0
 test262_fail: 888
 files:
   src/codegen/expressions.ts:

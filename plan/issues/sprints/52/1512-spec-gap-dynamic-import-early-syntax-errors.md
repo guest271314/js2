@@ -1,9 +1,9 @@
 ---
 id: 1512
-sprint: 52
 title: "spec gap: dynamic import — early SyntaxErrors for nested syntactic contexts"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: compiler
 language_feature: dynamic-import, early-errors
 goal: spec-completeness
+sprint: 52
 related: [1315, 1390, 1435]
 ---
 # #1512 — dynamic-import early SyntaxError detection

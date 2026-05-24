@@ -1,16 +1,17 @@
 ---
 id: 1290
 title: "perf: test262 runner — TS7 batch-parse via @typescript/native-preview (132× cold speedup)"
-sprint: 49
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: performance
 area: test-runner
 goal: performance
+sprint: 49
 related: [1029, 1288]
 ---
 # #1290 — test262 runner: TS7 batch-parse via `@typescript/native-preview`

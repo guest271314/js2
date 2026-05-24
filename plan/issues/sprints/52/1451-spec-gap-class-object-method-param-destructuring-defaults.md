@@ -1,9 +1,9 @@
 ---
 id: 1451
-sprint: 52
 title: "spec gap: class/object-literal method parameter destructuring with non-trivial defaults"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes, methods, destructuring, parameters
 goal: spec-completeness
+sprint: 52
 related: [1432, 1372, 1158, 1364]
 ---
 # #1451 — Class / object-literal method param destructuring with defaults

@@ -1,12 +1,12 @@
 ---
 id: 3
-sprint: 0
 title: "Issue 3: Arrays"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-27
 goal: builtin-methods
+sprint: 0
 ---
 # Issue 3: Arrays
 

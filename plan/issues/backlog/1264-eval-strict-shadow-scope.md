@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: eval, strict-mode, deopt
 goal: performance
+sprint: Backlog
 depends_on: [1261]
 required_by: [1266]
 ---

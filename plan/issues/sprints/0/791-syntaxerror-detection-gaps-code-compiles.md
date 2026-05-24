@@ -1,6 +1,5 @@
 ---
 id: 791
-sprint: 0
 title: "- SyntaxError detection gaps: code compiles when it should not"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 ---
 # #791 -- SyntaxError detection gaps: code compiles when it should not
 

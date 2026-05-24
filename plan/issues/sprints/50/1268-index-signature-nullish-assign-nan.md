@@ -1,10 +1,10 @@
 ---
 id: 1268
-sprint: 50
 title: "index-signature obj[key] ??= value returns NaN instead of assigning"
 status: done
 created: 2026-05-02
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: logical-assignment, index-signature
 goal: npm-library-support
+sprint: 50
+required_by: [1274]
 related: [1244, 1250]
 ---
 # #1268 — `obj[runtimeKey] ??= newValue` returns NaN on index-signature types

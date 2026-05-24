@@ -1,11 +1,10 @@
 ---
 id: 1262
-title: "eval tier 2: compile eval(\\\"static string\\\") as regular code at compile time"
+title: "eval tier 2: compile eval(\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"static string\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\") as regular code at compile time"
 status: wont-fix
 created: 2026-05-02
 updated: 2026-05-02
 completed: 2026-05-02
-closed_reason: duplicate of #1163 (done — static eval literal inlining already shipped)
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,7 +12,9 @@ task_type: feature
 area: codegen
 language_feature: eval
 goal: performance
+sprint: Backlog
 depends_on: [1261]
+closed_reason: duplicate of #1163 (done — static eval literal inlining already shipped)
 ---
 # #1262 — eval tier 2: compile `eval("static string")` as regular code at compile time
 

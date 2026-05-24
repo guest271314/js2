@@ -1,9 +1,9 @@
 ---
 id: 1511
-sprint: 52
 title: "spec gap: arguments object — mapped semantics, descriptors, trailing-comma length"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: arguments-object
 goal: spec-completeness
+sprint: 52
 related: [1364, 1432]
 ---
 # #1511 — arguments object fidelity

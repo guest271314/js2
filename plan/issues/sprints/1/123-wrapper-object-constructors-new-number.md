@@ -1,6 +1,5 @@
 ---
 id: 123
-sprint: 1
 title: "Wrapper object constructors (new Number/String/Boolean)"
 status: wont-fix
 created: 2026-03-11
@@ -9,6 +8,7 @@ completed: 2026-03-12
 task_type: feature
 language_feature: wrapper-objects
 goal: builtin-methods
+sprint: 1
 ---
 # Issue 123: Wrapper object constructors (new Number/String/Boolean)
 

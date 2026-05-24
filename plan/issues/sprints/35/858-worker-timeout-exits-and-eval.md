@@ -1,6 +1,5 @@
 ---
 id: 858
-sprint: 35
 title: "Worker/timeout exits and eval-code null deref (182 tests)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: spec-completeness
+sprint: 35
 test262_fail: 182
 ---
 # #858 -- Worker/timeout exits and eval-code null deref (182 tests)

@@ -1,6 +1,5 @@
 ---
 id: 333
-sprint: 14
 title: "- Dynamic import modifier syntax errors"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: low
 goal: standalone-mode
+sprint: 14
 test262_ce: 12
 ---
 # #333 -- Dynamic import modifier syntax errors

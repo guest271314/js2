@@ -1,12 +1,12 @@
 ---
 id: 66
-sprint: 0
 title: "Issue 66: Security design doc — runtime import hardening"
 status: done
 created: 2026-03-03
 updated: 2026-04-14
 completed: 2026-03-03
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 66: Security design doc — runtime import hardening
 

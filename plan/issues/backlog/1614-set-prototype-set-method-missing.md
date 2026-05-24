@@ -9,12 +9,12 @@ feasibility: medium
 task_type: feature
 area: codegen
 language_feature: set-methods
-es_edition: es2024
 goal: compiler-correctness
+sprint: Backlog
+es_edition: es2024
 test262_count: 7
 related: [1103]
 ---
-
 # #1614 — Set composition methods not resolved on subclass receivers
 
 ## Problem

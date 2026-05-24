@@ -1,6 +1,5 @@
 ---
 id: 1078
-sprint: 45
 title: "CI: emergency baseline-refresh workflow_dispatch — discoverable and unconditional promotion"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: easy
 reasoning_effort: low
 task_type: bugfix
 goal: ci-hardening
+sprint: 45
 parent: 1080
 depends_on: [1076]
 pr: 14

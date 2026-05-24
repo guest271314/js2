@@ -1,6 +1,5 @@
 ---
 id: 1048
-sprint: 40
 title: "async-generator destructuring: illegal cast inside __closure_N"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: test-infrastructure
+sprint: 40
 es_edition: multi
 ---
 # #1048 — async-generator destructuring: illegal cast inside __closure_N

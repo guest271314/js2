@@ -1,6 +1,5 @@
 ---
 id: 482
-sprint: 0
 title: "Well-known Symbol.toPrimitive for type coercion (113 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: symbol-protocol
+sprint: 0
 depends_on: [481]
 test262_skip: 113
 files:

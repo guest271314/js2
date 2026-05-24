@@ -1,12 +1,12 @@
 ---
 id: 209
-sprint: 2
 title: "- For-loop continue with string concatenation: any-typed += dispatch"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # #209 -- For-loop continue with string concatenation: any-typed += dispatch
 

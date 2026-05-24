@@ -1,6 +1,5 @@
 ---
 id: 584
-sprint: 0
 title: "Null pointer dereference in 361 tests (unknown function)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_fail: 361
 files:
   src/codegen/expressions.ts:

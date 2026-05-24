@@ -1,6 +1,5 @@
 ---
 id: 457
-sprint: 10
 title: "WeakMap/WeakSet via host imports"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: npm-library-support
+sprint: 10
 ---
 # #457 — WeakMap/WeakSet via host imports
 

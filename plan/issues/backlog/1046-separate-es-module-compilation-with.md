@@ -8,6 +8,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: compiler-architecture
+sprint: Backlog
 parent: null
 required_by: [1058]
 note: "Verified 2026-05-21: preprocessImports 23→89, compileProject 216→248, resolveAllImports 204→360, compileMultiSource 406→534"

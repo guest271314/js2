@@ -1,6 +1,5 @@
 ---
 id: 388
-sprint: 0
 title: "- Element access on externref (104 CE)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: platform
+sprint: 0
 test262_ce: 104
 files:
   src/codegen/expressions.ts:

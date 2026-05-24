@@ -1,6 +1,5 @@
 ---
 id: 557
-sprint: 0
 title: "Performance: repeated instruction tree traversal for index shifting"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: performance
+sprint: 0
 ---
 # Issue #557: Performance -- repeated instruction tree traversal for index shifting
 

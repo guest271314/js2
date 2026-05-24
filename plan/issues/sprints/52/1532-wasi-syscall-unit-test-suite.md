@@ -1,9 +1,9 @@
 ---
 id: 1532
-sprint: 52
 title: "test: WASI syscall unit test suite (fd_write, environ_get, clock_time_get, fd_read, proc_exit)"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,8 +11,8 @@ task_type: test
 area: runtime
 language_feature: wasi
 goal: nodejs-support
+sprint: 52
 ---
-
 # #1532 — WASI syscall unit test suite
 
 ## Problem

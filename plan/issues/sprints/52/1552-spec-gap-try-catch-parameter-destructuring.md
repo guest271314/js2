@@ -1,9 +1,9 @@
 ---
 id: 1552
-sprint: 52
 title: "spec gap: catch parameter destructuring (`try/dstr`) — share dstr-binding helper with function decls"
 status: ready
 created: 2026-05-20
+updated: 2026-05-24
 priority: medium
 feasibility: easy
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: try-catch, destructuring
 goal: spec-completeness
+sprint: 52
 parent: 779
 related: [1432, 1450, 1454, 1550]
 note: "Verified 2026-05-21: catch-clause codegen lives in src/codegen/statements/exceptions.ts (compileTryStatement at L242) — NOT statements.ts as cited"

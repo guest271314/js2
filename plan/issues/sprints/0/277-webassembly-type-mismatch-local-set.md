@@ -1,6 +1,5 @@
 ---
 id: 277
-sprint: 0
 title: "Issue #277: WebAssembly type mismatch -- local.set externref vs concrete types"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 0
 required_by: [315]
 files:
   src/codegen/expressions.ts:

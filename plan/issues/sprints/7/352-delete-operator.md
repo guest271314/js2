@@ -1,6 +1,5 @@
 ---
 id: 352
-sprint: 7
 title: "- Delete operator"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: error-model
+sprint: 7
 test262_skip: 264
 test262_categories:
   - spread across 55 categories

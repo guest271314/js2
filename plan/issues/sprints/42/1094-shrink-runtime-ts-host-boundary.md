@@ -1,6 +1,5 @@
 ---
 id: 1094
-sprint: 42
 title: "Shrink runtime.ts host boundary — compile-away JS semantics currently in sidecar runtime"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: max
 task_type: refactor
 language_feature: runtime-boundary
 goal: spec-completeness
+sprint: 42
 required_by: [1099]
 es_edition: multi
 ---

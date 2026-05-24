@@ -1,12 +1,12 @@
 ---
 id: 83
-sprint: 0
 title: "Issue 83: Test262 conformance subset"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 83: Test262 conformance subset
 

@@ -1,6 +1,5 @@
 ---
 id: 914
-sprint: 36
 title: "Add a short compiler architecture overview for contributors"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: contributor-readiness
+sprint: 36
 required_by: [918]
 files:
   CONTRIBUTING.md:

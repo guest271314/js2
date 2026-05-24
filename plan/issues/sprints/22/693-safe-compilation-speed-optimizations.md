@@ -1,6 +1,5 @@
 ---
 id: 693
-sprint: 22
 title: "Safe compilation speed optimizations"
 status: done
 created: 2026-03-20
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-20
 priority: medium
 goal: performance
+sprint: 22
 required_by: [694]
 ---
 # Safe compilation speed optimizations

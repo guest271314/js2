@@ -1,6 +1,5 @@
 ---
 id: 637
-sprint: 0
 title: "Create walkInstructions utility (eliminates 5 duplicate walkers)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: maintainability
+sprint: 0
 files:
   src/codegen/walk-instructions.ts:
     new:

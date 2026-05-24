@@ -8,6 +8,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: core-semantics
+sprint: Backlog
 subtask_of: 688
 ---
 # #805 — Extract assignment/destructuring from expressions.ts → assignments.ts

@@ -1,6 +1,5 @@
 ---
 id: 676
-sprint: 15
 title: "RegExp internals: exec groups, lastIndex, named captures"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: class-system
+sprint: 15
 test262_fail: 720
 files:
   src/codegen/expressions.ts:

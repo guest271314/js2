@@ -1,6 +1,5 @@
 ---
 id: 430
-sprint: 0
 title: "String-to-number coercion for non-addition arithmetic operators (36 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

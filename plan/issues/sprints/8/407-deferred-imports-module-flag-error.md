@@ -1,6 +1,5 @@
 ---
 id: 407
-sprint: 8
 title: "Deferred imports module flag error"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: test-infrastructure
+sprint: 8
 test262_ce: 54
 files:
   src/codegen/index.ts:

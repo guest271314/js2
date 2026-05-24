@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: developer-experience
+sprint: Backlog
 depends_on: [867]
 ---
 # #868 -- Playground: lazy-load test262 tree and file contents

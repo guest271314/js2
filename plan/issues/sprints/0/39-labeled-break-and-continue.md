@@ -1,12 +1,12 @@
 ---
 id: 39
-sprint: 0
 title: "Issue 39: Labeled Break and Continue"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: builtin-methods
+sprint: 0
 ---
 # Issue 39: Labeled Break and Continue
 

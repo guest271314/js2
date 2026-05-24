@@ -1,6 +1,5 @@
 ---
 id: 618
-sprint: 0
 title: "Wrong return value: 7,912 tests return 0 instead of expected result"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: core-semantics
+sprint: 0
 test262_fail: 7912
 files:
   src/codegen/expressions.ts:

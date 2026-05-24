@@ -1,6 +1,5 @@
 ---
 id: 521
-sprint: 0
 title: "Yield keyword not recognized in nested contexts (53 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: medium
 feasibility: medium
 goal: generator-model
+sprint: 0
 test262_ce: 53
 files:
   src/compiler.ts:

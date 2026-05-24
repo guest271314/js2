@@ -1,9 +1,9 @@
 ---
 id: 1443
-sprint: 52
 title: "spec gap: String.prototype.replace/replaceAll/match/search delegate to argument's Symbol.* method"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: string-symbol-dispatch
 goal: spec-completeness
+sprint: 52
 related: [1439]
 ---
 # #1443 - String.prototype delegation to argument's Symbol.* method

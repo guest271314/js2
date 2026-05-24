@@ -1,10 +1,10 @@
 ---
 id: 1286
-sprint: 47
 title: "Object.keys(any-typed obj).join() throws illegal cast — externref→string-array coerce missing"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -12,9 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: Object.keys, array, string, any
 goal: npm-library-support
+sprint: 47
 related: [1243]
 ---
-
 # #1286 — Object.keys(any).join() throws "illegal cast"
 
 ## Problem

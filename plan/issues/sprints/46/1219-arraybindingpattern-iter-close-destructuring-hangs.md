@@ -1,6 +1,5 @@
 ---
 id: 1219
-sprint: 46
 title: "ArrayBindingPattern iter-close: destructuring hangs when iterator never sets done:true (26 compile_timeout tests)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
+sprint: 46
 es_edition: es6
 related: [1207]
 origin: "Phase 1 analysis of #1207 timeout clusters by senior-timeouts (2026-05-01). iter-close cluster is a real runtime hang — the other ~70 timeout tests are load-induced flakes."

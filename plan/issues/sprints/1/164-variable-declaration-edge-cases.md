@@ -1,6 +1,5 @@
 ---
 id: 164
-sprint: 1
 title: "Issue #164: variable declaration edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: spec-completeness
+sprint: 1
 files:
   tests/test262-runner.ts:
     new: []

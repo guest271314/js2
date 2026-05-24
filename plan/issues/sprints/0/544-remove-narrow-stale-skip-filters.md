@@ -1,6 +1,5 @@
 ---
 id: 544
-sprint: 0
 title: "Remove/narrow stale skip filters"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: contributor-readiness
+sprint: 0
 ---
 # Remove/narrow stale skip filters
 

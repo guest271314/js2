@@ -1,12 +1,12 @@
 ---
 id: 99
-sprint: 0
 title: "Issue 99: Externref arithmetic, comparison, and control flow"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-09
 goal: compilable
+sprint: 0
 ---
 # Issue 99: Externref arithmetic, comparison, and control flow
 

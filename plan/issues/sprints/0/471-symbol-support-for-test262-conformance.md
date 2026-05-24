@@ -1,6 +1,5 @@
 ---
 id: 471
-sprint: 0
 title: "Symbol support for test262 conformance (1,485 skipped tests)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 0
 required_by: [483, 502]
 ---
 # #471 -- Symbol support for test262 conformance

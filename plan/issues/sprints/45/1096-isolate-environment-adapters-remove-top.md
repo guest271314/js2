@@ -1,6 +1,5 @@
 ---
 id: 1096
-sprint: 45
 title: "Isolate environment adapters — remove top-level await and browser/Node probing from core modules"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: refactor
 language_feature: compiler-internals
 goal: platform
+sprint: 45
 pr: 43
 merged: 2026-04-26
 es_edition: n/a

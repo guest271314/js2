@@ -1,6 +1,5 @@
 ---
 id: 124
-sprint: 1
 title: "delete operator"
 status: wont-fix
 created: 2026-03-11
@@ -9,6 +8,7 @@ completed: 2026-03-12
 task_type: feature
 language_feature: delete-operator
 goal: test-infrastructure
+sprint: 1
 ---
 # Issue 124: delete operator
 

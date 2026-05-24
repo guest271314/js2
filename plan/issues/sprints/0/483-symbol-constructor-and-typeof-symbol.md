@@ -1,6 +1,5 @@
 ---
 id: 483
-sprint: 0
 title: "Symbol() constructor and typeof symbol (207 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: symbol-protocol
+sprint: 0
 depends_on: [471]
 required_by: [487]
 test262_skip: 207

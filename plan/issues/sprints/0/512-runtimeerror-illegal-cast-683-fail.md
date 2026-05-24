@@ -1,6 +1,5 @@
 ---
 id: 512
-sprint: 0
 title: "RuntimeError: illegal cast (~683 FAIL)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-25
 priority: critical
 goal: crash-free
+sprint: 0
 test262_fail: 683
 ---
 # #512 -- RuntimeError: illegal cast (~683 FAIL)

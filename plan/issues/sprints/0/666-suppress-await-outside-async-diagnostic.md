@@ -1,6 +1,5 @@
 ---
 id: 666
-sprint: 0
 title: "Suppress 'await outside async' diagnostic (146 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: async-model
+sprint: 0
 test262_ce: 146
 files:
   src/compiler.ts:

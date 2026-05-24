@@ -1,12 +1,12 @@
 ---
 id: 102
-sprint: 1
 title: "Issue 102: Test262 — language/expressions remaining"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: test-infrastructure
+sprint: 1
 ---
 # Issue 102: Test262 — language/expressions remaining
 

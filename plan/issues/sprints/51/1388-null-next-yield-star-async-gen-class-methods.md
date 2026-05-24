@@ -1,9 +1,10 @@
 ---
 id: 1388
-sprint: 51
 title: "runtime: null.next — yield* / async-generator iterator construction returns null in class methods (316 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: generators, async-generators, classes
 goal: spec-completeness
+sprint: 51
+required_by: [1394]
 ---
 # #1388 — `null.next`: iterator construction returns null in class-method async generators
 

@@ -1,11 +1,10 @@
 ---
 id: 1274
-sprint: 47
 title: "Hono Tier 2 stress test: route registration + basic dispatch via TrieRouter"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
-merged_in: PR#175
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -13,7 +12,9 @@ task_type: feature
 area: codegen
 language_feature: classes, Map, closures
 goal: npm-library-support
+sprint: 47
 depends_on: [1267, 1268]
+merged_in: PR#175
 related: [1244, 1249, 1250]
 ---
 # #1274 — Hono Tier 2 stress test

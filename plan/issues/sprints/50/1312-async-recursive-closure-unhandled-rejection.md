@@ -1,6 +1,5 @@
 ---
 id: 1312
-sprint: 50
 title: "Async recursive function (next() compose pattern) — Unhandled rejection"
 status: ready
 created: 2026-05-07
@@ -8,10 +7,11 @@ updated: 2026-05-07
 priority: medium
 feasibility: hard
 reasoning_effort: max
-task_type: bug
+task_type: bugfix
 area: codegen, runtime, async, closures
 language_feature: async, closures, recursion
 goal: npm-library-support
+sprint: 50
 related: [1309, 1306]
 ---
 # #1312 — Async recursive closure pattern fails with Unhandled rejection

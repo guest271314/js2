@@ -1,6 +1,5 @@
 ---
 id: 540
-sprint: 0
 title: "Array out of bounds guards (14+ FAIL)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: crash-free
+sprint: 0
 complexity: M
 files:
   src/codegen/expressions.ts:

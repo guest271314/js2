@@ -1,6 +1,5 @@
 ---
 id: 443
-sprint: 0
 title: "Expected ReferenceError but execution succeeded (6 fail)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: error-model
+sprint: 0
 test262_fail: 6
 complexity: XS
 files:

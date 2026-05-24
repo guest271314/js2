@@ -1,6 +1,5 @@
 ---
 id: 513
-sprint: 0
 title: "Fix any-typed equality: object/ref identity broken in __any_strict_eq and externref path"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: critical
 goal: crash-free
+sprint: 0
 ---
 # Issue #513: Any-typed equality returns wrong results for object identity
 

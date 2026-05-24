@@ -1,6 +1,5 @@
 ---
 id: 1330
-sprint: 50
 title: "RegExp host-mode: Symbol.search protocol spec compliance (37 fails)"
 status: ready
 created: 2026-05-08
@@ -12,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: regexp
 goal: spec-completeness
+sprint: 50
 parent: 1002
 ---
 # #1330 — RegExp host-mode: Symbol.search protocol spec compliance (37 fails)

@@ -1,6 +1,5 @@
 ---
 id: 385
-sprint: 7
 title: "- Array method argument count errors"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: builtin-methods
+sprint: 7
 test262_ce: 5
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 1199
-
 title: "perf: linear-memory backing for typed numeric arrays (`Array<number>` with i32-only ops → `i32.load`/`i32.store`)"
 status: ready
 created: 2026-04-27
@@ -12,6 +11,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: performance
+sprint: Backlog
 depends_on: [1197]
 es_edition: n/a
 related: [1126, 1179, 1195, 1196, 1197, 1198]

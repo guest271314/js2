@@ -1,6 +1,5 @@
 ---
 id: 400
-sprint: 0
 title: "- Endo/SES-like freezing/locking of insecure language features"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 files:
   src/codegen/index.ts:
     new:

@@ -1,6 +1,5 @@
 ---
 id: 792
-sprint: 0
 title: "- emitGuardedRefCast conflates 'wrong type' with 'null' (net-zero from #789)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_fail: ~15000
 commit: bad4dbf0
 ---

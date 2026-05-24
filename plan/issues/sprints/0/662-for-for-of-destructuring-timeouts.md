@@ -1,6 +1,5 @@
 ---
 id: 662
-sprint: 0
 title: "For/for-of/destructuring timeouts (3,330 FAIL)"
 status: done
 created: 2026-03-20
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 0
 ---
 # For/for-of/destructuring timeouts (3,330 FAIL)
 

@@ -1,6 +1,5 @@
 ---
 id: 915
-sprint: 36
 title: "Add CONTRIBUTING.md with the minimum safe contributor workflow"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: ci-hardening
+sprint: 36
 required_by: [918]
 files:
   CONTRIBUTING.md:

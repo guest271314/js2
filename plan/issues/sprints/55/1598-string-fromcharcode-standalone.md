@@ -1,6 +1,5 @@
 ---
 id: 1598
-sprint: 55
 title: "host-indep: pure-Wasm String.fromCharCode / fromCodePoint in standalone mode"
 status: ready
 created: 2026-05-24
@@ -11,10 +10,9 @@ task_type: feature
 area: codegen
 language_feature: string built-ins
 goal: standalone-wasm
+sprint: 55
 related: [1471, 1474]
-depends_on: []
 ---
-
 # #1598 — Pure-Wasm `String.fromCharCode` / `String.fromCodePoint` in standalone mode
 
 ## Problem

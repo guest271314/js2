@@ -1,6 +1,5 @@
 ---
 id: 740
-sprint: 0
 title: "- Remove duplicated lib.d.ts copies, read from typescript package at runtime"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-22
 priority: medium
 feasibility: easy
 goal: npm-library-support
+sprint: 0
 required_by: [769]
 files:
   src/checker/index.ts:

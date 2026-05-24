@@ -1,6 +1,5 @@
 ---
 id: 387
-sprint: 0
 title: "Unsupported call expression (2356 CE)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: core-semantics
+sprint: 0
 test262_ce: 2356
 files:
   src/codegen/expressions.ts:

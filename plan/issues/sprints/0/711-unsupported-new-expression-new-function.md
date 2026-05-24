@@ -1,6 +1,5 @@
 ---
 id: 711
-sprint: 0
 title: "Unsupported new expression: new Function() (106 CE)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: async-model
+sprint: 0
 test262_ce: 106
 files:
   src/codegen/expressions.ts:

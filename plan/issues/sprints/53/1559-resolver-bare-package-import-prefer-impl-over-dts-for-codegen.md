@@ -1,9 +1,10 @@
 ---
 id: 1559
-sprint: 53
 title: "ModuleResolver: bare-package import resolves to implementation (default/main) for codegen, not .d.ts"
 status: done
 created: 2026-05-20
+updated: 2026-05-23
+completed: 2026-05-23
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,10 +12,11 @@ task_type: feature
 area: resolver, codegen
 language_feature: package-exports, npm-resolution, module-resolution
 goal: npm-library-support
+sprint: 53
+required_by: [1560]
 related: [1400, 1060, 1061, 1287]
 blocks: [eslint-tier-1e, 1560]
 ---
-
 # #1559 — Bare-package import resolves to implementation for codegen
 
 ## Problem

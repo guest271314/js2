@@ -1,6 +1,5 @@
 ---
 id: 1188
-sprint: 46
 title: "Setup js2.loopdive.com custom domain for GitHub Pages"
 status: done
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: devops
 area: infrastructure
 goal: ci-hardening
+sprint: 46
 es_edition: n/a
 related: []
 ---

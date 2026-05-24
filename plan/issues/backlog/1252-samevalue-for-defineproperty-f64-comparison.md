@@ -4,11 +4,13 @@ title: "SameValue for DefineProperty f64 comparison uses f64.ne — wrong for Na
 status: done
 created: 2026-04-17
 updated: 2026-04-28
+completed: 2026-05-03
 priority: medium
 feasibility: easy
 task_type: bugfix
 language_feature: object-model
 goal: error-model
+sprint: Backlog
 es_edition: es5
 found_by: "#1093 Phase 1 audit"
 ---

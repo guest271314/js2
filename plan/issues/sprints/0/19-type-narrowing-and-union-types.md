@@ -1,12 +1,12 @@
 ---
 id: 19
-sprint: 0
 title: "Issue 19: Type Narrowing and Union Types"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: compilable
+sprint: 0
 ---
 # Issue 19: Type Narrowing and Union Types
 

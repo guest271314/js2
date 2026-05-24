@@ -1,12 +1,12 @@
 ---
 id: 191
-sprint: 2
 title: "`assert` not found: tests using raw `assert()` calls"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: error-model
+sprint: 2
 ---
 # #191 — `assert` not found: tests using raw `assert()` calls
 

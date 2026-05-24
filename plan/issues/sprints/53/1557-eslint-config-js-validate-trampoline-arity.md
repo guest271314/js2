@@ -1,9 +1,10 @@
 ---
 id: 1557
-sprint: 53
 title: "ESLint config.js direct compile: __obj_meth_tramp validate arity mismatch (need 2, got 1)"
 status: done
 created: 2026-05-20
+updated: 2026-05-23
+completed: 2026-05-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,11 +12,11 @@ task_type: bugfix
 area: codegen
 language_feature: methods, trampolines, object-literal-methods
 goal: npm-library-support
+sprint: 53
 related: [1400, 1289, 1287, 1282]
 blocks: [eslint-tier-1d]
 note: "Verified 2026-05-21: compileCallExpression at src/codegen/expressions/calls.ts:965 (moved from expressions.ts); trampoline emit at src/codegen/closures.ts:3019/3085"
 ---
-
 # #1557 — ESLint config.js validate trampoline arity mismatch
 
 ## Problem

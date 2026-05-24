@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: observability
+sprint: Backlog
 ---
 # #1011 — Offline-first benchmarks with Playwright DOM measurement and Run Live button
 

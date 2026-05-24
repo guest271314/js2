@@ -1,6 +1,5 @@
 ---
 id: 973
-sprint: 0
 title: "Incremental compiler state leak — CompilerPool fork produces ~400 false CEs"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 0
 resolved_by: "investigation — no leak exists; prior fixes #963, #966 were root cause fixes"
 ---
 # #973 — Incremental compiler state leak in CompilerPool

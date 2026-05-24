@@ -1,6 +1,5 @@
 ---
 id: 987
-sprint: 40
 title: "Object-literal spread/object-shape fallbacks still fail in generator and spread call sites (40 CE)"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
+sprint: 40
 test262_ce: 40
 ---
 # #987 -- Object-literal spread/object-shape fallbacks still fail in generator and spread call sites (40 CE)

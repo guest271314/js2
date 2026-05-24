@@ -6,14 +6,14 @@ created: 2026-05-24
 updated: 2026-05-24
 priority: low
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: for-in, destructuring
-es_edition: multi
 goal: compiler-correctness
+sprint: Backlog
+es_edition: multi
 test262_count: 10
 ---
-
 # #1613 — for-in head non-identifier targets rejected
 
 ## Problem

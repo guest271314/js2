@@ -1,12 +1,12 @@
 ---
 id: 109
-sprint: 1
 title: "Issue 109: Tagged template literals"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-10
 goal: compilable
+sprint: 1
 ---
 # Issue 109: Tagged template literals
 

@@ -1,12 +1,12 @@
 ---
 id: 180
-sprint: 2
 title: "JS var re-declaration: 'Subsequent variable declarations must have the same type'"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 2
 ---
 # #180 — JS var re-declaration: "Subsequent variable declarations must have the same type"
 

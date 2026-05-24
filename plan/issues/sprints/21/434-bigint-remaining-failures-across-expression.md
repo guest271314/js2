@@ -1,6 +1,5 @@
 ---
 id: 434
-sprint: 21
 title: "BigInt remaining failures across expression operators (27 fail)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: low
 goal: core-semantics
+sprint: 21
 files:
   src/codegen/expressions.ts:
     new: []

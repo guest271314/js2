@@ -1,6 +1,5 @@
 ---
 id: 906
-sprint: 45
 title: "Compile away TDZ tracking for definite-assignment top-level numeric locals"
 status: done
 created: 2026-04-02
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 45
 depends_on: [800, 898]
 required_by: [908]
 files:

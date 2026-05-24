@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: Backlog
 depends_on: [694]
 required_by: [700]
 files:

@@ -1,6 +1,5 @@
 ---
 id: 1127
-sprint: 43
 title: "Class method param destructuring: nested array pattern + initializer throws spurious TypeError"
 status: done
 created: 2026-04-18
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
+sprint: 43
 ---
 ## Resolution (2026-04-21)
 

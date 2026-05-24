@@ -2,7 +2,6 @@
 id: 1586
 title: "IR preparation: explicit allocation sites with stable identity and metadata hooks"
 status: in-progress
-sprint: 55
 created: 2026-05-23
 updated: 2026-05-23
 priority: medium
@@ -12,7 +11,8 @@ task_type: infrastructure
 area: compiler
 language_feature: compiler-internals
 goal: platform
-depends_on: []
+sprint: 55
+required_by: [747, 1585, 1587, 1588]
 es_edition: n/a
 ---
 # #1586 — IR preparation: explicit allocation sites with stable identity and metadata hooks

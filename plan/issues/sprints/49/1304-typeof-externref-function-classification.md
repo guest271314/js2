@@ -1,6 +1,5 @@
 ---
 id: 1304
-sprint: 49
 title: "typeof on externref-wrapped JS function returns 'object' instead of 'function'"
 status: done
 created: 2026-05-03
@@ -13,7 +12,7 @@ task_type: bugfix
 area: runtime
 language_feature: typeof, externref, functions
 goal: npm-library-support
-depends_on: []
+sprint: 49
 related: [1292, 1275, 1248]
 ---
 # #1304 — `typeof predicate != 'function'` mis-classifies externref-wrapped JS callable

@@ -1,12 +1,12 @@
 ---
 id: 365
-sprint: 0
 title: "Collection mutation during for-of (15 skip)"
 status: done
 created: 2026-03-13
 updated: 2026-04-14
 completed: 2026-03-16
 goal: iterator-protocol
+sprint: 0
 ---
 # Issue #365: Collection mutation during for-of (15 skip)
 

@@ -1,10 +1,9 @@
 ---
 id: 1635
-renumbered_from: 1341
-sprint: 50
 title: "spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +11,8 @@ task_type: bugfix
 area: codegen
 language_feature: iterator
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1341
 parent: 1328
 related: 1320, 1323
 ---

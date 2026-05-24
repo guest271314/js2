@@ -1,6 +1,5 @@
 ---
 id: 274
-sprint: 0
 title: "Issue #274: Property access on function type -- .name, .length, .call, .apply"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: standalone-mode
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

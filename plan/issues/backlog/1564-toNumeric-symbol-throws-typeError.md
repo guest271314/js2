@@ -2,18 +2,19 @@
 id: 1564
 title: "ToNumeric: Symbol argument must throw TypeError (§7.1.3 step 3)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: easy
 reasoning_effort: low
-task_type: bug
+task_type: bugfix
 area: codegen
-goal: spec-completeness
-es_edition: ES2015
 language_feature: type-conversion
+goal: spec-completeness
+sprint: Backlog
+es_edition: ES2015
 test262_fail: 12
-created: 2026-05-21
 ---
-
 # ToNumeric: Symbol argument must throw TypeError
 
 ## Problem

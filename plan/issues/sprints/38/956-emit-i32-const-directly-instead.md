@@ -1,6 +1,5 @@
 ---
 id: 956
-sprint: 38
 title: "Emit i32.const directly instead of f64.const + i32.trunc_sat_f64_s (673 cases, 9% of modules)"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: core-semantics
+sprint: 38
 ---
 # #956 — Optimize f64 integer constants in i32 context
 

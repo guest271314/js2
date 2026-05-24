@@ -1,9 +1,10 @@
 ---
 id: 1481
-sprint: 52
 title: "wasi: support reading stdin via fd_read"
 status: done
 created: 2026-05-20
+updated: 2026-05-20
+completed: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +12,9 @@ task_type: feature
 area: codegen, runtime
 language_feature: stdin
 goal: wasi-completeness
+sprint: 52
 related: []
 ---
-
 ## Problem
 
 `--target wasi` programs cannot read from standard input. There is no

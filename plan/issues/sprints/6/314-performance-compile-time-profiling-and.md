@@ -1,6 +1,5 @@
 ---
 id: 314
-sprint: 6
 title: "Issue #314: Performance -- compile time profiling and optimization"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 6
 files:
   scripts/run-test262.ts:
     new:

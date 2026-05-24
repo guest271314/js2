@@ -1,6 +1,5 @@
 ---
 id: 1168
-sprint: 44
 title: "IR frontend widening — IrType union/boxed, lattice string/object/union, box/unbox instructions"
 status: done
 created: 2026-04-22
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: core-semantics
+sprint: 44
 depends_on: [1131]
 required_by: [1166, 1167c, 1169, 1169a, 1169b, 1169c]
 closed: 2026-04-23

@@ -1,6 +1,5 @@
 ---
 id: 1150
-sprint: 44
 title: "Fix runtime_error:26 + type_error:7 + oob:5 — async destructuring regressions"
 status: done
 created: 2026-04-20
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 44
 closed: 2026-04-23
 pr: 243
 net_improvement: 262

@@ -1,6 +1,5 @@
 ---
 id: 481
-sprint: 0
 title: "Well-known Symbol.iterator as compile-time struct field (1,327 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 required_by: [482, 484, 485, 486, 487]
 test262_skip: 1327
 files:

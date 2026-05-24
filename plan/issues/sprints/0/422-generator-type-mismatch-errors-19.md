@@ -1,6 +1,5 @@
 ---
 id: 422
-sprint: 0
 title: "Generator type mismatch errors (19 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 0
 depends_on: [287]
 files:
   src/codegen/statements.ts:

@@ -1,6 +1,5 @@
 ---
 id: 260
-sprint: 0
 title: "ClassDeclaration + call expression combined errors"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: high
 goal: core-semantics
+sprint: 0
 files:
   - src/codegen/expressions.ts
 ---

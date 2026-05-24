@@ -1,6 +1,5 @@
 ---
 id: 980
-sprint: 40
 title: "Auto-generate module size + load time benchmarks for landing page"
 status: done
 created: 2026-04-06
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: performance
+sprint: 40
 ---
 # #980 — Auto-generate size + load time benchmark graph
 

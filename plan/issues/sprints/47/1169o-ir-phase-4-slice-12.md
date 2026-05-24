@@ -1,6 +1,5 @@
 ---
 id: 1169o
-sprint: 47
 title: "IR Phase 4 Slice 12 — dynamic element access + array literals through IR"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ir
 language_feature: array-literals, element-access, computed-property
 goal: builtin-methods
+sprint: 47
 depends_on: [1169n]
 required_by: [1169p, 1169q, 1231, 1238]
 es_edition: ES2020

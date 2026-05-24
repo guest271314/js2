@@ -1,6 +1,5 @@
 ---
 id: 1322
-sprint: 50
 title: "Math.random() has no standalone fallback — requires JS host import in WASI/standalone mode"
 status: in-progress
 created: 2026-05-07
@@ -12,6 +11,7 @@ task_type: feature
 area: runtime, codegen
 language_feature: math-random
 goal: standalone-mode
+sprint: 50
 ---
 # #1322 — Math.random(): wire to WASI `random_get` in standalone mode
 

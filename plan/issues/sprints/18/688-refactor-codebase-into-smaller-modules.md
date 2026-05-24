@@ -1,6 +1,5 @@
 ---
 id: 688
-sprint: 18
 title: "Refactor codebase into smaller modules per language feature"
 status: done
 created: 2026-03-20
@@ -10,6 +9,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: maintainability
+sprint: 18
 required_by: [742]
 files:
   src/codegen/expressions.ts:

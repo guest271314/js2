@@ -1,6 +1,5 @@
 ---
 id: 469
-sprint: 10
 title: "React milestone 3: hooks state machine (useState, useEffect)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: platform
+sprint: 10
 depends_on: [455]
 ---
 # #469 — React milestone 3: hooks state machine

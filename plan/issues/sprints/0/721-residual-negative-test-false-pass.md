@@ -1,6 +1,5 @@
 ---
 id: 721
-sprint: 0
 title: "Residual negative test false-pass (2,564 FAIL)"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: high
 goal: error-model
+sprint: 0
 ---
 # Issue #721: Residual negative test false-pass
 

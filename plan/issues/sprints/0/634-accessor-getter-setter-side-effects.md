@@ -1,6 +1,5 @@
 ---
 id: 634
-sprint: 0
 title: "Accessor/getter/setter side effects not triggered (118 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_fail: 118
 files:
   src/codegen/expressions.ts:

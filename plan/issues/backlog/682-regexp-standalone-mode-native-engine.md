@@ -8,6 +8,7 @@ priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: standalone-mode
+sprint: Backlog
 files:
   src/codegen/expressions.ts:
     new:

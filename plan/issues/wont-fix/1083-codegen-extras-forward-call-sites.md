@@ -10,6 +10,7 @@ feasibility: medium
 reasoning_effort: low
 task_type: bugfix
 goal: ci-hardening
+sprint: Backlog
 closed: 2026-04-17
 closed_reason: "false positive — code already uses if/else branches, not sequential double-codegen"
 ---

@@ -3,6 +3,7 @@ id: 1591
 title: "class/elements: same-line / stacked member definitions lost or reordered (~294 fails)"
 status: backlog
 created: 2026-05-24
+updated: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -10,12 +11,12 @@ task_type: bugfix
 area: codegen
 language_feature: classes, class-elements
 goal: spec-completeness
-test262_fail: 294
-test262_category: language/statements/class/elements, language/expressions/class/elements
+sprint: Backlog
 renumbered_from: 779b
 parent: 779
+test262_fail: 294
+test262_category: language/statements/class/elements, language/expressions/class/elements
 ---
-
 # #1591 — `class/elements` same-line / stacked class-member definitions lost or reordered
 
 ## Problem

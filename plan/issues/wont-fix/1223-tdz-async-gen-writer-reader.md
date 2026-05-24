@@ -1,10 +1,10 @@
 ---
 id: 1223
-sprint: backlog
 title: "TDZ async/gen: writer+reader fn-decl sharing via destructure-assign path (#1205 follow-up)"
 status: wont-fix
 created: 2026-05-01
 updated: 2026-05-01
+completed: 2026-05-07
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: closures
 goal: crash-free
+sprint: Backlog
 depends_on: [1177, 1205]
 es_edition: ES2017+
 related: [1205, 1177, 1169f]

@@ -1,9 +1,9 @@
 ---
 id: 1337
-sprint: 50
 title: "spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: function
 goal: spec-completeness
+sprint: 50
 parent: 1328
 ---
 # #1337 — Function objects: bind, toString, length, internals

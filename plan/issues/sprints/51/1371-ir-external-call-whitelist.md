@@ -1,9 +1,10 @@
 ---
 id: 1371
-sprint: 51
 title: "IR: expand external-call whitelist to stop rejecting host imports and Math.*"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: functions
 goal: ir-full-coverage
+sprint: 51
 ---
 # #1371 — IR: external-call whitelist expansion
 

@@ -1,6 +1,5 @@
 ---
 id: 309
-sprint: 0
 title: "Issue #309: Expand test262 harness includes -- propertyIsEnumerable, fnGlobalObject"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: test-infrastructure
+sprint: 0
 files:
   tests/test262-runner.ts:
     new:

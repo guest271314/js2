@@ -1,6 +1,5 @@
 ---
 id: 645
-sprint: 0
 title: "Add testTypedArray.js to allowed includes (1,731 skip)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 depends_on: [608]
 test262_skip: 1731
 files:

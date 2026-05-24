@@ -1,6 +1,5 @@
 ---
 id: 576
-sprint: 21
 title: "TEST_CATEGORIES covers only 10,501 of ~23,000 previously-tested tests"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: high
 goal: iterator-protocol
+sprint: 21
 ---
 # Issue #576: Expand TEST_CATEGORIES to cover all test262 categories
 

@@ -1,10 +1,10 @@
 ---
 id: 1297
-sprint: 49
 title: "Hono Tier 5 — Application class: route registration + middleware dispatch + Context"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +12,7 @@ task_type: stress-test
 area: codegen, runtime
 language_feature: classes, generics, closures, middleware
 goal: npm-library-support
-depends_on: []
+sprint: 49
 related: [1244, 1274, 1285, 1293]
 ---
 # #1297 — Hono Tier 5: Application class, route registration, middleware dispatch, Context

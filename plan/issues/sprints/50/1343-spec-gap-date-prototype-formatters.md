@@ -1,9 +1,9 @@
 ---
 id: 1343
-sprint: 50
 title: "spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: date
 goal: spec-completeness
+sprint: 50
 parent: 1328
 ---
 # #1343 — Date: string formatters, parsers, ISO normalization

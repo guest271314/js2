@@ -1,12 +1,12 @@
 ---
 id: 56
-sprint: 0
 title: "Issue 56: Tuples"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: core-semantics
+sprint: 0
 ---
 # Issue 56: Tuples
 

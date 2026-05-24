@@ -1,9 +1,9 @@
 ---
 id: 1483
-sprint: 52
 title: "wasi: route Date.now and performance.now to clock_time_get"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: Date, performance
 goal: wasi-completeness
+sprint: 52
 related: []
 ---
-
 ## Problem
 
 `Date.now()` is lowered to a `__date_now` env-import in

@@ -1,6 +1,5 @@
 ---
 id: 406
-sprint: 0
 title: "'base' is possibly null errors"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_ce: 81
 files:
   src/codegen/expressions.ts:

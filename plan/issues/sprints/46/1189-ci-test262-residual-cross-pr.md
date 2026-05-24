@@ -1,6 +1,5 @@
 ---
 id: 1189
-sprint: 46
 title: "ci(test262): residual cross-PR regression overlap (~95%) from runner-load CT noise — not cache staleness"
 status: wont-fix
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: investigation
 area: infrastructure
 goal: ci-hardening
+sprint: 46
 es_edition: n/a
 related: [1171, 1185, 1186, 1190, 1192]
 origin: surfaced during PR #72 / #74 baseline-drift investigation (2026-04-27). Initial hypothesis was cache-key staleness, but cache-key invalidation was already correctly handled by #1171. Real cause is residual runner-load non-determinism near the 30s compile-timeout boundary.

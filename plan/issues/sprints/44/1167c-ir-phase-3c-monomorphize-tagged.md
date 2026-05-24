@@ -1,6 +1,5 @@
 ---
 id: 1167c
-sprint: 44
 title: "IR Phase 3c — monomorphize + tagged-unions (blocked on frontend widening)"
 status: done
 created: 2026-04-22
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: platform
+sprint: 44
 depends_on: [1167b, 1168]
 required_by: [1169]
 closed: 2026-04-24

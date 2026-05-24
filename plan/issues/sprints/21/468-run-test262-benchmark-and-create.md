@@ -1,6 +1,5 @@
 ---
 id: 468
-sprint: 21
 title: "Run test262 benchmark and create issues from results"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: high
 goal: async-model
+sprint: 21
 ---
 # #468 -- Run test262 benchmark post-140-fixes
 

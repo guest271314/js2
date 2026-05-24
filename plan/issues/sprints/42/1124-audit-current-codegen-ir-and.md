@@ -1,6 +1,5 @@
 ---
 id: 1124
-sprint: 42
 title: "Audit current codegen IR and, if needed, define a minimal SSA middle-end"
 status: done
 created: 2026-04-16
@@ -13,6 +12,7 @@ task_type: investigation
 area: codegen
 language_feature: compiler-internals
 goal: compiler-architecture
+sprint: 42
 required_by: [744, 773, 1121, 1126, 1131]
 ---
 # #1124 -- Audit current codegen IR and, if needed, define a minimal SSA middle-end

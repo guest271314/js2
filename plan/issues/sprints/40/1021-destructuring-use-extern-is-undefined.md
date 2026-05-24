@@ -1,6 +1,5 @@
 ---
 id: 1021
-sprint: 40
 title: "Destructuring: use __extern_is_undefined instead of ref.is_null for defaults (~2,000+ FAIL)"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: max
 goal: error-model
+sprint: 40
 ---
 # #1021 — Distinguish null from undefined in destructuring defaults
 

@@ -1,6 +1,5 @@
 ---
 id: 147
-sprint: 6
 title: "Function.name property"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: medium
 goal: compilable
+sprint: 6
 files:
   src/codegen/expressions.ts:
     new: []

@@ -1,6 +1,5 @@
 ---
 id: 633
-sprint: 0
 title: "Object.defineProperty tests fail (297 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_fail: 297
 files:
   src/codegen/index.ts:

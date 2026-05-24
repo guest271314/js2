@@ -1,6 +1,5 @@
 ---
 id: 1071
-sprint: 42
 title: "codegen: for-of requires an array expression — blocks iteration over Map/Set/iterator in bundled JS"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: for-of
 goal: iterator-protocol
+sprint: 42
 parent: 1034
 closed: 2026-04-12
 pr: 137

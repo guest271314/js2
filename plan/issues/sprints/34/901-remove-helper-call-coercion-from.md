@@ -1,6 +1,5 @@
 ---
 id: 901
-sprint: 34
 title: "Remove helper-call coercion from numeric GC-array element access"
 status: done
 created: 2026-04-02
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 34
 depends_on: [896]
 files:
   src/codegen/expressions.ts:

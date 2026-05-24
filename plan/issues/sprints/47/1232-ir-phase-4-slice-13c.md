@@ -1,6 +1,5 @@
 ---
 id: 1232
-sprint: 47
 title: "IR Phase 4 Slice 13c — String fixed-signature methods through IR"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: string-methods
 goal: standalone-mode
+sprint: 47
 depends_on: [1238]
 es_edition: ES2020
 related: [1169p, 1233]

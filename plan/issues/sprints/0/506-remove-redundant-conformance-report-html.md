@@ -1,6 +1,5 @@
 ---
 id: 506
-sprint: 0
 title: "Remove redundant conformance-report.html"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: developer-experience
+sprint: 0
 files:
   benchmarks/results/conformance-report.html:
     new: []

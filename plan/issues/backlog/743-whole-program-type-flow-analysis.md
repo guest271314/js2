@@ -8,6 +8,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: performance
+sprint: Backlog
 required_by: [744, 904, 905]
 files:
   src/checker/type-mapper.ts:

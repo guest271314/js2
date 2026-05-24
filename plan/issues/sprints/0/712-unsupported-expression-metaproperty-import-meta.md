@@ -1,6 +1,5 @@
 ---
 id: 712
-sprint: 0
 title: "Unsupported expression: MetaProperty import.meta (70 CE)"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: medium
 goal: ci-hardening
+sprint: 0
 ---
 # Unsupported expression: MetaProperty (import.source / import.defer)
 

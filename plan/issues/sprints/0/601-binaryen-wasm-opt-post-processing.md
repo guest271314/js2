@@ -1,6 +1,5 @@
 ---
 id: 601
-sprint: 0
 title: "Binaryen wasm-opt post-processing pass"
 status: done
 created: 2026-03-19
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-19
 priority: medium
 goal: npm-library-support
+sprint: 0
 ---
 # Issue #601: Binaryen wasm-opt post-processing pass
 

@@ -1,6 +1,5 @@
 ---
 id: 1216
-sprint: 47
 title: "ci: auto-commit playground benchmark baseline on push-to-main (architectural follow-up to #1214)"
 status: done
 created: 2026-04-30
@@ -13,6 +12,7 @@ task_type: infrastructure
 area: ci
 language_feature: n/a
 goal: ci-hardening
+sprint: 47
 depends_on: [1214]
 es_edition: n/a
 related: [1213, 1214, 1170, 1191]

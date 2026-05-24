@@ -1,6 +1,5 @@
 ---
 id: 764
-sprint: 18
 title: "- 'immutable global' assignment error (240 CE)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: spec-completeness
+sprint: 18
 test262_ce: 31
 note: "Down from 240 to 31 residual after #704 fix. Low priority now."
 ---

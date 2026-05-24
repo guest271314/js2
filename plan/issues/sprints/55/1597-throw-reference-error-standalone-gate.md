@@ -1,6 +1,5 @@
 ---
 id: 1597
-sprint: 55
 title: "host-indep: gate __throw_reference_error in standalone mode"
 status: ready
 created: 2026-05-24
@@ -11,10 +10,9 @@ task_type: bugfix
 area: codegen
 language_feature: tdz, error handling
 goal: standalone-wasm
+sprint: 55
 related: [1471, 1473, 1474]
-depends_on: []
 ---
-
 # #1597 — Gate `__throw_reference_error` in standalone mode
 
 ## Problem

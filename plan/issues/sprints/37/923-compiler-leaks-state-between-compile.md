@@ -1,6 +1,5 @@
 ---
 id: 923
-sprint: 37
 title: "Compiler leaks state between compile() calls in the same process"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: test-infrastructure
+sprint: 37
 related: [943]
 ---
 # #923 — Compiler leaks state between compile() calls in the same process

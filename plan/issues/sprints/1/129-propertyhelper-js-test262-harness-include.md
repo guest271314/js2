@@ -1,6 +1,5 @@
 ---
 id: 129
-sprint: 1
 title: "propertyHelper.js test262 harness include"
 status: wont-fix
 created: 2026-03-11
@@ -9,6 +8,7 @@ completed: 2026-03-12
 task_type: test
 language_feature: property-descriptors
 goal: property-model
+sprint: 1
 ---
 # Issue 129: propertyHelper.js test262 harness include
 

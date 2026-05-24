@@ -1,6 +1,5 @@
 ---
 id: 425
-sprint: 9
 title: "Async/yield keyword parsing edge cases (12 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 9
 files:
   tests/test262-runner.ts:
     new: []

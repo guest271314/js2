@@ -1,9 +1,10 @@
 ---
 id: 1392
-sprint: 51
 title: "IR: null-safe access primitives — ref.is_null IrUnop + value-producing if/else IR node"
 status: done
 created: 2026-05-08
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,6 +12,7 @@ task_type: feature
 area: ir
 language_feature: optional-chain
 goal: ir-full-coverage
+sprint: 51
 blocks: 1375
 ---
 # #1392 — IR null-safe access primitives

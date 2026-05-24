@@ -1,6 +1,5 @@
 ---
 id: 852
-sprint: 30
 title: "Destructuring parameters cause null_deref and illegal_cast (1,525 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: core-semantics
+sprint: 30
 test262_fail: 1525
 ---
 # #852 -- Destructuring parameters cause null_deref and illegal_cast (1,525 tests)

@@ -1,6 +1,5 @@
 ---
 id: 789
-sprint: 25
 title: "- TypeError null/undefined guard over-triggering (15,630 tests)"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: async-model
+sprint: 25
 test262_fail: 15630
 ---
 # #789 -- TypeError null/undefined guard over-triggering (15,630 tests)

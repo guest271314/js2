@@ -1,6 +1,5 @@
 ---
 id: 1065
-sprint: 40
 title: "Register `Array` as declared global so `x.constructor === Array` compares real refs"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: identifier-resolution
 goal: ci-hardening
+sprint: 40
 parent: 1057
 es_edition: multi
 ---

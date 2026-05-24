@@ -1,9 +1,9 @@
 ---
 id: 1342
-sprint: 50
 title: "spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails)"
 status: in-progress
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: json
 goal: spec-completeness
+sprint: 50
 parent: 1328
 related: 1324
 ---

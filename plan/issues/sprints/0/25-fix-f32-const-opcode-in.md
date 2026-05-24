@@ -1,12 +1,12 @@
 ---
 id: 25
-sprint: 0
 title: "Issue 25: Fix f32.const opcode in binary emitter"
 status: done
 created: 2026-02-28
 updated: 2026-04-14
 completed: 2026-02-28
 goal: performance
+sprint: 0
 ---
 # Issue 25: Fix f32.const opcode in binary emitter
 

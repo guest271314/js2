@@ -1,15 +1,16 @@
 ---
 id: 1505
-sprint: 52
 title: "spec audit: comprehensive ECMAScript implementation gap analysis"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: max
 task_type: research
 area: codegen
 goal: spec-completeness
+sprint: 52
 ---
 # #1505 - Comprehensive ECMAScript Implementation Gap Analysis
 

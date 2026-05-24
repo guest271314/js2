@@ -1,6 +1,5 @@
 ---
 id: 845
-sprint: 38
 title: "Miscellaneous compile errors: object literals, RegExp-on-X, for-in/of edge cases (340 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: error-model
+sprint: 38
 test262_ce: 340
 ---
 # #845 -- Miscellaneous compile errors (340 CE)

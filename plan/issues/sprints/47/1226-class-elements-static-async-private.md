@@ -1,6 +1,5 @@
 ---
 id: 1226
-sprint: 47
 title: "class/elements: static async private method produces invalid Wasm — call missing argument (~104 tests)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: class-elements, async, private-methods
 goal: async-model
+sprint: 47
 es_edition: ES2022+
 related: [1224, 1225]
 test262_fail: 104

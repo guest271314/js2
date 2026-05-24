@@ -1,6 +1,5 @@
 ---
 id: 433
-sprint: 21
 title: "Equality operators with mixed types produce i32/f64 type mismatch (10 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: medium
 goal: core-semantics
+sprint: 21
 files:
   src/codegen/expressions.ts:
     new: []

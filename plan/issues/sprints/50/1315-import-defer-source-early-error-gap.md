@@ -1,6 +1,5 @@
 ---
 id: 1315
-sprint: 50
 title: "import.defer / import.source missing early error detection — 157 negative tests false-pass"
 status: in-progress
 created: 2026-05-07
@@ -12,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: modules, import-defer, import-source
 goal: spec-completeness
+sprint: 50
 ---
 # #1315 — `import.defer` / `import.source` early error detection gap (157 negative tests)
 

@@ -1,15 +1,16 @@
 ---
 id: 1576
 title: "React Tier 1 compile/validate survey (probe of `react@19.2.6`)"
-status: survey
+status: ready
 created: 2026-05-20
-owner: tech-lead
+updated: 2026-05-21
 priority: high
 area: codegen, resolver, runtime
 goal: npm-library-support
+sprint: Backlog
+owner: tech-lead
 related: [1033, 1043, 1045, 1559, 1287, 1289]
 ---
-
 # React Tier 1 — compile/validate survey
 
 Anticipatory survey to land alongside `tests/stress/react-tier1.test.ts` and

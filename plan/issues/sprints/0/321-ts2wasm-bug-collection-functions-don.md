@@ -1,6 +1,5 @@
 ---
 id: 321
-sprint: 0
 title: "[ts2wasm] Bug: Collection functions don't scan top-level statements (`__module_init`)"
 status: done
 created: 2026-03-12
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: critical
 goal: platform
+sprint: 0
 required_by: [320, 322]
 files:
   src/codegen/index.ts:

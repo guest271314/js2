@@ -2,21 +2,20 @@
 id: 820d
 title: "class/dstr async-gen-meth default-init `unresolvable` illegal cast"
 status: ready
-sprint: 55
 created: 2026-05-21
 updated: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: medium
+task_type: bugfix
+language_feature: class-destructuring-async-generator-method
 goal: property-model
+sprint: 55
 parent: 820
 es_edition: ES2017
-language_feature: class-destructuring-async-generator-method
-task_type: bug
 test262_fail: 104
 note: "Verified 2026-05-21: closures.ts __obj_meth_tramp at L3019/L3085; binding-element default closure location is in destructuring-params.ts (no obvious 'default-init' match in literals.ts — may need re-scoping during implementation)"
 ---
-
 # #820d — class/dstr async-gen-meth default-init `unresolvable` illegal cast
 
 ## Problem

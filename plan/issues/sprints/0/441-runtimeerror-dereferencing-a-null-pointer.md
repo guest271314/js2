@@ -1,6 +1,5 @@
 ---
 id: 441
-sprint: 0
 title: "RuntimeError: dereferencing a null pointer -- residual after #419 (88 fail)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-25
 priority: high
 goal: crash-free
+sprint: 0
 test262_fail: 88
 complexity: M
 files:

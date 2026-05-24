@@ -1,6 +1,5 @@
 ---
 id: 629
-sprint: 0
 title: "Destructuring in generator/class methods fails silently (2,444 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_fail: 2444
 files:
   src/codegen/statements.ts:

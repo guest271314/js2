@@ -1,9 +1,10 @@
 ---
 id: 1491
-sprint: 52
 title: "nodejs: fs.readFileSync/writeFileSync as JS-host imports (non-WASI)"
 status: done
 created: 2026-05-20
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +12,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: nodejs-support
+sprint: 52
 related: [1035, 1044]
 ---
-
 # #1491 — `fs.readFileSync` / `writeFileSync` as JS host imports (non-WASI)
 
 ## Problem

@@ -1,21 +1,20 @@
 ---
 id: 1603
-sprint: 56
 title: "codegen: optional-chaining short-circuit emits invalid wasm (ref.is_null expected i32, found ref)"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: optional-chaining
-es_edition: es2020
 goal: compiler-correctness
+sprint: 56
+es_edition: es2020
 test262_count: 8
 related: [1522]
 ---
-
 # #1603 — Optional-chaining short-circuit produces invalid wasm
 
 ## Problem

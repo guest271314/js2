@@ -1,12 +1,12 @@
 ---
 id: 120
-sprint: 2
 title: "Issue 120: undefined/void 0 comparison support"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 2
 ---
 # Issue 120: undefined/void 0 comparison support
 

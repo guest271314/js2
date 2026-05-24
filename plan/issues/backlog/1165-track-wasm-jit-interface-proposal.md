@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: eval
 goal: spec-completeness
+sprint: Backlog
 depends_on: [1058, 1164]
 ---
 # #1165 — Track Wasm JIT interface proposal (`func.new`)

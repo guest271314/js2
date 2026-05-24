@@ -1,12 +1,12 @@
 ---
 id: 220
-sprint: 2
 title: "- ClassDeclaration compile errors in all statement positions"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #220 -- ClassDeclaration compile errors in all statement positions
 

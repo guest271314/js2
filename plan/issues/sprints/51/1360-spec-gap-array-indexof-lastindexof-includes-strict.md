@@ -1,9 +1,10 @@
 ---
 id: 1360
-sprint: 51
 title: "spec gap: Array.prototype.{indexOf,lastIndexOf,includes} — SameValueZero, sparse, fromIndex coercion (~210 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: spec-completeness
+sprint: 51
 ---
 # #1360 — Array.prototype.{indexOf,lastIndexOf,includes}: equality + sparse + fromIndex
 

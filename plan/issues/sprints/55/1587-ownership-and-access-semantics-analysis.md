@@ -2,7 +2,6 @@
 id: 1587
 title: "Static analysis pass: ownership and access semantics on IR values"
 status: in-progress
-sprint: 55
 created: 2026-05-23
 updated: 2026-05-23
 priority: medium
@@ -12,7 +11,9 @@ task_type: feature
 area: compiler
 language_feature: compiler-internals
 goal: platform
+sprint: 55
 depends_on: [1586]
+required_by: [747, 1585]
 es_edition: n/a
 ---
 # #1587 — Static analysis pass: ownership and access semantics on IR values

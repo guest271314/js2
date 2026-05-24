@@ -1,6 +1,5 @@
 ---
 id: 606
-sprint: 0
 title: "Test harness gaps: propertyHelper.js, assert.throws, String() indexer (1,105 tests)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 depends_on: [1113]
 test262_skip: 1105
 files:

@@ -3,6 +3,7 @@ id: 1555
 title: "refactor: destructureParamArray — streaming IteratorStep-per-element instead of __array_from_iter materialisation"
 status: ready
 created: 2026-05-20
+updated: 2026-05-21
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -10,11 +11,11 @@ task_type: refactor
 area: codegen
 language_feature: destructuring, iterators
 goal: spec-completeness
+sprint: Backlog
 parent: 1542
 related: [1432, 1450, 1454, 1550, 1542]
 note: "Verified 2026-05-21: destructureParamArray actually lives at destructuring-params.ts:655 (NOT statements.ts); statements.ts split into statements/ subdir; expressions.ts split into expressions/ subdir"
 ---
-
 # #1555 — Streaming iterator destructuring (replace `__array_from_iter` materialisation)
 
 ## Problem

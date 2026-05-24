@@ -1,10 +1,10 @@
 ---
 id: 1283
-sprint: 47
 title: "WeakMap host-import dispatch: type-mismatch on set/get/has/delete (carved off from #1242)"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,9 +12,9 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: WeakMap
 goal: spec-completeness
+sprint: 47
 related: [1242, 1244]
 ---
-
 # #1283 — WeakMap host-import dispatch: type-mismatch on set/get/has/delete
 
 ## Background

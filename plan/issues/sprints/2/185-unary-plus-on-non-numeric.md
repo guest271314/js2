@@ -1,12 +1,12 @@
 ---
 id: 185
-sprint: 2
 title: "Unary plus on non-numeric types"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #185 — Unary plus on non-numeric types
 

@@ -1,20 +1,19 @@
 ---
 id: 1608
-sprint: 56
 title: "codegen crash: 'Cannot set properties of undefined (setting typeIdx)' on Array push/pop/shift/join/unshift"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: array-mutator-methods
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 5
 ---
-
 # #1608 — Internal crash setting typeIdx in Array mutator codegen
 
 ## Problem

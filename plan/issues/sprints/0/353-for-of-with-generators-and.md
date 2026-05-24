@@ -1,6 +1,5 @@
 ---
 id: 353
-sprint: 0
 title: "- For-of with generators and custom iterators"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: medium
 feasibility: medium
 goal: iterator-protocol
+sprint: 0
 test262_skip: 152
 test262_categories:
   - language/statements/for-of

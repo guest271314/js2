@@ -1,6 +1,5 @@
 ---
 id: 895
-sprint: 31
 title: "CompilerPool fails to dispatch queued jobs when first worker becomes ready"
 status: done
 created: 2026-04-01
@@ -9,6 +8,7 @@ completed: 2026-04-01
 priority: critical
 feasibility: easy
 goal: test-infrastructure
+sprint: 31
 branch: main
 ---
 # #895 -- CompilerPool fails to dispatch queued jobs when first worker becomes ready

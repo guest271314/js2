@@ -1,6 +1,5 @@
 ---
 id: 1169n
-sprint: 47
 title: "IR Phase 4 Slice 11 — switch statements + missing binary/unary operators through IR"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ir
 language_feature: switch, bitwise, nullish-coalescing, optional-chaining
 goal: core-semantics
+sprint: 47
 required_by: [1169o, 1169q, 1231]
 es_edition: ES2020
 related: [1169, 1168]

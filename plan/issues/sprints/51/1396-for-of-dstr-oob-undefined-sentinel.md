@@ -1,16 +1,18 @@
 ---
 id: 1396
-sprint: 51
 title: "fix: for-of/dstr default initializers don't fire on OOB extern-array reads — null vs undefined sentinel"
 status: done
 created: 2026-05-09
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: destructuring, for-of
 goal: spec-completeness
+sprint: 51
 ---
 # #1396 — for-of/dstr default initializers don't fire on OOB extern-array reads
 

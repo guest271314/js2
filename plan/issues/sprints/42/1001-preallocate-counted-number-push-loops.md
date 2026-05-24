@@ -1,6 +1,5 @@
 ---
 id: 1001
-sprint: 42
 title: "Preallocate counted number[] push loops into dense WasmGC arrays"
 status: done
 created: 2026-04-09
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: ci-hardening
+sprint: 42
 ---
 # #1001 -- Preallocate counted `number[]` push loops into dense WasmGC arrays
 

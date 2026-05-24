@@ -1,6 +1,5 @@
 ---
 id: 276
-sprint: 0
 title: "Issue #276: Computed property name must be of assignable type"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: builtin-methods
+sprint: 0
 files:
   src/compiler.ts:
     new: []

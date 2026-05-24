@@ -1,6 +1,5 @@
 ---
 id: 599
-sprint: 0
 title: "- Self-contained WasmGC strings: eliminate wasm:js-string dependency"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: platform
+sprint: 0
 required_by: [600, 641, 642, 679]
 files:
   src/codegen/index.ts:

@@ -1,6 +1,5 @@
 ---
 id: 473
-sprint: 0
 title: "Array.prototype method .call/.apply support (852 skipped tests)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: test-infrastructure
+sprint: 0
 ---
 # #473 -- Array.prototype method .call/.apply support
 

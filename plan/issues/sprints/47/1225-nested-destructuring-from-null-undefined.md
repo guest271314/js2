@@ -1,6 +1,5 @@
 ---
 id: 1225
-sprint: 47
 title: "Nested destructuring from null/undefined: missing TypeError (~244 tests in for-of/dstr, assignment/dstr, class/dstr)"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, for-of, assignment
 goal: error-model
+sprint: 47
 es_edition: ES2015+
 related: [1224]
 test262_fail: 244

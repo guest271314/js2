@@ -1,12 +1,12 @@
 ---
 id: 69
-sprint: 0
 title: "Issue 69: Safe mode — restrict TypeScript to a secure subset"
 status: done
 created: 2026-03-03
 updated: 2026-04-14
 completed: 2026-03-05
 goal: property-model
+sprint: 0
 ---
 # Issue 69: Safe mode — restrict TypeScript to a secure subset
 

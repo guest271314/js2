@@ -1,9 +1,10 @@
 ---
 id: 1385
-sprint: 51
 title: "HANG: Temporal/Duration/from/argument-non-string.js — infinite runtime loop"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: temporal
 goal: spec-completeness
+sprint: 51
 ---
 # #1385 — Temporal Duration.from hang: compiled Wasm runs forever
 

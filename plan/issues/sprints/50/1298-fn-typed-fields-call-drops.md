@@ -1,10 +1,10 @@
 ---
 id: 1298
-sprint: 50
 title: "Calling a function-typed value stored in a field/array/Map drops the call and returns null"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-07
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,8 @@ task_type: bugfix
 area: codegen
 language_feature: closures, functions, classes, maps
 goal: npm-library-support
+sprint: 50
+required_by: [1309]
 related: [1297]
 ---
 # #1298 — Function-typed fields/array elements/Map values null-deref on call

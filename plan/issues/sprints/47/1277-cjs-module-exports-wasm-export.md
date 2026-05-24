@@ -1,10 +1,10 @@
 ---
 id: 1277
-sprint: 47
 title: "CJS module.exports → Wasm export mapping in compileProject"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,8 @@ task_type: feature
 area: codegen
 language_feature: CommonJS, module-exports
 goal: npm-library-support
+sprint: 47
+required_by: [1279, 1282, 1291]
 related: [1031, 1074]
 ---
 # #1277 — CJS `module.exports` → Wasm export mapping

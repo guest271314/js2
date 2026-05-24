@@ -1,6 +1,5 @@
 ---
 id: 414
-sprint: 0
 title: "Super keyword unsupported in remaining positions"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: standalone-mode
+sprint: 0
 test262_ce: 11
 complexity: S
 files:

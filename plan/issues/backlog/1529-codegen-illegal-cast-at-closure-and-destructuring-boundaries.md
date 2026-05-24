@@ -1,6 +1,5 @@
 ---
 id: 1529
-sprint: backlog
 title: "codegen: 'illegal cast' umbrella at closure & destructuring parameter boundaries"
 status: backlog
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: type-coercion, destructuring, closures, wasm-gc
+sprint: Backlog
 es_edition: n/a
 test262_category: multiple (class, async-generator, eval-code, super, for-await-of)
 test262_count: 241
 related: [1257, 1451, 1452]
 ---
-
 # #1529 — Runtime `illegal cast` failures cluster at closure/destructuring boundaries
 
 ## Problem

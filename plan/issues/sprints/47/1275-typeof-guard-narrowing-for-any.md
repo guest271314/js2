@@ -1,10 +1,10 @@
 ---
 id: 1275
-sprint: 47
 title: "typeof-guard narrowing for any-typed parameters (untyped JS functions)"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: typeof, type-narrowing, any
 goal: npm-library-support
+sprint: 47
 related: [1031, 1107]
 ---
 ## Implementation note (2026-05-02, dev-1245)

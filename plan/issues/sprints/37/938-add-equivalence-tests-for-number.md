@@ -1,6 +1,5 @@
 ---
 id: 938
-sprint: 37
 title: "Add equivalence tests for Number static methods and constants"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 37
 tags: [good-first-issue, testing, number]
 files:
   tests/equivalence/:

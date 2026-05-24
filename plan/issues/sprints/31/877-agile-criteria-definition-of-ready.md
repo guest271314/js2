@@ -1,6 +1,5 @@
 ---
 id: 877
-sprint: 31
 title: "Agile criteria — Definition of Ready, Definition of Done, velocity tracking"
 status: done
 created: 2026-03-30
@@ -10,6 +9,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: medium
 goal: standalone-mode
+sprint: 31
 ---
 # #877 -- Agile criteria — Definition of Ready, Definition of Done, velocity tracking
 

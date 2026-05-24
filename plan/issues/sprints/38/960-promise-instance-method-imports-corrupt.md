@@ -1,6 +1,5 @@
 ---
 id: 960
-sprint: 38
 title: "Promise instance method imports corrupt Wasm type indices (~1,023 pass regression)"
 status: done
 created: 2026-04-05
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: critical
 goal: async-model
+sprint: 38
 ---
 # #957 -- Promise instance method imports corrupt Wasm type indices
 

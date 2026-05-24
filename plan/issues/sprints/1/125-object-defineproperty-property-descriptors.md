@@ -1,6 +1,5 @@
 ---
 id: 125
-sprint: 1
 title: "Object.defineProperty / property descriptors"
 status: wont-fix
 created: 2026-03-11
@@ -9,6 +8,7 @@ completed: 2026-03-12
 task_type: feature
 language_feature: property-descriptors
 goal: property-model
+sprint: 1
 ---
 # Issue 125: Object.defineProperty / property descriptors
 

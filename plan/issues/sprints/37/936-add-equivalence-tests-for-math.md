@@ -1,6 +1,5 @@
 ---
 id: 936
-sprint: 37
 title: "Add equivalence tests for Math built-in methods"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: spec-completeness
+sprint: 37
 tags: [good-first-issue, testing, math]
 files:
   tests/equivalence/:

@@ -1,6 +1,5 @@
 ---
 id: 848
-sprint: 30
 title: "Class computed property and accessor correctness (1,015 tests)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: crash-free
+sprint: 30
 parent: 779
 test262_fail: 1015
 ---

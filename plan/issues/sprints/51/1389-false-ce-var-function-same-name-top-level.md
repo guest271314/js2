@@ -1,9 +1,10 @@
 ---
 id: 1389
-sprint: 51
 title: "fix: false CE — var + function-declaration same name at top-level scope"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -11,6 +12,7 @@ task_type: bugfix
 area: compiler/validation
 language_feature: var, hoisting
 goal: spec-completeness
+sprint: 51
 ---
 # #1389 — False CE: `var x; function x(){}` at top-level scope
 

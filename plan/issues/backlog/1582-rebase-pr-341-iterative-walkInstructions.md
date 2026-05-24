@@ -3,15 +3,16 @@ id: 1582
 title: "Rebase PR #341 — refactor: iterative walkInstructions (250 commits behind)"
 status: ready
 created: 2026-05-22
+updated: 2026-05-22
 priority: medium
 feasibility: hard
 reasoning_effort: high
 task_type: refactor
 area: codegen
 goal: code-modularity
+sprint: Backlog
 origin: surfaced 2026-05-22 during merge-queue drain audit
 ---
-
 # #1582 — Rebase PR #341 (iterative walkInstructions + patchInstrs refactor)
 
 ## Context

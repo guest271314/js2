@@ -1,6 +1,5 @@
 ---
 id: 1167a
-sprint: 44
 title: "IR Phase 3a — hygiene passes: constant-fold, dead-code, simplify-cfg"
 status: done
 created: 2026-04-22
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: ci-hardening
+sprint: 44
 depends_on: [1131, 1166]
 required_by: [1167b]
 closed: 2026-04-23

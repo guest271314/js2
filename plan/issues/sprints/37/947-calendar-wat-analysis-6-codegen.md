@@ -1,6 +1,5 @@
 ---
 id: 947
-sprint: 37
 title: "Calendar WAT analysis: 6 codegen inefficiencies found in the default playground example"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: error-model
+sprint: 37
 ---
 # #947 — Calendar WAT analysis: codegen inefficiencies in playground example
 

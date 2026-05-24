@@ -1,9 +1,10 @@
 ---
 id: 1366a
-sprint: 51
 title: "spec gap: class extends Error/TypeError/RangeError — builtin subclassing via existing host imports (+40-60 passes)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: classes
 goal: spec-completeness
+sprint: 51
 parent_issue: 1366
 pr: 307
 branch: issue-1366a-extends-error-subclassing

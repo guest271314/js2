@@ -1,6 +1,5 @@
 ---
 id: 382
-sprint: 7
 title: "- Spread argument in super/function calls"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: iterator-protocol
+sprint: 7
 test262_ce: 4
 files:
   src/codegen/expressions.ts:

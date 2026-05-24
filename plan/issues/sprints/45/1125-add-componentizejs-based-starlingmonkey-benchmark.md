@@ -1,6 +1,5 @@
 ---
 id: 1125
-sprint: 45
 title: "Add ComponentizeJS-based StarlingMonkey benchmark setup with Wizer and Weval"
 status: done
 created: 2026-04-16
@@ -13,6 +12,7 @@ task_type: feature
 area: benchmarks
 language_feature: wasm-components
 goal: spec-completeness
+sprint: 45
 merged: 2026-04-26
 pr: 46
 ---

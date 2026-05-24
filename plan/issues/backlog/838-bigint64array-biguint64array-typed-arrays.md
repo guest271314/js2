@@ -8,6 +8,7 @@ priority: low
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: Backlog
 test262_skip: 19
 test262_ce: 25
 ---

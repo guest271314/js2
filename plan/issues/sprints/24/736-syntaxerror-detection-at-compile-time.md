@@ -1,6 +1,5 @@
 ---
 id: 736
-sprint: 24
 title: "- SyntaxError detection at compile time (316 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 24
 test262_fail: 316
 files:
   src/compiler.ts:

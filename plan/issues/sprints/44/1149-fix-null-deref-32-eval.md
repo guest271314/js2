@@ -1,6 +1,5 @@
 ---
 id: 1149
-sprint: 44
 title: "Fix null_deref:32 — eval-code direct methods with arguments declare"
 status: done
 created: 2026-04-20
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: 44
 closed: 2026-04-23
 pr: 241
 net_improvement: 57

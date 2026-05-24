@@ -1,6 +1,5 @@
 ---
 id: 1196
-sprint: 47
 title: "perf: bounds-check elimination via SSA on monotonic indexed array loops"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: performance
+sprint: 47
 es_edition: n/a
 related: [1126, 1179, 1195, 1197]
 origin: surfaced by 2026-04-27 competitive-benchmark refresh — array-sum is ~9× slower than Node. Bounds checks on every array.get/set are one of the three dominant overheads.

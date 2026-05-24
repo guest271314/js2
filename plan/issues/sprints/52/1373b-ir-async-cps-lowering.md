@@ -1,9 +1,9 @@
 ---
 id: 1373b
-sprint: 52
 title: "IR async Phase C: CPS lowering for await + async-return + async-throw"
 status: blocked
 created: 2026-05-09
+updated: 2026-05-21
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,6 +11,7 @@ task_type: feature
 area: ir, codegen
 language_feature: async
 goal: ir-full-coverage
+sprint: 52
 depends_on: [1326c]
 note: "Verified 2026-05-21: src/codegen/async-scheduler.ts exists; src/codegen/async-cps.ts does NOT exist yet (still pending #1042 introducing it). async-cluster-architect-spec.md exists."
 ---

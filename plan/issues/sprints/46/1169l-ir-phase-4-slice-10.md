@@ -1,6 +1,5 @@
 ---
 id: 1169l
-sprint: 46
 title: "IR Phase 4 Slice 10 step D — Date / Error / Map / Set through IR"
 status: done
 created: 2026-04-28
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: error-model
+sprint: 46
 depends_on: [1169i]
 ---
 ## Implementation status (2026-04-30, dev-2)

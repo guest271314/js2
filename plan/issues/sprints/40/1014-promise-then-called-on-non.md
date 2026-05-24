@@ -1,6 +1,5 @@
 ---
 id: 1014
-sprint: 40
 title: "Promise .then() called on non-Promise values (1,969 FAIL)"
 status: done
 created: 2026-04-10
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 40
 ---
 # #1014 — Promise .then() called on non-Promise values (1,969 FAIL)
 

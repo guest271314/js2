@@ -1,10 +1,9 @@
 ---
 id: 1645
-renumbered_from: 1351
-sprint: 50
 title: "spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +11,8 @@ task_type: bugfix
 area: runtime
 language_feature: typedarray
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1351
 parent: 1328
 ---
 # #1351 — ArrayBuffer.resize / detached-buffer guards on TypedArray methods

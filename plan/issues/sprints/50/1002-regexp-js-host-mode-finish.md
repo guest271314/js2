@@ -1,14 +1,15 @@
 ---
 id: 1002
-sprint: 50
 title: "RegExp js-host mode: finish Symbol protocol and remaining host-wrapper semantics"
 status: done
 created: 2026-04-09
 updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: 50
 ---
 # #1002 — RegExp js-host mode: finish Symbol protocol and remaining host-wrapper semantics
 

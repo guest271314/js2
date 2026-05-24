@@ -1,11 +1,10 @@
 ---
 id: 1249
-sprint: 47
 title: "class private fields and methods (#name syntax) — PrivateIdentifier codegen"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: medium
 feasibility: medium
 reasoning_effort: max
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: classes, private-fields
 goal: npm-library-support
+sprint: 47
 related: [1244]
 ---
 # #1249 — Class private fields and methods (`#name` syntax)

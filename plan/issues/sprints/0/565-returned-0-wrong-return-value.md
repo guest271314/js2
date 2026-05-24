@@ -1,6 +1,5 @@
 ---
 id: 565
-sprint: 0
 title: "returned 0: wrong return value (4,259 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: hard
 goal: core-semantics
+sprint: 0
 test262_fail: 651
 files:
   src/codegen/expressions.ts:

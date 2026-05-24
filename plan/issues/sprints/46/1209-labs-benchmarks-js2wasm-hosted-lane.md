@@ -1,6 +1,5 @@
 ---
 id: 1209
-sprint: 46
 title: "labs/benchmarks: js2wasm hosted lane fails — ESM resolver error in run-node-wasm-program.mjs"
 status: done
 created: 2026-04-29
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: investigation
 area: labs
 goal: performance
+sprint: 46
 origin: surfaced by competitive-benchmark run 2026-04-29
 ---
 # #1209 — js2wasm hosted lane: ESM resolver error in benchmark harness

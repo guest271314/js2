@@ -1,6 +1,5 @@
 ---
 id: 1198
-sprint: 47
 title: "perf: pre-size dense arrays at allocation site (`const a = []; for ... a[i] = ...` → `new Array(n)`)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: arrays
 goal: performance
+sprint: 47
 es_edition: n/a
 related: [1126, 1179, 1195, 1196, 1197]
 origin: 2026-04-27 array-sum perf analysis — Tier 1 win #1, simplest of the three (~1 day). Avoids quadratic grow-on-write.

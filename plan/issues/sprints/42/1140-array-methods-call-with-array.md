@@ -1,6 +1,5 @@
 ---
 id: 1140
-sprint: 42
 title: "Array methods .call() with array-like receiver not supported"
 status: done
 created: 2026-04-20
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: spec-completeness
+sprint: 42
 ---
 ## Problem
 

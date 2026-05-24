@@ -1,6 +1,5 @@
 ---
 id: 448
-sprint: 9
 title: "Wasm validation: type mismatch i32 expected (47 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: compilable
+sprint: 9
 test262_ce: 47
 complexity: S
 files:

@@ -1,21 +1,20 @@
 ---
 id: 1605
-sprint: 56
 title: "codegen: class computed-property-name / setter param-scope emits invalid wasm (local.tee externref mismatch)"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: classes
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 6
 related: [1522]
 ---
-
 # #1605 — Class computed-name / setter scope local.tee type mismatch
 
 ## Problem

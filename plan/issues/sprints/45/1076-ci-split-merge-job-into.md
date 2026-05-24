@@ -1,6 +1,5 @@
 ---
 id: 1076
-sprint: 45
 title: "CI: split merge job into merge-report + regression-gate so push-to-main always refreshes baseline"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: easy
 reasoning_effort: medium
 task_type: bugfix
 goal: ci-hardening
+sprint: 45
 parent: 1080
 required_by: [1077, 1078, 1081]
 pr: null

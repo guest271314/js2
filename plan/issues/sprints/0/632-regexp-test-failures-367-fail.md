@@ -1,6 +1,5 @@
 ---
 id: 632
-sprint: 0
 title: "RegExp test failures (367 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_fail: 367
 files:
   src/codegen/expressions.ts:

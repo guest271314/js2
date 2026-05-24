@@ -1,12 +1,12 @@
 ---
 id: 94
-sprint: 0
 title: "Issue 94: Test262 coverage — language/function-code"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-09
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue 94: Test262 coverage — language/function-code
 

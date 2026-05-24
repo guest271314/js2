@@ -8,6 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: npm-library-support
+sprint: Backlog
 depends_on: [1043, 1045]
 ---
 # #1033 — Compile React to Wasm as a UI-library stress test

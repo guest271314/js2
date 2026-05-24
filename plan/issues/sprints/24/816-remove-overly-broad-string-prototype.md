@@ -1,6 +1,5 @@
 ---
 id: 816
-sprint: 24
 title: "- Remove overly broad String/prototype skip filter (1,073 tests re-enabled)"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: high
 goal: test-infrastructure
+sprint: 24
 test262_impact: 1073
 ---
 # #816 -- Remove overly broad String/prototype skip filter (1,073 tests re-enabled)

@@ -1,6 +1,5 @@
 ---
 id: 834
-sprint: 32
 title: "ES2025 Set methods: union, intersection, difference, symmetricDifference, isSubsetOf, isSupersetOf, isDisjointFrom"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: ci-hardening
+sprint: 32
 test262_skip: 216
 ---
 # #834 -- ES2025 Set prototype methods (216 tests)

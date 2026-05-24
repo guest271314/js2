@@ -1,6 +1,5 @@
 ---
 id: 1047
-sprint: 42
 title: "Instance fields leak onto prototype via _wrapForHost struct-field enumeration"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: class-elements-prototype-semantics
 goal: spec-completeness
+sprint: 42
 es_edition: multi
 ---
 # #1047 — Instance fields leak onto prototype via _wrapForHost struct-field enumeration

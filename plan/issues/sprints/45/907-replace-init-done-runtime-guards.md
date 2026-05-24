@@ -1,6 +1,5 @@
 ---
 id: 907
-sprint: 45
 title: "Replace __init_done runtime guards with start/init entry semantics"
 status: done
 created: 2026-04-02
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: developer-experience
+sprint: 45
 depends_on: [900]
 required_by: [908]
 files:

@@ -1,6 +1,5 @@
 ---
 id: 529
-sprint: 0
 title: "Speed up test262 runner with parallel workers + compilation cache"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: test-infrastructure
+sprint: 0
 type: infrastructure
 ---
 # #529: Speed up test262 runner with parallel workers + compilation cache

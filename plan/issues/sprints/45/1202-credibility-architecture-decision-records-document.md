@@ -1,6 +1,5 @@
 ---
 id: 1202
-sprint: 45
 title: "credibility: Architecture Decision Records — document the 8 core design choices that define js2wasm"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: docs
 area: architecture
 language_feature: n/a
 goal: contributor-readiness
+sprint: 45
 required_by: [1204, 1208]
 es_edition: n/a
 related: [1201, 1203, 1204]

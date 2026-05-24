@@ -1,6 +1,5 @@
 ---
 id: 176
-sprint: 6
 title: "Bug: Unicode escape sequences in property names not resolved"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: test-infrastructure
+sprint: 6
 files:
   tests/issue-176.test.ts:
     new:

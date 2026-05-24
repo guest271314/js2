@@ -1,6 +1,5 @@
 ---
 id: 611
-sprint: 0
 title: "Compiler crash: Cannot read 'kind' of undefined (2,995 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: error-model
+sprint: 0
 test262_ce: 2995
 files:
   src/codegen/expressions.ts:

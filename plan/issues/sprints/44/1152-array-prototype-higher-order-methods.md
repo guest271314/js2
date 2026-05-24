@@ -1,6 +1,5 @@
 ---
 id: 1152
-sprint: 44
 title: "Array.prototype higher-order methods fail with 'object is not a function' after PR #195 __get_builtin change (~217 test262 regressions)"
 status: done
 created: 2026-04-21
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: platform
+sprint: 44
 required_by: [1156]
 closed: 2026-04-21
 test262_fail: 217

@@ -1,12 +1,12 @@
 ---
 id: 133
-sprint: 2
 title: "typeof runtime comparison"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: platform
+sprint: 2
 ---
 # #133 — typeof runtime comparison
 

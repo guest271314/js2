@@ -1,6 +1,5 @@
 ---
 id: 1160
-sprint: 44
 title: "Array.from codegen error — test262-worker prototype poisoning leak (730 tests)"
 status: done
 created: 2026-04-21
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: array-builtins
 goal: spec-completeness
+sprint: 44
 closed: 2026-04-23
 pr: 7
 net_improvement: 578

@@ -8,6 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
+sprint: Backlog
 files:
   src/codegen/expressions.ts:
     breaking:

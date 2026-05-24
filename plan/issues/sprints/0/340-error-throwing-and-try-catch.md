@@ -1,6 +1,5 @@
 ---
 id: 340
-sprint: 0
 title: "- Error throwing and try/catch/finally"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: high
 feasibility: hard
 goal: test-infrastructure
+sprint: 0
 test262_skip: 1337
 test262_categories:
   - spread across 79+ categories (assert.throws patterns + try/catch control flow)

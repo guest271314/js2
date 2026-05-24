@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: eval, sloppy-mode
 goal: compatibility
+sprint: Backlog
 depends_on: [1261]
 ---
 # #1265 — eval tier 5: sloppy-mode direct eval — full local boxing + funcref globals

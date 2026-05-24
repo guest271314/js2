@@ -1,6 +1,5 @@
 ---
 id: 625
-sprint: 0
 title: "Wasm local.set type mismatch (552 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 required_by: [658]
 test262_ce: 552
 files:

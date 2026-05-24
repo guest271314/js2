@@ -1,6 +1,5 @@
 ---
 id: 349
-sprint: 7
 title: "- String() constructor as function"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: test-infrastructure
+sprint: 7
 test262_skip: 261
 test262_categories:
   - spread across 3 categories

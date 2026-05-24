@@ -1,6 +1,5 @@
 ---
 id: 523
-sprint: 0
 title: "Internal compiler errors: undefined property access (59 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: medium
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_ce: 59
 files:
   src/codegen/expressions.ts:

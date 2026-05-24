@@ -1,6 +1,5 @@
 ---
 id: 286
-sprint: 4
 title: "Logical assignment compile errors -- nullish and short-circuit"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: core-semantics
+sprint: 4
 files:
   src/codegen/expressions.ts:
     new: []

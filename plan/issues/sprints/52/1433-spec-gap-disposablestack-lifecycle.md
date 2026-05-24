@@ -1,8 +1,7 @@
 ---
 id: 1433
-sprint: 52
 title: "spec gap: DisposableStack and AsyncDisposableStack lifecycle semantics"
-status: in-review
+status: review
 created: 2026-05-11
 updated: 2026-05-20
 priority: medium
@@ -12,6 +11,7 @@ task_type: feature
 area: runtime
 language_feature: explicit-resource-management
 goal: spec-completeness
+sprint: 52
 related: [1020, 1036, 1037, 1413]
 ---
 # #1433 - DisposableStack and AsyncDisposableStack lifecycle semantics

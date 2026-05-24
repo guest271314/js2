@@ -1,10 +1,10 @@
 ---
 id: 1302
-sprint: 50
 title: "Wasm validation: closure references invalid global index when compiling lodash flow.js"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-07
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: closures, globals
 goal: npm-library-support
-depends_on: []
+sprint: 50
 related: [1292, 1295]
 ---
 # #1302 — Wasm validation: closure references invalid global index past declared range

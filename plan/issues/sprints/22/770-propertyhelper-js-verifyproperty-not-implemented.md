@@ -1,6 +1,5 @@
 ---
 id: 770
-sprint: 22
 title: "- propertyHelper.js verifyProperty not implemented (~1,219 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: critical
 feasibility: medium
 goal: property-model
+sprint: 22
 test262_fail: 1219
 ---
 # #770 -- propertyHelper.js verifyProperty not implemented (~1,219 tests)

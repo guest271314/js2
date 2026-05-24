@@ -1,6 +1,5 @@
 ---
 id: 395
-sprint: 0
 title: "- Runtime 'fn is not a function' errors (70 FAIL)"
 status: done
 created: 2026-03-16
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_fail: 70
 files:
   src/codegen/expressions.ts:

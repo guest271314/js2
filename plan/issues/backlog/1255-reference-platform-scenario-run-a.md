@@ -10,6 +10,7 @@ reasoning_effort: high
 task_type: feature
 language_feature: n/a
 goal: platform
+sprint: Backlog
 es_edition: n/a
 ---
 # #1255 -- Reference platform scenario: run a Node-oriented example on Wasmtime via Edge.js

@@ -1,6 +1,5 @@
 ---
 id: 1114
-sprint: 0
 title: "propertyHelper.js test262 harness (341 tests)"
 status: done
 created: 2026-03-19
@@ -11,6 +10,7 @@ feasibility: easy
 task_type: test
 language_feature: property-descriptors
 goal: property-model
+sprint: 0
 renumbered_from: 129
 depends_on: [1113]
 test262_skip: 341

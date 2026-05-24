@@ -1,12 +1,12 @@
 ---
 id: 200
-sprint: 2
 title: "JSON.parse/JSON.stringify: 24 compile errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #200 — JSON.parse/JSON.stringify: 24 compile errors
 

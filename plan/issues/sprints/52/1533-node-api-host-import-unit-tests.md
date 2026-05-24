@@ -1,9 +1,9 @@
 ---
 id: 1533
-sprint: 52
 title: "test: Node.js API host import unit tests (fs, crypto, process, console)"
 status: in-progress
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: test
 area: runtime
 language_feature: host-imports
 goal: nodejs-support
+sprint: 52
 related: [1491, 1492, 1493, 1490, 1494]
 ---
-
 # #1533 — Node.js API host import unit tests
 
 ## Problem

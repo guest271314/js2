@@ -1,6 +1,5 @@
 ---
 id: 357
-sprint: 0
 title: "- IIFE tagged templates"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: contributor-readiness
+sprint: 0
 test262_skip: 17
 test262_categories:
   - spread across 7 categories

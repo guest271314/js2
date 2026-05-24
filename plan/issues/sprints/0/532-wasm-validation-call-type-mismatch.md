@@ -1,6 +1,5 @@
 ---
 id: 532
-sprint: 0
 title: "Wasm validation: call type mismatch -- string addition folded to numeric"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: compilable
+sprint: 0
 ---
 # Issue #532: Wasm validation -- call type mismatch
 

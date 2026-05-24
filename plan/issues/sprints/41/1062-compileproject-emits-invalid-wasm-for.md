@@ -1,6 +1,5 @@
 ---
 id: 1062
-sprint: 41
 title: "compileProject emits invalid Wasm for lodash-es/clamp.js (toNumber type mismatch)"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: high
 goal: standalone-mode
+sprint: 41
 parent: 1031
 ---
 # #1062 — Codegen bug in lodash-es/clamp.js path: `if[0] expected type i32, found call of type externref`

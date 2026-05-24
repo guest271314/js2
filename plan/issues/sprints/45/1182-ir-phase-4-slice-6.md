@@ -1,6 +1,5 @@
 ---
 id: 1182
-sprint: 45
 title: "IR Phase 4 Slice 6 part 3 — host iterator protocol through the IR (`iter.*` instrs, Map/Set/generator iteration)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: ci-hardening
+sprint: 45
 depends_on: [1181]
 origin: surfaced from #1169e foundation PR (#63) — slice 6 step C from the spec, deferred from #1181 (vec fast path)
 related: [1169e, 1181]

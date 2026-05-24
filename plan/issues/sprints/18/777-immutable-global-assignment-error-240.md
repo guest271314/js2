@@ -1,6 +1,5 @@
 ---
 id: 777
-sprint: 18
 title: "- 'immutable global' assignment error (240 CE)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: compilable
+sprint: 18
 test262_ce: 240
 ---
 # #777 -- "immutable global" assignment error (240 CE)

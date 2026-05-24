@@ -1,6 +1,5 @@
 ---
 id: 1038
-sprint: 42
 title: "Function.prototype.bind not implemented (70 FAIL)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: function-bind
 goal: crash-free
+sprint: 42
 es_edition: es2015
 test262_fail: 70
 ---

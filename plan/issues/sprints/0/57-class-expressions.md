@@ -1,12 +1,12 @@
 ---
 id: 57
-sprint: 0
 title: "Issue 57: Class expressions"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: class-system
+sprint: 0
 ---
 # Issue 57: Class expressions
 

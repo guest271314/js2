@@ -1,12 +1,12 @@
 ---
 id: 50
-sprint: 0
 title: "Issue 50: Nullish and logical assignment operators"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: core-semantics
+sprint: 0
 ---
 # Issue 50: Nullish and logical assignment operators
 

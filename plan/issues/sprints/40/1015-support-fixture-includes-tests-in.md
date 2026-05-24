@@ -1,6 +1,5 @@
 ---
 id: 1015
-sprint: 40
 title: "Support fixture/includes tests in unified compilation mode (172 CE)"
 status: done
 created: 2026-04-10
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: 40
 ---
 # #1015 — Support fixture/includes tests in unified compilation mode (172 CE)
 

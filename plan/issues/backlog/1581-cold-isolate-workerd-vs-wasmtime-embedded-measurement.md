@@ -3,16 +3,17 @@ id: 1581
 title: "Add cold-isolate scenario alongside cold-process: measure via workerd (V8) and wasmtime-as-library (Wasm)"
 status: ready
 created: 2026-05-21
+updated: 2026-05-22
 priority: medium
 feasibility: medium
 reasoning_effort: high
 task_type: benchmark
 area: benchmarks, methodology
 goal: benchmark-credibility
+sprint: Backlog
 related: [1125, 1210]
 origin: methodology gap surfaced 2026-05-21 while wiring cold/warm + size + cold-start per-test charts
 ---
-
 # #1581 — Cold-isolate measurement (workerd + wasmtime-as-library)
 
 ## Context

@@ -1,6 +1,5 @@
 ---
 id: 668
-sprint: 14
 title: "'String literal not registered' for empty string (43 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: contributor-readiness
+sprint: 14
 test262_ce: 43
 files:
   src/codegen/index.ts:

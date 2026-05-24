@@ -1,10 +1,10 @@
 ---
 id: 1432
-sprint: 52
 title: "spec gap: parameter lists — rest/destructuring iterator semantics and default initializers"
 status: done
 created: 2026-05-11
 updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,9 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: parameters, destructuring
 goal: spec-completeness
+sprint: 52
 related: [869, 1158, 1372]
 ---
-
 ## Resolution
 
 Commit: `260f3df16` (now on `origin/main`).

@@ -1,12 +1,12 @@
 ---
 id: 184
-sprint: 2
 title: "- Function arity mismatch: 'not enough arguments on the stack'"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #184 -- Function arity mismatch: "not enough arguments on the stack"
 

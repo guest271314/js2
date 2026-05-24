@@ -1,6 +1,5 @@
 ---
 id: 514
-sprint: 0
 title: "Generator/async-gen 'options is not defined' (~684 CE)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: critical
 goal: async-model
+sprint: 0
 test262_ce: 684
 ---
 # #514 -- Generator/async-gen "options is not defined" (~684 CE)

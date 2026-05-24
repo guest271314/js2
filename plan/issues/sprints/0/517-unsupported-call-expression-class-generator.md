@@ -1,6 +1,5 @@
 ---
 id: 517
-sprint: 0
 title: "Unsupported call expression: class/generator/built-in method calls (2,164+ CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: maintainability
+sprint: 0
 test262_ce: 2164
 files:
   src/codegen/expressions.ts:

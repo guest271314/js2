@@ -1,6 +1,5 @@
 ---
 id: 149
-sprint: 0
 title: "Unsupported call expression patterns"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: compilable
+sprint: 0
 depends_on: [232]
 files:
   src/codegen/expressions.ts:

@@ -1,6 +1,5 @@
 ---
 id: 1092
-sprint: 41
 title: "Wrong error type — 69 tests throw Test262Error instead of expected TypeError"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: error-types
 goal: error-model
+sprint: 41
 es_edition: multi
 ---
 # #1092 — Wrong error type: 69 tests expect TypeError but get Test262Error

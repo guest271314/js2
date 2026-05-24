@@ -10,7 +10,9 @@ reasoning_effort: high
 task_type: feature
 language_feature: eval
 goal: platform
+sprint: Backlog
 depends_on: [1164, 1058]
+required_by: [1584]
 es_edition: multi
 ---
 # #1066 — Support `eval` in standalone mode via host-compiled Wasm child module

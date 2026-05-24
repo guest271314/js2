@@ -1,6 +1,5 @@
 ---
 id: 998
-sprint: 40
 title: "Class static-private method line-terminator variants still emit argless call/return_call in constructors (121 CE)"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: class-system
+sprint: 40
 test262_ce: 121
 ---
 Already fixed by prior work. Verified 2026-04-11: all 4 named samples (new-sc-line-gen-rs-static-method, new-no-sc-line-method, after-same-line-static-async variants) compile without CE. Regression tests in `tests/issue-998.test.ts`.

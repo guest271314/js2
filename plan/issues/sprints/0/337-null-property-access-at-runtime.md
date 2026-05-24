@@ -1,6 +1,5 @@
 ---
 id: 337
-sprint: 0
 title: "- Null property access at runtime"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: error-model
+sprint: 0
 test262_fail: 13
 test262_refs:
   - test/language/expressions/assignment/dstr/array-rest-put-prop-ref.js

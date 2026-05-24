@@ -1,6 +1,5 @@
 ---
 id: 823
-sprint: 25
 title: "Destructuring initializer not evaluated"
 status: done
 created: 2026-03-27
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: core-semantics
+sprint: 25
 parent: 779
 test262_fail: 121
 ---

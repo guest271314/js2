@@ -1,6 +1,5 @@
 ---
 id: 547
-sprint: 0
 title: "Restore search/filter UI in report.html"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: developer-experience
+sprint: 0
 ---
 # Issue #547: Restore search/filter UI in report.html
 

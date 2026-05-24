@@ -1,11 +1,10 @@
 ---
 id: 1231
-sprint: 47
 title: "perf: struct field type inference — eliminate boxing in object properties"
 status: done
 created: 2026-05-02
-completed: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-02
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -13,7 +12,9 @@ task_type: feature
 area: ir
 language_feature: object-literal, property-access
 goal: performance
+sprint: 47
 depends_on: [1169n, 1169o, 1169p]
+required_by: [1269, 1270]
 es_edition: ES2015+
 related: [1169, 1195]
 ---

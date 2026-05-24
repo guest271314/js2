@@ -1,6 +1,5 @@
 ---
 id: 658
-sprint: 0
 title: "local.set type mismatch residual (659 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 0
 depends_on: [625]
 test262_ce: 659
 files:

@@ -1,6 +1,5 @@
 ---
 id: 659
-sprint: 0
 title: "Call type mismatch residual (609 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 0
 depends_on: [626]
 required_by: [698]
 test262_ce: 609

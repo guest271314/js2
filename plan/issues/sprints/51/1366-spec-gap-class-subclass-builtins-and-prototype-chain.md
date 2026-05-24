@@ -1,9 +1,10 @@
 ---
 id: 1366
-sprint: 51
 title: "spec gap: class subclass + subclass-builtins prototype chain (~154 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: classes
 goal: spec-completeness
+sprint: 51
 ---
 # #1366 — Class subclass and subclass-builtins prototype chain
 

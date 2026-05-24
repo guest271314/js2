@@ -1,6 +1,5 @@
 ---
 id: 458
-sprint: 9
 title: "Map/Set via host imports"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: high
 goal: iterator-protocol
+sprint: 9
 ---
 # #458 — Map/Set via host imports
 

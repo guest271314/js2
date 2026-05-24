@@ -1,6 +1,5 @@
 ---
 id: 1185
-sprint: 45
 title: "IR Phase 4 — refactor: thread `IrLowerResolver` through `LowerCtx` (retire per-feature shortcuts)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: refactor
 area: codegen
 language_feature: compiler-internals
 goal: maintainability
+sprint: 45
 required_by: [1205]
 es_edition: n/a
 related: [1169e, 1181, 1182, 1183]

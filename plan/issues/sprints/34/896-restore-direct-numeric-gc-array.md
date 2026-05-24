@@ -1,6 +1,5 @@
 ---
 id: 896
-sprint: 34
 title: "Restore direct numeric GC-array codegen in hot loops"
 status: done
 created: 2026-04-02
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 34
 required_by: [901]
 files:
   playground/examples/benchmarks/array.ts:

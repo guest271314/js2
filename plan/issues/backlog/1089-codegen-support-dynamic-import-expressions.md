@@ -9,6 +9,7 @@ feasibility: hard
 reasoning_effort: high
 task_type: feature
 goal: async-model
+sprint: Backlog
 ---
 # #1089 — Support dynamic `import()` expressions
 

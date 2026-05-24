@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: Backlog
 files:
   tests/test262-runner.ts:
     modify:

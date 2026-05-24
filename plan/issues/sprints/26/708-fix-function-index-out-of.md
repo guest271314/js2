@@ -1,12 +1,12 @@
 ---
 id: 708
-sprint: 26
 title: "Fix: function index out of bounds in Wasm validation (167 CE)"
 status: done
 created: 2026-03-21
 updated: 2026-04-14
 completed: 2026-03-21
 goal: compilable
+sprint: 26
 ---
 # Issue #708: Wasm validation: function index out of bounds
 

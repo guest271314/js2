@@ -1,6 +1,5 @@
 ---
 id: 350
-sprint: 0
 title: "Symbol type skip filter narrowing"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 ---
 # Issue #350: Symbol type (398 skip)
 

@@ -1,6 +1,5 @@
 ---
 id: 1074
-sprint: 41
 title: "Surface ESM default export as a named Wasm function export"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: feature
 language_feature: esm-export-default
 goal: npm-library-support
+sprint: 41
 parent: 1031
 depends_on: [1060, 1061]
 required_by: [1075, 1107, 1108]

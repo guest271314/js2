@@ -10,6 +10,7 @@ reasoning_effort: max
 task_type: feature
 language_feature: collections
 goal: iterator-protocol
+sprint: Backlog
 es_edition: ES2015
 note: "Verified 2026-05-21: builtinCtors moved from runtime.ts L872-897 to L1856"
 ---

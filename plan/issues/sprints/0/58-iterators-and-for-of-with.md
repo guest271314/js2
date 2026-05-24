@@ -1,12 +1,12 @@
 ---
 id: 58
-sprint: 0
 title: "Issue 58: Iterators and for...of with custom iterables"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: iterator-protocol
+sprint: 0
 ---
 # Issue 58: Iterators and for...of with custom iterables
 

@@ -1,6 +1,5 @@
 ---
 id: 1060
-sprint: 41
 title: "ModuleResolver prefers @types/*/.d.ts over real .js body, dropping npm implementations"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 41
 parent: 1031
 required_by: [1074, 1075]
 ---

@@ -1,6 +1,5 @@
 ---
 id: 202
-sprint: 0
 title: "Variable scope and hoisting: 'Cannot find name' / 'Unknown identifier'"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-13
 priority: low
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

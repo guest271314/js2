@@ -1,9 +1,10 @@
 ---
 id: 1395
-sprint: 51
 title: "class static method descriptors: class identifier resolves to string_constant, not constructor object"
 status: done
 created: 2026-05-09
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,7 +12,7 @@ task_type: feature
 area: codegen
 language_feature: class, static methods, property descriptors
 goal: spec-completeness
-depends_on: []
+sprint: 51
 ---
 # #1395 — Static class identifier as constructor object
 

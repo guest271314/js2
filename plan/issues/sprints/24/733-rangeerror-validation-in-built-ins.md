@@ -1,6 +1,5 @@
 ---
 id: 733
-sprint: 24
 title: "- RangeError validation in built-ins (442 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: error-model
+sprint: 24
 test262_fail: 442
 files:
   src/codegen/expressions.ts:

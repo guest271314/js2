@@ -1,6 +1,5 @@
 ---
 id: 1112
-sprint: 0
 title: "delete operator via undefined sentinel (232 tests)"
 status: done
 created: 2026-03-19
@@ -11,6 +10,7 @@ feasibility: medium
 task_type: feature
 language_feature: delete-operator
 goal: property-model
+sprint: 0
 renumbered_from: 124
 test262_skip: 232
 files:

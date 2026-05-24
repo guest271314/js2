@@ -1,6 +1,5 @@
 ---
 id: 692
-sprint: 0
 title: "Async pipelined execution: overlap load/compile/run stages"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: hard
 goal: spec-completeness
+sprint: 0
 depends_on: [689, 690, 691]
 files:
   scripts/run-test262.ts:

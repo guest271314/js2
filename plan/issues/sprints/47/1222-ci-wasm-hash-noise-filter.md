@@ -1,6 +1,5 @@
 ---
 id: 1222
-sprint: 47
 title: "ci: wasm-hash noise filter — exclude byte-identical regressions from PR gate"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: feature
 area: ci
 language_feature: n/a
 goal: ci-hardening
+sprint: 47
 es_edition: n/a
 related: [1192, 1217]
 origin: "S46 regression analysis (2026-05-01): PR #111 had byte-identical Wasm on both branches yet showed net=-3 due to symmetric flip noise. Same 19 fail-flips appeared in unrelated PR #114. The dev-self-merge gate cannot distinguish runner-variance flips from real regressions unless the Wasm hash is tracked."

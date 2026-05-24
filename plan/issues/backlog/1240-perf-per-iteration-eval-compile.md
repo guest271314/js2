@@ -11,6 +11,7 @@ task_type: performance
 area: codegen
 language_feature: eval
 goal: spec-completeness
+sprint: Backlog
 related: [1229, 1207, 1227]
 es_edition: ES5
 test262_fail: 0

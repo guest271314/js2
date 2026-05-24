@@ -1,12 +1,12 @@
 ---
 id: 88
-sprint: 0
 title: "Issue 88: Test262 coverage — language/expressions"
 status: done
 created: 2026-03-09
 updated: 2026-04-14
 completed: 2026-03-09
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue 88: Test262 coverage — language/expressions
 

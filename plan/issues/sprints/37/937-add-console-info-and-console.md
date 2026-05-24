@@ -1,6 +1,5 @@
 ---
 id: 937
-sprint: 37
 title: "Add console.info() and console.debug() as aliases for console.log()"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: platform
+sprint: 37
 tags: [good-first-issue, codegen, dx]
 files:
   src/codegen/expressions.ts:

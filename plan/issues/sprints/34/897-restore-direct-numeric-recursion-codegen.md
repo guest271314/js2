@@ -1,6 +1,5 @@
 ---
 id: 897
-sprint: 34
 title: "Restore direct numeric recursion codegen for fib hot path"
 status: done
 created: 2026-04-02
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 34
 required_by: [902]
 files:
   playground/examples/benchmarks/fib.ts:

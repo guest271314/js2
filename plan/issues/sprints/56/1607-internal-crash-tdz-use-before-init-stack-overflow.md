@@ -1,20 +1,19 @@
 ---
 id: 1607
-sprint: 56
 title: "codegen crash: 'Maximum call stack size exceeded' on use-before-initialization (TDZ) in declaration statements"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: tdz-lexical-bindings
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 8
 ---
-
 # #1607 — Compiler stack overflow on use-before-initialization declarations
 
 ## Problem

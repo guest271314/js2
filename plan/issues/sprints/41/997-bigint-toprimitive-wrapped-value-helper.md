@@ -1,6 +1,5 @@
 ---
 id: 997
-sprint: 41
 title: "BigInt ToPrimitive/wrapped-value helper emits i64 into externref __call_fn_0 wrapper (55 CE)"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 41
 test262_ce: 55
 ---
 # #997 -- BigInt ToPrimitive/wrapped-value helper emits i64 into externref `__call_fn_0` wrapper (55 CE)

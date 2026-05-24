@@ -1,9 +1,9 @@
 ---
 id: 1456
-sprint: 52
 title: "spec gap: private-reference assignment to readonly accessor / method throws TypeError"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes, private-fields, compound-assignment
 goal: spec-completeness
+sprint: 52
 related: [1431, 1434]
 ---
 # #1456 — Private accessor/method LHS in compound assignment must throw TypeError

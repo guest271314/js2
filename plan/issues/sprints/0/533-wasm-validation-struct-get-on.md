@@ -1,6 +1,5 @@
 ---
 id: 533
-sprint: 0
 title: "Wasm validation: struct.get on null ref type (125 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 0
 test262_ce: 125
 files:
   src/codegen/expressions.ts:

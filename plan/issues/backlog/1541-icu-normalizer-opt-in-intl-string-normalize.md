@@ -1,9 +1,9 @@
 ---
 id: 1541
-sprint: backlog
 title: "Opt-in icu_normalizer (icu4x) for String.prototype.normalize"
 status: backlog
 created: 2026-05-20
+updated: 2026-05-20
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: string
 goal: standalone-wasm
+sprint: Backlog
 related: [1535]
 ---
-
 # #1541 — Opt-in icu_normalizer for String.prototype.normalize
 
 ## Problem

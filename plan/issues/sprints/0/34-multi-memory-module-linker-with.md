@@ -1,12 +1,12 @@
 ---
 id: 34
-sprint: 0
 title: "Issue 34: Multi-Memory Module Linker with Isolation Validation"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: standalone-mode
+sprint: 0
 ---
 # Issue 34: Multi-Memory Module Linker with Isolation Validation
 

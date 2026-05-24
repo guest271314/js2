@@ -1,12 +1,12 @@
 ---
 id: 36
-sprint: 0
 title: "Issue #36: Static class members"
 status: done
 created: 2026-03-01
 updated: 2026-04-14
 completed: 2026-03-01
 goal: builtin-methods
+sprint: 0
 ---
 # Issue #36: Static class members
 

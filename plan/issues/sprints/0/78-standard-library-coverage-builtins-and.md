@@ -1,12 +1,12 @@
 ---
 id: 78
-sprint: 0
 title: "Issue 78: Standard library coverage — builtins and static methods"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: core-semantics
+sprint: 0
 ---
 # Issue 78: Standard library coverage — builtins and static methods
 

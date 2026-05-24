@@ -1,6 +1,5 @@
 ---
 id: 1108
-sprint: 42
 title: "lodash-es add: export default of HOF closure result not surfaced as Wasm export"
 status: done
 created: 2026-04-12
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 42
 depends_on: [1074, 1107]
 ---
 # #1108 — lodash-es add: export default of HOF closure not exported

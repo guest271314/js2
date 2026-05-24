@@ -1,6 +1,5 @@
 ---
 id: 329
-sprint: 0
 title: "- Object.setPrototypeOf support"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: property-model
+sprint: 0
 test262_ce: 16
 test262_refs:
   - test/language/expressions/super/prop-dot-obj-ref-this.js

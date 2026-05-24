@@ -1,10 +1,10 @@
 ---
 id: 1126
-sprint: 50
 title: "Infer when JavaScript number flows can be safely lowered to int32 or uint32"
 status: done
 created: 2026-04-16
 updated: 2026-05-02
+completed: 2026-05-07
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: numeric-inference
 goal: core-semantics
+sprint: 50
 depends_on: [1124]
 ---
 > **Deferred from Sprint 46 → Sprint 47 → Sprint 48.** Each sprint it competed

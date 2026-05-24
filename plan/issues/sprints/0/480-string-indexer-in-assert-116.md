@@ -1,6 +1,5 @@
 ---
 id: 480
-sprint: 0
 title: "String() indexer in assert — 116 tests"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: low
 goal: compilable
+sprint: 0
 ---
 # #480 — String() indexer in assert (116 tests)
 

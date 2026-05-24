@@ -1,6 +1,5 @@
 ---
 id: 1228
-sprint: 47
 title: "IR selector widening: accept void return + any params"
 status: done
 created: 2026-05-01
@@ -13,6 +12,7 @@ task_type: refactor
 area: ir
 language_feature: n/a
 goal: maintainability
+sprint: 47
 es_edition: n/a
 related: [1169q]
 ---

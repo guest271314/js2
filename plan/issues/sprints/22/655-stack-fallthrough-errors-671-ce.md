@@ -1,6 +1,5 @@
 ---
 id: 655
-sprint: 22
 title: "- Stack fallthrough errors (671 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-03-20
 priority: high
 feasibility: medium
 goal: compilable
+sprint: 22
 test262_ce: 671
 files:
   src/codegen/stack-balance.ts:

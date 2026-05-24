@@ -1,6 +1,5 @@
 ---
 id: 465
-sprint: 0
 title: "Inline small functions to reduce call overhead"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: performance
+sprint: 0
 files:
   src/codegen/expressions.ts:
     breaking:

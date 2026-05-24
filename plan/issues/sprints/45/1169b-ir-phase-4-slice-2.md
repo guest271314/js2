@@ -1,6 +1,5 @@
 ---
 id: 1169b
-sprint: 45
 title: "IR Phase 4 Slice 2 — object literals and property access through IR path"
 status: done
 created: 2026-04-26
@@ -13,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: compiler-internals
 goal: ci-hardening
+sprint: 45
 depends_on: [1169a, 1168]
 required_by: [1169c]
 ---

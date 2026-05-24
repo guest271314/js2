@@ -1,6 +1,5 @@
 ---
 id: 1097
-sprint: 42
 title: "Remove stale import-helper generator path in compiler/output.ts"
 status: done
 created: 2026-04-12
@@ -12,6 +11,7 @@ reasoning_effort: low
 task_type: refactor
 language_feature: compiler-internals
 goal: maintainability
+sprint: 42
 closed: 2026-04-12
 pr: 142
 es_edition: n/a

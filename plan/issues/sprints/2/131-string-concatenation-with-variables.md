@@ -1,12 +1,12 @@
 ---
 id: 131
-sprint: 2
 title: "String concatenation with variables"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: standalone-mode
+sprint: 2
 ---
 # #131 — String concatenation with variables
 

@@ -1,6 +1,5 @@
 ---
 id: 635
-sprint: 14
 title: "Add missing Instr opcodes to IR types (158 unsafe casts)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-20
 priority: high
 feasibility: easy
 goal: compilable
+sprint: 14
 files:
   src/ir/types.ts:
     breaking:

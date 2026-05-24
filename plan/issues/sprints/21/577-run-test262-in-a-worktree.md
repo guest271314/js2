@@ -1,6 +1,5 @@
 ---
 id: 577
-sprint: 21
 title: "- Run test262 in a worktree to avoid mid-run code changes"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: high
 feasibility: easy
 goal: npm-library-support
+sprint: 21
 files:
   scripts/run-test262.ts:
     new:

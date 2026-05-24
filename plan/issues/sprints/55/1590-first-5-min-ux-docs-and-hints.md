@@ -1,17 +1,18 @@
 ---
 id: 1590
-sprint: 55
 title: "Improve first-5-minutes UX: Wasmtime run docs, coverage honesty, CLI run-hint, standalone I/O docs, pitch accuracy, comparison section"
 status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: easy
 reasoning_effort: medium
 task_type: docs
-goal: developer-experience
 area: docs+cli
 language_feature: none
+goal: developer-experience
+sprint: 55
 ---
 # #1590 — Improve js2wasm UX based on early user feedback
 

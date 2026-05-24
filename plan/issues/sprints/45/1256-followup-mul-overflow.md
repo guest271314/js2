@@ -1,6 +1,5 @@
 ---
 id: 1256
-sprint: 45
 title: "i32 fast path for `*` is not spec-faithful when true product exceeds 2^53"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: correctness
 area: codegen
 language_feature: bitwise-coercion
 goal: core-semantics
+sprint: 45
 parent: 1179
 pr: 69
 merged: 2026-04-27

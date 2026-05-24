@@ -1,6 +1,5 @@
 ---
 id: 1121
-sprint: 45
 title: "Infer numeric recursive fast path without JSDoc hints on exported entrypoints"
 status: done
 created: 2026-04-15
@@ -13,6 +12,7 @@ task_type: performance
 area: codegen
 language_feature: numeric-inference
 goal: core-semantics
+sprint: 45
 depends_on: [1124]
 ---
 # #1121 -- Infer numeric recursive fast path without JSDoc hints on exported entrypoints

@@ -2,21 +2,21 @@
 id: 1247
 title: "compiler: typed `string[]` local with `path.split('/')` initializer triggers struct-type mismatch"
 status: done
+created: 2026-05-02
+updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: npm-library-support
-depends_on: []
+sprint: 47
 related: [1244]
-created: 2026-05-02
-updated: 2026-05-02
 es_edition: ES5
 origin: "Surfaced by #1244 Hono Tier 1a stress test. Hono's `splitPath` is typed `(path: string) => string[]`; compiling that signature triggers a Wasm-level type mismatch at instantiation."
 ---
-
 # #1247 — Typed `string[]` local with `String.prototype.split` initializer triggers struct-type mismatch
 
 ## Problem

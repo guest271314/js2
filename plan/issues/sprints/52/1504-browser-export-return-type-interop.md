@@ -1,9 +1,9 @@
 ---
 id: 1504
-sprint: 52
 title: "browser: marshal compiled export return values (structs/arrays) to plain JS"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: browser-support
+sprint: 52
 related: [1308, 1382, 1500]
 ---
-
 # #1504 — Marshal compiled return values to plain JS at the export boundary
 
 ## Problem

@@ -1,6 +1,5 @@
 ---
 id: 416
-sprint: 9
 title: "Compound assignment on element access (non-ref targets)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: builtin-methods
+sprint: 9
 test262_ce: 11
 complexity: S
 files:

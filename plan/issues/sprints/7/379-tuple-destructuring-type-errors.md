@@ -1,6 +1,5 @@
 ---
 id: 379
-sprint: 7
 title: "- Tuple/destructuring type errors"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 7
 test262_ce: 10
 files:
   src/codegen/expressions.ts:

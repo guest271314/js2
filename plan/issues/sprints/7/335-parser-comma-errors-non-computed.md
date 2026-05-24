@@ -1,6 +1,5 @@
 ---
 id: 335
-sprint: 7
 title: "- Parser comma errors (non-computed-property contexts)"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: generator-model
+sprint: 7
 test262_ce: 75
 test262_refs:
   - test/language/expressions/bitwise-and/bigint-non-primitive.js

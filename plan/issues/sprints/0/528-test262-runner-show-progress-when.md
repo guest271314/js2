@@ -1,6 +1,5 @@
 ---
 id: 528
-sprint: 0
 title: "Test262 runner -- show progress when starting each batch"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 0
 ---
 # Issue #528: Test262 runner -- show progress when starting each batch
 

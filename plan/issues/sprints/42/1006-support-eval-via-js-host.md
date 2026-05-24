@@ -1,6 +1,5 @@
 ---
 id: 1006
-sprint: 42
 title: "Support eval via JS host import"
 status: done
 created: 2026-04-09
@@ -12,7 +11,8 @@ reasoning_effort: medium
 task_type: feature
 language_feature: eval
 goal: spec-completeness
-required_by: [1073]
+sprint: 42
+required_by: [1073, 1584]
 es_edition: multi
 ---
 # #1006 -- Support `eval` via JS host import

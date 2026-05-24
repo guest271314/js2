@@ -1,12 +1,12 @@
 ---
 id: 62
-sprint: 0
 title: "Issue 62: JSON.parse / JSON.stringify via host"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-02
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 62: JSON.parse / JSON.stringify via host
 

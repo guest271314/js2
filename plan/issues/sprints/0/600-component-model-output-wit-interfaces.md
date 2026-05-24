@@ -1,6 +1,5 @@
 ---
 id: 600
-sprint: 0
 title: "Component Model output: WIT interfaces from TypeScript types"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: platform
+sprint: 0
 depends_on: [598, 599]
 required_by: [639]
 files:

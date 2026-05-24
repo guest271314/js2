@@ -1,12 +1,12 @@
 ---
 id: 112
-sprint: 1
 title: "Issue 112: Number static methods and constants (ES2015)"
 status: done
 created: 2026-03-10
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 1
 ---
 # Issue 112: Number static methods and constants (ES2015)
 

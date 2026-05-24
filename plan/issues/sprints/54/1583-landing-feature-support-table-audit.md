@@ -1,16 +1,18 @@
 ---
 id: 1583
-sprint: 54
-title: Audit landing-page feature support table (ES editions section)
+title: "Audit landing-page feature support table (ES editions section)"
 status: done
+created: 2026-05-22
+updated: 2026-05-23
+completed: 2026-05-23
 priority: medium
 feasibility: medium
 reasoning_effort: medium
 task_type: docs+ui
 area: landing-page
 goal: trustworthy-conformance-reporting
+sprint: 54
 ---
-
 # Audit landing-page feature support table (ES editions section)
 
 The landing page (https://js2.loopdive.com/, served from `index.html`) has a

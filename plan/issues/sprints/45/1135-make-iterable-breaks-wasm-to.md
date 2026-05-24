@@ -1,6 +1,5 @@
 ---
 id: 1135
-sprint: 45
 title: "`__make_iterable` breaks Wasm-to-Wasm vec→externref destructuring after setExports"
 status: done
 created: 2026-04-18
@@ -9,6 +8,7 @@ completed: 2026-04-25
 priority: high
 feasibility: medium
 goal: spec-completeness
+sprint: 45
 impact: high-leverage — obscures test262 pass/fail for rest-destructuring PRs
 origin: dev investigation 2026-04-18 (follow-up to PR #219)
 resolved: 2026-04-25 — fix landed via PR #245 (commit c56ad6f47), validated by dev-d on sprint 45

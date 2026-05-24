@@ -1,10 +1,10 @@
 ---
 id: 1282
-sprint: 48
 title: "ESLint Tier 1 stress test — minimal Linter.verify() compilation"
 status: done
 created: 2026-05-02
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen
 language_feature: classes, Map, WeakMap, CJS, instanceof
 goal: npm-library-support
+sprint: 48
 depends_on: [1277, 1279]
 related: [1244, 1274, 1287, 1289]
 ---

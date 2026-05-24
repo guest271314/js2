@@ -1,12 +1,12 @@
 ---
 id: 135
-sprint: 2
 title: "Ternary/conditional returning non-boolean values"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: core-semantics
+sprint: 2
 ---
 # #135 — Ternary/conditional returning non-boolean values
 

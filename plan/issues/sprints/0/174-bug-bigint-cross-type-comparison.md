@@ -1,6 +1,5 @@
 ---
 id: 174
-sprint: 0
 title: "Bug: BigInt cross-type comparison and arithmetic failures"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: low
 goal: crash-free
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

@@ -2,19 +2,20 @@
 id: 1565
 title: "ToBoolean BigInt: must use i64.eqz, not f64.convert_i64_s (§7.1.2)"
 status: done
-sprint: 55
+created: 2026-05-21
+updated: 2026-05-23
+completed: 2026-05-23
 priority: medium
 feasibility: easy
 reasoning_effort: low
-task_type: bug
+task_type: bugfix
 area: codegen
-goal: spec-completeness
-es_edition: ES2020
 language_feature: bigint
+goal: spec-completeness
+sprint: 55
+es_edition: ES2020
 test262_fail: 12
-created: 2026-05-21
 ---
-
 # ToBoolean BigInt: must use i64.eqz, not f64.convert_i64_s
 
 ## Problem

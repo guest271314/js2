@@ -1,9 +1,10 @@
 ---
 id: 1580
-sprint: 54
 title: "string-hash benchmark: wasm-validator pre-existing bug + uncompetitive hot runtime"
 status: done
 created: 2026-05-21
+updated: 2026-05-23
+completed: 2026-05-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,10 +12,10 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
+sprint: 54
 related: [1175, 1178, 1210, 1184]
 origin: surfaced again by 4-lane competitive benchmark refresh
 ---
-
 # #1580 — string-hash benchmark: wasm-validator failure + uncompetitive runtime
 
 ## Problem

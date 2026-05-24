@@ -1,6 +1,5 @@
 ---
 id: 675
-sprint: 24
 title: "Dynamic import() support"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: async-model
+sprint: 24
 test262_fail: 471
 files:
   src/codegen/expressions.ts:

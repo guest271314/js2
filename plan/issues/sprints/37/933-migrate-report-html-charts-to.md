@@ -1,6 +1,5 @@
 ---
 id: 933
-sprint: 37
 title: "Migrate report.html charts to shared t262-charts.js web components"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: 37
 depends_on: [925]
 ---
 # #933 — Migrate report.html charts to shared t262-charts.js web components

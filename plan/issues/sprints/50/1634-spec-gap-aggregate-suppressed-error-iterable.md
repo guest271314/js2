@@ -1,10 +1,9 @@
 ---
 id: 1634
-renumbered_from: 1340
-sprint: 50
 title: "spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails)"
 status: ready
 created: 2026-05-08
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +11,8 @@ task_type: bugfix
 area: runtime, codegen
 language_feature: error
 goal: spec-completeness
+sprint: 50
+renumbered_from: 1340
 parent: 1328
 ---
 # #1340 — AggregateError / SuppressedError: errors iterable, cause option

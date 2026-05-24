@@ -4,11 +4,13 @@ title: "__any_eq loose equality missing cross-tag coercion — null==undefined, 
 status: done
 created: 2026-04-17
 updated: 2026-04-17
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 task_type: bugfix
 language_feature: comparison
 goal: platform
+sprint: Backlog
 es_edition: es5
 found_by: "#1093 Phase 2 audit"
 ---

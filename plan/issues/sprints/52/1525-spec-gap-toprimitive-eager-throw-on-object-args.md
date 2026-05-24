@@ -1,6 +1,5 @@
 ---
 id: 1525
-sprint: 52
 title: "spec gap: built-in coercion paths throw 'Cannot convert object to primitive value' eagerly"
 status: ready
 created: 2026-05-20
@@ -11,12 +10,12 @@ reasoning_effort: medium
 task_type: bugfix
 area: codegen
 language_feature: to-primitive, abstract-operations
+sprint: 52
 es_edition: ES2024
 test262_category: multiple (Array, String, DataView, Boolean, equality)
 test262_count: 170
 related: [1253, 1129, 1434]
 ---
-
 # #1525 — `Cannot convert object to primitive value` raised too eagerly
 
 ## Problem

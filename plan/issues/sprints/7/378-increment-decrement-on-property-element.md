@@ -1,6 +1,5 @@
 ---
 id: 378
-sprint: 7
 title: "- Increment/decrement on property/element access"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: contributor-readiness
+sprint: 7
 test262_ce: 12
 files:
   src/codegen/expressions.ts:

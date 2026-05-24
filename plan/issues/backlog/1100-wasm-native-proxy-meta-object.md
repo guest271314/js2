@@ -10,6 +10,7 @@ reasoning_effort: max
 task_type: feature
 language_feature: proxy
 goal: spec-completeness
+sprint: Backlog
 es_edition: ES2015
 ---
 # #1100 — Wasm-native Proxy: meta-object protocol without JS host

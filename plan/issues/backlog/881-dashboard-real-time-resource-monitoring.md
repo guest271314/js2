@@ -8,6 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: observability
+sprint: Backlog
 depends_on: [876]
 ---
 # #881 -- Dashboard: real-time resource monitoring

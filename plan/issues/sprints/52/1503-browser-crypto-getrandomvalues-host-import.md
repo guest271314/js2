@@ -1,9 +1,9 @@
 ---
 id: 1503
-sprint: 52
 title: "browser: crypto.getRandomValues / crypto.randomUUID host imports"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: browser-support
+sprint: 52
 related: [1500, 1501, 1502]
 ---
-
 # #1503 — Web Crypto host imports: `getRandomValues` and `randomUUID`
 
 ## Problem

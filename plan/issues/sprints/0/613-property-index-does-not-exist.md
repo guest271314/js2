@@ -1,6 +1,5 @@
 ---
 id: 613
-sprint: 0
 title: "Property 'index' does not exist on string[] (206 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: builtin-methods
+sprint: 0
 test262_ce: 206
 files:
   src/checker/lib-es5.ts:

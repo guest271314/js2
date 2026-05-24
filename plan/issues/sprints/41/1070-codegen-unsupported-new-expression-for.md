@@ -1,6 +1,5 @@
 ---
 id: 1070
-sprint: 41
 title: "codegen: unsupported new expression for Intl.ListFormat (and other Intl builtins)"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: intl
 goal: standalone-mode
+sprint: 41
 parent: 1034
 closed: 2026-04-12
 pr: 141

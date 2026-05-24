@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: standalone-mode
+sprint: Backlog
 subtask_of: 688
 ---
 # #809 — Extract native string helpers from index.ts → native-strings.ts

@@ -1,6 +1,5 @@
 ---
 id: 472
-sprint: 0
 title: "Async/await support for test262 conformance (1,405 skipped tests)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: async-model
+sprint: 0
 ---
 # #472 -- Async/await support for test262 conformance
 

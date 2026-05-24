@@ -1,6 +1,5 @@
 ---
 id: 459
-sprint: 0
 title: "Object.defineProperty getter/setter subset"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: property-model
+sprint: 0
 ---
 # #459 — Object.defineProperty getter/setter subset
 

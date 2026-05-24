@@ -1,9 +1,10 @@
 ---
 id: 1376
-sprint: 51
 title: "IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: feature
 area: ir, ci
 language_feature: all
 goal: ir-full-coverage
+sprint: 51
 ---
 # #1376 — IR fallback telemetry gate
 

@@ -1,6 +1,5 @@
 ---
 id: 452
-sprint: 0
 title: "Compile TypeScript compiler to Wasm"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: core-semantics
+sprint: 0
 ---
 # #452 — Compile TypeScript compiler to Wasm
 

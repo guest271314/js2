@@ -1,6 +1,5 @@
 ---
 id: 289
-sprint: 0
 title: "Issue #289: For-in compile errors -- property enumeration edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: core-semantics
+sprint: 0
 files:
   src/codegen/statements.ts:
     new: []

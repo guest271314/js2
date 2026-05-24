@@ -1,6 +1,5 @@
 ---
 id: 843
-sprint: 32
 title: "super keyword in object literals and edge cases (20 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: ci-hardening
+sprint: 32
 test262_ce: 20
 ---
 # #843 -- super keyword in object literals and edge cases (20 CE)

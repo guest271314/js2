@@ -1,6 +1,5 @@
 ---
 id: 683
-sprint: 15
 title: "Runtime type narrowing: emit specialized code for typeof/instanceof guards"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: class-system
+sprint: 15
 files:
   src/codegen/expressions.ts:
     breaking:

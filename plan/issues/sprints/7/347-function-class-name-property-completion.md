@@ -1,6 +1,5 @@
 ---
 id: 347
-sprint: 7
 title: "- Function/class .name property completion"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: npm-library-support
+sprint: 7
 test262_skip: 404
 test262_categories:
   - spread across 15 categories

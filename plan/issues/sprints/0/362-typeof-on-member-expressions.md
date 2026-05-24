@@ -1,6 +1,5 @@
 ---
 id: 362
-sprint: 0
 title: "typeof on member expressions"
 status: done
 created: 2026-03-13
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: medium
 goal: builtin-methods
+sprint: 0
 ---
 # typeof on member expressions
 

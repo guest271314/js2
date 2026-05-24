@@ -2,20 +2,20 @@
 id: 779b
 title: "class/elements same-line / semicolon multi-definition parsing"
 status: done
-sprint: 53
 created: 2026-05-21
 updated: 2026-05-21
+completed: 2026-05-23
 priority: high
 feasibility: medium
 reasoning_effort: medium
+task_type: bugfix
+language_feature: class-elements-parsing
 goal: property-model
+sprint: 53
 parent: 779
 es_edition: ES2022
-language_feature: class-elements-parsing
-task_type: bug
 test262_fail: 290
 ---
-
 # #779b — class/elements same-line / semicolon multi-definition parsing
 
 ## Problem

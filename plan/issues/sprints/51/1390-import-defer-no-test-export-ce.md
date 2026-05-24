@@ -1,9 +1,10 @@
 ---
 id: 1390
-sprint: 51
 title: "fix: import-defer proposal tests fail as CE (no test export) when TEST262_INCLUDE_PROPOSALS=1"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: low
 feasibility: easy
 reasoning_effort: low
@@ -11,6 +12,7 @@ task_type: bugfix
 area: test262-runner
 language_feature: import-defer
 goal: spec-completeness
+sprint: 51
 ---
 # #1390 — import-defer tests show as CE "no test export" in CI
 

@@ -8,6 +8,7 @@ priority: low
 feasibility: medium
 reasoning_effort: high
 goal: test-infrastructure
+sprint: Backlog
 test262_ce: 172
 ---
 # #926 -- Fixture tests not supported in unified mode (172 CE)

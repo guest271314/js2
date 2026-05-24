@@ -1,6 +1,5 @@
 ---
 id: 408
-sprint: 9
 title: "Compiler hangs on for-of with Set mutation during iteration"
 status: done
 created: 2026-03-17
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: high
 feasibility: hard
 goal: test-infrastructure
+sprint: 9
 test262_ce: 1
 files:
   src/codegen/index.ts:

@@ -11,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: eval, indirect-eval
 goal: performance
+sprint: Backlog
 depends_on: [1261]
 ---
 # #1263 — eval tier 3: indirect eval `(0,eval)(...)` — no local boxing, global scope only

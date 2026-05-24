@@ -1,9 +1,9 @@
 ---
 id: 1468
-sprint: 52
 title: "for-of/dstr: obj-ptrn-id-init undefined-key + array-elem-trlg iterator close"
-status: in-review
+status: review
 created: 2026-05-09
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +11,7 @@ task_type: triage
 area: codegen, runtime
 language_feature: destructuring, iteration
 goal: spec-completeness
+sprint: 52
 ---
 # #1397 — for-of/dstr remaining clusters
 

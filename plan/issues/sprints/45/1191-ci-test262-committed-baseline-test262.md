@@ -1,6 +1,5 @@
 ---
 id: 1191
-sprint: 45
 title: "ci(test262): committed baseline (test262-current.jsonl) is 1634 tests behind reality — refresh + automate"
 status: done
 created: 2026-04-27
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 area: infrastructure
 goal: ci-hardening
+sprint: 45
 es_edition: n/a
 related: [1189, 1190]
 origin: surfaced during PR #74 (#1186) escalation. Committed `benchmarks/results/test262-current.jsonl` says 25387 pass; PR #74 actually produces 27021 pass — gap of +1634 tests passing that the committed baseline doesn't reflect.

@@ -1,6 +1,5 @@
 ---
 id: 342
-sprint: 7
 title: "- Array.prototype.method.call/apply patterns"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: medium
 goal: builtin-methods
+sprint: 7
 test262_skip: 773
 test262_categories:
   - spread across 19 Array categories

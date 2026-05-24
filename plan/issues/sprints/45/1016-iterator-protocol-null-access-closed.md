@@ -1,6 +1,5 @@
 ---
 id: 1016
-sprint: 45
 title: "Iterator protocol null access — closed/exhausted iterators crash (500+ FAIL)"
 status: done
 created: 2026-04-10
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
+sprint: 45
 required_by: [1177]
 partial_fix: "PR #134 (#1016a, +12); PR #21 (#1016b, +98); #1016c (this PR) — parameter-default closure capture + empty pattern no-iterate"
 ---

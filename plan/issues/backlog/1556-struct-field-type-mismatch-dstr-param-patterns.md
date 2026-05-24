@@ -1,9 +1,9 @@
 ---
 id: 1556
 title: "architect-spec: struct-field type mismatch in binding-pattern param destructuring — root cause of #1543/#1544 illegal-cast cluster"
-status: spec-done
+status: ready
 created: 2026-05-20
-spec_done: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,10 +11,11 @@ task_type: architect-spec
 area: codegen, type-resolver
 language_feature: destructuring, classes, async-generators, for-of
 goal: test262-conformance
+sprint: Backlog
+spec_done: 2026-05-20
 related: [1542, 1543, 1544, 1550, 1555]
 blocks: [1543, 1544]
 ---
-
 # #1556 — Architect spec: binding-pattern param struct-field type mismatch
 
 ## Background

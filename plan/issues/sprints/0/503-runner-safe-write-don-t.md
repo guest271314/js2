@@ -1,6 +1,5 @@
 ---
 id: 503
-sprint: 0
 title: "Runner safe-write: don't corrupt report on crash"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 files:
   scripts/run-test262.ts:
     new:

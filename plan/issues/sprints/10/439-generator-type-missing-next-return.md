@@ -1,6 +1,5 @@
 ---
 id: 439
-sprint: 10
 title: "Generator type missing next/return/throw methods (16 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: iterator-protocol
+sprint: 10
 test262_ce: 16
 complexity: M
 files:

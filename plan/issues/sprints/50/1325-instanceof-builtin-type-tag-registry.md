@@ -1,6 +1,5 @@
 ---
 id: 1325
-sprint: 50
 title: "instanceof against built-in types: compile-time type-tag registry eliminates JS host for common cases"
 status: in-progress
 created: 2026-05-07
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen
 language_feature: instanceof
 goal: standalone-mode
+sprint: 50
 ---
 # #1325 — instanceof built-in type-tag registry
 

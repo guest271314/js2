@@ -1,6 +1,5 @@
 ---
 id: 1320
-sprint: 50
 title: "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)"
 status: ready
 created: 2026-05-07
@@ -12,7 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: iterators, externref, Array.from
 goal: spec-conformance
-depends_on: []
+sprint: 50
 related: [1154]
 ---
 # #1320 — Array.from / Iterator.from runtime bridge drops own [Symbol.iterator]

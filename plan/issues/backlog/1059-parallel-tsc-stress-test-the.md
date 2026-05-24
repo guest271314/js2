@@ -8,6 +8,7 @@ priority: low
 feasibility: hard
 reasoning_effort: high
 goal: performance
+sprint: Backlog
 depends_on: [1058]
 labels: [stress-test, web-os-architecture, parallelism]
 ---

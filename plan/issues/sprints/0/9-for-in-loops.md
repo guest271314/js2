@@ -1,12 +1,12 @@
 ---
 id: 9
-sprint: 0
 title: "Issue 9: for-in loops"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-28
 goal: iterator-protocol
+sprint: 0
 ---
 # Issue 9: for-in loops
 

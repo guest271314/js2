@@ -1,6 +1,5 @@
 ---
 id: 701
-sprint: 24
 title: "resolveWasmType infinite recursion with skipSemanticDiagnostics"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: async-model
+sprint: 24
 files:
   src/codegen/index.ts:
     new: []

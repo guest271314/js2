@@ -1,6 +1,5 @@
 ---
 id: 631
-sprint: 0
 title: "Prototype chain tests fail (625 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: hard
 goal: property-model
+sprint: 0
 required_by: [678]
 test262_fail: 625
 files:

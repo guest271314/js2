@@ -1,6 +1,5 @@
 ---
 id: 941
-sprint: 37
 title: "Add equivalence tests for global isNaN() and isFinite() functions"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: npm-library-support
+sprint: 37
 tags: [good-first-issue, testing]
 files:
   tests/equivalence/:

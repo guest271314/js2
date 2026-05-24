@@ -1,6 +1,5 @@
 ---
 id: 657
-sprint: 0
 title: "Yield outside generator residual (411 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: spec-completeness
+sprint: 0
 depends_on: [628]
 test262_ce: 411
 files:

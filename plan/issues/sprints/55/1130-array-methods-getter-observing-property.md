@@ -1,14 +1,14 @@
 ---
 id: 1130
-sprint: 55
 title: "Array methods — getter-observing property access on indices and length"
-status: needs-respec
+status: ready
 created: 2026-04-20
 updated: 2026-04-28
 priority: medium
 feasibility: hard
 reasoning_effort: high
 goal: property-model
+sprint: 55
 ---
 # #1130 — Array methods: getter-observing property access on indices and length
 

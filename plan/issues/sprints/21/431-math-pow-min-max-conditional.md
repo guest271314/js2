@@ -1,6 +1,5 @@
 ---
 id: 431
-sprint: 21
 title: "Math.pow/min/max conditional expressions produce fallthru type mismatch (27 CE)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: medium
 goal: compilable
+sprint: 21
 files:
   src/codegen/expressions.ts:
     new: []

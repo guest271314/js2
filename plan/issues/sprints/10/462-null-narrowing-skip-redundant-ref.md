@@ -1,6 +1,5 @@
 ---
 id: 462
-sprint: 10
 title: "Null narrowing: skip redundant ref.is_null guards after if (x !== null)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-18
 priority: medium
 goal: contributor-readiness
+sprint: 10
 ---
 # Issue #462: Null narrowing in if-statement branches
 

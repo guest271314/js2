@@ -1,6 +1,5 @@
 ---
 id: 1333
-sprint: 50
 title: "RegExp host-mode: Pre-ES6 (S15.10) tests + annexB legacy accessors"
 status: ready
 created: 2026-05-08
@@ -12,6 +11,7 @@ task_type: bugfix
 area: runtime
 language_feature: regexp
 goal: spec-completeness
+sprint: 50
 parent: 1002
 ---
 # #1333 — RegExp host-mode: Pre-ES6 (S15.10) tests + annexB legacy accessors

@@ -1,12 +1,12 @@
 ---
 id: 6
-sprint: 0
 title: "Issue 6: Classes"
 status: done
 created: 2026-02-27
 updated: 2026-04-14
 completed: 2026-02-28
 goal: compilable
+sprint: 0
 ---
 # Issue 6: Classes
 

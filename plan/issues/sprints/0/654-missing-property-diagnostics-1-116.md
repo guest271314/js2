@@ -1,6 +1,5 @@
 ---
 id: 654
-sprint: 0
 title: "Missing property diagnostics (1,116 CE)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: builtin-methods
+sprint: 0
 test262_ce: 1116
 files:
   src/compiler.ts:

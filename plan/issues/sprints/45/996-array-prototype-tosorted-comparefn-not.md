@@ -1,6 +1,5 @@
 ---
 id: 996
-sprint: 45
 title: "Array.prototype.toSorted comparefn-not-a-function hits 30s compiler timeout"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: low
 feasibility: medium
 reasoning_effort: medium
 goal: error-model
+sprint: 45
 resolved_by: "#1085 (iterative bodyUsesArguments, PR #127)"
 test262_ct: 1
 ---

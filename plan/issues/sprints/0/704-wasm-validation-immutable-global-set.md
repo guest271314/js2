@@ -1,6 +1,5 @@
 ---
 id: 704
-sprint: 0
 title: "Wasm validation: immutable global set (284 CE)"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: high
 goal: platform
+sprint: 0
 ---
 # Issue #704: Wasm validation: immutable global set (284 CE)
 

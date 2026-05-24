@@ -1,6 +1,5 @@
 ---
 id: 383
-sprint: 0
 title: "- Label not allowed / let declaration errors"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 test262_ce: 8
 files:
   src/codegen/index.ts:

@@ -1,6 +1,5 @@
 ---
 id: 962
-sprint: 38
 title: "illegal cast regressions after sprint 38 merges (433 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: ci-hardening
+sprint: 38
 ---
 # #962 — illegal cast regressions after sprint 38 merges
 

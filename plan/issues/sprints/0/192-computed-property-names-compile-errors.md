@@ -1,6 +1,5 @@
 ---
 id: 192
-sprint: 0
 title: "Computed property names: compile errors in class and object contexts"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: builtin-methods
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

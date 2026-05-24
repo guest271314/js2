@@ -1,15 +1,16 @@
 ---
 id: 1573
 title: "ESLint next-layer validation-error survey (post #1557 / #1558)"
-status: survey
+status: ready
 created: 2026-05-20
+updated: 2026-05-21
 priority: high
-owner: tech-lead
 area: codegen
 goal: npm-library-support
+sprint: Backlog
+owner: tech-lead
 related: [1400, 1289, 1287, 1282, 1557, 1558, 1559, 1560]
 ---
-
 # ESLint next-layer validation-error survey
 
 Anticipatory survey of ESLint internal modules to enumerate the validation

@@ -1,6 +1,5 @@
 ---
 id: 152
-sprint: 0
 title: "Setter return value error in allowJs mode"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: class-system
+sprint: 0
 files:
   src/compiler.ts:
     new: []

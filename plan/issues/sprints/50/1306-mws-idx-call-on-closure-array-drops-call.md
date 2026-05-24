@@ -1,10 +1,10 @@
 ---
 id: 1306
-sprint: 50
 title: "ElementAccessExpression call on closure-typed array drops call: mws[idx](c, next) emits ref.null"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-07
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: closures, element-access-call, callable-array
 goal: npm-library-support
+sprint: 50
 related: [1301, 1297]
 ---
 # #1306 — `mws[idx](c, next)` on a closure-typed array compiles to `ref.null`, dropping the call

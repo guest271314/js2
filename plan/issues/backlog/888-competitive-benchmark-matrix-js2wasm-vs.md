@@ -11,6 +11,7 @@ task_type: performance
 area: tooling
 language_feature: benchmark-suite
 goal: developer-experience
+sprint: Backlog
 es_edition: n/a
 ---
 # #888 -- Competitive benchmark matrix: js2wasm vs StarlingMonkey, Javy, and native Node.js

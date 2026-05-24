@@ -1,6 +1,5 @@
 ---
 id: 239
-sprint: 0
 title: "Issue #239: Element access on struct types (bracket notation)"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: property-model
+sprint: 0
 files:
   src/codegen/expressions.ts:
     new: []

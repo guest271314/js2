@@ -1,9 +1,9 @@
 ---
 id: 1440
-sprint: 52
 title: "spec gap: Date setters ToNumber coercion + Invalid Date (NaN) propagation"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: date
 goal: spec-completeness
+sprint: 52
 related: [1343, 1344, 1434]
 ---
 # #1440 - Date setters ToNumber coercion + Invalid Date propagation

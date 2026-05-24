@@ -1,6 +1,5 @@
 ---
 id: 647
-sprint: 22
 title: "Residual null pointer dereferences (1,374 FAIL)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-20
 priority: high
 feasibility: medium
 goal: crash-free
+sprint: 22
 depends_on: [622]
 required_by: [656, 663]
 test262_fail: 1374

@@ -1,6 +1,5 @@
 ---
 id: 501
-sprint: 21
 title: "Complete test262 baseline run and pin results"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: critical
 feasibility: easy
 goal: async-model
+sprint: 21
 required_by: [504, 505, 509]
 files:
   scripts/run-test262.ts:

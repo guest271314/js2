@@ -1,9 +1,9 @@
 ---
 id: 1466
-sprint: 52
 title: "spec gap: Proxy + Reflect trap / operation fidelity"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: proxy-reflect
 goal: spec-completeness
+sprint: 52
 related: [965, 929, 1460, 1462]
 ---
 # #1466 - spec gap: Proxy + Reflect trap / operation fidelity

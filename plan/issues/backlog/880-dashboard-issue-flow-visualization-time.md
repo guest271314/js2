@@ -8,6 +8,7 @@ priority: low
 feasibility: medium
 reasoning_effort: high
 goal: observability
+sprint: Backlog
 depends_on: [876]
 ---
 # #880 -- Dashboard: issue flow visualization

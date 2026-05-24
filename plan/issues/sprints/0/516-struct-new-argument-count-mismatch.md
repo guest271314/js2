@@ -1,6 +1,5 @@
 ---
 id: 516
-sprint: 0
 title: "struct.new argument count mismatch in class constructors (1,781 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-03-18
 priority: high
 feasibility: hard
 goal: property-model
+sprint: 0
 test262_ce: 1781
 files:
   src/codegen/index.ts:

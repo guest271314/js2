@@ -1,6 +1,5 @@
 ---
 id: 494
-sprint: 22
 title: "Remove stale skip filters (194 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: core-semantics
+sprint: 22
 test262_skip: 194
 files:
   tests/test262-runner.ts:

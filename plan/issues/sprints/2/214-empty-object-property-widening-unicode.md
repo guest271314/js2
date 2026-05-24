@@ -1,12 +1,12 @@
 ---
 id: 214
-sprint: 2
 title: "Issue #214: Empty object property widening (unicode escape + member-expr tests)"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: test-infrastructure
+sprint: 2
 ---
 # Issue #214: Empty object property widening (unicode escape + member-expr tests)
 

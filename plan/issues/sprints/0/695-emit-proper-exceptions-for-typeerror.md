@@ -1,6 +1,5 @@
 ---
 id: 695
-sprint: 0
 title: "Emit proper exceptions for TypeError/ReferenceError/etc (4,738 FAIL)"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: high
 feasibility: medium
 goal: error-model
+sprint: 0
 required_by: [726, 728]
 test262_fail: 4738
 files:

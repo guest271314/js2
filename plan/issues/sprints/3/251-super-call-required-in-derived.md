@@ -1,12 +1,12 @@
 ---
 id: 251
-sprint: 3
 title: "Issue #251: super() call required in derived class constructors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: class-system
+sprint: 3
 ---
 # Issue #251: super() call required in derived class constructors
 

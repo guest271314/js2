@@ -1,6 +1,5 @@
 ---
 id: 951
-sprint: 37
 title: "Unused imports cause 'Missing initializer in const declaration' compile error"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: easy
 reasoning_effort: low
 goal: compilable
+sprint: 37
 ---
 # #951 -- Unused imports cause "Missing initializer in const declaration" compile error
 

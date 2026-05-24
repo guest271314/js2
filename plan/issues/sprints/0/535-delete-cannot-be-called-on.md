@@ -1,6 +1,5 @@
 ---
 id: 535
-sprint: 0
 title: "'delete' cannot be called on identifier in strict mode (20 CE)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 test262_ce: 20
 files:
   src/codegen/expressions.ts:

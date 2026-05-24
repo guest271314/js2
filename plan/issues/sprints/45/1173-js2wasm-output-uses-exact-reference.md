@@ -1,6 +1,5 @@
 ---
 id: 1173
-sprint: 45
 title: "js2wasm output uses 'exact' reference types that wasmtime 44 rejects (array-sum benchmark crash)"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays
 goal: compilable
+sprint: 45
 pr: 57
 merged: 2026-04-27
 origin: surfaced by `#1125` competitive benchmark verification (2026-04-27)

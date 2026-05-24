@@ -1,6 +1,5 @@
 ---
 id: 1028
-sprint: 40
 title: "TypedArray.prototype.toLocaleString null/undefined in element toLocaleString path"
 status: done
 created: 2026-04-11
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: spec-completeness
+sprint: 40
 parent: 820
 ---
 # #1028 — TypedArray.prototype.toLocaleString element path crashes on null

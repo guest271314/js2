@@ -1,9 +1,9 @@
 ---
 id: 1537
-sprint: backlog
 title: "Wasm-native number formatting (Ryū port): toString/toFixed/toPrecision/toExponential"
 status: backlog
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: number
 goal: standalone-wasm
+sprint: Backlog
 related: [1535]
 ---
-
 # #1537 — Wasm-native number formatting (Ryū)
 
 ## Problem

@@ -1,10 +1,10 @@
 ---
 id: 1293
-sprint: 48
 title: "Hono Tier 4 — string[][] array-of-arrays type support + #segments field"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: arrays, typed-arrays
 goal: npm-library-support
+sprint: 48
 related: [1285, 1233]
 ---
 # #1293 — Hono Tier 4: string[][] array-of-arrays + #segments field

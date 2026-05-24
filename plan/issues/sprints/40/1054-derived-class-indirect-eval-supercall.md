@@ -1,6 +1,5 @@
 ---
 id: 1054
-sprint: 40
 title: "Derived class indirect-eval supercall does not throw SyntaxError"
 status: done
 created: 2026-04-11
@@ -12,6 +11,7 @@ reasoning_effort: medium
 task_type: bugfix
 language_feature: test262-harvest-cluster
 goal: spec-completeness
+sprint: 40
 es_edition: multi
 ---
 # #1054 — Derived class indirect-eval supercall does not throw SyntaxError

@@ -1,14 +1,15 @@
 ---
 id: 837
-sprint: 50
 title: "Stage 3: Map/WeakMap upsert — getOrInsert, getOrInsertComputed"
 status: done
 created: 2026-03-28
 updated: 2026-05-07
+completed: 2026-05-07
 priority: low
 feasibility: easy
 reasoning_effort: medium
 goal: platform
+sprint: 50
 test262_skip: ~110
 ---
 # #837 -- Map/WeakMap upsert methods (getOrInsert/getOrInsertComputed)

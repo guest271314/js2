@@ -1,15 +1,16 @@
 ---
 id: 1571
 title: "axios Tier 1 compile/validate survey (probe of `axios@1.16.1`)"
-status: survey
+status: ready
 created: 2026-05-20
-owner: tech-lead
+updated: 2026-05-21
 priority: high
 area: codegen, resolver, runtime
 goal: npm-library-support
+sprint: Backlog
+owner: tech-lead
 related: [1032, 1042, 1043, 1044, 1276, 1287, 1289, 1558]
 ---
-
 # axios Tier 1 — compile/validate survey
 
 Anticipatory survey to land alongside `tests/stress/axios-tier1.test.ts` and

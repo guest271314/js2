@@ -1,6 +1,5 @@
 ---
 id: 725
-sprint: 16
 title: "Local HTTP server for wasm source map stack traces"
 status: done
 created: 2026-03-21
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-21
 priority: medium
 goal: test-infrastructure
+sprint: 16
 ---
 # Local HTTP server for wasm source map stack traces
 

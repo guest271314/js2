@@ -1,10 +1,10 @@
 ---
 id: 1291
-sprint: 48
 title: "lodash Tier 1b — upgrade add/clamp stress tests to execution-level assertions"
 status: done
 created: 2026-05-03
 updated: 2026-05-03
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: npm-package-imports, closures
 goal: npm-library-support
+sprint: 48
 depends_on: [1276, 1277, 1279]
+required_by: [1292]
 related: [1278, 1295]
 ---
 # #1291 — lodash Tier 1b: upgrade add/clamp to execution-level assertions

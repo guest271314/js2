@@ -1,6 +1,5 @@
 ---
 id: 731
-sprint: 0
 title: "- Function/class .name property (558 tests)"
 status: done
 created: 2026-03-22
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: medium
 feasibility: easy
 goal: class-system
+sprint: 0
 test262_fail: 558
 files:
   src/codegen/statements.ts:

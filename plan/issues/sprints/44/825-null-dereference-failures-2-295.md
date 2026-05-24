@@ -1,6 +1,5 @@
 ---
 id: 825
-sprint: 44
 title: "Null dereference failures (2,295 runtime failures)"
 status: done
 created: 2026-03-28
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
+sprint: 44
 parent: 820
 required_by: [1146]
 closed: 2026-04-23

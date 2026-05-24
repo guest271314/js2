@@ -1,6 +1,5 @@
 ---
 id: 623
-sprint: 0
 title: "Worker timeout: 559 tests killed after 60s"
 status: done
 created: 2026-03-19
@@ -9,7 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: generator-model
-depends_on: [610]
+sprint: 0
 test262_fail: 559
 files:
   scripts/run-test262.ts:

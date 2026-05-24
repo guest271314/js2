@@ -1,9 +1,9 @@
 ---
 id: 1326c
-sprint: 52
 title: "Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B)"
 status: in-progress
 created: 2026-05-08
+updated: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,7 +11,9 @@ task_type: feature
 area: codegen, runtime
 language_feature: async, promises
 goal: standalone-mode
+sprint: 52
 depends_on: [1326]
+required_by: [1373b]
 ---
 # #1326 Phase 1C — Microtask queue + Promise.then standalone
 

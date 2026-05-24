@@ -1,6 +1,5 @@
 ---
 id: 158
-sprint: 1
 title: "String concatenation with non-string operands"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: test-infrastructure
+sprint: 1
 files:
   src/codegen/expressions.ts:
     new:

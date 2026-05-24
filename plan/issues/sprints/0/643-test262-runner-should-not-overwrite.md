@@ -1,6 +1,5 @@
 ---
 id: 643
-sprint: 0
 title: "Test262 runner should not overwrite report until run completes"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: medium
 feasibility: easy
 goal: test-infrastructure
+sprint: 0
 files:
   scripts/run-test262.ts:
     breaking:

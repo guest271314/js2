@@ -1,9 +1,9 @@
 ---
 id: 1550
-sprint: 52
 title: "spec gap: dstr-binding default initializer evaluated when value is non-undefined (`init-skipped` pattern)"
 status: ready
 created: 2026-05-20
+updated: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, default-parameters
 goal: spec-completeness
+sprint: 52
 parent: 779
 related: [1432, 1450, 1451, 1454]
 note: "Verified 2026-05-21: corrected file path destructuring.ts → statements/destructuring.ts"

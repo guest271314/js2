@@ -1,9 +1,10 @@
 ---
 id: 1375
-sprint: 51
 title: "IR: full optional-chain support (?. and ?.[]) without resolver fallback"
 status: done
 created: 2026-05-08
+updated: 2026-05-20
+completed: 2026-05-20
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: ir, codegen
 language_feature: optional-chain
 goal: ir-full-coverage
+sprint: 51
 ---
 # #1375 — IR: full optional-chain support
 

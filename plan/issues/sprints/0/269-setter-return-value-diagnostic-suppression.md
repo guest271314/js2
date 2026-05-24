@@ -1,6 +1,5 @@
 ---
 id: 269
-sprint: 0
 title: "Issue #269: Setter return value diagnostic suppression"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: low
 goal: class-system
+sprint: 0
 files:
   src/compiler.ts:
     new: []

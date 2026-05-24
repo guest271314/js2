@@ -8,6 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: spec-completeness
+sprint: Backlog
 files:
   src/index.ts:
     modify:

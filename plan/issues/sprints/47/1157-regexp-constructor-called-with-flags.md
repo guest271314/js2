@@ -1,6 +1,5 @@
 ---
 id: 1157
-sprint: 47
 title: "RegExp constructor called with flags='undefinedy' from String.prototype method paths (~288 test262 regressions)"
 status: done
 created: 2026-04-21
@@ -12,6 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 language_feature: regexp
 goal: spec-completeness
+sprint: 47
 es_edition: multi
 ---
 # #1153 — RegExp constructor flags = "undefinedy" regression

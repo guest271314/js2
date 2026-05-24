@@ -1,6 +1,5 @@
 ---
 id: 320
-sprint: 6
 title: "[ts2wasm] Codegen: Dead import and type elimination"
 status: done
 created: 2026-03-12
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: iterator-protocol
+sprint: 6
 depends_on: [317, 321]
 required_by: [318]
 files:

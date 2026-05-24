@@ -1,6 +1,5 @@
 ---
 id: 356
-sprint: 0
 title: "- Closure-as-value in assert and array-like objects"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 test262_skip: 106
 test262_categories:
   - spread across 27 categories

@@ -1,6 +1,5 @@
 ---
 id: 553
-sprint: 0
 title: "Division by zero missing in constant folding (tryStaticToNumber)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: contributor-readiness
+sprint: 0
 ---
 # Issue #553: Division by zero missing in constant folding
 

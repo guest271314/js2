@@ -1,9 +1,10 @@
 ---
 id: 1384
-sprint: 51
 title: "CE: static async method with PrivateName — 'not enough arguments on the stack' (249 tests)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes
 goal: spec-completeness
+sprint: 51
 ---
 # #1384 — Static async method PrivateName CE: invalid Wasm arity
 

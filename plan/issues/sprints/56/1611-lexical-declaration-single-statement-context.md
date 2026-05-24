@@ -1,20 +1,19 @@
 ---
 id: 1611
-sprint: 56
 title: "parser: lexical declaration in single-statement context rejected for valid newline-separated cases"
 status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: parser
 language_feature: lexical-declarations, asi
-es_edition: multi
 goal: compiler-correctness
+sprint: 56
+es_edition: multi
 test262_count: 16
 ---
-
 # #1611 — `let`/`const` in single-statement context: valid newline cases rejected
 
 ## Problem

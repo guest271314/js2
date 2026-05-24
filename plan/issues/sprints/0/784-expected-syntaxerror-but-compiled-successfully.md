@@ -1,6 +1,5 @@
 ---
 id: 784
-sprint: 0
 title: "- Expected SyntaxError but compiled successfully (~2,657 tests)"
 status: done
 created: 2026-03-25
@@ -9,6 +8,7 @@ completed: 2026-03-25
 priority: medium
 feasibility: hard
 goal: error-model
+sprint: 0
 parent: 779
 test262_fail: 2657
 ---

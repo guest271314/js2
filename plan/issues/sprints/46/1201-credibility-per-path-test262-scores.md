@@ -1,6 +1,5 @@
 ---
 id: 1201
-sprint: 46
 title: "credibility: per-path test262 scores in test262-report.json — wire categorical data into landing page and report.html"
 status: done
 created: 2026-04-27
@@ -13,6 +12,7 @@ task_type: tooling
 area: ci
 language_feature: n/a
 goal: async-model
+sprint: 46
 required_by: [1204]
 pr: 104
 es_edition: n/a

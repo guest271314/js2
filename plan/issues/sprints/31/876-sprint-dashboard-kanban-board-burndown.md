@@ -1,6 +1,5 @@
 ---
 id: 876
-sprint: 31
 title: "Sprint dashboard — kanban board, burndown, agent status, metrics"
 status: done
 created: 2026-03-30
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: npm-library-support
+sprint: 31
 required_by: [878, 879, 880, 881]
 ---
 # #876 -- Sprint dashboard — kanban board, burndown chart, agent status, metrics

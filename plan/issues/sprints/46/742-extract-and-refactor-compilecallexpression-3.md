@@ -1,6 +1,5 @@
 ---
 id: 742
-sprint: 46
 title: "Extract and refactor compileCallExpression (3,350 lines)"
 status: blocked
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-09
 priority: medium
 feasibility: medium
 goal: maintainability
+sprint: 46
 depends_on: [688]
 files:
   src/codegen/expressions.ts:

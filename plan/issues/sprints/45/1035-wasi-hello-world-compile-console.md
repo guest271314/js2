@@ -1,6 +1,5 @@
 ---
 id: 1035
-sprint: 45
 title: "WASI hello-world: compile console.log + node:fs write to a standalone native executable"
 status: done
 created: 2026-04-15
@@ -11,6 +10,7 @@ feasibility: medium
 reasoning_effort: high
 task_type: feature
 goal: async-model
+sprint: 45
 ---
 # #1035 — WASI hello-world with node:fs translated to WASI
 

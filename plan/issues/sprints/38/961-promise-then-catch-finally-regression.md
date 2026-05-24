@@ -1,6 +1,5 @@
 ---
 id: 961
-sprint: 38
 title: "Promise .then()/.catch()/.finally() regression after #960 removal (1,095 tests)"
 status: done
 created: 2026-04-05
@@ -10,6 +9,7 @@ priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: async-model
+sprint: 38
 ---
 # #961 — Promise .then()/.catch()/.finally() regression after #960 removal
 

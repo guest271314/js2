@@ -1,6 +1,5 @@
 ---
 id: 271
-sprint: 0
 title: "Issue #271: Cannot find name -- missing harness or global declarations"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-16
 priority: low
 goal: async-model
+sprint: 0
 files:
   src/compiler.ts:
     new: []

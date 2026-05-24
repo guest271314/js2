@@ -1,19 +1,19 @@
 ---
 id: 1554
-sprint: 52
 title: "cli: --standalone should reject --allow-fs (logically mutually exclusive flags)"
 status: ready
 created: 2026-05-20
+updated: 2026-05-21
 priority: low
 feasibility: easy
 reasoning_effort: low
 task_type: bugfix
 area: cli
 goal: host-independence
+sprint: 52
 related: [1470, 1471]
 note: "Verified 2026-05-21: src/cli.ts has --allow-fs (L98) but NO --standalone flag exists yet. Issue may need to be re-scoped: either define what 'standalone' means in CLI (perhaps --target=wasi implies standalone?), or precede this fix with an issue that adds --standalone."
 ---
-
 # #1554 — `--standalone` should reject `--allow-fs` at parse time
 
 ## Problem

@@ -1,15 +1,16 @@
 ---
 id: 1542
-title: "Class method destructured-pattern param default not applied; throws \"Cannot destructure null\" instead"
-status: suspended
+title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\" instead"
+status: ready
 created: 2026-05-20
-parent: 820
+updated: 2026-05-20
 priority: high
 feasibility: hard
 goal: test262-conformance
+sprint: 52
+parent: 820
 test262_fail: 134
 ---
-
 ## Suspended Work
 
 **Suspended**: 2026-05-20 by dev-equiv-tests after smoke-testing.

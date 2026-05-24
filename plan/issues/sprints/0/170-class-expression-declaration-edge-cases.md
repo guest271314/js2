@@ -1,6 +1,5 @@
 ---
 id: 170
-sprint: 0
 title: "Class expression/declaration edge cases"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: spec-completeness
+sprint: 0
 files:
   src/codegen/index.ts:
     new:

@@ -1,6 +1,5 @@
 ---
 id: 1335
-sprint: 50
 title: "Number.prototype formatting in pure Wasm: integer toString(radix), then Ryu for floats (standalone)"
 status: ready
 created: 2026-05-08
@@ -12,6 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: number-formatting
 goal: standalone-mode
+sprint: 50
 parent: 1321
 ---
 # #1335 — Number.prototype formatting in pure Wasm (standalone-mode follow-up)

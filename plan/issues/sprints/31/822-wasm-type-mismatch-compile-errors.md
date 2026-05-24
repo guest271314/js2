@@ -1,6 +1,5 @@
 ---
 id: 822
-sprint: 31
 title: "Wasm type mismatch compile errors (907 CE)"
 status: done
 created: 2026-03-27
@@ -10,6 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: core-semantics
+sprint: 31
 test262_ce: 907
 ---
 # #822 -- Wasm type mismatch compile errors (907 CE)

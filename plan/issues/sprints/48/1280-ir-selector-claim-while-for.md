@@ -1,10 +1,10 @@
 ---
 id: 1280
-sprint: 48
 title: "IR selector: claim while/for-loop bodies with typed numeric state"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: feature
 area: codegen, ir
 language_feature: while, for, loops
 goal: performance, npm-library-support
+sprint: 48
 related: [1169, 1228]
 ---
 # #1280 — IR selector: claim while/for-loop functions

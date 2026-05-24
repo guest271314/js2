@@ -1,6 +1,5 @@
 ---
 id: 348
-sprint: 7
 title: "- Null/undefined arithmetic coercion"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: easy
 goal: compilable
+sprint: 7
 test262_skip: 339
 test262_categories:
   - spread across 25 categories (unary +/- on null/undefined, return undefined into arithmetic)

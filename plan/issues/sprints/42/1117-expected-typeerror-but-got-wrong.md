@@ -1,6 +1,5 @@
 ---
 id: 1117
-sprint: 42
 title: "Expected TypeError but got wrong error type (136 tests)"
 status: done
 created: 2026-04-04
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 task_type: bugfix
 goal: ci-hardening
+sprint: 42
 renumbered_from: 856
 test262_fail: 136
 ---

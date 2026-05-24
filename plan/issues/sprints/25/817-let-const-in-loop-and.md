@@ -1,6 +1,5 @@
 ---
 id: 817
-sprint: 25
 title: "let/const in loop and try/catch bodies leak into outer scope"
 status: done
 created: 2026-03-27
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: core-semantics
+sprint: 25
 effort: S
 ---
 # Issue #817: let/const in loop and try/catch bodies leak into outer scope

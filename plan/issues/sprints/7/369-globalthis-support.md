@@ -1,6 +1,5 @@
 ---
 id: 369
-sprint: 7
 title: "- globalThis support"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: standalone-mode
+sprint: 7
 test262_skip: 10
 files:
   src/codegen/expressions.ts:

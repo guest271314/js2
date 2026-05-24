@@ -1,12 +1,12 @@
 ---
 id: 224
-sprint: 2
 title: "Issue #224: Prefix/postfix increment/decrement on member expressions"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: contributor-readiness
+sprint: 2
 ---
 # Issue #224: Prefix/postfix increment/decrement on member expressions
 

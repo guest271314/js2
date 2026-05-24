@@ -1,12 +1,12 @@
 ---
 id: 205
-sprint: 2
 title: "String.prototype.indexOf type coercion errors"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #205 — String.prototype.indexOf type coercion errors
 

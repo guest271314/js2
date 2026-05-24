@@ -1,6 +1,5 @@
 ---
 id: 689
-sprint: 0
 title: "Dynamic worker pool: memory-aware scaling with dead worker recovery"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: test-infrastructure
+sprint: 0
 required_by: [690, 691, 692]
 files:
   scripts/run-test262.ts:

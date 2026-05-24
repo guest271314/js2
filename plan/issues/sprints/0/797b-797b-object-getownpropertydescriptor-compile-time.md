@@ -1,6 +1,5 @@
 ---
 id: 797b
-sprint: 0
 title: "#797b -- Object.getOwnPropertyDescriptor compile-time resolution"
 status: done
 created: 2026-03-26
@@ -9,6 +8,7 @@ completed: 2026-03-26
 priority: high
 feasibility: medium
 goal: contributor-readiness
+sprint: 0
 depends_on: [797a]
 subtask_of: 797
 commit: 8aa2ff7d

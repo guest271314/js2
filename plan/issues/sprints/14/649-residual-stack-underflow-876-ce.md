@@ -1,6 +1,5 @@
 ---
 id: 649
-sprint: 14
 title: "Residual stack underflow (876 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-20
 priority: medium
 feasibility: medium
 goal: compilable
+sprint: 14
 depends_on: [627]
 test262_ce: 876
 files:

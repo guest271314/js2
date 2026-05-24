@@ -1,12 +1,12 @@
 ---
 id: 116
-sprint: 2
 title: "Issue 116: Unskip implemented features in test262 runner"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: async-model
+sprint: 2
 ---
 # Issue 116: Unskip implemented features in test262 runner
 

@@ -1,6 +1,5 @@
 ---
 id: 836
-sprint: 32
 title: "Tagged templates with non-PropertyAccess tag expressions (20 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: ci-hardening
+sprint: 32
 test262_ce: 20
 ---
 # #836 -- Tagged templates with non-PropertyAccess tag expressions (20 CE)

@@ -1,6 +1,5 @@
 ---
 id: 709
-sprint: 26
 title: "RuntimeError: out of bounds array access (174 FAIL)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: core-semantics
+sprint: 26
 test262_fail: 174
 files:
   src/codegen/expressions.ts:

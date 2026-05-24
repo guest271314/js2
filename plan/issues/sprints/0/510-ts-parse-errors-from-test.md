@@ -1,6 +1,5 @@
 ---
 id: 510
-sprint: 0
 title: "TS parse errors from test wrapping (78 CE)"
 status: done
 created: 2026-03-18
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: high
 goal: error-model
+sprint: 0
 test262_ce: 175
 ---
 # #510 -- TS parse errors from test wrapping (~175 CE)

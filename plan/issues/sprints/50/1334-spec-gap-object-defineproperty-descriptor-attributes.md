@@ -1,9 +1,10 @@
 ---
 id: 1334
-sprint: 50
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
 status: done
 created: 2026-05-08
+updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +12,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
+sprint: 50
 parent: 1328
 ---
 # #1334 — Object.defineProperty: descriptor attribute fidelity

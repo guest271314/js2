@@ -1,10 +1,10 @@
 ---
 id: 1303
-sprint: 50
 title: "Wasm validation: f64.trunc emitted on externref operand when compiling lodash partial.js"
 status: done
 created: 2026-05-03
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: type-coercion, externref
 goal: npm-library-support
-depends_on: []
+sprint: 50
 related: [1292, 1180, 1305]
 ---
 # #1303 — Wasm validation: `f64.trunc` operand is `externref`, not `f64`

@@ -1,12 +1,12 @@
 ---
 id: 60
-sprint: 0
 title: "Issue 60: RegExp via host imports"
 status: done
 created: 2026-03-02
 updated: 2026-04-14
 completed: 2026-03-03
 goal: spec-completeness
+sprint: 0
 ---
 # Issue 60: RegExp via host imports
 

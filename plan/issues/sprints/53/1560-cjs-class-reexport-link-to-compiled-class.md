@@ -1,11 +1,10 @@
 ---
 id: 1560
-sprint: 53
 title: "CJS module.exports = { Linter } — named class re-exports link to compiled class, not extern fallback"
 status: done
-covered_by: 1559
 created: 2026-05-20
-resolved: 2026-05-21
+updated: 2026-05-21
+completed: 2026-05-21
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -13,11 +12,13 @@ task_type: feature
 area: codegen, cjs-resolver
 language_feature: commonjs, classes, re-exports
 goal: npm-library-support
+sprint: 53
+depends_on: [1559]
+covered_by: 1559
+resolved: 2026-05-21
 related: [1400, 1277, 1279, 1284, 1559]
 blocks: [eslint-tier-1e]
-depends_on: [1559]
 ---
-
 # #1560 — CJS class re-exports link to compiled class
 
 ## Resolution (2026-05-21) — COVERED BY #1559

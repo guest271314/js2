@@ -1,12 +1,10 @@
 ---
 id: 1159
-sprint: 50
 title: "Nested empty array pattern with initializer violates §13.3.3.6 iterator consumption semantics"
 status: done
-needs_architect_spec: true
-bundle_with: 1158
 created: 2026-04-21
 updated: 2026-05-07
+completed: 2026-05-07
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -14,6 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
+sprint: 50
+needs_architect_spec: true
+bundle_with: 1158
 es_edition: es6
 ---
 # #1159 -- Nested empty array pattern with initializer violates §13.3.3.6 iterator consumption semantics

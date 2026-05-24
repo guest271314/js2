@@ -1,6 +1,5 @@
 ---
 id: 866
-sprint: 31
 title: "Regression: NaN sentinel interferes with toString/valueOf and explicit NaN arguments"
 status: done
 created: 2026-03-29
@@ -9,6 +8,7 @@ completed: 2026-03-31
 priority: critical
 feasibility: medium
 goal: ci-hardening
+sprint: 31
 test262_fail: 71
 branch: issue-866-redo
 ---

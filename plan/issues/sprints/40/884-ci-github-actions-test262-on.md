@@ -1,6 +1,5 @@
 ---
 id: 884
-sprint: 40
 title: "CI: GitHub Actions test262 on every PR"
 status: done
 created: 2026-03-31
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: ci-hardening
+sprint: 40
 depends_on: [882]
 required_by: [1007]
 ---

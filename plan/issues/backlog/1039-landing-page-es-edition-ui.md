@@ -9,6 +9,7 @@ feasibility: medium
 reasoning_effort: medium
 task_type: feature
 goal: developer-experience
+sprint: Backlog
 ---
 # #1039 — ES edition support UI improvements
 

@@ -1,9 +1,10 @@
 ---
 id: 1379
-sprint: 51
 title: "spec gap: prefix/postfix ++/-- on null/undefined/string operands — ToNumeric coercion (~40 fails)"
 status: done
 created: 2026-05-08
+updated: 2026-05-08
+completed: 2026-05-08
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -11,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: operators
 goal: spec-completeness
+sprint: 51
 ---
 # #1379 — Prefix/postfix ++/-- on null/undefined/string operands
 

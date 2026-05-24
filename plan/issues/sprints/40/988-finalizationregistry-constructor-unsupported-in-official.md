@@ -1,6 +1,5 @@
 ---
 id: 988
-sprint: 40
 title: "FinalizationRegistry constructor unsupported in official-scope tests (23 CE)"
 status: done
 created: 2026-04-07
@@ -10,6 +9,7 @@ priority: low
 feasibility: medium
 reasoning_effort: medium
 goal: spec-completeness
+sprint: 40
 test262_ce: 23
 ---
 # #988 -- FinalizationRegistry constructor unsupported in official-scope tests (23 CE)

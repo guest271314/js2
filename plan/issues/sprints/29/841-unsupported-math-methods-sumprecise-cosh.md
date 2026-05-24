@@ -1,6 +1,5 @@
 ---
 id: 841
-sprint: 29
 title: "Unsupported Math methods: sumPrecise, cosh, sinh, tanh, f16round (19 CE)"
 status: done
 created: 2026-03-28
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: easy
 goal: iterator-protocol
+sprint: 29
 test262_ce: 19
 ---
 # #841 -- Unsupported Math methods (19 CE)

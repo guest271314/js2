@@ -1,6 +1,5 @@
 ---
 id: 572
-sprint: 21
 title: "Internal compiler errors (152 CE)"
 status: done
 created: 2026-03-19
@@ -9,6 +8,7 @@ completed: 2026-03-19
 priority: medium
 feasibility: medium
 goal: test-infrastructure
+sprint: 21
 test262_ce: 152
 files:
   src/codegen/expressions.ts:

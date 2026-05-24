@@ -1,6 +1,5 @@
 ---
 id: 925
-sprint: 35
 title: "Landing page: integrate test262 conformance circle and ECMAScript edition timeline diagrams"
 status: done
 created: 2026-04-03
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: npm-library-support
+sprint: 35
 required_by: [933]
 ---
 # #925 — Landing page: integrate test262 conformance circle and ECMAScript edition timeline

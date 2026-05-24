@@ -2,19 +2,20 @@
 id: 820k
 title: "Object.* receiver TypeError on null/undefined (ToObject step) (~39 fails)"
 status: ready
+created: 2026-05-21
+updated: 2026-05-21
 priority: medium
 feasibility: easy
 reasoning_effort: low
-task_type: bug
+task_type: bugfix
 area: builtins
+language_feature: object-builtins
 goal: async-model
+sprint: Backlog
 parent: 820
 es_edition: ES2017
-language_feature: object-builtins
 test262_fail: 39
-created: 2026-05-21
 ---
-
 # #820k — Object.* receiver ToObject TypeError
 
 ## Problem

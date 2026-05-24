@@ -1,10 +1,10 @@
 ---
 id: 1259
-sprint: 47
 title: "async-gen yield-star sync-fallback leaks unboxed ref-cell into iter capture"
 status: done
 created: 2026-05-02
 updated: 2026-05-02
+completed: 2026-05-03
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,11 +12,10 @@ task_type: bugfix
 area: codegen
 language_feature: async-generators, iterator-protocol
 goal: async-model
+sprint: 47
 related: [1177, 1245, 1205]
-depends_on: []
 test262_fail: 50
 ---
-
 ## Implementation note (2026-05-02, dev-1245)
 
 The 50 failing async-gen-yield-star tests described in the issue body are

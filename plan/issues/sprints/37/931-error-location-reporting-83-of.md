@@ -1,6 +1,5 @@
 ---
 id: 931
-sprint: 37
 title: "Error location reporting: 83% of compile errors lack real line numbers"
 status: done
 created: 2026-04-03
@@ -10,6 +9,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 37
 required_by: [985]
 test262_ce: 2803
 test262_fail: 21178

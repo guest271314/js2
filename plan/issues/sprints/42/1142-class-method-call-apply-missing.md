@@ -1,6 +1,5 @@
 ---
 id: 1142
-sprint: 42
 title: "Class method .call()/.apply() missing brand-check on thisArg"
 status: done
 created: 2026-04-20
@@ -10,6 +9,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: medium
 goal: crash-free
+sprint: 42
 ---
 ## Problem
 

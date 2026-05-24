@@ -1,6 +1,5 @@
 ---
 id: 714
-sprint: 26
 title: "Conformance progress graph: track pass/fail/CE over time"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: easy
 goal: ci-hardening
+sprint: 26
 files:
   benchmarks/results/report.html:
     new:

@@ -1,12 +1,12 @@
 ---
 id: 84
-sprint: 0
 title: "Issue 84: `var` hoisting support"
 status: done
 created: 2026-03-08
 updated: 2026-04-14
 completed: 2026-03-08
 goal: core-semantics
+sprint: 0
 ---
 # Issue 84: `var` hoisting support
 

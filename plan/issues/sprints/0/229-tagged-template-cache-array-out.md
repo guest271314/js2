@@ -1,6 +1,5 @@
 ---
 id: 229
-sprint: 0
 title: "Issue #229: Tagged template cache: array out of bounds on top-level repeated calls"
 status: done
 created: 2026-03-11
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-12
 priority: medium
 goal: contributor-readiness
+sprint: 0
 files:
   src/codegen/index.ts:
     new: []

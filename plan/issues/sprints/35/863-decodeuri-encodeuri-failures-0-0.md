@@ -1,6 +1,5 @@
 ---
 id: 863
-sprint: 35
 title: "decodeURI/encodeURI failures: #0-0 error pattern (70 FAIL)"
 status: done
 created: 2026-03-29
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: platform
+sprint: 35
 test262_fail: 70
 ---
 # #863 -- decodeURI/encodeURI failures: #0-0 error pattern (70 FAIL)

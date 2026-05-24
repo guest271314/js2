@@ -1,6 +1,5 @@
 ---
 id: 376
-sprint: 0
 title: "- Decorator syntax support"
 status: done
 created: 2026-03-13
@@ -9,6 +8,7 @@ completed: 2026-03-16
 priority: low
 feasibility: easy
 goal: class-system
+sprint: 0
 test262_ce: 10
 files:
   src/compiler.ts:

@@ -1,12 +1,12 @@
 ---
 id: 181
-sprint: 2
 title: "Unsupported `new Object()` and `new Function()` constructor calls"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: compilable
+sprint: 2
 ---
 # #181 — Unsupported `new Object()` and `new Function()` constructor calls
 

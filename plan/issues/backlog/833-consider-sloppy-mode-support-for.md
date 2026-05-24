@@ -8,6 +8,7 @@ priority: low
 feasibility: hard
 reasoning_effort: max
 goal: contributor-readiness
+sprint: Backlog
 test262_skip: 16
 ---
 # #833 -- Consider sloppy mode support for legacy code

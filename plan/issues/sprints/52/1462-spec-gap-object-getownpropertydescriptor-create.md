@@ -1,9 +1,9 @@
 ---
 id: 1462
-sprint: 52
 title: "spec gap: Object.getOwnPropertyDescriptor + Object.create descriptor surface"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: property-descriptors
 goal: spec-completeness
+sprint: 52
 related: [1460]
 ---
 # #1462 - spec gap: Object.getOwnPropertyDescriptor + Object.create descriptor surface

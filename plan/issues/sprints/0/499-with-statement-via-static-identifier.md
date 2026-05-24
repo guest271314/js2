@@ -1,6 +1,5 @@
 ---
 id: 499
-sprint: 0
 title: "with statement via static identifier dispatch (94 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: low
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 depends_on: [488]
 test262_skip: 94
 files:

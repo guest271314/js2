@@ -1,6 +1,5 @@
 ---
 id: 690
-sprint: 0
 title: "Streaming test results with incremental report updates and zero-copy worker IPC"
 status: done
 created: 2026-03-20
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: high
 feasibility: medium
 goal: spec-completeness
+sprint: 0
 depends_on: [689]
 required_by: [691, 692]
 files:

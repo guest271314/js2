@@ -1,9 +1,9 @@
 ---
 id: 1492
-sprint: 52
 title: "nodejs: crypto.randomBytes / randomUUID host imports"
-status: in-review
+status: review
 created: 2026-05-20
+updated: 2026-05-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,9 +11,9 @@ task_type: feature
 area: runtime
 language_feature: host-imports
 goal: nodejs-support
+sprint: 52
 related: [1322, 1044]
 ---
-
 # #1492 — `crypto.randomBytes` / `crypto.randomUUID` host imports
 
 ## Problem

@@ -1,12 +1,12 @@
 ---
 id: 213
-sprint: 2
 title: "- Bug: New expression spread arguments"
 status: done
 created: 2026-03-11
 updated: 2026-04-14
 completed: 2026-03-11
 goal: spec-completeness
+sprint: 2
 ---
 # #213 -- Bug: New expression spread arguments
 

@@ -1,6 +1,5 @@
 ---
 id: 710
-sprint: 0
 title: "RuntimeError: unreachable executed (173 FAIL)"
 status: done
 created: 2026-03-21
@@ -9,6 +8,7 @@ completed: 2026-03-21
 priority: medium
 feasibility: medium
 goal: crash-free
+sprint: 0
 test262_fail: 173
 files:
   src/codegen/expressions.ts:

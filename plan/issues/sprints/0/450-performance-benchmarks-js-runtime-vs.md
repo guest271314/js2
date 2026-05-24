@@ -1,6 +1,5 @@
 ---
 id: 450
-sprint: 0
 title: "Performance benchmarks: JS runtime vs precompiled Wasm"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: medium
 goal: standalone-mode
+sprint: 0
 required_by: [454]
 ---
 # #450 — Performance benchmarks: JS runtime vs precompiled Wasm

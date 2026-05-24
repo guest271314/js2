@@ -1,6 +1,5 @@
 ---
 id: 428
-sprint: 21
 title: "Expected ReferenceError but succeeded (6 fail)"
 status: done
 created: 2026-03-17
@@ -8,6 +7,7 @@ updated: 2026-04-14
 completed: 2026-03-17
 priority: low
 goal: error-model
+sprint: 21
 files:
   src/compiler.ts:
     new: [checkTDZInStatements, checkForTDZRef]

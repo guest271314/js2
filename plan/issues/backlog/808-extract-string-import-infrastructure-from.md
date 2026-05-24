@@ -8,6 +8,7 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: Backlog
 subtask_of: 688
 ---
 # #808 — Extract string/import infrastructure from index.ts → imports.ts

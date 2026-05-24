@@ -1,6 +1,5 @@
 ---
 id: 1153
-sprint: 44
 title: "Compiler-internal crashes block ~3,585 test262 tests: commentDirectiveRegEx.exec, constructSigs.reduce, cache.set"
 status: done
 created: 2026-04-21
@@ -10,6 +9,7 @@ priority: critical
 feasibility: medium
 reasoning_effort: high
 goal: async-model
+sprint: 44
 closed: 2026-04-23
 test262_fail: 3585
 root_cause_confirmed: 2026-04-21

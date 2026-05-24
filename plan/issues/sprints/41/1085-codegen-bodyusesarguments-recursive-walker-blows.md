@@ -1,6 +1,5 @@
 ---
 id: 1085
-sprint: 41
 title: "codegen: bodyUsesArguments recursive walker blows stack under tight CI stack budget when called from recursive nested-declarations compile path"
 status: done
 created: 2026-04-11
@@ -11,6 +10,7 @@ feasibility: easy
 reasoning_effort: low
 task_type: bugfix
 goal: test-infrastructure
+sprint: 41
 required_by: [1086]
 ---
 # #1085 — `bodyUsesArguments` recursion + compile-stack composition blows V8 stack under CI cgroup limits

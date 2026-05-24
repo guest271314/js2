@@ -1,6 +1,5 @@
 ---
 id: 489
-sprint: 0
 title: "General Function.prototype.call/apply (822 tests)"
 status: done
 created: 2026-03-18
@@ -9,6 +8,7 @@ completed: 2026-04-14
 priority: critical
 feasibility: medium
 goal: compilable
+sprint: 0
 test262_skip: 822
 files:
   src/codegen/expressions.ts:
