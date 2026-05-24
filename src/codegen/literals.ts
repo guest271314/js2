@@ -1120,7 +1120,26 @@ export function compileObjectLiteralForStruct(
     const existingType = ctx.mod.types[existingFunc.typeIdx];
     if (!existingType || existingType.kind !== "func") continue;
     const sameArity = existingType.params.length === newParams.length;
-    const sameParamTypes = sameArity && existingType.params.every((p, i) => valTypesMatch(p, newParams[i]!));
+    // (#1602 regression fix) Compare param types nullability-insensitively for
+    // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
+    // param as a non-null `ref structTypeIdx`, but the actual compiled method
+    // uses `ref null structTypeIdx` for self (and `ref null T` for any
+    // default-initialised ref param). A strict `valTypesMatch` flags this as a
+    // mismatch and forks a per-literal funcIdx — but that orphans the original
+    // shared funcMap entry (left with an empty body), so a *direct* call like
+    // `obj.method()` (which dispatches via funcMap, not the per-literal map)
+    // lands on the empty func and traps. Real divergence we still want to
+    // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
+    // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
+    const refTypesMatch = (p: ValType, q: ValType): boolean => {
+      const pRef = p.kind === "ref" || p.kind === "ref_null";
+      const qRef = q.kind === "ref" || q.kind === "ref_null";
+      if (pRef && qRef) {
+        return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
+      }
+      return valTypesMatch(p, q);
+    };
+    const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
     if (sameArity && sameParamTypes) continue;
 
     // Mismatch — allocate a fresh funcIdx for this literal's method without

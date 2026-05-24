@@ -103,3 +103,33 @@ Three independent codegen bugs all surfaced as the same validator error
 method, leaving a funcref uncoerced at the call. This is a missing
 class-expression static-member-access path in `property-access.ts`, not a
 call-site coercion bug; tracked for a follow-up.
+
+## Follow-up regression (fixed 2026-05-25) — ~245 test262 tests lost
+
+Fix #2 above (the per-literal-funcIdx fork on a same-arity param-*type*
+divergence) over-triggered. The pre-pass in `compileObjectLiteralForStruct`
+builds the method's **self** param as a non-null `ref structTypeIdx`, but the
+actually-compiled method uses `ref null structTypeIdx` for self (and
+`ref null U` for any default-initialised ref param). The strict `valTypesMatch`
+treats `ref T` and `ref null T` as different, so even the **single-literal
+common case** — `{ method([x,y,z] = [1,2,3]) {} }` — was flagged as a
+"mismatch" and forked a fresh per-literal func. That orphaned the original
+shared `funcMap` entry with an **empty body**. The per-literal map only
+redirects the **closure** path (`emitObjectMethodAsClosure`); a **direct**
+member call `obj.method()` dispatches via `funcMap`, so it landed on the empty
+func, which (combined with a `ref.null … ref.as_non_null` on the defaulted
+param) trapped at runtime — `dereferencing a null pointer`.
+
+This regressed **187** `language/expressions/object/dstr/*` + **22**
+`.../method-definition/*` tests (object methods with destructured / default
+params, invoked directly). Peak 29,603 (sha 65844, PR #593) → 29,355 (sha
+9265). Bisected: the probe passes at 65844 and traps at the post-#1602 HEAD.
+
+**Fix:** compare ref/ref_null of the **same struct typeIdx** as equal in the
+fork decision (`refTypesMatch` in `literals.ts`). Nullability of the same
+struct is not a real signature divergence — WasmGC `ref null T` is a supertype
+of `ref T` and the trampoline forwarding is unaffected. Genuine divergence
+(`[f64, externref]` vs `[externref, f64]`) differs in `kind`/`typeIdx` and is
+still detected, so #1602's Bug B sibling-generator case (covered by
+`tests/issue-1602.test.ts`) keeps passing. Regression guard:
+`tests/issue-1602-regress-direct-call.test.ts`.
