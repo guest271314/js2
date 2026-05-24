@@ -53,10 +53,15 @@ is the part you'd replace for a real host.
 
 ## Build to `.wasm`
 
+From the repo root (works immediately after `pnpm install`, no build step):
+
 ```bash
 mkdir -p examples/native-messaging/out
-npx js2wasm examples/native-messaging/host.ts --target wasi -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/host.ts --target wasi -o examples/native-messaging/out
 ```
+
+(Once the package is built — `pnpm run build` — or installed from npm, you can
+use the `js2wasm` bin directly: `npx js2wasm host.ts --target wasi -o out`.)
 
 This produces `out/host.wasm`. The module imports only from
 `wasi_snapshot_preview1` (`fd_read`, `fd_write`) — no `env.*` imports — so it

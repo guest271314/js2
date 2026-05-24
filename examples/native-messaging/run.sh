@@ -14,8 +14,8 @@ DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WASM="$DIR/out/host.wasm"
 
 if [ ! -f "$WASM" ]; then
-  echo "host.wasm not found at $WASM — build it first:" >&2
-  echo "  npx js2wasm $DIR/host.ts --target wasi -o $DIR/out" >&2
+  echo "host.wasm not found at $WASM — build it first (from the repo root):" >&2
+  echo "  npx tsx src/cli.ts examples/native-messaging/host.ts --target wasi -o examples/native-messaging/out" >&2
   exit 1
 fi
 
