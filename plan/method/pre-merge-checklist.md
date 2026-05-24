@@ -12,7 +12,7 @@ Devs do NOT do a direct ff-only merge to main. Instead:
 2. [ ] Run scoped local checks (issue-specific compile+run)
 3. [ ] `git push && gh pr create`
 4. [ ] Monitor `.claude/ci-status/pr-<N>.json` until SHA matches HEAD
-5. [ ] `net_per_test > 0`: `gh pr merge <N> --merge --auto` (enqueues; queue re-runs checks against merged state then lands)
+5. [ ] `net_per_test > 0`: `gh pr merge <N> --auto` (enqueues — NO `--merge`/strategy flag; the queue owns the strategy and rejects `--merge --auto`; queue re-runs checks against merged state then lands)
 6. [ ] Escalate to tech lead if: regressions > 10, single bucket > 50, or judgment call needed
 
 ## Tech lead direct merge (fallback / hotfix only)

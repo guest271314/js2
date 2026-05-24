@@ -97,7 +97,7 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
      ```
    - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Then **stop and wait** — you are notified when it returns (~2 min wall). Do NOT loop in-context, do NOT emit status pings while it runs. If it hasn't returned after ~20 min, note it once via `TaskUpdate`; escalate to tech lead only after ~20 min of genuine stall.
    - **On CI completion:**
-     - **All required checks green** → run `/dev-self-merge <N>`. If MERGE: `gh pr merge <N> --merge --auto`, proceed to step 6.
+     - **All required checks green** → run `/dev-self-merge <N>`. If MERGE: `gh pr merge <N> --auto` (NO `--merge`/strategy flag — the queue owns the strategy and rejects `--merge --auto`), proceed to step 6.
      - **Drift detected** (`mergeable_state` becomes `BEHIND`) → `git fetch origin && git merge origin/main`, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI. Do NOT escalate.
      - **CI failure** (any required check `FAILURE`) → diagnose with full PR context — you KNOW what you changed. Fix locally, `git push`, loop back to wait-for-CI. Do NOT escalate ordinary failures.
      - **ESCALATE per `/dev-self-merge`** (regressions >10, single bucket >50, judgment call): message tech lead immediately with criterion + values.
