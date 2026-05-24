@@ -998,10 +998,15 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
 
   // ── collectStringStaticImports finalize ──
   if (state.needsFromCharCode) {
-    const typeIdx = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "String_fromCharCode", { kind: "func", typeIdx });
     if (ctx.nativeStrings) {
-      ensureNativeStringExternBridge(ctx);
+      // #1598: pure-Wasm path — emit __str_fromCharCode helper, no host import.
+      // nativeStrings is forced on for --target wasi / standalone, so this also
+      // covers the no-JS-host case. The call site (calls.ts) routes to the
+      // helper and never registers env.String_fromCharCode in this mode.
+      ensureNativeStringHelpers(ctx);
+    } else {
+      const typeIdx = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "String_fromCharCode", { kind: "func", typeIdx });
     }
   }
   if (state.needsFromCodePoint) {

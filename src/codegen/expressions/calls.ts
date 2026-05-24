@@ -2558,13 +2558,39 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return { kind: "i32" };
     }
 
-    // Handle String.fromCharCode(code) — host import
+    // Handle String.fromCharCode(code) — native helper (nativeStrings) or host import
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "String" &&
       propAccess.name.text === "fromCharCode" &&
       expr.arguments.length >= 1
     ) {
+      // #1598: nativeStrings mode (forced on for --target wasi / standalone) uses
+      // a pure-Wasm __str_fromCharCode helper — no env.String_fromCharCode import.
+      if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        const helperIdx = ctx.nativeStrHelpers.get("__str_fromCharCode");
+        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+        if (helperIdx !== undefined) {
+          // First arg → string
+          const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+          if (a0 && a0.kind !== "i32") {
+            fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          }
+          fctx.body.push({ op: "call", funcIdx: helperIdx });
+          // Multi-arg: concat each subsequent code unit's string (spec: join).
+          if (expr.arguments.length > 1 && concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind !== "i32") {
+                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx: helperIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+          return nativeStringType(ctx);
+        }
+      }
       const funcIdx = ctx.funcMap.get("String_fromCharCode");
       if (funcIdx !== undefined) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {

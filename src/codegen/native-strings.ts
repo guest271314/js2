@@ -3743,6 +3743,35 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       exported: false,
     });
   }
+
+  // --- $__str_fromCharCode(code: i32) -> ref $NativeString --- (#1598)
+  // Creates a single-code-unit NativeString from a UTF-16 code unit. Per spec,
+  // String.fromCharCode coerces each argument with ToUint16, so the low 16 bits
+  // are taken (no surrogate-pair handling — that is fromCodePoint's job).
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [strRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__str_fromCharCode", funcIdx);
+
+    // params: code(0). Build: struct.new $NativeString(len=1, off=0, [code & 0xFFFF])
+    const body: Instr[] = [
+      { op: "i32.const", value: 1 }, // len
+      { op: "i32.const", value: 0 }, // off
+      { op: "local.get", index: 0 }, // code
+      { op: "i32.const", value: 0xffff },
+      { op: "i32.and" }, // ToUint16
+      { op: "array.new_fixed", typeIdx: strDataTypeIdx, length: 1 },
+      { op: "struct.new", typeIdx: strTypeIdx },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__str_fromCharCode",
+      typeIdx,
+      locals: [],
+      body,
+      exported: false,
+    });
+  }
 }
 
 export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
