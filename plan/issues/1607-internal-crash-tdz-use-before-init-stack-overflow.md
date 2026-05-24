@@ -1,7 +1,7 @@
 ---
 id: 1607
 title: "codegen crash: 'Maximum call stack size exceeded' on use-before-initialization (TDZ) in declaration statements"
-status: in-review
+status: done
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
