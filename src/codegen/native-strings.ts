@@ -21,7 +21,15 @@ export function nativeStringType(ctx: CodegenContext): ValType {
  * but returns an `Instr[]` for callers that build instruction streams without
  * a `FunctionContext` (e.g. throw-instr builders that return `Instr[]`).
  */
-export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string): Instr[] {
+export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string, encoding?: StringEncoding): Instr[] {
+  // #1588 PR-B: when `--utf8-storage` is on and the literal is proven
+  // `ascii`/`utf8-guaranteed`, materialize an i8-backed `Utf8String` instead
+  // of the i16 `NativeString`. When off (or the literal is `wtf16`/unknown),
+  // this is byte-identical to before.
+  if (ctx.utf8Storage && ctx.utf8StrTypeIdx >= 0 && (encoding === "ascii" || encoding === "utf8-guaranteed")) {
+    return utf8StringLiteralInstrs(ctx, value);
+  }
+
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
   const strTypeIdx = ctx.nativeStrTypeIdx;
   const instrs: Instr[] = [];
@@ -36,6 +44,72 @@ export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string): I
   // struct.new $NativeString(len, off, data)
   instrs.push({ op: "struct.new", typeIdx: strTypeIdx });
   return instrs;
+}
+
+/** #1588 PR-B: encoding annotation values the lowering sites consume. Mirrors
+ *  `Encoding` in `src/ir/analysis/encoding.ts` (kept as a local string-union to
+ *  avoid a codegen→ir import cycle). */
+export type StringEncoding = "ascii" | "utf8-guaranteed" | "wtf16";
+
+/**
+ * #1588 PR-B: materialize a string literal as an i8-backed `Utf8String`.
+ * Precondition (asserted): `value` contains no lone surrogate — guaranteed by
+ * the encoding classifier (a lone surrogate is always `wtf16`, never reaches
+ * here). The assert is a defensive guard against a future classifier bug
+ * emitting malformed UTF-8 bytes.
+ */
+function utf8StringLiteralInstrs(ctx: CodegenContext, value: string): Instr[] {
+  const bytes = utf8Encode(value);
+  const instrs: Instr[] = [];
+  // len = code-unit (UTF-16) length, byteLen = UTF-8 byte length, off = 0.
+  instrs.push({ op: "i32.const", value: value.length });
+  instrs.push({ op: "i32.const", value: bytes.length });
+  instrs.push({ op: "i32.const", value: 0 });
+  for (const b of bytes) {
+    instrs.push({ op: "i32.const", value: b });
+  }
+  instrs.push({ op: "array.new_fixed", typeIdx: ctx.utf8StrDataTypeIdx, length: bytes.length });
+  // struct.new $Utf8String(len, byteLen, off, data)
+  instrs.push({ op: "struct.new", typeIdx: ctx.utf8StrTypeIdx });
+  return instrs;
+}
+
+/**
+ * Encode a JS (WTF-16) string to UTF-8 bytes. Asserts no lone surrogate — the
+ * caller only invokes this for `ascii`/`utf8-guaranteed` strings, which the
+ * classifier guarantees are well-formed. Uses code points (handles
+ * well-formed surrogate pairs for astral scalars).
+ */
+function utf8Encode(value: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < value.length; i++) {
+    let cp = value.charCodeAt(i);
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      const lo = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+        i++;
+      } else {
+        throw new Error(
+          `#1588 utf8Encode: lone high surrogate in a string annotated utf8-guaranteed/ascii — classifier bug`,
+        );
+      }
+    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+      throw new Error(
+        `#1588 utf8Encode: lone low surrogate in a string annotated utf8-guaranteed/ascii — classifier bug`,
+      );
+    }
+    if (cp <= 0x7f) {
+      out.push(cp);
+    } else if (cp <= 0x7ff) {
+      out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    } else if (cp <= 0xffff) {
+      out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    } else {
+      out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
+  }
+  return out;
 }
 
 /**

@@ -123,6 +123,10 @@ export function compileIrPathFunctions(
   // fork / retire discipline). `alloc` ids are inert at lowering, so wiring the
   // registry does not change emitted Wasm.
   const allocRegistry = new AllocSiteRegistry();
+  // #1588 PR-B: expose the registry on the context so the string-lowering
+  // sites (literal / concat materialization) can read the `encoding`
+  // annotation when `--utf8-storage` is on. Inert when off (sites never read).
+  ctx.allocRegistry = allocRegistry;
 
   // Single shared union-struct registry across all IR-path functions in this
   // compilation. Registering a union once produces one WasmGC struct type;

@@ -123,6 +123,11 @@ export interface CompileOptions {
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
+   *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
+   *  as i8-backed `Utf8String`; all others stay i16. Default false →
+   *  byte-identical output. Implies `nativeStrings` on the WasmGC backend. */
+  utf8Storage?: boolean;
   /** Test-only: emit `__test_str_from_externref` and `__test_str_to_externref`
    *  exports so test code can pass JS strings to/from native-string params (#1187).
    *  Has no effect unless `nativeStrings` is also true. Production builds should
