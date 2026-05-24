@@ -119,10 +119,47 @@ for call-result rules:
   to `wtf16` (refining `slice` with statically-known code-point boundaries is
   a later refinement). Any other string-returning call is `wtf16`.
 
-**PR-B / PR-C (still deferred).** Dual i8/i16 storage at allocation sites and
-the Component Model boundary lowering + benchmark. These change storage
-layout / emitted Wasm and warrant an architect design pass on the storage +
-boundary ABI before implementation.
+**PR-B part 1 (landed, gated scaffolding — inert when off).** The dual-storage
+foundation, all behind `--utf8-storage` (default OFF, implies `nativeStrings`
+on the WasmGC backend):
+
+- New WasmGC types registered **only when the flag is on** (so the type table
+  is byte-identical when off): `__str_data_u8 = (array (mut i8))` and
+  `Utf8String = { len:i32, byteLen:i32, off:i32, data:ref __str_data_u8 }`, a
+  third `AnyString` subtype alongside `NativeString`/`ConsString`. `len` stays
+  the JS-visible code-unit (UTF-16) length; `byteLen` is the canonical-ABI
+  size.
+- `--utf8-storage` flag plumbed: `CompileOptions` / `CodegenOptions` /
+  `CodegenContext.utf8Storage`, the CLI (`--utf8-storage`), `compiler.ts`, and
+  the `nativeStrings` implication in `create-context.ts`.
+- `nativeStringLiteralInstrs(ctx, value, encoding?)` emits an i8-backed
+  `Utf8String` (with compile-time-computed UTF-8 bytes) for
+  `ascii`/`utf8-guaranteed`, the existing i16 `NativeString` otherwise. The
+  UTF-8 encoder asserts no lone surrogate (defensive classifier-bug guard —
+  §4 soundness anchor).
+- The live `AllocSiteRegistry` is exposed on `ctx.allocRegistry` from the IR
+  pipeline so the lowering sites can read the `encoding` annotation.
+
+This part is **not yet reached at runtime**: the IR lowering resolver still
+calls `nativeStringLiteralInstrs(ctx, value)` without an encoding, so even with
+`--utf8-storage` on, literals currently take the i16 path. Wiring the resolver
+to pass the annotation + the access-primitive `Utf8String` dispatch arm is
+**PR-B part 2** (required before the path is correct end-to-end, since an
+i8 string must be readable by `charCodeAt`/`length`).
+
+**PR-B part 2 (next).** Thread `instr.alloc` through the `emitStringConst`
+resolver hook (`lower.ts`), read the annotation at the literal/concat/flatten
+sites, and add the third subtype-dispatch arm to the access primitives in
+`ensureNativeStringHelpers` so `Utf8String` interoperates with
+`NativeString`/`ConsString` in the same module. Round-trip + fuzz correctness
+tests. **Alias-fusion soundness guard** (issue §4): before any CSE may fuse
+string sites, enforce that a `wtf16` site never aliases into a `utf8`
+canonical (no string-fusing pass exists today — forward guard).
+
+**PR-C (deferred).** Component Model boundary lowering (Edge A `c-abi.ts` scan
+elision; Edge B `declarations.ts` import selection + standalone Wasm-native
+`string_to_utf8`) + benchmark. See "## Phase 2 ABI Plan" in the #1588 issue
+file for the full design.
 
 ## Consequences
 

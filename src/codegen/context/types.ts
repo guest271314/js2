@@ -30,6 +30,8 @@ export interface CodegenOptions {
   fast?: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings?: boolean;
+  /** #1588 PR-B: dual i8/i16 string storage (default false → byte-identical). */
+  utf8Storage?: boolean;
   /** Test-only: emit `__test_str_from_externref` / `__test_str_to_externref` exports (#1187). */
   testRuntime?: boolean;
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
@@ -519,11 +521,25 @@ export interface CodegenContext {
   fast: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings: boolean;
+  /** #1588 PR-B: dual i8/i16 storage. When true (and `nativeStrings`),
+   *  string allocation sites proven `ascii`/`utf8-guaranteed` by the encoding
+   *  analysis use an i8-backed `Utf8String`; everything else stays i16.
+   *  Default false → byte-identical to today (the Utf8String types are not
+   *  even registered when off). */
+  utf8Storage: boolean;
   /** Native string support type indices */
   nativeStrDataTypeIdx: number;
   anyStrTypeIdx: number;
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
+  /** #1588 PR-B: i8 backing array + Utf8String subtype indices. -1 when
+   *  `utf8Storage` is off (types not registered). */
+  utf8StrDataTypeIdx: number;
+  utf8StrTypeIdx: number;
+  /** #1588 PR-B: the live AllocSiteRegistry from the IR pipeline, threaded so
+   *  the string-lowering sites can read the `encoding` annotation. Undefined
+   *  for non-IR / legacy front-end paths (→ encoding reads back `wtf16`). */
+  allocRegistry?: import("../../ir/alloc-registry.js").AllocSiteRegistry;
   /** Whether native string helper functions have been emitted */
   nativeStrHelpersEmitted: boolean;
   /** Whether native string host bridge helpers have been emitted */

@@ -1,5 +1,6 @@
 ---
 id: 1601
+sprint: 56
 title: "codegen: Array.prototype reduce/reduceRight/map/filter callback paths emit invalid wasm (stack underflow at local.set/if/array.set)"
 status: ready
 created: 2026-05-24

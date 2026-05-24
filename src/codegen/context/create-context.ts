@@ -25,8 +25,11 @@ export function createCodegenContext(
   // no `wasm:js-string` and no env JS-host string helpers. Use logical OR
   // for the implication chain so `wasi: false` doesn't short-circuit
   // `standalone: true` (`?? ` returns the LHS on `false`).
+  // #1588 PR-B: `utf8Storage` implies nativeStrings on the WasmGC backend —
+  // host-string mode has no in-heap bytes to choose a width for.
   const nativeStrings =
-    options?.nativeStrings ?? !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports);
+    options?.nativeStrings ??
+    !!(options?.fast || options?.wasi || options?.standalone || strictNoHostImports || options?.utf8Storage);
   const ctx: CodegenContext = {
     mod,
     checker,
@@ -100,11 +103,15 @@ export function createCodegenContext(
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
     nativeStrings,
+    // #1588 PR-B: dual i8/i16 storage, default OFF.
+    utf8Storage: !!options?.utf8Storage,
     testRuntime: options?.testRuntime ?? false,
     nativeStrDataTypeIdx: -1,
     anyStrTypeIdx: -1,
     nativeStrTypeIdx: -1,
     consStrTypeIdx: -1,
+    utf8StrDataTypeIdx: -1,
+    utf8StrTypeIdx: -1,
     nativeStrHelpersEmitted: false,
     nativeStrExternBridgeEmitted: false,
     testRuntimeStringHelpersEmitted: false,
