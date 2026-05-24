@@ -24,4 +24,4 @@ Include the phrase **Team Lead** somewhere in your commit message or command to 
 - Always verify `pwd` is `/workspace` and branch is `main` before committing
 - Use `git add <specific files>` — never `git add -A`
 - Include `Checklist completed.` in commit messages for audit trail (in addition to authentication)
-- Never force-push main
+- Never force-push public `main` or rewrite its published history — it's append-only; undo bad commits with a revert PR (see `docs/ci-policy.md`)

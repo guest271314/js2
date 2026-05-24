@@ -141,16 +141,60 @@ arguments is **merge commit**, matching what `dev-self-merge` invokes
 
 ---
 
-## 5. Force-push policy
+## 5. Force-push policy — public `main` is append-only
+
+**The public `main` branch is append-only. Its published history must NEVER
+be force-pushed or rewritten.** This is a hard rule, above and beyond the
+GitHub branch-protection settings below.
+
+What this forbids:
+
+- No `git push --force` / `--force-with-lease` to `main`.
+- No rebasing, squashing, or amending of commits that are already published
+  on `main`.
+- No history-rewriting `git filter-repo` / `filter-branch` / subtree-split
+  operations run against the public branch.
+
+The only sanctioned way `main` advances is **appending** new commits via a
+PR through the merge queue (§3, §4). The queue only ever fast-forwards or
+adds merge commits on top of existing history — it never rewrites it.
+
+**To undo a bad commit, fix forward with a revert PR** (`git revert` →
+PR → merge queue). Never rewrite history to "remove" a commit.
+
+**Rationale.** Rewriting published history breaks every external clone and
+fork: their local `main` keeps the old lineage, so their next `git pull`
+fails with "divergent branches" — through no fault of their own, and with
+no clean recovery short of re-cloning. This already happened once (the
+one-time public/private repository restructure force-pushed/rewrote
+`origin/main`) and broke an external contributor's first `git pull`. We do
+not do this again.
+
+**The one exception** is a true emergency — e.g. a leaked secret or key
+committed to history that must be expunged. That is a deliberate, announced
+break, not a routine operation:
+
+- It requires **explicit human sign-off**. An agent must NEVER rewrite public
+  history on its own initiative.
+- Watchers, contributors, and fork owners must be **notified in advance** to
+  re-clone, and it is understood that all existing forks will diverge.
+- The admin temporarily disables the ruleset, performs the push, re-enables,
+  and the disable/re-enable is logged in the repo audit log.
+
+**Non-exception (this is fine).** Resetting a *local* throwaway checkout to
+match the remote (`git reset --hard origin/main`) is always allowed — that
+moves a local branch pointer and pushes nothing. It is not a remote history
+rewrite and is unrelated to this rule.
+
+### GitHub branch-protection settings backing this rule
 
 - **Force-pushes to `main` are blocked** for all users.
 - **Admins included**: the branch-protection ruleset is configured with
   `enforce_admins: true`. This prevents accidental destructive pushes from
   maintainer accounts.
-- **Override path**: if a force-push is genuinely necessary (e.g. to expunge
-  leaked secrets), the admin temporarily disables the ruleset, performs the
-  push, and re-enables. The disable/re-enable is logged in the repo audit
-  log.
+- **Override path**: the emergency exception above — the admin temporarily
+  disables the ruleset, performs the push, and re-enables. The
+  disable/re-enable is logged in the repo audit log.
 - **Branch deletion is blocked**: `main` cannot be deleted via API or UI.
 
 ---
