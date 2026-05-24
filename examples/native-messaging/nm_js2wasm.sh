@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env -S wasmtime -W all-proposals=y /absolute/path/to/js2/examples/native-messaging/out/host.wasm
 # Chrome launches the native messaging host by executing this script and then
 # speaking the length-prefixed JSON protocol over the script's stdin/stdout.
 # The wrapper hands stdin/stdout straight through to the WASI runtime, which
@@ -8,19 +8,4 @@
 # script in turn needs an absolute path to host.wasm — Chrome does not set a
 # predictable working directory. We resolve paths relative to this script's
 # own location so the example is copy-paste portable.
-set -eu
 
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-WASM="$DIR/out/host.wasm"
-
-if [ ! -f "$WASM" ]; then
-  echo "host.wasm not found at $WASM — build it first (from the repo root):" >&2
-  echo "  npx tsx src/cli.ts examples/native-messaging/host.ts --target wasi -o examples/native-messaging/out" >&2
-  exit 1
-fi
-
-# wasmtime is the default runtime. Swap in wasmer if you prefer:
-#   exec wasmer run "$WASM"
-# Neither runtime needs --dir/--mapdir here: this host only touches
-# stdin/stdout/stderr, no filesystem.
-exec wasmtime "$WASM"
