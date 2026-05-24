@@ -41,7 +41,8 @@
 - [feedback_team_comm_channels.md](feedback_team_comm_channels.md) — Dev status via TaskUpdate not verbose SendMessage; shutdown handoffs via agent-context files
 - [feedback_token_budget_guardrails.md](feedback_token_budget_guardrails.md) — Warn at 25% weekly budget, force break at 40%, hard stop at 50%
 - [feedback_diary_and_sprints_before_compact.md](feedback_diary_and_sprints_before_compact.md) — Update plan/diary.md and plan/issues/sprints/N/sprint.md (+ retrospective) BEFORE /compact — never discard learnings with the conversation
-- [feedback_tasklist_sync_unreliable.md](feedback_tasklist_sync_unreliable.md) — TaskList sync per-agent is unreliable; when devs report mismatched task IDs, fall back to SendMessage as authoritative dispatch
+- [feedback_tasklist_sync_unreliable.md](feedback_tasklist_sync_unreliable.md) — DISPATCH MODEL (2026-05-23): native TaskList auto-dispatch is canonical; tech lead reconciles (mark merged done immediately), doesn't route manually; SendMessage dispatch is break-glass only
+- [feedback_ignore_unreliable_autodispatch.md](feedback_ignore_unreliable_autodispatch.md) — SUPERSEDED 2026-05-23 by native auto-dispatch switch. Devs now trust auto-dispatch; only verify live state (is it merged/owned?) before claiming. Ignoring auto-dispatch wholesale is break-glass only.
 - [feedback_sendmessage_discipline.md](feedback_sendmessage_discipline.md) — SendMessage = blockers/decisions/completions only; status/idle/ack → TaskUpdate or silence
 - [feedback_dev_silence_protocol.md](feedback_dev_silence_protocol.md) — No idle_notification messages ever; devs silent during CI-wait; TL keeps queue full, devs escalate only
 - [feedback_idle_notification_silence.md](feedback_idle_notification_silence.md) — Don't respond to idle notifications unless CI landed or work to assign; silence breaks the ping loop
