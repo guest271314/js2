@@ -175,6 +175,9 @@ maturing, so compiled output is not guaranteed to run there yet. Browser hosts
 (Chrome 119+, Firefox 120+) and Node.js 22+ run the JS-host target without extra
 flags.
 
+For reading STDIN and writing STDOUT/STDERR from standalone (`--target wasi`)
+output, see [docs/standalone-io.md](./docs/standalone-io.md).
+
 ## Current coverage and limitations
 
 `js2wasm` passes roughly two-thirds of Test262 in a JS host (see the conformance
