@@ -38,6 +38,12 @@ coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 land
 | 1659 | CI does not run tests/equivalence/ (OOM) — equivalence regressions land silently | high | medium | **Ready** (gates CI-visibility of #1658) |
 | 1658 | Destructured/scalar function-parameter default not applied (returns 30, expects 40) | high | medium | **Ready** (depends on #1659 for CI gating) |
 
+## Sprint 55 — docs (added 2026-05-25)
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1661 | README programmatic-API example fails — `instantiate(binary, {})` vs default-mode host imports (guest #601) | high | easy | **Ready** (sprint 55, docs, plan-only) |
+
 ## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
 
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
@@ -76,10 +82,10 @@ sign-off.
 
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
-| 1660 | Replace placeholder cla-check with a real CLA signature/approval gate | high | medium | **Ready** — gates external-PR merges incl. guest271314's PR #589 (#1530 HOLD) |
+| 1660 | Replace placeholder cla-check with a real CLA signature/approval gate | high | medium | **Done** — self-hosted in-repo signature gate (`.github/cla/`); internal/bot authors exempt, external humans sign by comment. Promotion to a *required* check deferred to an admin (see issue follow-up). |
 
 ```
-#1660 (real CLA gate) -- gates all external-PR merges
+#1660 (real CLA gate) -- DONE: gates external-PR merges once promoted to required
   └── PR #589 (guest271314, attached to #1530) -- HOLD until guest's CLA acceptance is recorded
 ```
 

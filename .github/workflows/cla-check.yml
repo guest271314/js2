@@ -1,19 +1,183 @@
 name: CLA Check
 
+# Self-hosted CLA-acceptance gate (#1660). No third-party service.
+#
+# Records affirmative CLA acceptance IN-REPO at .github/cla/signatures.json.
+# External (non-org-member, non-bot) human contributors must comment the exact
+# phrase  "I have read and agree to the CLA"  on their PR; the workflow then
+# appends their signature and the check passes. Internal authors (org members,
+# the maintainer, and any *[bot]) are EXEMPT and pass with no signature — this
+# is critical so the team's self-merge / automation PRs are never blocked.
+#
+# SECURITY — pull_request_target:
+#   This trigger runs with a WRITE token in the BASE-repo context even for fork
+#   PRs. We therefore NEVER `actions/checkout` the PR head, and never run any
+#   PR-supplied code. We only read PR/comment METADATA via the API and the
+#   tracked signature store, and (on a valid signing comment) commit an append
+#   to .github/cla/signatures.json. The checkout we DO perform is always the
+#   BASE ref (default checkout of pull_request_target = base), so the gate
+#   logic + signature store we read are the trusted repo's versions, not the
+#   fork's.
+#
+# The job is named `cla-check` so it maps to that branch-protection context.
+# It is currently informational (not yet a required check) — see the follow-up
+# note in plan/issues/1660-real-cla-gate.md before promoting it to required.
+#
+# ADMIN NOTE for the eventual branch-protection promotion: this workflow pushes
+# the signature commit directly to the default branch as github-actions[bot].
+# If `main` is later protected with required PR reviews / linear history, that
+# direct push can be rejected. When promoting, either (a) allow the
+# github-actions bot to bypass protection for `.github/cla/signatures.json`, or
+# (b) switch the signing path to open a tiny auto-merge PR instead of a direct
+# push. Until protection is enabled this direct push works as-is.
+
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write # to commit appended signatures to the base repo
+  pull-requests: write # to post the one-time instruction comment
+  issues: write
+  statuses: write # to set the cla-check commit status
 
 jobs:
   cla-check:
     runs-on: ubuntu-latest
+    # issue_comment fires on ALL issues; only run for PR comments.
+    if: ${{ github.event_name != 'issue_comment' || github.event.issue.pull_request != null }}
     steps:
-      - name: Placeholder
-        run: |
-          echo "CLA enforcement placeholder."
-          echo "Replace this workflow with a real contributor signature or approval system."
-          echo "Required contributor terms are documented in CONTRIBUTING.md and CLA.md."
+      # BASE checkout only (default for pull_request_target). Never the PR head.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Evaluate / record CLA acceptance
+        uses: actions/github-script@v7
+        env:
+          # Exposed so the gate module's own fetch()-based org-membership check
+          # has a token. github-script also injects an authenticated `github`
+          # Octokit, but the gate module calls the REST API directly.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const gate = await import(`${process.env.GITHUB_WORKSPACE}/.github/cla/cla-gate.mjs`);
+            const fs = require("node:fs");
+            const { execFileSync } = require("node:child_process");
+
+            const org = context.repo.owner;
+            const repo = context.repo.repo;
+            const token = process.env.GITHUB_TOKEN || core.getInput("github-token");
+            const claVersion = gate.currentClaVersion();
+            const allowlist = gate.readAllowlist();
+
+            // ---- Resolve PR number + author + head SHA ------------------------
+            let prNumber, author;
+            if (context.eventName === "issue_comment") {
+              prNumber = context.payload.issue.number;
+            } else {
+              prNumber = context.payload.pull_request.number;
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner: org, repo, pull_number: prNumber,
+            });
+            author = pr.user.login;
+            const headSha = pr.head.sha;
+            const authorName = pr.user.name || author;
+
+            core.info(`PR #${prNumber} author=${author} cla_version=${claVersion} event=${context.eventName}`);
+
+            // ---- Helper: set the cla-check commit status ----------------------
+            async function setStatus(state, description) {
+              await github.rest.repos.createCommitStatus({
+                owner: org, repo, sha: headSha,
+                state, // success | failure | pending
+                context: "cla-check",
+                description: description.slice(0, 140),
+              });
+            }
+
+            // ---- 1) EXEMPTION (static allowlist + bots + live org membership) -
+            const { exempt, reason } = await gate.resolveExemption({
+              token, org, login: author, allowlist,
+            });
+            if (exempt) {
+              core.info(`Author ${author} is exempt (${reason}); CLA not required.`);
+              await setStatus("success", `CLA not required (${reason}).`);
+              return;
+            }
+
+            // ---- 2) issue_comment: record a signature if the phrase matches ---
+            if (context.eventName === "issue_comment") {
+              const commenter = context.payload.comment.user.login;
+              const body = context.payload.comment.body;
+              const commenterIsAuthor =
+                commenter.toLowerCase() === author.toLowerCase();
+              if (commenterIsAuthor && gate.commentMatchesPhrase(body)) {
+                const store = gate.readStore();
+                const sig = gate.makeSignature({
+                  login: author, name: authorName, pr: prNumber,
+                  commitSha: headSha, claVersion,
+                });
+                const { store: next, added } = gate.appendSignature(store, sig);
+                if (added) {
+                  gate.writeStore(next);
+                  // Commit the appended signature to the base repo.
+                  execFileSync("git", ["config", "user.name", "github-actions[bot]"]);
+                  execFileSync("git", ["config", "user.email",
+                    "41898282+github-actions[bot]@users.noreply.github.com"]);
+                  execFileSync("git", ["add", ".github/cla/signatures.json"]);
+                  execFileSync("git", ["commit", "-m",
+                    `chore(cla): record CLA acceptance for @${author} (PR #${prNumber})`]);
+                  execFileSync("git", ["push", "origin",
+                    `HEAD:${context.payload.repository.default_branch}`]);
+                  core.info(`Recorded CLA signature for @${author}.`);
+                }
+                await setStatus("success", "CLA accepted and recorded.");
+                return;
+              }
+              // A non-matching comment on an unsigned PR: re-evaluate below.
+            }
+
+            // ---- 3) Already signed at the current version? --------------------
+            const store = gate.readStore();
+            if (gate.hasSigned(store.signatures, author, claVersion)) {
+              await setStatus("success", "CLA already accepted.");
+              return;
+            }
+
+            // ---- 4) Not signed → fail + one-time instruction comment ----------
+            const marker = "<!-- cla-gate:request -->";
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: org, repo, issue_number: prNumber, per_page: 100,
+            });
+            const alreadyAsked = comments.some(
+              (c) => c.body && c.body.includes(marker),
+            );
+            if (!alreadyAsked) {
+              await github.rest.issues.createComment({
+                owner: org, repo, issue_number: prNumber,
+                body:
+                  `${marker}\n` +
+                  `Thanks for your contribution, @${author}! Before this PR can be ` +
+                  `merged we need a recorded acceptance of our ` +
+                  `[Contributor License Agreement](../blob/${context.payload.repository.default_branch}/CLA.md).\n\n` +
+                  `Please post a comment on this PR with **exactly** this phrase:\n\n` +
+                  `> ${gate.AGREEMENT_PHRASE}\n\n` +
+                  `Your acceptance will be recorded in ` +
+                  `\`.github/cla/signatures.json\` and the \`cla-check\` will turn green.`,
+              });
+            }
+            await setStatus(
+              "failure",
+              `Awaiting CLA acceptance — comment "${gate.AGREEMENT_PHRASE}".`,
+            );
+            core.setFailed(`@${author} has not accepted the CLA (version ${claVersion}).`);
