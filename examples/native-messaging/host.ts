@@ -27,22 +27,23 @@ declare const process: {
   stderr: { write(chunk: Uint8Array | string): void };
 };
 
-// Strip Chrome's 4-byte little-endian length prefix from a framed message,
-// returning just the JSON body. readStdin() hands us the whole stdin buffer
-// (prefix + body) as a single string; we skip the first 4 code units.
-function stripLengthPrefix(framed: string): string {
-  // The 4 prefix bytes are read as 4 string code units by readStdin().
-  return framed.substring(4);
-}
-
 // Decode the little-endian uint32 length that Chrome wrote as the first 4
-// bytes, so a host can validate the frame size against the body it received.
+// bytes. readStdin() hands us the whole stdin buffer (prefix + body) as a
+// single string, one byte per code unit, so the prefix is the first 4 units.
 function decodeLength(framed: string): number {
   const b0 = framed.charCodeAt(0) & 0xff;
   const b1 = framed.charCodeAt(1) & 0xff;
   const b2 = framed.charCodeAt(2) & 0xff;
   const b3 = framed.charCodeAt(3) & 0xff;
   return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+// Extract exactly the declared body bytes after the 4-byte prefix — mirroring
+// the AssemblyScript reference's "read the length, then read that many body
+// bytes" loop, rather than blindly taking everything after the prefix (which
+// would mishandle a stdin buffer carrying trailing bytes).
+function readBody(framed: string, length: number): string {
+  return framed.substring(4, 4 + length);
 }
 
 // Write a framed Native Messaging response: the 4-byte little-endian length
@@ -60,7 +61,7 @@ export function main(): void {
   // the simplest "stdio" wiring; a long-lived port would loop here).
   const framed = readStdin();
   const declaredLen = decodeLength(framed);
-  const body = stripLengthPrefix(framed);
+  const body = readBody(framed, declaredLen);
 
   // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
   // protocol stream. Chrome ignores the host's stderr.
