@@ -7930,6 +7930,10 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
       // not a host import — skip the env.readStdin stub so the codegen path in
       // compileCallExpression takes over.
       if (ctx.wasi && name === "readStdin") continue;
+      // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
+      // skip the stub so the unified-collector finalize can emit the WasmGC
+      // native scanners (registered under the same funcMap names) instead.
+      if ((ctx.wasi || ctx.standalone) && (name === "parseInt" || name === "parseFloat")) continue;
       if (!ctx.funcMap.has(name)) {
         const sig = ctx.checker.getSignatureFromDeclaration(stmt);
         if (sig) {
