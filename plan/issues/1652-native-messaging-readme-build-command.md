@@ -1,8 +1,10 @@
 ---
 id: 1652
 title: Fix native-messaging README build command (npx js2wasm not found on fresh clone)
-status: in-review
+status: done
 priority: low
+updated: 2026-05-24
+completed: 2026-05-24
 task_type: docs
 area: [docs, examples]
 related: [1530, 1590]

@@ -1,9 +1,10 @@
 ---
 id: 1587
 title: "Static analysis pass: ownership and access semantics on IR values"
-status: in-progress
+status: done
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
