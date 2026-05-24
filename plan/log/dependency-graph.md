@@ -43,16 +43,28 @@ coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 land
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
 (#1530) on the AssemblyScript reference `nm_assemblyscript.ts`.
 
+**Direction (2026-05-24):** host capabilities are exposed as **standard Node.js
+APIs** (`process.stdin` / `process.stdout`), never bespoke builtins. The
+example is being rewritten onto `process.stdin.read()` (#1653) + already-shipped
+`process.stdout.write()` (#1651), with `Buffer`/`DataView` framing.
+
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
 | 1654 | DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under --target wasi | high | medium | **Ready** (root) |
 | 1653 | process.stdin.read(buffer, offset?) — binary incremental stdin read (keystone) | high | hard | Blocked by #1654 |
 | 1655 | process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal | medium | easy | Blocked by #1654 |
+| 1530 | Native Messaging host example — Node-style rewrite (no bespoke builtins) | medium | medium | **Reopened** (`in-progress`); Blocked by #1653 + #1654 |
+| ~~1628~~ | ~~raw-byte stdout builtin `writeStdout(bytes)`~~ | — | — | **wont-fix** — superseded by `process.stdout.write` (#1651), the standard Node API; bespoke builtin is the wrong shape |
 
 ```
+#1651 (process.stdout.write) -- DONE (standard Node write API; supersedes #1628/#1617)
 #1654 (ArrayBuffer/DataView valid standalone) -- root, unblocks both
-  ├── #1653 (binary stdin read) -- keystone
+  ├── #1653 (binary stdin read, process.stdin.read) -- keystone
+  │     └── #1530 (Native Messaging example, Node-style rewrite) -- also needs #1654 directly
   └── #1655 (stdout write ArrayBuffer)
+
+#1530 depends on #1653 + #1654.
+#1628 (a.k.a. "#1617" in the #1530 history) -> wont-fix (superseded by #1651).
 ```
 
 ## Sprint 55 — repo structure / website (added 2026-05-24)
