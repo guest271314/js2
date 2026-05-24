@@ -12,10 +12,12 @@ script. This directory contains:
 
 ```
 examples/native-messaging/
-  host.ts        ← the TypeScript host (compiled with --target wasi)
-  README.md      ← this file
-  manifest.json  ← Chrome native-host manifest template
-  run.sh         ← wasmtime/wasmer wrapper Chrome invokes
+  host.ts          ← the TypeScript host (compiled with --target wasi)
+  README.md        ← this file
+  nm_js2wasm.json  ← Chrome native-host manifest template
+  manifest.json    ← Web extension manifest
+  nm_js2wasm.sh    ← wasmtime/wasmer wrapper Chrome invokes
+  background.js    ← MV3 Web extension background `ServiceWorker` script
 ```
 
 ## Status: a working drop-in Chrome host
@@ -72,7 +74,7 @@ runs on any standards-compliant WASI preview1 runtime.
 
 ## Run it under a WASI runtime
 
-`run.sh` wraps the runtime invocation. wasmtime is **not bundled** with this
+`nm_js2wasm.sh` wraps the runtime invocation. `wasmtime` is **not bundled** with this
 repo — install it from <https://wasmtime.dev> (or use `wasmer` /
 [wazero](https://github.com/tetratelabs/wazero); see
 [`../wasi/README.md`](../wasi/README.md) for the full runtime matrix and how to
@@ -109,23 +111,24 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 1. **Build** `out/host.wasm` (above) and make sure `run.sh` is executable
    (`chmod +x run.sh`).
 
-2. **Edit `manifest.json`**:
-   - `path` → the **absolute** path to `run.sh` (Chrome requires an absolute
-     path and does not set a predictable working directory).
+2. **Edit `nm_js2wasm.json`**:
+   - `path` → the **absolute** path to `nm_js2wasm.sh` (Chrome requires an absolute
+     path and does not set a predictable working directory), and make sure the file is 
+     set to executable.
    - `allowed_origins` → `chrome-extension://YOUR_EXTENSION_ID/` for the
      extension that will connect. Find the ID on `chrome://extensions` with
-     Developer mode enabled.
+     Developer mode enabled after installing the unpacked Web extension.
 
 3. **Install the manifest** in the per-platform location Chrome scans:
 
    | Platform | Manifest location |
    |----------|-------------------|
-   | Linux | `~/.config/google-chrome/NativeMessagingHosts/com.example.js2wasm_host.json` |
-   | macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.example.js2wasm_host.json` |
-   | Windows | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.example.js2wasm_host` whose default value is the absolute path to the manifest `.json` |
+   | Linux | `~/.config/google-chrome/NativeMessagingHosts/nm_js2wasm.json` |
+   | macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_js2wasm.json` |
+   | Windows | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_js2wasm` whose default value is the absolute path to the manifest `.json` |
 
    The manifest **filename** must match the host `name` field
-   (`com.example.js2wasm_host`). On Windows, `run.sh` won't run directly —
+   (`nm_js2wasm`). On Windows, `nm_js2wasm.sh` won't run directly —
    use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\host.wasm"`) and point
    `path` at the `.bat`.
 
@@ -133,9 +136,14 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
    extension manifest:
 
    ```js
-   const port = chrome.runtime.connectNative("com.example.js2wasm_host");
+   const port = chrome.runtime.connectNative("nm_js2wasm");
    port.onMessage.addListener((msg) => console.log("from host:", msg));
-   port.onDisconnect.addListener(() => console.log("host disconnected"));
+   port.onDisconnect.addListener((_) => {
+     console.log("host disconnected");
+     if (chrome.runtime.lastError) {
+       console.log(chrome.runtime.lastError);
+     }
+   }
    port.postMessage({ ping: true });
    ```
 
