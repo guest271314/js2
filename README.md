@@ -86,6 +86,42 @@ WasmGC structs, arrays, primitives, and functions. Where JavaScript remains
 dynamic, it inserts guards, uses dynamic representations, or delegates at host
 boundaries.
 
+### How does this compare to specific projects?
+
+These projects share parts of the design space with `js2wasm` and each makes a
+different, reasonable trade-off:
+
+- **[AssemblyScript](https://www.assemblyscript.org/)** — a well-engineered
+  compiler for a TypeScript-*like* language with its own stricter type system,
+  lowering to compact Wasm via Binaryen. It achieves small output by defining a
+  new language contract rather than accepting mainstream JavaScript semantics.
+  `js2wasm` targets existing TypeScript/JavaScript semantics directly, which is
+  a harder compatibility goal; AssemblyScript is the better fit when you can
+  write to its language and want maximally lean output.
+
+- **[Javy](https://github.com/bytecodealliance/javy)** — embeds the QuickJS
+  interpreter inside the Wasm module and runs your JS on top of it. That
+  inherits broad JavaScript compatibility immediately, at the cost of shipping
+  and initializing an interpreter in every module. `js2wasm` instead compiles
+  the code ahead-of-time with no embedded interpreter, trading some
+  compatibility for a smaller, engine-free artifact.
+
+- **[Porffor](https://porffor.dev/)** — like `js2wasm`, an ahead-of-time
+  JavaScript-to-Wasm compiler aiming at real JS semantics rather than a subset,
+  which puts it in the same fourth category. It is an early-stage project that
+  lowers to linear memory; `js2wasm` lowers to WasmGC, leaning on the host
+  garbage collector for objects, closures, and arrays. The two are close
+  neighbors exploring different lowering strategies for the same hard target.
+
+- **StarlingMonkey + [weval](https://github.com/bytecodealliance/weval)** —
+  StarlingMonkey is a WASI-oriented build of the SpiderMonkey engine; weval
+  applies Wasm partial evaluation (a Futamura projection) to specialize the
+  engine for a given script, reducing interpreter overhead. This is a
+  bundled-engine approach made faster through specialization, so it keeps full
+  engine compatibility while still shipping the engine. `js2wasm` avoids
+  bundling an engine at all, accepting a narrower compatibility surface in
+  exchange.
+
 For a more detailed category-level comparison, see the [FAQ](./docs/faq.md).
 
 ## Quick Start
