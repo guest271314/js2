@@ -88,7 +88,7 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
    ```
    Then open the PR:
    `gh pr create --base main --title "fix(#N): <description>" --body "..."`
-   **Immediately after the PR is created, set the issue frontmatter `status: in-review`** in `plan/issues/sprints/{sprint}/{N}.md` (commit it on your branch). This signals the issue has left active dev and is awaiting merge — never leave it at `in-progress` once a PR is open.
+   **The implementation PR sets the issue frontmatter `status: done` directly** (with `completed: <date>`) in `plan/issues/{N}-{slug}.md` — commit it on your branch as part of the PR. You are self-merging this PR, so by the time the merge queue lands it the issue IS done, and there is no separate observer who can flip the status afterward. Do NOT set `in-review` and plan a later flip: once the queue lands the PR you can't make a follow-up commit from `/workspace`, which orphans the issue at `in-review` (see #1602/#1603/#1606). (`status: in-review` is only for the handoff/external case where the PR author is NOT the merger.)
 5. **After `gh pr create` returns — watch CI via a BACKGROUND task, then go quiet:**
    - Update your status file to show the open PR:
      ```bash
@@ -102,7 +102,7 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
      - **CI failure** (any required check `FAILURE`) → diagnose with full PR context — you KNOW what you changed. Fix locally, `git push`, loop back to wait-for-CI. Do NOT escalate ordinary failures.
      - **ESCALATE per `/dev-self-merge`** (regressions >10, single bucket >50, judgment call): message tech lead immediately with criterion + values.
 6. After merge lands (by you OR by the merge queue):
-   - Set the issue frontmatter `status: done` in `plan/issues/sprints/{sprint}/{N}.md`. A merged PR ALWAYS implies `status: done` — whoever observes the merge sets it; do not leave a merged issue at `in-review`.
+   - The issue frontmatter is already `status: done` (set in the PR itself, step 4) — no post-merge flip is needed. A merged PR ALWAYS implies `status: done`; under self-merge the PR carries it so nothing is left at `in-review`.
    - `rm -f "/workspace/.claude/agent-status/issue-{N}-{slug}.json"` — clear your status
    - `git worktree remove /workspace/.claude/worktrees/<branch>` — clean up your own worktree
    - `TaskUpdate(status: completed)`

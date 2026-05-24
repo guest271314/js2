@@ -324,8 +324,9 @@ GitHub branch protection is the hard block.
 ### Issue status lifecycle
 The issue frontmatter `status:` field tracks where an issue is, set by whichever agent drives the transition:
 - `ready`/`in-progress` → dev starts work (sets `in-progress` when claiming).
-- **`in-review`** — set by the agent the moment it **opens a PR** for the issue. An open PR ⇒ the issue is no longer `in-progress`.
-- **`done`** — set when the **PR merges** (by the dev who observes the merge, or by the merge queue's observer). A merged PR ⇒ `done`. Never leave a merged issue at `in-review`.
+- **Self-merge path (the common case)** — when a dev opens the implementation PR for an issue they will self-merge, the **implementation PR sets `status: done` directly** (with `completed:`), not `in-review`. By the time the merge queue lands the PR, the issue *is* done, and there is no separate observer who can make a post-merge commit. Setting `in-review` here orphans the issue: the dev can't flip it to `done` afterward from `/workspace` once the queue lands the PR. So the impl PR carries the final status. (See #1602/#1603/#1606 — stuck at `in-review` because of exactly this.)
+- **`in-review`** — reserved for the **handoff/external case**: the PR author is NOT the merger (e.g. work handed off to another agent, or an external contributor's PR). Set when the PR opens; flipped to `done` by whoever observes the merge.
+- **`done`** — true once the **PR merges**. In the self-merge path it's already set in the impl PR; in the handoff/external case it's set by the merge observer. A merged PR ⇒ `done`. Never leave a merged issue at `in-review`.
 
 ### Issue completion (post-merge)
 1. Set `status: done` in the issue file at `plan/issues/<id>-<slug>.md`
