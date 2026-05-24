@@ -4865,6 +4865,9 @@ export function addStringImports(ctx: CodegenContext): void {
   // Record import count before adding so we can shift function indices
   // if this is called after collectDeclarations has run.
   const importsBefore = ctx.numImportFuncs;
+  // #1666: suppress addImport's per-call eager func-index fixup — this function
+  // adds a batch of imports and does its own single shift below.
+  ctx.suppressFuncIndexFixup = (ctx.suppressFuncIndexFixup ?? 0) + 1;
 
   // concat: (externref, externref) -> (ref extern)
   const concatType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "ref_extern" }]);
@@ -4911,6 +4914,9 @@ export function addStringImports(ctx: CodegenContext): void {
     const idx = ctx.funcMap.get(name);
     if (idx !== undefined) ctx.jsStringImports.set(name, idx);
   }
+
+  // #1666: end of import batch — re-enable addImport's eager fixup.
+  ctx.suppressFuncIndexFixup = (ctx.suppressFuncIndexFixup ?? 1) - 1;
 
   // If imports were added after defined functions were registered (late addition),
   // shift all defined-function indices.
@@ -6174,6 +6180,9 @@ export function addUnionImports(ctx: CodegenContext): void {
   // Record the import count before adding, so we can adjust defined-function
   // indices if imports are added after collectDeclarations has run.
   const importsBefore = ctx.numImportFuncs;
+  // #1666: suppress addImport's per-call eager func-index fixup — this function
+  // adds a batch of imports and does its own single shift below.
+  ctx.suppressFuncIndexFixup = (ctx.suppressFuncIndexFixup ?? 0) + 1;
 
   // __typeof_number: (externref) → i32
   const typeofType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
@@ -6235,6 +6244,9 @@ export function addUnionImports(ctx: CodegenContext): void {
     kind: "func",
     typeIdx: typeofStrType,
   });
+
+  // #1666: end of import batch — re-enable addImport's eager fixup.
+  ctx.suppressFuncIndexFixup = (ctx.suppressFuncIndexFixup ?? 1) - 1;
 
   // If imports were added after defined functions were registered (late addition),
   // shift all defined-function indices and fix exports/funcMap/call instructions.

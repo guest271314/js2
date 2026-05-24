@@ -633,6 +633,15 @@ export interface CodegenContext {
   anonStructHash: Map<string, string>;
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
+  /**
+   * #1666: re-entrancy guard for the eager func-index fixup in `addImport`.
+   * Batch import adders (`addUnionImports`, `addStringImports`,
+   * `addArrayIteratorImports`, `addUnionImportsAsNativeFuncs`) capture
+   * `importsBefore`, add several imports, then shift function indices ONCE
+   * themselves. While such a batch is active they bump this counter so the
+   * per-`addImport` eager fixup does not double-shift. `undefined`/`0` means
+   * "no batch active — eager fixup is allowed". */
+  suppressFuncIndexFixup?: number;
   /** Map from class name → global index of the prototype externref singleton */
   protoGlobals: Map<string, number>;
   /** Map from class name → own method names (instance methods, for prototype allowlist; see #1047) */
