@@ -884,16 +884,6 @@
       "sprint": "55"
     },
     {
-      "id": "1597",
-      "title": "host-indep: gate __throw_reference_error in standalone mode",
-      "priority": "medium",
-      "feasibility": "easy",
-      "depends_on": [],
-      "goal": "standalone-wasm",
-      "status": "ready",
-      "sprint": "55"
-    },
-    {
       "id": "1584",
       "title": "Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback",
       "priority": "medium",
@@ -2982,6 +2972,16 @@
       "goal": "wasi-completeness",
       "status": "review",
       "sprint": "Backlog"
+    },
+    {
+      "id": "1597",
+      "title": "host-indep: gate __throw_reference_error in standalone mode",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "standalone-wasm",
+      "status": "review",
+      "sprint": "55"
     },
     {
       "id": "1519",
