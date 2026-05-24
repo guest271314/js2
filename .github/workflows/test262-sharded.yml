@@ -138,6 +138,112 @@ jobs:
           if [ "$tc_rc" -ne 0 ]; then echo "::error::typecheck failed (rc=$tc_rc)"; exit "$tc_rc"; fi
           if [ "$lint_rc" -ne 0 ]; then echo "::warning::lint failed (rc=$lint_rc) — not blocking"; fi
 
+  changes:
+    # merge_group has no native `paths:` filter (unlike pull_request/push
+    # above), so a website/plan/doc-only PR entering the queue would otherwise
+    # run the full ~1.5h 32-shard matrix for nothing. This job diffs the
+    # queued group's base..head and decides whether any test262-relevant path
+    # changed, exposing `run_shards=true|false`.
+    #
+    # CONSERVATIVE FAIL-SAFE: if base_sha is missing/empty, the diff fails, or
+    # detection is in any way uncertain → `run_shards=true` (run test262). We
+    # only emit `false` when we POSITIVELY confirm zero test262-relevant paths
+    # changed. A false positive (running shards we didn't need) costs CI time;
+    # a false negative (skipping shards we needed) lets a real regression
+    # through — so we bias hard toward running.
+    #
+    # Only meaningful on merge_group. On pull_request/push the native `paths:`
+    # filter already gates the whole workflow, and on workflow_dispatch we
+    # always want shards — so this job emits `true` for every non-merge_group
+    # event and the shard `if:` keeps its existing arms for those.
+    name: detect test262-relevant changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event_name == 'merge_group' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.actor != 'github-actions[bot]')
+    outputs:
+      run_shards: ${{ steps.detect.outputs.run_shards }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Detect test262-relevant changes
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -uo pipefail
+          # Non-merge_group events keep the old behaviour: the workflow-level
+          # `paths:` filter (PR/push) or unconditional intent (dispatch) already
+          # decided we should run, so emit true and let the shard `if:` arms
+          # handle gating per event_name.
+          if [ "$EVENT_NAME" != "merge_group" ]; then
+            echo "Non-merge_group event ($EVENT_NAME): run_shards=true (native paths filter / dispatch governs)."
+            echo "run_shards=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- merge_group: diff base..head ourselves ---
+          if [ -z "${MG_BASE_SHA:-}" ] || [ -z "${MG_HEAD_SHA:-}" ]; then
+            echo "::warning::merge_group base/head sha missing (base='${MG_BASE_SHA:-}' head='${MG_HEAD_SHA:-}') — FAIL-SAFE run_shards=true."
+            echo "run_shards=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Make sure both commits are present (fetch-depth:0 should cover it,
+          # but the merge_group head may be a freshly-built ref).
+          git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "$MG_BASE_SHA" 2>/dev/null || true
+          git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "$MG_HEAD_SHA" 2>/dev/null || true
+
+          set +e
+          DIFF=$(git diff --name-only "$MG_BASE_SHA" "$MG_HEAD_SHA" 2>/tmp/diff_err)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::git diff $MG_BASE_SHA..$MG_HEAD_SHA failed (rc=$rc): $(cat /tmp/diff_err) — FAIL-SAFE run_shards=true."
+            echo "run_shards=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed paths in queued group:"
+          echo "$DIFF" | sed 's/^/  /'
+
+          # Empty diff is suspicious (a no-op merge shouldn't be queued); be
+          # conservative and run.
+          if [ -z "$DIFF" ]; then
+            echo "::warning::Empty diff for merge_group $MG_BASE_SHA..$MG_HEAD_SHA — FAIL-SAFE run_shards=true."
+            echo "run_shards=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RESULT=$(printf '%s\n' "$DIFF" | bash scripts/test262-paths-match.sh)
+          echo "test262-paths-match → run_shards=$RESULT"
+          echo "run_shards=$RESULT" >> "$GITHUB_OUTPUT"
+
+  # =====================================================================
+  # merge_group gating truth table (the other event_names are governed by
+  # the workflow-level `paths:` filter + the per-job `if:` arms below):
+  #
+  #   queued change          changes.run_shards   test262-shard   merge-report
+  #   ---------------------  ------------------   -------------   -------------------
+  #   src/** (or any         true                 RUNS (matrix)   runs, real result
+  #     &test262-paths)
+  #   website/plan/doc-only  false                SKIPPED         runs, trivial PASS
+  #   base_sha empty /       true (fail-safe)     RUNS (matrix)   runs, real result
+  #     diff fails / empty
+  #
+  # In ALL three rows the required check "merge shard reports" is produced
+  # green — that is the invariant that keeps the PR mergeable (see the trap
+  # documented in test262-pr-stub.yml). The only thing that varies is whether
+  # the heavy matrix actually executed.
+  # =====================================================================
+
   test262-shard:
     # Heavy 16-shard test262 fires on all gate-relevant events:
     #   pull_request → per-PR validation (serial queue model — each PR is
@@ -149,10 +255,18 @@ jobs:
     # regression-gate reports per-test transitions; bad PRs bounce back to
     # their authors with actionable feedback rather than slipping into a
     # batch.
+    #
+    # merge_group arm now also requires `needs.changes.outputs.run_shards`
+    # to be 'true' — the `changes` job skips the heavy matrix for queued
+    # website/plan/doc-only changes (and fails safe to 'true' on any doubt,
+    # see that job). The other arms are unchanged: pull_request/push are
+    # already gated by the workflow-level `paths:` filter, and
+    # workflow_dispatch always runs.
+    needs: [changes]
     if: |
       (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
       (github.event_name == 'pull_request' && github.actor != 'github-actions[bot]') ||
-      github.event_name == 'merge_group' ||
+      (github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'true') ||
       github.event_name == 'workflow_dispatch'
     # Runs in PARALLEL with `gate` — both are independently required by the
     # ruleset (`cheap gate (main-ancestor + lint)` and `merge shard reports`),
@@ -268,32 +382,64 @@ jobs:
     # for all gate-relevant contexts. Serial-queue model: this is the same
     # job whether the trigger is pull_request (PR-level validation) or
     # merge_group (final pre-merge validation).
+    # CRITICAL — this job produces the required check "merge shard reports".
+    # It MUST run and report green in BOTH of these cases, or the PR is
+    # permanently BLOCKED (the cascade-skip trap documented in
+    # test262-pr-stub.yml):
+    #   (a) shards ran and succeeded                        → real merged report
+    #   (b) shards were intentionally skipped on merge_group
+    #       because run_shards=='false' (no test262-relevant
+    #       change in the queue)                            → trivial PASS
+    # `needs.test262-shard.result` is 'skipped' in case (b), so we cannot
+    # gate solely on it; we OR-in the run_shards=='false' branch. Steps that
+    # touch shard artifacts are themselves guarded by `SHARDS_RAN` so the
+    # skip path short-circuits to a clean exit 0 (see the per-step `if:`).
     if: |
       always() &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]') &&
-      needs.test262-shard.result == 'success'
+      (needs.test262-shard.result == 'success' ||
+       (github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'false'))
     name: merge shard reports
-    needs: [test262-shard]
+    needs: [changes, test262-shard]
     runs-on: ubuntu-latest
+    env:
+      # 'true' when the heavy matrix actually executed and produced artifacts;
+      # 'false' on the merge_group skip path (no test262-relevant change).
+      SHARDS_RAN: ${{ needs.test262-shard.result == 'success' && 'true' || 'false' }}
 
     steps:
+      - name: No-op pass (shards skipped — no test262-relevant changes)
+        if: env.SHARDS_RAN != 'true'
+        run: |
+          echo "→ merge_group queued only non-test262-relevant changes"
+          echo "  (changes.run_shards=='false'); the heavy 32-shard matrix was"
+          echo "  skipped. Reporting 'merge shard reports' green so the required"
+          echo "  check exists and the PR stays mergeable."
+          echo "→ A src/** (or any &test262-paths) change in the queue would"
+          echo "  have run the full matrix and produced a real merged report."
+
       - name: Checkout
+        if: env.SHARDS_RAN == 'true'
         uses: actions/checkout@v5
 
       - name: Setup Node
+        if: env.SHARDS_RAN == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 25
 
       - name: Setup pnpm via Corepack
+        if: env.SHARDS_RAN == 'true'
         run: |
           corepack enable
           corepack prepare pnpm@10.30.2 --activate
 
       - name: Install dependencies
+        if: env.SHARDS_RAN == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Download shard artifacts
+        if: env.SHARDS_RAN == 'true'
         uses: actions/download-artifact@v7
         with:
           path: shard-artifacts
@@ -301,12 +447,14 @@ jobs:
           merge-multiple: false
 
       - name: Merge test262 JSONL results
+        if: env.SHARDS_RAN == 'true'
         run: |
           mkdir -p merged-reports
           find shard-artifacts -name 'test262-results-*.jsonl' -print0 | sort -z | xargs -0 cat > merged-reports/test262-results-merged.jsonl
           test -s merged-reports/test262-results-merged.jsonl
 
       - name: Build merged test262 report
+        if: env.SHARDS_RAN == 'true'
         run: |
           node scripts/build-test262-report.mjs \
             --input merged-reports/test262-results-merged.jsonl \
@@ -316,7 +464,7 @@ jobs:
             ${{ github.event_name != 'workflow_dispatch' && '--include-proposals' || (inputs.include_proposals && '--include-proposals' || '') }}
 
       - name: Upload merged reports
-        if: always()
+        if: always() && env.SHARDS_RAN == 'true'
         uses: actions/upload-artifact@v6
         with:
           retention-days: 1
@@ -328,9 +476,18 @@ jobs:
   regression-gate:
     # Runs after merge-report in all non-bot push contexts (merge_group / manual
     # push / workflow_dispatch). Compares branch report against baseline.
-    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+    #
+    # Skips cleanly on the merge_group no-shards path (run_shards=='false'):
+    # there is no merged report to diff, and a non-test262-relevant change
+    # cannot cause a conformance regression by definition. regression-gate is
+    # NOT a required check, so a `skipped` result here is harmless. We also
+    # add `changes` to `needs` and require shards to have actually run so the
+    # download/diff steps never look for an artifact that wasn't produced.
+    if: |
+      (github.event_name != 'push' || github.actor != 'github-actions[bot]') &&
+      needs.test262-shard.result == 'success'
     name: check for test262 regressions
-    needs: [merge-report]
+    needs: [changes, test262-shard, merge-report]
     runs-on: ubuntu-latest
 
     steps:
