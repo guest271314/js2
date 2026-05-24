@@ -279,7 +279,10 @@ export interface IrLowerResolver {
    *   - native       → inline `i32.const len`, `i32.const 0`, code-unit
    *                    `i32.const`s, `array.new_fixed`, `struct.new`.
    */
-  emitStringConst?(value: string): readonly Instr[];
+  // #1588 PR-B part 2: `alloc` carries the string.const's allocation-site id
+  // so the resolver can read the encoding annotation (utf8-storage decision).
+  // Optional — resolvers/callers that omit it get the i16 path (byte-identical).
+  emitStringConst?(value: string, alloc?: import("./nodes.js").AllocSiteId): readonly Instr[];
   /** `[call concat]` (host) or `[call __str_concat]` (native). */
   emitStringConcat?(): readonly Instr[];
   /** `[call equals]` (host) or `[call __str_equals]` (native). */
@@ -951,7 +954,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         return;
       }
       case "string.const": {
-        const ops = resolver.emitStringConst?.(instr.value);
+        const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
         for (const o of ops) out.push(o);
         return;
