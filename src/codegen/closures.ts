@@ -2405,13 +2405,25 @@ export function compileArrowAsCallback(
     }
   }
 
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  // #1606: For functions parsed from a foreign SourceFile (e.g. statically
+  // inlined `eval("...")` bodies), the checker has no symbol binding for the
+  // declaration. `getSignatureFromDeclaration` then dereferences `.declarations`
+  // on an undefined symbol deep inside TypeScript and throws
+  // "Cannot read properties of undefined (reading 'declarations')". Guard the
+  // signature/return-type resolution so the callback compiles with a void/any
+  // return type instead of crashing the whole compile — the body still coerces
+  // its actual return value via the normal path.
   let cbReturnType: ValType | null = null;
-  if (sig) {
-    const retType = ctx.checker.getReturnTypeOfSignature(sig);
-    if (!isVoidType(retType)) {
-      cbReturnType = resolveWasmType(ctx, retType);
+  try {
+    const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+    if (sig) {
+      const retType = ctx.checker.getReturnTypeOfSignature(sig);
+      if (!isVoidType(retType)) {
+        cbReturnType = resolveWasmType(ctx, retType);
+      }
     }
+  } catch {
+    cbReturnType = null;
   }
 
   const cbResults: ValType[] = cbReturnType ? [cbReturnType] : [];

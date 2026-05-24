@@ -556,7 +556,20 @@ export function compileObjectLiteral(
 
   const contextType = ctx.checker.getContextualType(expr);
   if (!contextType) {
-    const type = ctx.checker.getTypeAtLocation(expr);
+    // #1606: `getTypeAtLocation` can crash inside TypeScript's `checkObjectLiteral`
+    // for object literals parsed from a foreign SourceFile (e.g. statically inlined
+    // `eval("({foo:0,foo:1})")` bodies) — the checker has no binding for the
+    // duplicate-property symbol and dereferences `.flags` on undefined. Fall back
+    // to the externref plain-object lowering instead of crashing the compile.
+    let type: ts.Type | undefined;
+    try {
+      type = ctx.checker.getTypeAtLocation(expr);
+    } catch {
+      const fallback = compileObjectLiteralAsExternref(ctx, fctx, expr);
+      if (fallback) return fallback;
+      reportError(ctx, expr, "Cannot determine struct type for object literal");
+      return null;
+    }
     let typeName = resolveStructName(ctx, type);
     if (!typeName) {
       // Auto-register the struct type for inline object literals

@@ -28,6 +28,16 @@ Pulled into S50 alongside the original closure/dispatch cohort. Direct-dispatch 
 - File icons show which codegen file is primarily touched:
   `[E]` = expressions.ts, `[S]` = statements.ts, `[I]` = index.ts, `[T]` = test262-runner.ts
 
+## Destructuring-lane sweep follow-ups (added 2026-05-24)
+
+From the dev-1553b destructuring-lane verification sweep. #1659 (CI equivalence
+coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 lands.
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1659 | CI does not run tests/equivalence/ (OOM) — equivalence regressions land silently | high | medium | **Ready** (gates CI-visibility of #1658) |
+| 1658 | Destructured/scalar function-parameter default not applied (returns 30, expects 40) | high | medium | **Ready** (depends on #1659 for CI gating) |
+
 ## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
 
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`

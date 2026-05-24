@@ -163,3 +163,219 @@ Acceptance: ≥80% pass when compiled with `--target standalone`.
 - **Rust toolchain** — mitigated by committing prebuilt artifact; CI never runs `cargo`.
 - **Binary size** — ~250–400 KB added to every standalone module. Acceptable for `--target standalone`; irrelevant for JS-host builds.
 - **regress ABI stability** — pin version in `vendor/regress-version.txt`; review on upgrade.
+
+---
+
+## Architecture Plan (authoritative — 2026-05-24, supersedes the regress-first plan above)
+
+Author: architect. Written after reading the **current** standalone
+pipeline and the existing native-string helper layer end-to-end (HEAD
+`92c7483a4`). **The "Implementation Plan" above (regress side-module via
+`wasmMerge`) has a load-bearing flaw that blocks Phase 2a as written.** This
+section re-sequences the work so a dev can build the smallest slice today
+with **zero new toolchain**, and demotes the Rust `regress` side-module to a
+*later, optional* phase whose entry condition is explicit.
+
+### The flaw in the regress-first plan
+
+The standalone target is **pure WasmGC** (`src/cli.ts:35`:
+"`--standalone — pure WasmGC, no JS host`") and forces `nativeStrings`
+(`index.ts:4829-4830`). Standalone strings are therefore **WasmGC `i16`
+arrays** (`__str_data`), reachable directly by WasmGC code.
+
+A Rust `regress` build is `wasm32-unknown-unknown` — a **linear-memory**
+module. The plan proposes linking it with Binaryen `wasm-merge`. But:
+- **`wasm-merge` cannot coherently fuse a linear-memory module and a WasmGC
+  module into one instance.** They have separate memory models; there is no
+  shared address space. The strings the matcher must read live in WasmGC
+  `i16` arrays, which a linear-memory `regress` cannot address without an
+  explicit copy across a boundary that does not exist in a single merged
+  instance.
+- The plan's ABI ("strings pass as `(ptr, len)` into a shared linear memory
+  slab") presupposes that boundary and a marshalling layer (WasmGC `i16`
+  array → linear slab → back) that is itself a substantial, unspecified
+  piece of work — and it is pure overhead the standalone target should not
+  pay when the data is already WasmGC.
+- It also imports a Rust toolchain + a committed ~250-400 KB artifact + a
+  version-pin/rebuild story **before any regex byte has matched**. That is a
+  large irreversible commitment made on an unproven integration.
+
+**Conclusion**: side-module linking is the wrong *first* move. It may be a
+viable *later* move for full ES2023 coverage (`\p{}`, lookbehind,
+backreferences) **iff** we adopt a second-instance model (two `WebAssembly.
+Instance`s sharing an `externref`/copy ABI) rather than `wasm-merge` — that
+is a separate design (see Phase 2d entry condition). It is not Phase 2a.
+
+### The right Phase 2a: a pure-WasmGC matcher, self-hosted like the string layer
+
+`src/codegen/native-strings.ts` (4,211 lines) already contains **hand-
+authored WasmGC helper functions** that operate directly on `i16` string
+arrays — `__str_indexOf`, `__str_substring`, `__str_compare`,
+`__str_charAt`, `__str_slice`, `__str_includes`, … — each built as an
+explicit `WasmFunction` body and registered in `ctx.nativeStrHelpers`
+(emission sites listed at `native-strings.ts:285…2355+`). **This is the
+exact pattern a standalone regex matcher should follow**: emit a family of
+WasmGC helper functions that walk the `i16` array. No Rust, no
+`wasm-merge`, no linear memory, no marshalling — the matcher reads the same
+`i16` arrays everything else already uses.
+
+Regex compilation is split cleanly:
+- **Compile time (TS, in the compiler)**: parse the pattern string and flags
+  into a small bytecode/NFA program. The pattern is *always a literal or a
+  compile-time-known string* in the overwhelming majority of cases
+  (`/\d+/`, `new RegExp("ab+c")`); only `new RegExp(dynamicStr)` is runtime.
+  Phase 2a handles **literal/static patterns only** and refuses dynamic
+  patterns in standalone (keep the Phase-1 `reportError` for the dynamic
+  case, narrowed). The parser already exists in part: `parseRegExpLiteral`
+  (imported in `typeof-delete.ts:14`) extracts `{pattern, flags}`.
+- **Run time (emitted WasmGC)**: a generic `__regex_match` helper that
+  interprets the compiled program against an `i16` array + start index,
+  returning a match struct — OR, for the smallest slice, **specialised
+  per-pattern matcher functions** emitted directly from the parsed AST (no
+  interpreter), the way `native-strings.ts` emits one function per method.
+  Specialised emission is simpler to land first (no bytecode format to
+  design) and is the recommended Phase-2a form.
+
+### Data structures (WasmGC, no linear memory)
+
+Reuse the issue's `$RegExp` / `$MatchArray` struct shapes above **but drop
+`$handle` (no foreign engine) and `$indices` externref** (use a WasmGC
+`i32` pairs array instead). Concretely:
+
+```wat
+(type $RegExp (sub (struct
+  (field $tag        i32)                ;; REGEXP_TAG
+  (field $source     (ref $NativeString));; pattern (i16 array wrapper)
+  (field $flags      i32)                ;; g=1 i=2 m=4 s=8 u=16 y=32 d=64
+  (field $lastIndex  (mut f64))
+  (field $progIdx    i32)                ;; index of the emitted matcher fn (funcref table) — Phase 2b+
+)))
+
+(type $MatchResult (struct
+  (field $matched   i32)                 ;; 1 = matched, 0 = no match
+  (field $start     i32)                 ;; match start (i16 index)
+  (field $end       i32)                 ;; match end (exclusive)
+  (field $groups    (ref $arr_i32))      ;; flat [g0s,g0e,g1s,g1e,…]; -1 = unmatched
+)))
+```
+
+For Phase 2a (specialised per-pattern functions) the `$progIdx`/funcref
+table is unnecessary — the call site calls the specialised function
+directly, exactly as string methods do via `ctx.nativeStrHelpers`. Promote
+to a funcref/bytecode model only when the number of distinct patterns or
+the dynamic-pattern requirement forces it (Phase 2c).
+
+### Codegen routing (replaces the Phase-1 gates — same entry points as the regress plan)
+
+The entry points the regress plan lists are correct; only the target
+changes (emit WasmGC matcher calls, not regress imports):
+
+| File | Phase-1 gate (verified present) | Phase 2a change |
+|------|----------------------------------|-----------------|
+| `src/codegen/typeof-delete.ts` | `compileRegExpLiteral` @287, refuse @289-295 | when `ctx.standalone` and pattern is static-parseable: parse via `parseRegExpLiteral`, emit/return a `$RegExp` built by the WasmGC path; keep refuse only for unparseable/dynamic |
+| `src/codegen/expressions/new-super.ts` | refuse @1998-2008 | same for `new RegExp(p,f)` when `p` is a compile-time string |
+| `src/codegen/expressions/calls.ts` | refuse @1374 | same for `RegExp(p,f)` call form |
+| `src/codegen/string-ops.ts` | refuse @1956-1970 (match/matchAll/search; replace/replaceAll/split w/ RegExp arg) | route to the WasmGC matcher helpers when `ctx.standalone` |
+| `src/codegen/native-strings.ts` (or a new `src/codegen/native-regex.ts` sibling) | — | **new**: emit the matcher helper functions, registered in a `ctx.nativeRegexHelpers` map mirroring `ctx.nativeStrHelpers` |
+
+Put the matcher emission in a **new `src/codegen/native-regex.ts`** that
+mirrors `native-strings.ts`'s structure (one `WasmFunction` per primitive,
+shift-maintained funcMap registration). Do **not** bloat `native-strings.ts`.
+
+### Phased breakdown (smallest buildable slice first)
+
+- **Phase 2a — literal & character-class matching, no JS, no Rust.**
+  - Patterns: literal chars, `.`, char classes `[...]`/`[^...]`, anchors
+    `^`/`$`, quantifiers `*`/`+`/`?`/`{n,m}` (greedy), alternation `|`,
+    non-capturing groups `(?:…)`, the `i` and `g` flags.
+  - Methods: `RegExp.prototype.test`, `RegExp.prototype.exec`,
+    `String.prototype.match` (non-`g` returns first match struct; `g`
+    returns all-matches array), `String.prototype.search`,
+    `String.prototype.replace(re, string)` (no `$n` / function replacer
+    yet — refuse those in standalone), `String.prototype.split(re)`.
+  - Implementation: a backtracking matcher emitted as WasmGC helpers over
+    `i16` arrays. Capturing groups `( … )` recorded into `$groups`.
+  - **Refuse (keep Phase-1 error, narrowed)**: dynamic `new RegExp(var)`,
+    backreferences `\1`, lookahead/lookbehind, `\p{}`, the `u`/`v`/`y`/`s`
+    flags, and `replace` with a function/`$n` replacer. Each refusal cites
+    "#1539 Phase 2b/2c/2d".
+  - Smallest first PR within 2a: **`test` + literal/`.`/char-class/anchors
+    only**, proving the parse→emit→match pipeline + the string-ops routing,
+    with `tests/issue-1539-standalone-regex.test.ts` running under
+    `--target standalone` (compile + run via the existing standalone test
+    harness; see `tests/issue-1474-standalone-regex-refuse.test.ts` for the
+    inverse-direction harness to adapt).
+- **Phase 2b — capturing groups, `exec`/`match` group arrays, named groups
+  `(?<name>…)`, `lastIndex`/sticky `y`, empty-match advance.** Add the
+  funcref/bytecode model here if specialised emission becomes unwieldy.
+- **Phase 2c — `replace` with `$1`/`$<name>`/function replacer,
+  `matchAll`, `replaceAll`, multiline `m`, dotAll `s`, the `d`
+  indices flag.**
+- **Phase 2d (optional, entry-condition gated) — full ES2023 fancy
+  features** (`\p{}` Unicode property escapes, lookbehind, backreferences).
+  **Entry condition**: only if test262 RegExp pass-rate plateaus below
+  target on these specific features AND a **two-instance** linking design
+  (not `wasm-merge`) is specced and approved. This is where Rust `regress`
+  *could* return — as a separate WasmGC↔linear instance pair with a defined
+  copy ABI — but it is explicitly out of scope until 2a-2c land and the
+  data justifies the toolchain cost.
+
+### Test strategy
+
+- **Equivalence tests** (`tests/issue-1539-standalone-regex.test.ts`):
+  compile each pattern twice — once default (JS-host, `RegExp_new`) and once
+  `--target standalone` — assert identical results on a fixed input corpus.
+  This reuses the dual-run pattern already used for native strings
+  (`ctx.testRuntime && ctx.nativeStrings`, index.ts:774). Per Phase 2a
+  scope: literal, `.`, classes, anchors, quantifiers, alternation, `i`/`g`.
+- **test262 under standalone**: run `test/built-ins/RegExp/*`,
+  `test/built-ins/String/prototype/{match,replace,replaceAll,search,split}/*`,
+  `test/language/literals/regexp/*` with `--target standalone`. **Do not
+  promise ≥80% in 2a** — Phase 2a deliberately refuses fancy features;
+  expect the *feature-subset* pass rate to climb in 2b/2c. Track the
+  standalone-RegExp pass count as the metric, not a single threshold.
+- **Refusal tests**: extend `tests/issue-1474-standalone-regex-refuse.test.ts`
+  so the *narrowed* refusals (dynamic pattern, backrefs, lookaround, fancy
+  flags) still produce clean compile errors citing the right phase.
+
+### Edge cases (Phase 2a)
+
+- **Empty match + `g`** (`/x*/g` on `"abc"`): advance position by 1 after a
+  zero-width match (spec §22.2.7.2) to avoid an infinite loop.
+- **Anchored `^`/`$` with/without `m`**: in 2a, `^`/`$` match only
+  string start/end (multiline `m` is Phase 2c).
+- **Case-insensitive `i`**: simple ASCII case-fold in 2a; full Unicode
+  case-folding deferred (note in test file). Most test262 `i` tests are
+  ASCII.
+- **Greedy backtracking termination**: cap backtracking steps or use an
+  explicit stack to guarantee termination (no JS stack to rely on in
+  standalone). Document the cap.
+- **`split(re)` with capturing groups**: spec interleaves captured groups
+  into the result array — defer the capture-interleave to 2b; 2a `split`
+  handles non-capturing separators only (refuse capturing-group split with
+  a 2b citation).
+- **Surrogate pairs / `u` flag**: 2a operates on UTF-16 code units (the
+  `i16` array). The `u` flag (code-point semantics) is refused until 2c/2d.
+
+### Why this de-risks the issue
+
+- **Phase 2a ships with zero new toolchain or CI changes** — it is the same
+  hand-authored-WasmGC-helper pattern already proven by `native-strings.ts`,
+  reading the same `i16` arrays. No Rust, no `vendor/*.wasm`, no
+  `wasm-merge`, no `build-regress-wasm.sh`.
+- **The hard, irreversible bets** (Rust toolchain, prebuilt artifact, the
+  unsolved WasmGC↔linear linking) are deferred to Phase 2d behind an
+  explicit entry condition, instead of being prerequisites for the first
+  matched byte.
+- **Routing is proven first**: 2a's first PR validates the parse→emit→match
+  pipeline + string-ops/literal routing on the simplest patterns, so 2b/2c
+  are pure feature-addition on a known-good spine.
+
+### Recommendation
+
+Keep `status: ready`. Dispatch **Phase 2a, first PR** (test + literal/
+class/anchor matcher in a new `src/codegen/native-regex.ts`, with the
+narrowed refusals and a dual-run equivalence test) as the buildable slice.
+The `regress` side-module sections above are retained as **possible Phase 2d
+material only**, gated on the two-instance design + test262 data; they are
+**not** the Phase 2a plan.
