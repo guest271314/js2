@@ -516,6 +516,39 @@ jobs:
             exit 1
           fi
 
+      # #1668 — HARD stale-baseline guard. The catastrophic guard above (and the
+      # advisory regression-gate) are only as trustworthy as the baseline they
+      # diff against. The baseline is refreshed per-merge by the promote-baseline
+      # job → js2wasm-baselines repo. If that pipeline ever silently breaks, the
+      # baseline falls behind main and the gates go blind to new regressions
+      # (they'd compare against an ancient state). This fails the REQUIRED check
+      # when the baseline's recorded main-sha is too far behind main HEAD.
+      # Normal operation is 0–1 behind; a quiet period is 0 behind (no merges →
+      # no drift), so a large lag specifically means promotion is broken — the
+      # threshold is generous so only genuine breakage trips it.
+      - name: Stale-baseline guard (#1668)
+        if: env.SHARDS_RAN == 'true'
+        env:
+          MAX_BASELINE_COMMITS_BEHIND: "50"
+        run: |
+          if [ ! -d /tmp/cat-baselines ]; then
+            echo "::warning::baselines clone missing — skipping stale-baseline guard."
+            exit 0
+          fi
+          # Baseline commit subject: "chore(test262): refresh baseline — N/T pass (<main-sha>)"
+          BSHA=$(git -C /tmp/cat-baselines log -1 --format=%s | grep -oE '[0-9a-f]{7,40}' | tail -1)
+          if [ -z "$BSHA" ]; then
+            echo "::warning::could not parse baseline main-sha from commit subject — skipping stale-baseline guard."
+            exit 0
+          fi
+          git fetch --depth=200 origin main 2>/dev/null || true
+          BEHIND=$(git rev-list --count "${BSHA}..origin/main" 2>/dev/null || echo 999)
+          echo "Baseline main-sha ${BSHA} is ${BEHIND} commit(s) behind origin/main (max ${MAX_BASELINE_COMMITS_BEHIND})."
+          if [ "$BEHIND" -gt "$MAX_BASELINE_COMMITS_BEHIND" ]; then
+            echo "::error::STALE BASELINE: the js2wasm-baselines JSONL is ${BEHIND} commits behind main HEAD (baseline main-sha ${BSHA}). The promote-baseline pipeline is likely broken, so the regression gates are blind to new regressions. Fix baseline promotion before merging. See #1668."
+            exit 1
+          fi
+
       - name: Upload merged reports
         if: always() && env.SHARDS_RAN == 'true'
         uses: actions/upload-artifact@v6
