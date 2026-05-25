@@ -3,7 +3,7 @@ id: 1670
 slug: atomics-illegal-cast-regression
 title: "Atomics negative tests trap with `illegal cast` (regressed by #1654 / PR #599)"
 sprint: 55
-status: in-review
+status: done
 feasibility: hard
 depends_on: []
 regressed_by: 1654
