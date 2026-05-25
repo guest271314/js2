@@ -14,6 +14,11 @@ related: [1662, 1335, 1470, 1472]
 ---
 # #1666 — `--target wasi` produces invalid (non-instantiable) Wasm for several constructs
 
+> **REVERTED by #618** (the eager `fixupModuleFuncIndices` in `addImport`
+> corrupted the default-GC trampoline path → −3,600 test262). Re-land must
+> scope the func-index fixup so it never re-shifts already-emitted bodies in
+> the default (non-standalone) path. See #1668. Status stays `ready`.
+
 ## Problem
 
 Beyond host-import leaks, the standalone audit (#1662) found a distinct

@@ -1,7 +1,7 @@
 ---
 id: 1669
 title: "codegen: object-method trampoline forwards args without coercion → invalid wasm (regressed by #1602)"
-status: in-review
+status: done
 created: 2026-05-25
 updated: 2026-05-25
 priority: high
