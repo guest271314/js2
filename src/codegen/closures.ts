@@ -3225,8 +3225,34 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       (methodResult.kind === "ref" || methodResult.kind === "ref_null") &&
       (wrapperResult as { typeIdx?: number }).typeIdx !== (methodResult as { typeIdx?: number }).typeIdx
     ) {
-      tFctx.body = newBody;
-      newBody.push(...coercionInstrs(ctx, methodResult, wrapperResult, tFctx));
+      // (#1672) Both results are GC struct refs but with DIFFERENT typeIdx.
+      // This happens when the wrapper captured the method's result struct type
+      // at closure-emit time (`results[0]`), but the method body later resolved
+      // its return to a structurally-distinct struct type (e.g. two
+      // iterator-result-like struct shapes built at different points — the
+      // AsyncFromSyncIterator `next`/`return`/`throw` accessor path). `coercionInstrs`
+      // is a NO-OP for same-`kind` operands (`from.kind === to.kind`), so the
+      // earlier reliance on it left the body returning `ref methodTypeIdx` where
+      // the wrapper's func type declares `ref wrapperTypeIdx` — an invalid module
+      // ("fallthru" / result type error compiling `__obj_meth_tramp_*`). Emit an
+      // explicit cast to the wrapper's declared result type instead. The cast is
+      // routed through `anyref` so it works regardless of whether the two struct
+      // types share a supertype (a direct `ref.cast` between unrelated GC types is
+      // itself invalid). At runtime the method's generator/iterator-result object
+      // is a valid instance of the wrapper's result shape, so the cast succeeds.
+      const wrapperTypeIdx = (wrapperResult as { typeIdx: number }).typeIdx;
+      if (methodResult.kind === "ref") {
+        // Non-null source: cast directly.
+        newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+      } else {
+        // Nullable source: a null must stay null; cast preserves nullability when
+        // the target is also nullable, else guard. Wrapper result kind dictates.
+        if (wrapperResult.kind === "ref_null") {
+          newBody.push({ op: "ref.cast_null", typeIdx: wrapperTypeIdx } as Instr);
+        } else {
+          newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+        }
+      }
     }
 
     // Mutate the existing body array in place so the already-registered
