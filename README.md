@@ -2,7 +2,8 @@
 
 Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 
-> **Status: early-stage research prototype — a tech demo, not a production-ready compiler.** This is an experimental project under active development. Expect rough edges, incomplete language/standard-library coverage, and breaking changes. It is not yet suitable for production use.
+> **Status: early-stage research prototype — a tech demo, not a production-ready compiler.**
+> `js2wasm` is an experimental ahead-of-time JavaScript/TypeScript-to-WasmGC compiler under active development. It explores one specific point in the design space: full ECMAScript backwards compatibility via direct AOT compilation, with no JavaScript engine or interpreter bundled into the output. It does **not** claim production readiness, full language coverage, or stable APIs — expect rough edges, gaps, and breaking changes. Live conformance and benchmark figures are in **[STATUS.md](./STATUS.md)** (numbers change frequently and are not duplicated in this README).
 
 `js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That avoids the runtime tax common in the interpreter-based and engine-embedding approaches — where a JavaScript interpreter or full engine is compiled to Wasm and shipped inside every module — and keeps the output aligned with Wasm-native deployment models.
 
