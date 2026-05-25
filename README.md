@@ -4,7 +4,7 @@ Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 
 > **Status: early-stage research prototype — a tech demo, not a production-ready compiler.** This is an experimental project under active development. Expect rough edges, incomplete language/standard-library coverage, and breaking changes. It is not yet suitable for production use.
 
-`js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That removes the runtime tax common in interpreter-in-Wasm and bundled-engine stacks, where interpreters often land in the high-hundreds-of-kilobytes range and full-fledged JavaScript engines in the megabytes, and keeps the output aligned with Wasm-native deployment models.
+`js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That avoids the runtime tax common in the interpreter-based and engine-embedding approaches — where a JavaScript interpreter or full engine is compiled to Wasm and shipped inside every module — and keeps the output aligned with Wasm-native deployment models.
 
 `js2wasm` is the core compiler product of **Loopdive GmbH**, released under **Apache License 2.0 with LLVM Exceptions** — and developed fully in the open, including its agentic engineering workflow. The repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
 
@@ -35,7 +35,7 @@ It also matters for security boundaries. In browsers, Node.js, and other JavaScr
 
 That includes practical combinations with hosts like Tauri, where compiler output can be shipped as executable Wasm artifacts instead of bundling a full browser-plus-JS-engine runtime into the application.
 
-The current public benchmark and conformance work is aimed at proving that direct compilation can become a viable alternative to interpreter bundling for production infrastructure.
+The current public benchmark and conformance work exists to test an open question: whether direct AOT compilation can become a viable alternative to bundling a runtime for these workloads. That has not been settled yet — it is what the project is investigating.
 
 Many alternatives in adjacent spaces solve the problem by narrowing the language instead:
 
@@ -46,24 +46,26 @@ Many alternatives in adjacent spaces solve the problem by narrowing the language
 
 Projects in this category usually take years to reach meaningful semantic coverage. A large part of the Loopdive thesis is that an AI-native compiler workflow can compress that timeline substantially without giving up on the harder target.
 
-Current public milestone:
-
-<!-- AUTO:conformance-start -->
-**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
-<!-- AUTO:conformance-end -->
-
-See the [Playground](https://loopdive.github.io/js2wasm/playground/) and [Roadmap](./ROADMAP.md) for the current public surface.
+Current Test262 conformance and benchmark numbers are tracked in one place and
+change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
+[Playground](https://loopdive.github.io/js2wasm/playground/), and the
+[Roadmap](./ROADMAP.md).
 
 ## Current Status
 
-`js2wasm` is still an active compiler effort, but it is no longer just a research prototype. The project now has:
+`js2wasm` is an early-stage research prototype: an experimental compiler under
+active development, not a production-ready tool. It is being explored as a
+public, in-the-open project, and the conformance story, runtime boundary, and
+standalone path are all still hardening. What exists today:
 
-- **~60% Test262 compliance**
+- a JS-hosted compilation path passing a substantial subset of Test262 (see
+  [STATUS.md](./STATUS.md) for the current figure)
 - a public browser playground
-- ongoing benchmark and compatibility reporting
-- both JS-hosted and standalone-oriented compiler work, with standalone support still in progress and not yet the primary conformance path
+- continuous conformance and benchmark reporting on every change
+- a standalone (no-JS-host) path that is in progress and not yet the primary
+  conformance target
 
-The project is being positioned for a community-first release while the compiler, runtime boundary, and conformance story continue to harden.
+Treat it as a tech demo to evaluate the approach, not as something to deploy.
 
 ## How It Compares
 
@@ -239,11 +241,14 @@ output, see [docs/standalone-io.md](./docs/standalone-io.md).
 
 ## Current coverage and limitations
 
-`js2wasm` passes roughly two-thirds of Test262 in a JS host (see the conformance
-figure above and the full [Test262 report](./benchmarks/results/report.html)).
-That means a large, useful subset of the language works — but there are real
-gaps, and you will hit them. This section is the honest high-level shape; the
-report is the authoritative per-feature detail.
+In a JS host, `js2wasm` passes a substantial subset of Test262 — enough that a
+large, useful slice of the language works — but there are real gaps, and you
+will hit them. The current pass rate lives in [STATUS.md](./STATUS.md) and the
+full [Test262 report](./benchmarks/results/report.html); this section is the
+qualitative high-level shape, and the report is the authoritative per-feature
+detail. Note that Test262 measures conformance to the ECMAScript *language*
+specification — it does not cover Web APIs, Node.js host behavior, or whether an
+arbitrary real-world npm package runs unchanged.
 
 **Solid** (broadly works):
 
@@ -272,9 +277,9 @@ report is the authoritative per-feature detail.
 - dropping in an arbitrary npm package unchanged
 
 If a pattern you rely on does not work, check the [Test262 report](./benchmarks/results/report.html)
-or open an issue. This is a serious compiler with a growing compatibility
-baseline and a clear infrastructure target — not yet a "drop in any npm package"
-story.
+or open an issue. This is an actively developed compiler with a growing
+compatibility baseline and a clear infrastructure target — but it is a research
+prototype, not yet a "drop in any npm package" story.
 
 ## The Methodology
 
@@ -290,11 +295,11 @@ Loopdive develops `js2wasm` with an **Automated Agile Team** model. The goal is 
 
 ### Why It Matters
 
-This model is designed around one claim:
+This model is a bet that a tight, automated feedback loop lets a small team
+iterate on a hard compatibility target faster than a conventional one would.
+Whether that bet pays off is part of what this prototype is testing.
 
-**Velocity is our moat.**
-
-The project is optimized for:
+The workflow is optimized for:
 
 - short implementation-to-validation cycles
 - continuous spec-aligned compiler iteration

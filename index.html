@@ -1446,7 +1446,7 @@
           <img class="hero-logo" src="./js2logo-squaring-the-circle-white.svg" alt="JS2 logo" />
           <h1
             id="hero-title"
-            data-texts='["A next generation JavaScript compiler.", "Compile JavaScript without embedding a JS engine.",
+            data-texts='["An ahead-of-time JavaScript compiler.", "Compile JavaScript without embedding a JS engine.",
             "JavaScript compiled ahead of time, for fast cold starts and speed.", "Reduce supply chain attack surface with module sandboxing.", "Target existing Javascript code, not a new language."]'
           >
             <span class="hero-title-shell">
@@ -1471,7 +1471,7 @@
 
       <section class="section-pad" id="mission">
         <div class="intro">
-          <h2>Mission: Next generation JavaScript.</h2>
+          <h2>Mission: JavaScript, compiled.</h2>
           <p>
             <strong>This is an early-stage research prototype and technical demo, not a production-ready compiler.</strong>
             Expect rough edges, incomplete language and standard-library coverage, and breaking changes between versions.
@@ -1483,8 +1483,8 @@
           </p>
           <p>
             The project is motivated by the idea that JavaScript, despite being a dynamic language, can be compiled
-            efficiently ahead of time without limiting it to an incompatible subset or shipping a full JS runtime like
-            V8, SpiderMonkey or JavaScriptCore.
+            efficiently ahead of time without limiting it to an incompatible subset or shipping a full JS engine
+            inside every module. Whether that idea holds up at scale is an open question the project is testing.
           </p>
           <p>The project is guided by the following goals:</p>
         </div>
@@ -3752,11 +3752,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               </summary>
               <div class="approach-faq-answer">
                 <p>
-                  Good question! JavaScript engines like V8 are highly optimized multi-tier streaming JIT compilers that
-                  often run code two magnitudes faster than interpreters - within reach of native performance - and have
-                  a mature battle tested sandbox. WebAssembly has an edge in some scenarios, but overall it is not
-                  always faster or even on par. Interpreters like QuickJS on the other hand trade simplicity for
-                  performance.
+                  Good question! Large production JavaScript engines are highly optimized multi-tier streaming JIT
+                  compilers that often run code orders of magnitude faster than an interpreter - within reach of native
+                  performance - and have mature, battle-tested sandboxes. WebAssembly has an edge in some scenarios, but
+                  overall it is not always faster or even on par. Embedded JavaScript interpreters, on the other hand,
+                  trade peak performance for a small, portable footprint.
                 </p>
                 <h3>Runtime overhead</h3>
                 <p>
