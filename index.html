@@ -1457,8 +1457,9 @@
           <p class="hero-sub">
             JS
             <sup>2</sup>
-            is a research preview of an open source compiler focused on compiling JavaScript to WebAssembly ahead of
-            time, developed at Loopdive.
+            is an <strong>early-stage research prototype</strong> &mdash; a technical demo exploring ahead-of-time
+            compilation of JavaScript to WebAssembly, developed at Loopdive. It is <strong>not a production-ready
+            compiler</strong>; expect rough edges, missing features, and breaking changes.
           </p>
           <div class="hero-actions">
             <a class="btn-solid" href="./playground/">Playground</a>
@@ -3536,51 +3537,6 @@ export function run(n) {
                   benchmark="fib"
                   mode="absolute-lower-better"
                   title="Fibonacci loop"
-                  baseline-label="JS"
-                  show-delta
-                  delta-kind="factor"
-                ></perf-benchmark-chart>
-              </div>
-              <div
-                class="diagram-panel"
-                data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
-              >
-                <perf-benchmark-chart
-                  src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                  benchmark="fib-recursive"
-                  mode="absolute-lower-better"
-                  title="Fibonacci recursion"
-                  baseline-label="JS"
-                  show-delta
-                  delta-kind="factor"
-                ></perf-benchmark-chart>
-              </div>
-              <div
-                class="diagram-panel"
-                data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
-              >
-                <perf-benchmark-chart
-                  src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                  benchmark="array-sum"
-                  mode="absolute-lower-better"
-                  title="Array fill + sum"
-                  baseline-label="JS"
-                  show-delta
-                  delta-kind="factor"
-                ></perf-benchmark-chart>
-              </div>
-              <div
-                class="diagram-panel"
-                data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
-              >
-                <perf-benchmark-chart
-                  src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                  benchmark="string-hash"
-                  mode="absolute-lower-better"
-                  title="String build + hash"
                   baseline-label="JS"
                   show-delta
                   delta-kind="factor"
