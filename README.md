@@ -68,66 +68,58 @@ standalone path are all still hardening. What exists today:
 
 Treat it as a tech demo to evaluate the approach, not as something to deploy.
 
-## How It Compares
+## The AOT JavaScript compilation landscape
 
-Most JavaScript-on-Wasm approaches fit into one of four broad categories:
+There are several established ways to get JavaScript running on WebAssembly.
+Each makes a different, reasonable trade-off, and most have years of engineering
+behind them. The point of this map is not to rank them — it is to locate the
+specific gap `js2wasm` is exploring. Described by architecture rather than by
+product:
 
-1. bundled JavaScript interpreters,
-2. bundled JavaScript engines,
-3. incompatible JavaScript or TypeScript subsets, supersets, and new languages,
-4. direct AOT compilation of JavaScript semantics to WasmGC.
+- **Interpreter-based approach** — compile a JavaScript *interpreter* to Wasm
+  and run the user's program on top of it. Gets broad ECMAScript compatibility
+  more or less for free, because a real interpreter is doing the work. The cost:
+  every deployed module ships and initializes the interpreter, which adds size
+  and startup overhead and means application code runs interpreted rather than
+  compiled.
 
-`js2wasm` is in the fourth category.
+- **Engine-embedding approach** — compile a full production JavaScript *engine*
+  to Wasm (optionally specialized per-script, e.g. via partial evaluation).
+  Inherits mature, battle-tested engine semantics and very high compatibility.
+  The cost: the engine is large, and even when specialized the engine itself is
+  still part of what ships.
 
-Bundled-runtime approaches inherit compatibility from an interpreter or engine,
-but every deployed module pays for that runtime. Subset, superset, and
-new-language approaches can generate compact Wasm by changing the language
-contract.
+- **Typed JS/TS subset languages** — a statically typed language with
+  JavaScript-like or TypeScript-like syntax that compiles ahead of time to
+  compact Wasm. Output is small and fast precisely *because* it deliberately
+  does **not** accept full ECMAScript: dynamic semantics are excluded by design
+  and the type system is the contract. Excellent when you can write to that
+  language; not a path to running existing JavaScript unchanged.
 
-`js2wasm` is aimed at a different target: **JavaScript semantics without
-shipping a JavaScript engine or interpreter inside the deployed artifact**.
-Where the compiler can prove stable types and shapes, it lowers them directly to
-WasmGC structs, arrays, primitives, and functions. Where JavaScript remains
-dynamic, it inserts guards, uses dynamic representations, or delegates at host
-boundaries.
+- **Linear-memory AOT compilers** — compile JavaScript ahead of time to Wasm
+  using linear memory, implementing object model, allocation, and (typically) a
+  garbage collector inside the module. This shares the "compile, don't embed a
+  runtime" goal; the distinguishing axis from `js2wasm` is the lowering target
+  (linear memory and a self-managed heap vs. host-managed WasmGC) and, in
+  current projects, how much of full ECMAScript compatibility is an explicit
+  goal.
 
-### How does this compare to specific projects?
+**Where `js2wasm` sits.** Direct AOT compilation to **WasmGC** (objects,
+closures, and arrays lower to host-managed GC structs/arrays/references), with
+**full ECMAScript backwards compatibility as the explicit goal**, and **no
+JavaScript engine or interpreter bundled into the output**. Where the compiler
+can prove stable types and shapes it lowers them directly; where JavaScript
+stays dynamic it inserts guards, boxed representations, or host fallbacks.
 
-These projects share parts of the design space with `js2wasm` and each makes a
-different, reasonable trade-off:
-
-- **[AssemblyScript](https://www.assemblyscript.org/)** — a well-engineered
-  compiler for a TypeScript-*like* language with its own stricter type system,
-  lowering to compact Wasm via Binaryen. It achieves small output by defining a
-  new language contract rather than accepting mainstream JavaScript semantics.
-  `js2wasm` targets existing TypeScript/JavaScript semantics directly, which is
-  a harder compatibility goal; AssemblyScript is the better fit when you can
-  write to its language and want maximally lean output.
-
-- **[Javy](https://github.com/bytecodealliance/javy)** — embeds the QuickJS
-  interpreter inside the Wasm module and runs your JS on top of it. That
-  inherits broad JavaScript compatibility immediately, at the cost of shipping
-  and initializing an interpreter in every module. `js2wasm` instead compiles
-  the code ahead-of-time with no embedded interpreter, trading some
-  compatibility for a smaller, engine-free artifact.
-
-- **[Porffor](https://porffor.dev/)** — like `js2wasm`, an ahead-of-time
-  JavaScript-to-Wasm compiler aiming at real JS semantics rather than a subset,
-  which puts it in the same fourth category. It is an early-stage project that
-  lowers to linear memory; `js2wasm` lowers to WasmGC, leaning on the host
-  garbage collector for objects, closures, and arrays. The two are close
-  neighbors exploring different lowering strategies for the same hard target.
-
-- **StarlingMonkey + [weval](https://github.com/bytecodealliance/weval)** —
-  StarlingMonkey is a WASI-oriented build of the SpiderMonkey engine; weval
-  applies Wasm partial evaluation (a Futamura projection) to specialize the
-  engine for a given script, reducing interpreter overhead. This is a
-  bundled-engine approach made faster through specialization, so it keeps full
-  engine compatibility while still shipping the engine. `js2wasm` avoids
-  bundling an engine at all, accepting a narrower compatibility surface in
-  exchange.
-
-For a more detailed category-level comparison, see the [FAQ](./docs/faq.md).
+The structural observation behind the project is that this *combination* of
+trade-offs is largely unoccupied: the typed-subset languages excluded full
+ECMAScript compatibility on purpose; the linear-memory AOT compilers do not
+currently center it; and the interpreter-based and engine-embedding approaches
+reach compatibility only by shipping a runtime (paying in size and startup).
+Targeting WasmGC + full backwards compatibility + no bundled runtime is a point
+that has not been seriously attempted. `js2wasm` is testing whether it is
+viable — that is an open question, not a settled result, and the honest answer
+today is "we don't know yet."
 
 ## Quick Start
 
