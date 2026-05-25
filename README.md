@@ -50,7 +50,13 @@ Projects in this category usually take years to reach meaningful semantic covera
 Current Test262 conformance and benchmark numbers are tracked in one place and
 change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
 [Playground](https://loopdive.github.io/js2wasm/playground/), and the
-[Roadmap](./ROADMAP.md).
+[Roadmap](./ROADMAP.md). The single auto-updated conformance figure (refreshed
+by CI on every merge) is below; everything else links to STATUS.md rather than
+duplicating numbers that go stale.
+
+<!-- AUTO:conformance-start -->
+**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
+<!-- AUTO:conformance-end -->
 
 ## Current Status
 
