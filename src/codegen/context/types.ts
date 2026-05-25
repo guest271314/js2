@@ -597,10 +597,25 @@ export interface CodegenContext {
    */
   pendingMethodTrampolines: {
     trampolineBody: Instr[];
+    /** The trampoline's own func index. */
+    trampolineFuncIdx: number;
     methodFuncIdx: number;
     objStructTypeIdx: number;
     /** User-param count the wrapper func type was built with (excludes self). */
     userParamCount: number;
+    /**
+     * (#1669) The wrapper func type's user-param types and result, captured at
+     * emit time. These are the static types of the `local.get`s the forwarding
+     * body reads, and the type the trampoline must return. The method's
+     * signature can drift away from these during later body compilation; the
+     * finalize pass coerces each forwarded arg from `wrapperUserParams[i]` to
+     * the method's final param type, and the method's result back to
+     * `wrapperResult`, so the rebuilt body validates against both signatures.
+     * Captured directly (not re-derived from `trampolineFuncIdx`) because late
+     * import shifting can move that index relative to the recorded value.
+     */
+    wrapperUserParams: ValType[];
+    wrapperResult: ValType | undefined;
   }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
