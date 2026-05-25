@@ -1457,9 +1457,8 @@
           <p class="hero-sub">
             JS
             <sup>2</sup>
-            is an <strong>early-stage research prototype</strong> &mdash; a technical demo exploring ahead-of-time
-            compilation of JavaScript to WebAssembly, developed at Loopdive. It is <strong>not a production-ready
-            compiler</strong>; expect rough edges, missing features, and breaking changes.
+            is a research preview of an open source compiler focused on compiling JavaScript to WebAssembly ahead of
+            time, developed at Loopdive.
           </p>
           <div class="hero-actions">
             <a class="btn-solid" href="./playground/">Playground</a>
@@ -1473,6 +1472,10 @@
       <section class="section-pad" id="mission">
         <div class="intro">
           <h2>Mission: Next generation JavaScript.</h2>
+          <p>
+            <strong>This is an early-stage research prototype and technical demo, not a production-ready compiler.</strong>
+            Expect rough edges, incomplete language and standard-library coverage, and breaking changes between versions.
+          </p>
           <p>
             The mission of the JS² compiler project is to make WebAssembly a drop-in deployment target for existing
             JavaScript and npm packages, running modules without embedding a JS runtime and enabling more secure,
@@ -3730,6 +3733,19 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
         <div class="approach-faq" aria-labelledby="faq-title">
           <div class="approach-faq-list">
+            <details>
+              <summary>
+                <span class="approach-faq-question">Is the compiler production ready?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  No. JS<sup>2</sup> is an early-stage research prototype and technical demo, not a production-ready
+                  compiler. It is under active development with incomplete language and standard-library coverage, known
+                  bugs, and breaking changes between versions. Treat it as something to explore and experiment with
+                  &mdash; not to deploy in production.
+                </p>
+              </div>
+            </details>
             <details>
               <summary>
                 <span class="approach-faq-question">Why not just use a JavaScript engine or interpreter?</span>
