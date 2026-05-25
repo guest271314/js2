@@ -274,6 +274,62 @@ or open an issue. This is an actively developed compiler with a growing
 compatibility baseline and a clear infrastructure target — but it is a research
 prototype, not yet a "drop in any npm package" story.
 
+## FAQ
+
+**Why not embed an existing interpreter or engine?**
+That is the interpreter-based / engine-embedding approach, and it is a perfectly
+reasonable way to get compatibility — but every deployed module then ships and
+initializes a runtime, which is exactly the size and startup cost `js2wasm` is
+trying to avoid. The bet here is that *compiling* the code, rather than shipping
+something to run it, is worth pursuing for size- and cold-start-sensitive
+deployments. Whether that bet holds across enough real code is the open
+question.
+
+**Isn't the Test262 conformance still incomplete?**
+Yes, and the live figure is in [STATUS.md](./STATUS.md) and the
+[Test262 report](./benchmarks/results/report.html) rather than rounded up here.
+Two caveats matter more than the number: Test262 measures the ECMAScript
+*language* spec, **not** Web APIs, host/Node.js behavior, or whether an arbitrary
+npm package runs unchanged; and the standalone (no-JS-host) path is less complete
+than the JS-host path. A high pass rate is necessary but not sufficient for "runs
+real JavaScript."
+
+**Won't you eventually re-implement a JavaScript engine?**
+That is the real risk, treated as an empirical question, not a solved one. The
+design is compiled-code-first: resolve what can be resolved statically and lower
+it directly, with no interpreter on the common paths. The genuinely unstatic
+corners (`eval`, dynamic `Function`) would need a small interpreter fallback that
+runs only on those paths — not a full engine in every module. Whether that
+fallback stays small, and how much real code avoids it, is what the prototype is
+testing. If compatibility turns out to require shipping an engine, that is a
+negative result worth knowing.
+
+**Why not extend an existing typed JS/TS subset language?**
+Typed JS/TS subset languages produce small, fast Wasm *because* they deliberately
+exclude full ECMAScript — dynamic semantics are dropped by design and the static
+type system is the contract. Extending one toward full backwards compatibility
+means re-adding the dynamics it was built to avoid. `js2wasm` instead targets
+existing JavaScript semantics directly, so existing code is the input rather than
+a rewrite into a new dialect.
+
+**Why WasmGC rather than linear memory?**
+WasmGC gives the compiler host-managed structs, arrays, references, and function
+references, which map onto JavaScript objects, closures, and arrays fairly
+directly and let the host GC manage memory instead of shipping a collector inside
+the module. Linear-memory AOT compilation is a legitimate alternative with its
+own trade-offs (more control, broader runtime support today, but a self-managed
+heap); `js2wasm` keeps a linear-memory backend for WASI-oriented targets, so this
+is a per-target choice rather than a one-way bet. See the
+[ADRs](./docs/adr/README.md) for the reasoning.
+
+**What is the realistic timeline to production-ready?**
+Unknown. This is research-stage work, and a firm date would be a guess dressed up
+as a commitment. The viability of the core bet — full ECMAScript backwards
+compatibility, AOT-compiled to WasmGC, no bundled runtime — is still being
+established. The conformance and benchmark trends are public so progress can be
+judged from data. Until they say otherwise, treat it as something to evaluate,
+not to deploy.
+
 ## The Methodology
 
 Loopdive develops `js2wasm` with an **Automated Agile Team** model. The goal is not novelty for its own sake. The goal is to compress the feedback loop between product intent, compiler implementation, and conformance verification.

@@ -3863,6 +3863,77 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
             <details>
               <summary>
+                <span class="approach-faq-question">Isn't the Test262 conformance still incomplete?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  Yes &mdash; and the live figures are published openly on the
+                  <a href="#goals">compatibility</a>
+                  page rather than rounded up in prose. Two honest caveats matter more than the headline number. First,
+                  Test262 measures conformance to the ECMAScript
+                  <em>language</em>
+                  specification; it does
+                  <strong>not</strong>
+                  cover Web APIs, Node.js or other host behavior, or whether an arbitrary real-world npm package runs
+                  unchanged. A high pass rate is necessary but not sufficient for &ldquo;runs real JavaScript.&rdquo;
+                  Second, the standalone (no-JS-host) path is less complete than the JS-host path. Check the per-feature
+                  report before relying on anything specific.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">Won't you eventually end up re-implementing a JavaScript engine?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  That is the real risk, and we treat it as an open empirical question rather than a solved one. The
+                  approach is compiled-code-first: resolve as much as possible statically and lower it directly, so the
+                  common paths carry no interpreter. The genuinely unstatic corners of the language &mdash;
+                  <code>eval</code>
+                  and dynamic
+                  <code>Function</code>
+                  construction &mdash; would need a small interpreter fallback that runs only on those paths, not a full
+                  engine in every module. Whether that fallback can stay small while the rest is compiled, and how much
+                  real code can avoid it, is precisely what the prototype is testing. If it turns out the only way to be
+                  compatible is to ship an engine, that would be a negative result worth knowing.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">Why not just extend an existing typed JavaScript/TypeScript subset language?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  Typed JS/TS subset languages compile to small, fast Wasm precisely
+                  <em>because</em>
+                  they deliberately exclude full ECMAScript: dynamic semantics are dropped by design and the static type
+                  system becomes the contract. That is a sound engineering choice, but it is a different goal. Extending
+                  one toward full backwards compatibility would mean re-adding the dynamic semantics it was built to
+                  avoid &mdash; you would be fighting the language's own design. We are targeting existing JavaScript
+                  semantics as the north star instead, so that existing code and npm packages are the input, not a
+                  rewrite into a new dialect.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span class="approach-faq-question">What is the realistic timeline to production-ready?</span>
+              </summary>
+              <div class="approach-faq-answer">
+                <p>
+                  Honestly: unknown. This is research-stage work, and a credible production date would be a guess
+                  dressed up as a commitment. The viability of the core bet &mdash; full ECMAScript backwards
+                  compatibility, AOT-compiled to WasmGC, with no bundled runtime &mdash; is still being established. The
+                  conformance and benchmark trends are public so progress can be judged from data rather than promises.
+                  Until those tell a clearly different story, treat the project as something to evaluate and experiment
+                  with, not to deploy.
+                </p>
+              </div>
+            </details>
+            <details>
+              <summary>
                 <span class="approach-faq-question">Do you plan to support all dynamic parts of the language?</span>
               </summary>
               <div class="approach-faq-answer">
