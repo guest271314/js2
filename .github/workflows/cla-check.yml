@@ -61,9 +61,24 @@ jobs:
       # context reports success and the merge queue can proceed. The real CLA
       # evaluation below runs ONLY for pull_request_target / issue_comment, so
       # it never executes in a non-PR context (which previously errored). (#1668)
-      - name: Non-PR event — CLA enforced at PR time, pass
+      - name: Non-PR event — post passing cla-check status (CLA enforced at PR time)
         if: github.event_name != 'pull_request_target' && github.event_name != 'issue_comment'
-        run: echo "Non-PR event (${{ github.event_name }}): CLA acceptance is enforced at PR submission; nothing to gate here."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # On merge_group (and any non-PR event) there is no PR author to gate —
+          # CLA acceptance was already enforced at PR submission. The job's own
+          # check-run name can vary by trigger ("CLA Check / cla-check" vs
+          # "cla-check"), which can leave the required `cla-check` context
+          # unsatisfied on the merge-group commit and wedge the queue. So post
+          # an EXPLICIT commit status named exactly `cla-check` = success on the
+          # event SHA — deterministic, independent of check-run naming. (#1668)
+          echo "Non-PR event (${{ github.event_name }}): posting passing cla-check status on ${{ github.sha }}."
+          gh api --method POST "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -f state=success \
+            -f context=cla-check \
+            -f "description=CLA enforced at PR submission; nothing to gate on non-PR events." \
+            -f "target_url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       # BASE checkout only (default for pull_request_target). Never the PR head.
       - uses: actions/checkout@v5
