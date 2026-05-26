@@ -3,7 +3,7 @@ id: 1671
 slug: trampoline-null-receiver-runtime
 title: "object-method trampoline / direct dispatch lost the real receiver → ~200 runtime null-derefs (completes #1669/#621)"
 sprint: 55
-status: in-review
+status: done
 created: 2026-05-25
 updated: 2026-05-25
 priority: high
