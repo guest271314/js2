@@ -20,6 +20,7 @@ import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegis
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { compileNativeStringLiteral } from "./string-ops.js";
+import { getVecInfo } from "./type-coercion.js";
 
 // ── Compile-time ToBoolean coercion of descriptor flag initializers ──
 /**
@@ -115,6 +116,139 @@ function isStaticallyNonObjectDescArg(descArg: ts.Expression): boolean {
   if (ts.isIdentifier(descArg) && descArg.text === "undefined") return true;
   if (ts.isPrefixUnaryExpression(descArg) && ts.isNumericLiteral(descArg.operand)) return true;
   return false;
+}
+
+// ── #1130 PR-0: array-index-exotic length growth on defineProperty ───
+
+/**
+ * Parse a property key string as a canonical array index per the array
+ * exotic-object rules (ES §10.4.2.1 / `CanonicalNumericIndexString` plus
+ * `ToString(ToUint32(n)) === key`). Returns the index when the key is a
+ * canonical array index in `[0, 2^32-2]`, else undefined. "length", "01",
+ * "-1", "1.5", "4294967295" are NOT canonical array indices.
+ */
+function parseCanonicalArrayIndex(key: string): number | undefined {
+  if (!/^(0|[1-9][0-9]*)$/.test(key)) return undefined;
+  const n = Number(key);
+  // Array indices are < 2^32 - 1 (4294967295 is the max length, not an index).
+  if (!Number.isInteger(n) || n < 0 || n >= 0xffffffff) return undefined;
+  return n;
+}
+
+/**
+ * A receiver expression is safe to re-compile for the length-growth side
+ * effect only when evaluating it has no observable side effects. Identifiers
+ * and `this` qualify; calls, indexing, and arbitrary member chains do not.
+ */
+function isSideEffectFreeReceiver(objArg: ts.Expression): boolean {
+  return ts.isIdentifier(objArg) || objArg.kind === ts.SyntaxKind.ThisKeyword;
+}
+
+/**
+ * #1130 PR-0: emit array-index-exotic `length` growth.
+ *
+ * `Object.defineProperty(arr, "n", desc)` on an array exotic object with
+ * `n >= arr.length` sets `arr.length = n + 1` (ES §10.4.2.1 ArraySetLength
+ * via `[[DefineOwnProperty]]`). Our WasmGC vec stores the logical length in
+ * struct field 0; this emits a guarded bump on a freshly-compiled vec ref.
+ *
+ * Emits nothing (and returns) when `objArg` is not a side-effect-free vec
+ * receiver or `propArg` is not a canonical array index. Leaves the operand
+ * stack unchanged.
+ */
+function maybeEmitVecLengthGrowth(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  objArg: ts.Expression,
+  propArg: ts.Expression,
+): void {
+  if (!ts.isStringLiteral(propArg)) return;
+  const idx = parseCanonicalArrayIndex(propArg.text);
+  if (idx === undefined) return;
+  if (!isSideEffectFreeReceiver(objArg)) return;
+
+  const objTsType = ctx.checker.getTypeAtLocation(objArg);
+  const wasmType = resolveWasmType(ctx, objTsType);
+  if (wasmType.kind !== "ref" && wasmType.kind !== "ref_null") return;
+  const vecTypeIdx = (wasmType as { typeIdx?: number }).typeIdx;
+  if (vecTypeIdx === undefined) return;
+  const vecInfo = getVecInfo(ctx, vecTypeIdx);
+  if (vecInfo === null) return;
+  const arrTypeIdx = vecInfo.arrTypeIdx;
+
+  // Re-compile the receiver to a raw vec ref (safe: side-effect-free).
+  const recvType = compileExpression(ctx, fctx, objArg);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    // Unexpected: discard whatever landed on the stack to stay balanced.
+    if (recvType) fctx.body.push({ op: "drop" });
+    return;
+  }
+  const vecLocal = allocLocal(fctx, `__defprop_grow_${fctx.locals.length}`, recvType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+
+  // Only grow when idx >= vec.length. Inside the guard, grow the backing
+  // `$data` array if its capacity is too small (so iteration/index reads
+  // don't trap), then set vec.length = idx + 1. This mirrors the indexed
+  // assignment grow path in expressions/assignment.ts so the vec stays
+  // internally consistent (logical length never exceeds backing capacity).
+  const dataLocal = allocLocal(fctx, `__defprop_grow_data_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+  const oldCapLocal = allocLocal(fctx, `__defprop_grow_ocap_${fctx.locals.length}`, { kind: "i32" });
+  const newDataLocal = allocLocal(fctx, `__defprop_grow_ndata_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+
+  fctx.body.push({ op: "i32.const", value: idx });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "i32.ge_s" }); // idx >= vec.length?
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // data = vec.data
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "local.set", index: dataLocal } as Instr,
+
+      // if (idx >= array.len(data)) grow backing array to idx + 1
+      { op: "local.get", index: dataLocal } as Instr,
+      { op: "array.len" } as Instr,
+      { op: "local.tee", index: oldCapLocal } as Instr,
+      { op: "i32.const", value: idx } as Instr,
+      { op: "i32.le_s" } as Instr, // oldCap <= idx?
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // newData = array.new_default(idx + 1)
+          { op: "i32.const", value: idx + 1 } as Instr,
+          { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+          { op: "local.set", index: newDataLocal } as Instr,
+          // array.copy newData[0..oldCap] = data[0..oldCap]
+          { op: "local.get", index: newDataLocal } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "local.get", index: oldCapLocal } as Instr,
+          { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+          // vec.data = newData
+          { op: "local.get", index: vecLocal } as Instr,
+          { op: "local.get", index: newDataLocal } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        ],
+      } as Instr,
+
+      // vec.length = idx + 1
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "i32.const", value: idx + 1 } as Instr,
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+    ],
+  });
 }
 
 // ── Compile-time primitive type check for Object methods ─────────────
@@ -479,6 +613,11 @@ export function compileObjectDefineProperty(
     fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }
+
+  // (#1130 PR-0) Array exotic objects grow `length` when a numeric-index
+  // property at or beyond the current length is defined. Emit the guarded
+  // bump before the descriptor is applied; no-op for non-array receivers.
+  maybeEmitVecLengthGrowth(ctx, fctx, objArg, propArg);
 
   // Check if descriptor is an object literal with a `value`, `get`, or `set` property
   let valueExpr: ts.Expression | undefined;

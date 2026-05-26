@@ -1,9 +1,9 @@
 ---
 id: 1130
 title: "Array methods — getter-observing property access on indices and length"
-status: ready
+status: in-review
 created: 2026-04-20
-updated: 2026-04-28
+updated: 2026-05-25
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -912,3 +912,73 @@ codegen) and, if holes are not tracked, **scope PR-1/2 to the `[]`-or-dense
 than expanding #1130. This is the one place this issue could legitimately
 need more than a spec — flag it to the architect/PO if hole tracking turns
 out to be a prerequisite for a majority of the 96.
+
+---
+
+## PR-0 implemented — vec array-index-exotic length growth (2026-05-25)
+
+Branch `issue-1130-getter-observe-v2` (off current main, dcf2b287c).
+Implements **PR-0** from the 2026-05-24 authoritative re-spec, item A:
+array exotic objects grow `length` when `Object.defineProperty(arr, "n", …)`
+defines a property at a numeric index `n >= arr.length` (ES §10.4.2.1
+ArraySetLength via `[[DefineOwnProperty]]`).
+
+### What changed
+
+`src/codegen/object-ops.ts` only:
+- `parseCanonicalArrayIndex(key)` — canonical array index per
+  `ToString(ToUint32(n)) === key`, range `[0, 2^32-2]`. Excludes `"length"`,
+  `"01"`, `"-1"`, `"1.5"`, `"4294967295"`.
+- `maybeEmitVecLengthGrowth(ctx, fctx, objArg, propArg)` — emitted at the top
+  of `compileObjectDefineProperty` before descriptor dispatch (so it fires for
+  both the accessor and value sub-paths). No-op unless the receiver is a
+  side-effect-free vec receiver (identifier / `this`, validated via
+  `getVecInfo`) and the key is a canonical array index. Uses a fresh
+  side-effect-free re-compile of the receiver to get the raw vec ref.
+
+### Finding that corrects the spec (load-bearing)
+
+The re-spec said "emit a guarded length bump: `if (n >= vec.len) vec.len = n+1`
+via `struct.set` on field 0." **That alone is unsafe.** Bumping only the
+logical length (struct field 0) leaves the physical backing `$data` array at
+its old size, so a subsequent `for`-loop to `arr.length` or `arr.forEach`
+**traps with "array element access out of bounds."** Verified by probe.
+
+PR-0 therefore **also grows the backing `$data` array** (capacity → `n+1`,
+`array.new_default` + `array.copy`), mirroring the indexed-assignment grow
+path at `src/codegen/expressions/assignment.ts:2488-2578`. This keeps the vec
+internally consistent (logical length never exceeds backing capacity), so
+iteration and index reads no longer trap.
+
+### Scope / boundary
+
+PR-0 grows length + capacity and is independently valuable + safe (fixes a
+real `arr.length`-after-numeric-`defineProperty` correctness bug without
+introducing iteration traps). It does **not** yet store the value-descriptor's
+value nor invoke accessor getters during iteration — newly-grown slots read as
+the element default. The element/length accessor slow-path (the
+`__array_idx_accessor_get` / `emitElementLoad` machinery + HasProperty) is
+**PR-1's scope** and is not in this PR.
+
+### Validation
+
+- `tests/issue-1130.test.ts` (8 cases): index-grow value+accessor descriptors,
+  `length`-key exclusion, no-shrink for in-range index, for-loop + forEach over
+  the grown array do not trap, grown index reads default, `string[]` vec grows.
+  All pass.
+- Existing defineProperty suites (`issue-1460`, `issue-846`,
+  `issue-846-class-static-prototype`) pass unchanged.
+- Array suites (`array-capacity`, `array-bounds-elimination`,
+  `array-oob-bounds-check`, `array-callback-three-params`) show identical
+  pass/fail counts with and without the change (the failing ones fail on clean
+  main too — `helpers.js` infra breakage, not this change). Zero regressions.
+
+### Remaining (NOT in PR-0)
+
+- **PR-1**: element + length accessor slow-path read (`emitElementLoad`,
+  `__array_idx_accessor_get`, `__array_length_accessor_get`, `__to_length`,
+  sentinel) gated on `ctx.arrayAccessorObserved`; HasProperty; forEach.
+- **PR-2**: fan-out to map/every/some/filter/reduce/reduceRight.
+- **Open question still open**: interior-hole representation (`[9, , 12]`).
+  PR-0 does not touch holes, so it is unaffected; PR-1's HasProperty work must
+  resolve it (flag to architect if it blocks a majority of the 96).
