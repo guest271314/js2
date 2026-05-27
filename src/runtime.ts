@@ -3540,6 +3540,10 @@ assert._isSameValue = isSameValue;
           return v.toLocaleString();
         };
       if (name === "__extern_is_undefined") return (v: any) => (v === undefined ? 1 : 0);
+      // (#1328) Array.isArray on an externref value (e.g. a RegExp match
+      // result returned from the host). The compile-time type can't decide
+      // this for `externref`, so defer to the real spec predicate.
+      if (name === "__extern_is_array") return (v: any) => (Array.isArray(v) ? 1 : 0);
       if (name === "__get_undefined") return () => undefined;
       // (#1343) ToBoolean for externref values per ECMA-262 §7.1.2.
       // The pre-existing externref path for `Boolean(x)` only checked
@@ -3776,7 +3780,8 @@ assert._isSameValue = isSameValue;
       // exported getters so opaque struct fields are visible at runtime.
       if (name === "__object_keys")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.18 Object.keys → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3793,7 +3798,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_values")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.22 Object.values → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3815,7 +3821,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_entries")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.5 Object.entries → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -4067,14 +4074,40 @@ assert._isSameValue = isSameValue;
             throw new TypeError("Object.defineProperty called on non-object");
           }
           const key = prop != null ? String(prop) : "";
-          // For plain JS objects and descriptors, use native Object.defineProperty which
-          // follows the prototype chain for descriptor flags per ToPropertyDescriptor.
-          if (!_isWasmStruct(obj)) {
+          // Field reader that round-trips both plain JS objects (native `o[f]`,
+          // which fires accessors / walks the prototype chain per
+          // ToPropertyDescriptor) and WasmGC structs (sidecar + the compiled
+          // module's `__sget_<field>` exports for typed struct fields that
+          // never reach the sidecar). Mirrors the reader in __defineProperties.
+          const getField = (o: any, f: string): any => {
+            if (!_isWasmStruct(o)) return o[f];
+            // _safeGet fires struct accessor getters (__get_<f>) and the
+            // sidecar; fall back to the compiled module's __sget_<field>
+            // export for typed struct fields that never reach the sidecar.
+            let v = _safeGet(o, f);
+            if (v === undefined) {
+              const g = callbackState?.getExports()?.[`__sget_${f}`];
+              if (typeof g === "function") v = g(o);
+            }
+            return v;
+          };
+          // For a plain JS object whose descriptor is also a plain JS object,
+          // native Object.defineProperty follows the descriptor's prototype
+          // chain and accessor getters correctly — use it directly.
+          if (!_isWasmStruct(obj) && !_isWasmStruct(desc)) {
             Object.defineProperty(obj, key, desc);
             return obj;
           }
+          // The descriptor is a WasmGC struct (e.g. an object-literal-valued
+          // descriptor in `Object.create(p, { k: descStruct })`). Native
+          // Object.defineProperty sees it as null-proto/no-keys and drops every
+          // attribute. Materialize a plain descriptor via getField first.
+          if (!_isWasmStruct(obj)) {
+            const d2 = _toPropertyDescriptorValidate(desc, getField);
+            Object.defineProperty(obj, key, d2);
+            return obj;
+          }
           // WasmGC struct obj: apply via sidecar
-          const getField = (o: any, f: string): any => (!_isWasmStruct(o) ? o[f] : _sidecarGet(o, f));
           const d = _toPropertyDescriptorValidate(desc, getField);
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
@@ -4380,7 +4413,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__getOwnPropertyNames")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.10 Object.getOwnPropertyNames → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (!_isWasmStruct(obj)) return Object.getOwnPropertyNames(obj);
           const exports = callbackState?.getExports();
           // #1047 — registered class prototype: return only the allowlist
