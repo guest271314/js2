@@ -2871,26 +2871,64 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // Check the TypeScript type of the argument at compile time
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
-      // externref args carry host JS values whose array-ness can't be decided
-      // statically (e.g. a RegExp match result). Defer to the host predicate
-      // (#1328) rather than emitting a wrong compile-time `false`.
+      // externref args carry values whose array-ness can't be decided
+      // statically. Two runtime cases must both be handled:
+      //   (#1678) a compiled native array materialised into the externref slot
+      //     (e.g. a rest/array binding default whose value is `any`-typed
+      //     becomes a __vec_externref) — detected via `ref.test` against every
+      //     registered vec struct type. Pure Wasm, works in standalone/WASI.
+      //   (#1328) a genuine host JS value (e.g. a RegExp match result) — these
+      //     are not WasmGC vec structs, so fall back to the host predicate
+      //     `__extern_is_array` when a JS host is present.
+      // We OR the two checks so neither case regresses; in standalone mode the
+      // host predicate is simply absent and only the `ref.test` path runs.
       if (argWasmType.kind === "externref") {
-        const argSideType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
-        if (argSideType && argSideType.kind !== "externref") {
-          // Non-externref value reaching here is never a host array.
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") {
+          // Non-externref values (numbers, bools) are never arrays.
           fctx.body.push({ op: "drop" });
           fctx.body.push({ op: "i32.const", value: 0 });
           return { kind: "i32" };
         }
+        const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
         const isArrIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
-        if (isArrIdx === undefined) {
-          // Host predicate unavailable (e.g. standalone) — drop and fall back.
+        if (vecTypeIdxs.length === 0 && isArrIdx === undefined) {
+          // No WasmGC array types registered and no host predicate available
+          // (e.g. standalone with no arrays in the module) — never an array.
           fctx.body.push({ op: "drop" });
           fctx.body.push({ op: "i32.const", value: 0 });
           return { kind: "i32" };
         }
-        flushLateImportShifts(ctx, fctx);
-        fctx.body.push({ op: "call", funcIdx: isArrIdx });
+        // Keep the externref value live in a temp; both the ref.test scan
+        // (needs an anyref) and the host predicate (needs the externref)
+        // consume it, so we can't leave it on the stack.
+        const externTmp = allocLocal(fctx, `__isarr_ext_${fctx.locals.length}`, { kind: "externref" } as ValType);
+        fctx.body.push({ op: "local.set", index: externTmp });
+        let emittedTerm = false;
+        if (vecTypeIdxs.length > 0) {
+          const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "local.set", index: anyTmp });
+          // result = ref.test(t0) | ref.test(t1) | ...
+          for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
+            fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
+            if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+          }
+          emittedTerm = true;
+        }
+        if (isArrIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+          fctx.body.push({ op: "call", funcIdx: isArrIdx });
+          if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
+          emittedTerm = true;
+        }
+        if (!emittedTerm) {
+          // Should be unreachable given the guard above, but stay safe.
+          fctx.body.push({ op: "i32.const", value: 0 });
+        }
         return { kind: "i32" };
       }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
@@ -8318,6 +8356,16 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // wasm class (handled by the ClassName_method dispatch below) or the
           // `@@iterator`/`@@asyncIterator` cases (already handled above).
           const recvSym = receiverType.getSymbol()?.name;
+          // (#1330) When a regex flows through an `any`/unresolved variable —
+          // the common test262 shape `re[Symbol.search](s)` with `re: any` —
+          // recvSym is undefined and the narrow `=== "RegExp"` guard rejects
+          // it, so dispatch falls through to generic method lookup which can't
+          // resolve the "@@search" string key → returns 0/undefined. Route
+          // these through `__regex_symbol_call` too: the host import validates
+          // the receiver at runtime (throws the correct TypeError if it isn't a
+          // RegExp), so widening here is spec-safe. Stay narrow for receivers
+          // that resolve to a *user* class/struct, which may define their own
+          // @@match/@@replace/etc.
           const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
           let resolvedClassName = receiverType.getSymbol()?.name;
           if (resolvedClassName && !ctx.classSet.has(resolvedClassName)) {
