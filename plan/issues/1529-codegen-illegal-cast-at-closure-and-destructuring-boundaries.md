@@ -1,7 +1,7 @@
 ---
 id: 1529
 title: "codegen: 'illegal cast' umbrella at closure & destructuring parameter boundaries"
-status: backlog
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium
@@ -10,7 +10,7 @@ reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: type-coercion, destructuring, closures, wasm-gc
-sprint: Backlog
+sprint: 56
 es_edition: n/a
 test262_category: multiple (class, async-generator, eval-code, super, for-await-of)
 test262_count: 241
