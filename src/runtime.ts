@@ -3757,7 +3757,8 @@ assert._isSameValue = isSameValue;
       // exported getters so opaque struct fields are visible at runtime.
       if (name === "__object_keys")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.18 Object.keys → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3774,7 +3775,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_values")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.22 Object.values → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3796,7 +3798,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_entries")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.5 Object.entries → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -4361,7 +4364,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__getOwnPropertyNames")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.10 Object.getOwnPropertyNames → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (!_isWasmStruct(obj)) return Object.getOwnPropertyNames(obj);
           const exports = callbackState?.getExports();
           // #1047 — registered class prototype: return only the allowlist
