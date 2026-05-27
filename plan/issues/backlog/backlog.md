@@ -2,6 +2,16 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Standalone (--target wasi) host-import audit (2026-05-25) — goal `standalone-mode`
+
+Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.
+
+- [#1662](../1662-standalone-host-import-audit.md) — Audit record + findings table (done) — high, easy.
+- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
+- [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
+- [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
+- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, ready (after #1666).
+
 ## Harvest 2026-05-24b (fixable test262 compile-error causes — CE decomposition)
 
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
@@ -18,10 +28,19 @@ already enumerated in #1522 / #1543 / #1556 are not re-filed.
 - [#1595](1595-arraybuffer-transfer-methods-not-implemented.md) — ArrayBuffer.prototype.transfer / transferToFixedLength / transferToImmutable not implemented — **~40 fails**, medium
 - [#1596](1596-function-prototype-apply-call-not-accessible.md) — Function.prototype.apply / .call not accessible on compiled Wasm functions — **~46 fails**, high
 
+## Destructuring-lane sweep follow-ups (2026-05-24)
+
+From the dev-1553b destructuring-lane verification sweep.
+
+- [#1658](../1658-destructured-function-param-default-not-applied.md) — Destructured/scalar **function-parameter** default not applied: returns 30 where 40 is expected on the real runtime (distinct from the object/array decl-mode #1553b/#1553d which are done) — high, medium, **ready**. NOT currently caught by CI (see #1659); depends on #1659 for gating.
+- [#1659](../1659-ci-equivalence-tests-not-run.md) — CI does not run `tests/equivalence/` (OOMs in runner) so genuine equivalence regressions (e.g. #1658) land silently. Options: shard like test262 / constrained workers / `--no-threads` / separate scheduled job. Sub-item: fix `__extern_get` harness-fidelity gap in `tests/equivalence/helpers.ts` so the suite runs clean — high, medium, **ready**. Gates CI-visibility of #1658.
+
 ## Sprint 55 — repo structure / website (2026-05-24)
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
 - [#1657](../1657-mq-test262-paths-filter.md) — Skip `merge_group` test262 shards for non-src changes while keeping the "merge shard reports" required check green — medium, medium, **in-review (sprint 55)**. Conservative path detector (`scripts/test262-paths-match.sh`) + `changes` job gate the queue's shard matrix; fail-safe runs shards on any doubt. Related: #1656.
+- [#1661](../1661-readme-programmatic-api-host-imports.md) — README programmatic-API example fails: `instantiate(binary, {})` but default JS-host mode emits `string_constants` + `env.*` imports, so the empty-imports snippet throws `Import #0 "string_constants"`. Recommend switching the example to standalone / no-host mode (#1471–#1474) so it genuinely runs under `{}`, and document the default-vs-standalone import requirement — **high**, easy, **ready (sprint 55)**. Plan-only; from guest271314 GitHub #601. Same theme as #389 (docs imply standalone behavior default mode doesn't deliver). Related: #1471, #1472, #1473, #1474, #1530.
+- [#1667](../1667-dx-generate-import-object.md) — **DX feature**: `compile()` should return a ready-to-pass import object for default/JS-host mode, so `WebAssembly.instantiate(r.binary, r.importObject)` works out of the box (no hand-wiring) — surfaces the runtime the CLI already emits as `<name>.imports.js` through the programmatic API. Complements #1661 (docs): #1661 documents the standalone zero-import path; #1667 adds the JS-host convenience. Host-imports-required stays the explicit default; standalone/`wasi` remains the recommended portable default — **medium**, medium, **ready**. From guest271314 GitHub #601. Related: #601, #1661, #1471.
 
 ## WASI Native Messaging — AssemblyScript-reference alignment (2026-05-24)
 
@@ -32,6 +51,10 @@ both others); #1653 is the keystone for the read side + continuous loop.
 - [#1654](../1654-wasi-dataview-arraybuffer-invalid-module.md) — DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under `--target wasi` — high, medium, **root (ready)**
 - [#1653](../1653-wasi-process-stdin-read-binary.md) — `process.stdin.read(buffer, offset?)` binary incremental stdin read (keystone) — high, hard, **depends on #1654**
 - [#1655](../1655-wasi-process-stdout-write-arraybuffer.md) — `process.stdout.write(ArrayBuffer)` accept ArrayBuffer arg, not only Uint8Array literal — medium, easy, **depends on #1654**
+
+## Governance / legal — CLA gate (2026-05-24)
+
+- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a *required* branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
 
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 

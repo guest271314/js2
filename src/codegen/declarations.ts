@@ -48,6 +48,7 @@ import {
   unwrapGeneratorYieldType,
 } from "./index.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
+import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
 import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import {
@@ -586,7 +587,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
     const method = node.expression.name.text;
     if (FUNCTIONAL_ARRAY_METHODS.has(method)) {
-      if (method === "reduce") {
+      if (method === "reduce" || method === "reduceRight") {
         state.funcArrayNeed2 = true;
       } else {
         state.funcArrayNeed1 = true;
@@ -595,7 +596,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     if (method === "call" && ts.isPropertyAccessExpression(node.expression.expression)) {
       const innerMethod = node.expression.expression.name.text;
       if (FUNCTIONAL_ARRAY_METHODS.has(innerMethod)) {
-        if (innerMethod === "reduce") {
+        if (innerMethod === "reduce" || innerMethod === "reduceRight") {
           state.funcArrayNeed2 = true;
         } else {
           state.funcArrayNeed1 = true;
@@ -977,15 +978,31 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectParseImports finalize ──
-  for (const name of state.parseNeeded) {
-    // Skip if already registered (e.g. by collectExternDeclarations from lib.d.ts) (#1109)
-    if (ctx.funcMap.has(name)) continue;
-    if (name === "parseInt") {
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", name, { kind: "func", typeIdx });
-    } else {
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", name, { kind: "func", typeIdx });
+  // #1663 — standalone / WASI targets have no JS runtime to satisfy the
+  // env.parseInt / env.parseFloat imports, so emit WasmGC-native scanners
+  // instead (registered under the same funcMap names; call sites unchanged).
+  // The functions are emitted as DEFINED funcs here; the batched late-import
+  // shift (`fixupModuleFuncIndices`, walked on every later `addImport`) keeps
+  // their funcMap indices and internal `call __str_flatten` refs correct as
+  // the remaining finalize blocks register more imports (#1666).
+  {
+    const parseNative = new Set<string>();
+    for (const name of state.parseNeeded) {
+      if (ctx.funcMap.has(name)) continue; // already registered (e.g. lib.d.ts) (#1109)
+      if (ctx.wasi || ctx.standalone) {
+        parseNative.add(name);
+        continue;
+      }
+      if (name === "parseInt") {
+        const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "f64" }]);
+        addImport(ctx, "env", name, { kind: "func", typeIdx });
+      } else {
+        const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
+        addImport(ctx, "env", name, { kind: "func", typeIdx });
+      }
+    }
+    if (parseNative.size > 0) {
+      emitNativeParseNumber(ctx, parseNative);
     }
   }
 

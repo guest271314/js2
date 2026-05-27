@@ -181,6 +181,8 @@ function instrDelta(instr: Instr, types: TypeDef[], funcSigs: FuncSigInfo): numb
     op === "f32.demote_f64" ||
     op === "f64.reinterpret_i64" ||
     op === "i64.reinterpret_f64" ||
+    op === "f32.reinterpret_i32" ||
+    op === "i32.reinterpret_f32" ||
     op === "i32.trunc_sat_f64_s" ||
     op === "i32.trunc_sat_f64_u" ||
     op === "i32.trunc_f64_s" ||

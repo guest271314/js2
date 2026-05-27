@@ -3,7 +3,7 @@ id: 779d
 title: "Object-literal destructuring (non-class, non-for-of) residuals (~132 fails)"
 status: in-review
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: object-destructuring
 goal: property-model
-sprint: 56
+sprint: Backlog
 parent: 779
 es_edition: ES2018
 test262_fail: 132
@@ -49,69 +49,31 @@ class-only paths fixed by #1543/#1544 and the for-of paths fixed by
   MethodDefinition)
 - §14.1.18 IteratorBindingInitialization
 
-## Investigation (2026-05-27, dev)
+## Fix (2026-05-27) — narrow funcIdx-shift sub-cluster
 
-Baseline JSONL (2026-05-22, commit 1f5208c8) marked 155 `object/dstr` tests
-non-pass. Re-ran all 154 in **process isolation** (the compiler is not safe to
-call repeatedly in one process — accumulates global module state, so in-loop
-sweeps are invalid) against current main:
+Root cause confirmed in `src/codegen/destructuring-params.ts`
+`destructureParamObject` externref path (lines ~581-609): the struct-fast-path
+`then` branch and the `__extern_get` `else` branch each compile the binding
+default into a detached buffer via a manual `fctx.body` swap. When the *second*
+branch's compilation added a late/union import, the function indices shifted,
+but the *first* branch's buffer was detached from `fctx.body` at that moment, so
+the index-shift walk missed its forward `call`, leaving an off-by-one funcIdx
+("not enough arguments on the stack for call"). E.g. `method({ x = thrower() })`
+emitted `call <method>` instead of `call <thrower>`.
 
-- **6 now pass** (fixed since baseline by #1542/#1543/#1544/#1550/#1553x/#1151-GapB)
-- **146 still fail**: 112 runtime FAIL + 34 compile_error
+Fix: register both branch buffers in `ctx.liveBodies` (walked by every shift
+path) for the whole construction window. Same mechanism as the #801/#1384
+liveBodies safety net.
 
-The 146 residuals are **NOT one bug** — they split across several root causes,
-many already owned by other in-flight issues:
-
-1. **`assert#2` cluster (~40)** — `method([[,] = g()])` style: inner array
-   elision/rest **over-consumes the iterator**. This is **#1592**
-   (already ESCALATED-NEEDS-SPEC, task #100). Not unique to #779d.
-2. **`Cannot destructure 'null'/'undefined'` (~14)** — array elision/empty/
-   exhausted patterns throw when they should bind `undefined`. Overlaps #1592.
-3. **invalid-wasm `obj-ptrn-*-init-throws / -init-skipped` (~14)** — UNIQUE to
-   #779d. Root cause confirmed below.
-4. **`assert#4`/`assert#6` (fn-name, rest)** — later-assertion mismatches.
-5. **CE noise (~25)** — TS-checker diagnostics on the wrapped *JS* harness
-   (`Argument of type '{}' is not assignable to '[any]'`, `Cannot find name 's'`,
-   Proxy types). These are wrapper/`allowJs` artifacts, not codegen bugs the
-   real sharded runner necessarily hits the same way.
-
-### Confirmed unique root cause (cluster 3)
-
-`meth-obj-ptrn-id-init-throws.js`: `method({ x = thrower() })` where
-`function thrower(){ throw … }` is declared **after** the object literal.
-Emits invalid wasm: `not enough arguments on the stack for call (need 2, got 0)`.
-
-WAT of `__anon_0_method` default-fires branch (via
-`emitDefaultValueCheck` f64 path, `src/codegen/statements/destructuring.ts:365`)
-shows the default initializer `thrower()` compiled to **`call 18`**
-(= `__anon_0_method`, the enclosing method **itself**) instead of **`call 19`**
-(= `$thrower`) — an **off-by-one funcIdx**, plus two stray `ref.null extern`
-left on the stack. Index map: imports 0-10; defined fns start at 11; 17=`test`,
-18=`__anon_0_method`, 19=`thrower`.
-
-This is the **late-import / addUnionImports funcIdx-shift hazard** (CLAUDE.md
-"addUnionImports" section): compiling the binding default inside the
-object-literal method body adds late imports (`__extern_get`,
-`__extern_is_undefined`) which shift function indices, but a forward call
-reference resolved against pre-shift indices (or `thrower`'s funcMap entry not
-shifted).
-
-**Minimal repros do NOT reproduce it** — `method({ x = thrower() })` with
-thrower before/after the literal, and `{ x = 42 }`, all instantiate fine in
-isolation. The off-by-one only manifests with the FULL test262 harness present
-(Test262Error struct + 5 assert helpers + closures), i.e. once enough
-functions/late-imports exist for the shift to mis-align a forward call. This
-confirms the defect is in the shared late-import index-shift machinery, not in
-the destructure helper's local logic — a fragile, broadly-shared area (also
-touched by #1529). Recommend senior-dev ownership for the shift fix.
-
-### Recommendation
-
-#779d as scoped (~132 obj-literal dstr) is **not a single fix** — it's an
-umbrella overlapping #1592 (escalated), #1529, #820c. Suggest: (a) split out
-the unique funcIdx-shift bug (cluster 3, ~14 tests) as its own narrow fix, and
-(b) fold the rest into the existing #1592 / #779 umbrella tracking rather than
-re-fixing here. Awaiting tech-lead direction on scope before implementing.
+### Test Results
+- 6 `*-meth-obj-ptrn-*-init-throws` tests (meth/gen-meth/async-gen-meth ×
+  id/prop-id) flip from `compile_error` → `pass` (verified in process isolation).
+- `tests/issue-779d.test.ts` added (3 cases) — passes.
+- Regression check: `default-params.test.ts` 3 failures are PRE-EXISTING on the
+  branch base (verified by stashing the fix), NOT introduced here.
+- Out of scope (separate bugs, still failing): `*-init-skipped` family (default
+  fires on `null` — #821/#1550 semantics); `async-gen-*-prop-id-init-skipped`
+  has a distinct funcIdx orphan in the async-gen path; elision/rest = #1592.
 
 ## Acceptance criteria
 

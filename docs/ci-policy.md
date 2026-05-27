@@ -46,7 +46,7 @@ A failure here surfaces in the PR Checks tab but does not block merge.
 | `differential gate (branch vs main)` | `.github/workflows/test262-differential.yml` | Branch-vs-main HEAD comparison with src-tree-hash caching (#1246). Useful diagnostic signal, but the sharded `merge shard reports` is the authoritative gate. Kept running for visibility into per-PR deltas. |
 | `check for test262 regressions` | `.github/workflows/test262-sharded.yml` | Legacy rolling-baseline regression gate. Produced drift-induced false-positives — see PR #142/#143/#151 retros. Superseded by `merge shard reports`. |
 | `refresh-benchmarks` | `.github/workflows/benchmark-refresh.yml` | Playground benchmark regression gate. Currently informational at the branch-protection level, but the workflow itself fails on regression for PRs (#1525, §6 below). Promote to required once a longer signal window confirms stability. |
-| `CLA check` | `.github/workflows/cla-check.yml` | Currently informational; promote to required once the CLA flow is stable. |
+| `cla-check` | `.github/workflows/cla-check.yml` | Self-hosted CLA-acceptance gate (#1660): records affirmative acceptance in `.github/cla/signatures.json`. Internal authors (org members, maintainer, `*[bot]`) are exempt and pass with no signature; external humans must comment the agreement phrase. **Currently informational** — promote to required only after exemption is confirmed in practice (add `"cla-check"` to `REQUIRED_CHECKS` in `scripts/enable-branch-protection.sh` and re-run it). Do NOT promote before confirming internal/bot authors pass, or it would block the merge queue. |
 | `Test262 Canary` | `.github/workflows/test262-canary.yml` | Smoke check on a small slice of test262 — fast feedback, not authoritative. |
 
 ---

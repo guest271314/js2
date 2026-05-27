@@ -2321,6 +2321,10 @@ const ARRAY_METHODS = new Set([
   "with",
   "flat",
   "flatMap",
+  // TypedArray-specific (#1664) — native WasmGC lowering avoids the generic
+  // __extern_get / __extern_length host-import fallback under --target wasi.
+  "set",
+  "subarray",
 ]);
 
 /**
@@ -2432,7 +2436,7 @@ export function compileArrayMethodCall(
   // getReceiverLocalIdx succeeds and mutating methods can write back.
   let moduleGlobalIdx: number | undefined;
   let savedLocal: number | undefined;
-  const MUTATING = new Set(["push", "pop", "shift", "reverse", "splice", "fill", "copyWithin", "sort"]);
+  const MUTATING = new Set(["push", "pop", "shift", "reverse", "splice", "fill", "copyWithin", "sort", "set"]);
   if (ts.isIdentifier(propAccess.expression)) {
     const name = propAccess.expression.text;
     const gIdx = ctx.moduleGlobals.get(name);
@@ -2587,6 +2591,15 @@ export function compileArrayMethodCall(
       break;
     case "flatMap":
       result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr);
+      break;
+    case "set": {
+      const setResult = compileTypedArraySet(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      // TypedArray.prototype.set returns undefined (void).
+      result = setResult === null ? null : (VOID_RESULT as any);
+      break;
+    }
+    case "subarray":
+      result = compileTypedArraySubarray(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     default:
       result = undefined;
@@ -4871,8 +4884,11 @@ function compileArrayMap(
   } else {
     callInstrs = [
       ...buildBridgeCallInstrs(ctx, setup, elemType, arrTypeIdx, loop, { kind: "inline" }),
-      // Convert result to target element type if needed
-      ...(!ctx.fast && mapResultElemType.kind === "i32" ? [{ op: "i32.trunc_sat_f64_s" } as Instr] : []),
+      // The host bridge returns f64. Coerce it to the result element type so the
+      // downstream `array.set` validates — notably f64 → externref must box via
+      // __box_number when the source array is untyped (`new Array(n)`). Without
+      // this, `array.set` sees f64 where it expects externref. (#1601)
+      ...(!ctx.fast ? coercionInstrs(ctx, { kind: "f64" }, mapResultElemType, fctx) : []),
     ];
   }
 
@@ -5668,6 +5684,164 @@ function compileArrayFill(
   // Return same vec ref
   fctx.body.push({ op: "local.get", index: vecTmp });
   return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+/**
+ * TypedArray.prototype.set(source, offset?) (#1664) — copy source elements into
+ * the receiver starting at `offset`, mutating the receiver's backing array in
+ * place. Native WasmGC lowering so `--target wasi`/standalone modules don't fall
+ * through to the generic `__extern_get`/`__extern_length` host-import path.
+ *
+ * `source` may be an array literal or another typed array; both compile to a
+ * vec struct. When source and receiver share the same element wasm type we use
+ * `array.copy`; otherwise we element-wise copy through an f64 bridge so that
+ * e.g. `Float64Array.set([1,2,3])` (i32-typed literal) writes correct values.
+ * Returns VOID_RESULT (set returns undefined) or null to bail to the fallback.
+ */
+function compileTypedArraySet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  if (callExpr.arguments.length < 1) {
+    reportError(ctx, callExpr, "set requires at least 1 argument");
+    return null;
+  }
+
+  // The source argument must be a known WasmGC array (vec struct). If it isn't
+  // (e.g. `any`), bail to the generic externref dispatch (returns undefined so
+  // the caller continues to the host-import path).
+  const srcNode = callExpr.arguments[0]!;
+  const srcTsType = ctx.checker.getTypeAtLocation(srcNode);
+  const srcArrInfo = resolveArrayInfo(ctx, srcTsType);
+  if (!srcArrInfo) return null;
+
+  const srcVecTypeIdx = srcArrInfo.vecTypeIdx;
+  const srcArrTypeIdx = srcArrInfo.arrTypeIdx;
+  const srcElemType = srcArrInfo.elemType;
+
+  const dstVec = allocLocal(fctx, `__ta_set_dvec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const dstData = allocLocal(fctx, `__ta_set_ddata_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+  const srcVec = allocLocal(fctx, `__ta_set_svec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: srcVecTypeIdx });
+  const srcData = allocLocal(fctx, `__ta_set_sdata_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: srcArrTypeIdx,
+  });
+  const srcLen = allocLocal(fctx, `__ta_set_slen_${fctx.locals.length}`, { kind: "i32" });
+  const offsetTmp = allocLocal(fctx, `__ta_set_off_${fctx.locals.length}`, { kind: "i32" });
+  const iTmp = allocLocal(fctx, `__ta_set_i_${fctx.locals.length}`, { kind: "i32" });
+
+  // Receiver -> vec ref, extract data array.
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: dstVec });
+  emitReceiverNullGuard(ctx, fctx, dstVec);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dstData });
+
+  // Source -> vec ref, extract length + data array.
+  compileExpression(ctx, fctx, srcNode);
+  fctx.body.push({ op: "local.tee", index: srcVec });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: srcLen });
+  fctx.body.push({ op: "local.get", index: srcVec });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: srcData });
+
+  // offset (default 0).
+  if (callExpr.arguments.length >= 2) {
+    if (ctx.fast) {
+      compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "i32" });
+    } else {
+      compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "f64" });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    }
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
+  fctx.body.push({ op: "local.set", index: offsetTmp });
+
+  if (srcArrTypeIdx === arrTypeIdx) {
+    // Same backing array type — bulk array.copy dstData[offset..] = srcData[0..srcLen].
+    emitArrayCopy(fctx, arrTypeIdx, dstData, offsetTmp, srcData, null, srcLen);
+  } else {
+    // Element-wise copy through an f64 bridge to convert between element types.
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: iTmp });
+    const loopBody: Instr[] = [
+      { op: "local.get", index: iTmp },
+      { op: "local.get", index: srcLen },
+      { op: "i32.ge_s" },
+      { op: "br_if", depth: 1 },
+
+      // dstData[offset + i] = (elemType) srcData[i]
+      { op: "local.get", index: dstData },
+      { op: "local.get", index: offsetTmp },
+      { op: "local.get", index: iTmp },
+      { op: "i32.add" },
+      { op: "local.get", index: srcData },
+      { op: "local.get", index: iTmp },
+      ...typedArrayElemLoad(srcArrTypeIdx, srcElemType),
+      ...numericElemConvert(srcElemType, elemType),
+      { op: "array.set", typeIdx: arrTypeIdx },
+
+      { op: "local.get", index: iTmp },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: iTmp },
+      { op: "br", depth: 0 },
+    ];
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    });
+  }
+
+  return VOID_RESULT as unknown as ValType;
+}
+
+/**
+ * Load one element from a vec's backing array (`array.get` + signedness).
+ */
+function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
+  // i32-element arrays are stored unsigned-or-signed; array.get is fine for f64
+  // bridge purposes since we immediately convert. Use array.get for ref/f64,
+  // array.get for i32 (sign chosen by the convert step).
+  return [{ op: "array.get", typeIdx: arrTypeIdx } as Instr];
+}
+
+/**
+ * Convert a numeric value of `from` wasm type to `to` wasm type on the stack.
+ * Only handles the i32/f64 element types used by typed arrays.
+ */
+function numericElemConvert(from: ValType, to: ValType): Instr[] {
+  if (from.kind === to.kind) return [];
+  if (from.kind === "i32" && to.kind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
+  if (from.kind === "f64" && to.kind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
+  return [];
+}
+
+/**
+ * TypedArray.prototype.subarray(begin?, end?) (#1664) — returns a new vec over
+ * the [begin, end) slice. The vec-struct model has no shared ArrayBuffer, so
+ * this copies (matching `.slice` semantics); the acceptance criteria only
+ * require correct element values + zero host imports, not buffer aliasing.
+ */
+function compileTypedArraySubarray(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType {
+  // subarray clamps the same way slice does; reuse the slice lowering.
+  return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
 }
 
 /**

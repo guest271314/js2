@@ -151,6 +151,8 @@ type InstrBase =
   | { op: "i64.extend_i32_u" }
   | { op: "i64.trunc_f64_s" }
   | { op: "i64.reinterpret_f64" }
+  | { op: "i32.reinterpret_f32" }
+  | { op: "f32.reinterpret_i32" }
   | { op: "f64.convert_i64_s" }
   | { op: "f64.reinterpret_i64" }
   | { op: "f64.const"; value: number }

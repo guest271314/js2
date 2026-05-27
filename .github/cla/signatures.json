@@ -1,0 +1,5 @@
+{
+  "comment": "Recorded CLA acceptances. Appended by .github/workflows/cla-check.yml when an external contributor comments the exact agreement phrase on their PR. Each entry: {login, name, pr, commit_sha, cla_version, signed_at}. Do not hand-edit signatures; the workflow is the source of truth. See CONTRIBUTING.md.",
+  "cla_version": "sha256:56fa61fcd8de",
+  "signatures": []
+}

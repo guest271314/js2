@@ -50,6 +50,7 @@ import {
   ensureLateImport,
   flushLateImportShifts,
   registerResolveComputedKeyExpression,
+  valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
 
@@ -555,7 +556,20 @@ export function compileObjectLiteral(
 
   const contextType = ctx.checker.getContextualType(expr);
   if (!contextType) {
-    const type = ctx.checker.getTypeAtLocation(expr);
+    // #1606: `getTypeAtLocation` can crash inside TypeScript's `checkObjectLiteral`
+    // for object literals parsed from a foreign SourceFile (e.g. statically inlined
+    // `eval("({foo:0,foo:1})")` bodies) — the checker has no binding for the
+    // duplicate-property symbol and dereferences `.flags` on undefined. Fall back
+    // to the externref plain-object lowering instead of crashing the compile.
+    let type: ts.Type | undefined;
+    try {
+      type = ctx.checker.getTypeAtLocation(expr);
+    } catch {
+      const fallback = compileObjectLiteralAsExternref(ctx, fctx, expr);
+      if (fallback) return fallback;
+      reportError(ctx, expr, "Cannot determine struct type for object literal");
+      return null;
+    }
     let typeName = resolveStructName(ctx, type);
     if (!typeName) {
       // Auto-register the struct type for inline object literals
@@ -1079,7 +1093,15 @@ export function compileObjectLiteralForStruct(
     const existingFuncIdx = ctx.funcMap.get(fullName);
     if (existingFuncIdx === undefined) continue;
 
-    // Compute the signature this method would compile to.
+    // Compute the signature this method would compile to. This MUST mirror the
+    // body-compile param-type derivation below (search "methodParams") exactly,
+    // otherwise the fork decision diverges from reality: it would think this
+    // single-literal method's params differ from the registered func type and
+    // fork a per-literal funcIdx, orphaning the shared `funcMap` entry with an
+    // empty stub body — a *direct* call `obj.method()` (dispatched via funcMap,
+    // not the per-literal map) then lands on the empty func and traps
+    // ("dereferencing a null pointer" / iterator-protocol "reading 'next' of
+    // null"). (#1671 — completes #1669/#1602.)
     const newParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
     for (const param of prop.parameters) {
       const paramType = ctx.checker.getTypeAtLocation(param);
@@ -1087,25 +1109,82 @@ export function compileObjectLiteralForStruct(
       if (param.initializer && wasmType.kind === "ref") {
         wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
       }
+      // (#1671) Binding-pattern params route through the externref destructure
+      // path during body compilation (#1151 Gap B — see line ~1524). The
+      // fork-decision sig must apply the SAME widening, or
+      // `async *method([, , ...x] = […]) {}` (array binding pattern) computes
+      // `(ref null vec)` here while the real body uses `externref`, a `kind`
+      // divergence `refTypesMatch` cannot reconcile, spuriously forking.
+      const hasBindingPattern = ts.isArrayBindingPattern(param.name) || ts.isObjectBindingPattern(param.name);
+      if (hasBindingPattern && !param.type && !param.dotDotDotToken && wasmType.kind !== "externref") {
+        wasmType = { kind: "externref" };
+      }
       newParams.push(wasmType);
     }
 
-    // Compare against existing function's param count. (Result-type comparison
-    // is harder; param count is the canonical mismatch that causes
-    // "not enough arguments on the stack" trampoline failures.)
+    // Compare against the existing function's signature. A mismatched param
+    // count causes "not enough arguments on the stack" trampoline failures.
+    // (#1602) A param-type/order mismatch with the SAME count is just as
+    // breaking: two structurally-deduped sibling literals (e.g.
+    // `{ *m(x = 42, y) {} }` → params [f64, externref] and
+    // `{ *m(x, y = 42) {} }` → params [externref, f64]) share one funcMap
+    // entry, so the second body-compile overwrites the func's typeIdx and any
+    // method-as-closure trampoline built for the first literal forwards args in
+    // the wrong order, emitting an invalid `call`. Treat any per-position type
+    // divergence as a mismatch too, so each literal gets its own funcIdx.
     const localIdx = existingFuncIdx - ctx.numImportFuncs;
     const existingFunc = ctx.mod.functions[localIdx];
     if (!existingFunc) continue;
     const existingType = ctx.mod.types[existingFunc.typeIdx];
     if (!existingType || existingType.kind !== "func") continue;
-    if (existingType.params.length === newParams.length) continue;
+    const sameArity = existingType.params.length === newParams.length;
+    // (#1602 regression fix) Compare param types nullability-insensitively for
+    // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
+    // param as a non-null `ref structTypeIdx`, but the actual compiled method
+    // uses `ref null structTypeIdx` for self (and `ref null T` for any
+    // default-initialised ref param). A strict `valTypesMatch` flags this as a
+    // mismatch and forks a per-literal funcIdx — but that orphans the original
+    // shared funcMap entry (left with an empty body), so a *direct* call like
+    // `obj.method()` (which dispatches via funcMap, not the per-literal map)
+    // lands on the empty func and traps. Real divergence we still want to
+    // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
+    // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
+    const refTypesMatch = (p: ValType, q: ValType): boolean => {
+      const pRef = p.kind === "ref" || p.kind === "ref_null";
+      const qRef = q.kind === "ref" || q.kind === "ref_null";
+      if (pRef && qRef) {
+        return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
+      }
+      return valTypesMatch(p, q);
+    };
+    const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
+    if (sameArity && sameParamTypes) continue;
 
     // Mismatch — allocate a fresh funcIdx for this literal's method without
     // touching the shared funcMap entry.
+    //
+    // (#1602) Seed the fresh func with a type built from THIS literal's actual
+    // params (`newParams`) and result, not the colliding sibling's type. A
+    // method-as-closure trampoline emitted for this literal reads the func's
+    // signature up front (before the body-compile pass refines it); a stale
+    // placeholder type would make the trampoline forward args in the wrong
+    // order/type and emit an invalid `call`.
+    const isGen = prop.asteriskToken !== undefined;
+    const methodSig = ctx.checker.getSignatureFromDeclaration(prop);
+    let methodResult: ValType[] = [];
+    if (isGen) {
+      methodResult = [{ kind: "externref" }];
+    } else if (methodSig) {
+      let rt = ctx.checker.getReturnTypeOfSignature(methodSig);
+      const isAsync = prop.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+      if (isAsync) rt = unwrapPromiseType(rt, ctx.checker);
+      if (rt && !isVoidType(rt)) methodResult = [resolveWasmType(ctx, rt)];
+    }
+    const freshTypeIdx = addFuncType(ctx, newParams, methodResult, `${fullName}__lit_type`);
     const freshFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.mod.functions.push({
       name: `${fullName}__lit${freshFuncIdx}`,
-      typeIdx: existingFunc.typeIdx, // placeholder; the body-compile step rewrites this
+      typeIdx: freshTypeIdx, // seeded from this literal's params; body-compile may refine
       locals: [],
       body: [],
       exported: false,
