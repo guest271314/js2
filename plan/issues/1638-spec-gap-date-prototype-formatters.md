@@ -1,9 +1,10 @@
 ---
 id: 1638
 title: "spec gap: Date.prototype string formatters and parsers (174 of 485 test262 fails)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -76,3 +77,48 @@ env var. Some tests also call `Date.prototype[Symbol.toPrimitive]` directly; we 
 - `test262/test/built-ins/Date/prototype/toISOString/15.9.5.43-0-1.js`
 - `test262/test/built-ins/Date/prototype/Symbol.toPrimitive/this-val-non-obj.js`
 - `test262/test/built-ins/Date/prototype/toJSON/invoke-tojson-result-throws.js`
+
+## Resolution (2026-05-27)
+
+The Date string formatters were **stubs** returning hardcoded placeholders
+(`"1970-01-01T00:00:00.000Z"` for toISOString/toJSON, `"Thu Jan 01 1970
+00:00:00 GMT+0000"` for everything else), so every test asserting a specific
+format failed. Date is a Wasm-native struct holding an i64 timestamp; the
+formatters now build the spec-correct string (ECMA-262 §21.4.4) from that
+timestamp.
+
+**Implementation:**
+
+1. **`src/runtime.ts`** — new `_formatDate(ts, mode)` helper + a
+   `__date_format` host import. Builds DateString / TimeString / UTCString /
+   ISOString in UTC (the compiler's Date model is UTC-only;
+   `getTimezoneOffset()` is always 0), with weekday/month-name tables and
+   zero-padding. Invalid Date → `"Invalid Date"` for the string formatters,
+   `RangeError` for toISOString.
+
+2. **`src/codegen/expressions/builtins.ts`** — `compileDateMethodCall` now
+   emits a `__date_format(ts_i64, mode_i32) -> externref` call for the string
+   methods (replacing the placeholder), keyed by a `DATE_FORMAT_MODE` map.
+   `toJSON` branches on the invalid-Date sentinel → `ref.null.extern` (spec
+   returns `null`, not a throw). nativeStrings/WASI mode keeps the placeholder
+   (host-string bridge does not apply to WasmGC i16 arrays). This is the
+   JS-host fast path per the dual-mode architecture; a fully-standalone Wasm
+   formatter is out of scope here.
+
+3. **Latent bug fixed**: `TIME_OF_DAY_SETTERS`/`CALENDAR_SETTERS` membership
+   used the `in` operator, which walks the prototype chain — so
+   `"toString"`/`"toLocaleString"` (Object.prototype members) falsely matched
+   the setter path and were mis-compiled as f64-returning setters. Switched to
+   `Object.prototype.hasOwnProperty.call(...)`. This is why `toString`/
+   `toLocaleString` returned `null` while `toDateString`/`toUTCString` worked.
+
+### Test Results
+
+- `tests/issue-1638.test.ts` — 10 cases, all pass (toISOString, toUTCString,
+  toDateString, toTimeString, toString, Invalid Date → "Invalid Date",
+  toISOString RangeError, toJSON null/ISO, no getTime/getHours/setHours
+  regression).
+- Existing `tests/date-native.test.ts`, `tests/issue-1343-date-setters.test.ts`,
+  `tests/issue-1440.test.ts` — all pass (the single pre-existing `Date.now()`
+  LinkError in date-native is unrelated: that test's import object omits
+  `__date_now`; it fails identically on main HEAD).
