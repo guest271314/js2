@@ -8116,8 +8116,20 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // `obj[Symbol.iterator]`-style calls (already handled above) or
           // user classes that define their own @@match etc.
           const recvSym = receiverType.getSymbol()?.name;
+          // (#1330) When a regex flows through an `any`/unresolved variable —
+          // the common test262 shape `re[Symbol.search](s)` with `re: any` —
+          // recvSym is undefined and the narrow `=== "RegExp"` guard rejects
+          // it, so dispatch falls through to generic method lookup which can't
+          // resolve the "@@search" string key → returns 0/undefined. Route
+          // these through `__regex_symbol_call` too: the host import validates
+          // the receiver at runtime (throws the correct TypeError if it isn't a
+          // RegExp), so widening here is spec-safe. Stay narrow for receivers
+          // that resolve to a *user* class/struct, which may define their own
+          // @@match/@@replace/etc.
           const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
-          if (isRegExpRecv) {
+          const isUnresolvedRecv =
+            recvSym === undefined && !!(receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
+          if (isRegExpRecv || isUnresolvedRecv) {
             // Push receiver as externref (already a RegExp host object)
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {

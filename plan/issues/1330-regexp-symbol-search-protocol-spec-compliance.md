@@ -1,9 +1,9 @@
 ---
 id: 1330
 title: "RegExp host-mode: Symbol.search protocol spec compliance (37 fails)"
-status: ready
+status: in-progress
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-27
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -77,3 +77,31 @@ V8 implements steps 1-9 natively. The compiler-level fix simply ensures the look
 ### Test files to verify
 - `tests/equivalence/regexp-methods.test.ts` — add cases: `re[Symbol.search]("xyz")` returns int, `RegExp.prototype[Symbol.search].call(fakeRe, "a")` invokes user `exec`.
 - Re-run test262 bucket `built-ins/RegExp/prototype/Symbol.search/*` and `built-ins/String/prototype/search/*`.
+
+## Actual root cause (2026-05-27, dev-1605)
+
+The original impl-plan diagnosis (well-known symbol boxed as `__box_number` so
+the host sees `Number(9)`) was a **red herring** — by current main, `Symbol.X`
+*as a value* already coerces to a real Symbol via `__box_symbol`. The live gap
+is in the protocol *call* path:
+
+`re[Symbol.search](s)` is an `ElementAccessExpression` **call** handled by
+`compileCallableElementAccessCall` (`src/codegen/expressions/calls.ts`). The
+existing `__regex_symbol_call` dispatch (#1439) for `@@search`/`@@match`/
+`@@replace`/`@@split`/`@@matchAll` was gated on
+`isRegExpRecv = recvSym === "RegExp" || "RegExpConstructor"` (calls.ts:~8118).
+When a regex flows through an **`any`-typed** variable — the dominant test262
+shape — `receiverType.getSymbol()?.name` is `undefined`, the guard fails, and
+dispatch falls through to generic method lookup that cannot resolve the
+`"@@search"` *string* key on a host RegExp → returns `0`/`undefined`.
+
+**Fix**: broaden the guard to also fire when the receiver type is
+`any`/`unknown`/unresolved (`recvSym === undefined && flags & (Any|Unknown)`).
+The `__regex_symbol_call` host import (`src/runtime.ts:~4697`) already validates
+the receiver at runtime and throws the correct `TypeError` if it isn't a RegExp,
+so widening is spec-safe. User classes that define their own `@@match`/etc. keep
+the narrow path (their receiver resolves to a named class symbol, not `any`).
+
+Verified locally (`tests/issue-1330.test.ts`, 6 cases): typed + any-typed
+`@@search`/`@@match`/`@@split` all dispatch correctly; `String.prototype.search`
+and the regexp/symbol equivalence suites (30 tests) show no regression.
