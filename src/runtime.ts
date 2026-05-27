@@ -1045,6 +1045,73 @@ function _materializeIterable(
 }
 
 /**
+ * (#1320) Drain a plain JS object whose own `[Symbol.iterator]` is a compiled
+ * **Wasm closure struct** (typeof "object", not a JS function). Native
+ * `Array.from` / `Iterator.from` reject such an object with
+ * `items[Symbol.iterator] … must be a function`, because V8 sees a non-callable
+ * iterator method. We invoke the closure (and its returned iterator's `.next`,
+ * which is typically also a Wasm closure) through the `__call_fn_0` export and
+ * collect the yielded values into a real JS array.
+ *
+ * Returns `null` when this path does not apply — caller falls back to native
+ * `Array.from`:
+ *   - the value has no own/inherited `@@iterator`, OR
+ *   - the `@@iterator` is already a real JS function (native path is correct), OR
+ *   - the closure-call export is unavailable.
+ *
+ * Throws from the user's `@@iterator()` / `.next()` propagate unchanged (a
+ * custom iterator that throws must surface that throw, per §7.4).
+ */
+function _drainWasmClosureIterable(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any[] | null {
+  if (obj == null || typeof obj !== "object") return null;
+  let iterFn: any;
+  try {
+    iterFn = obj[Symbol.iterator];
+  } catch {
+    return null;
+  }
+  // Only handle the broken case: an @@iterator that exists but is a Wasm
+  // closure struct (non-function object). Real JS functions / generators take
+  // the native path.
+  if (iterFn == null || typeof iterFn === "function" || !_isWasmStruct(iterFn)) return null;
+  const exports = callbackState?.getExports();
+  const callFn0 = exports?.["__call_fn_0"];
+  if (typeof callFn0 !== "function") return null;
+  const iteratorObj = callFn0(iterFn);
+  if (iteratorObj == null || typeof iteratorObj !== "object") return null;
+  const out: any[] = [];
+  const MAX_ITER = 1 << 16;
+  let iterCount = 0;
+  const resolveProp = (target: any, key: string): any => {
+    const direct = target?.[key];
+    if (direct !== undefined) return direct;
+    const safe = _safeGet(target, key);
+    if (safe !== undefined) return safe;
+    const sget = exports?.[`__sget_${key}`];
+    if (typeof sget === "function") return sget(target);
+    return undefined;
+  };
+  while (iterCount++ < MAX_ITER) {
+    const nextFn = resolveProp(iteratorObj, "next");
+    let result: any;
+    if (typeof nextFn === "function") {
+      result = nextFn.call(iteratorObj);
+    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      result = callFn0(nextFn);
+    } else {
+      break;
+    }
+    if (result == null) break;
+    if (resolveProp(result, "done")) break;
+    out.push(resolveProp(result, "value"));
+  }
+  return out;
+}
+
+/**
  * (#1438) Recursively convert a wasm vec / tuple struct to a real JS array
  * suitable for the native `new Map(iterable)`, `new WeakMap(iterable)` etc.
  * constructors. Inner tuples (heterogeneous `[k, v]` structs) are converted
@@ -4844,6 +4911,27 @@ assert._isSameValue = isSameValue;
               if (wrappedArgs.length > 0) wrappedArgs[0] = coerceRecv(wrappedArgs[0]);
             }
           }
+          // (#1320) `Array.from.call(thisArg, items)` / `.apply(thisArg, [items])`
+          // routes here with obj=Array.from. When `items` is a plain JS object
+          // whose own @@iterator is a Wasm closure (typeof "object"), native
+          // Array.from rejects it ("items[Symbol.iterator] … must be a
+          // function"). Pre-drain the closure-backed iterator to a real array so
+          // the native call sees an array-like it can iterate. The custom
+          // `thisArg` constructor receiver is preserved (arg 0 of call/apply).
+          if (
+            (method === "call" || method === "apply") &&
+            (wrappedObj === Array.from || wrappedObj === (Array as { of?: unknown }).of)
+          ) {
+            // call(thisArg, items)  → items at wrappedArgs[1]
+            // apply(thisArg, [items]) → items at wrappedArgs[1][0]
+            if (method === "call" && wrappedArgs.length > 1) {
+              const drained = _drainWasmClosureIterable(wrappedArgs[1], callbackState);
+              if (drained !== null) wrappedArgs[1] = drained;
+            } else if (method === "apply" && Array.isArray(wrappedArgs[1]) && wrappedArgs[1].length > 0) {
+              const drained = _drainWasmClosureIterable(wrappedArgs[1][0], callbackState);
+              if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
+            }
+          }
           const fn = wrappedObj[method];
           if (typeof fn !== "function") {
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
@@ -5489,6 +5577,16 @@ assert._isSameValue = isSameValue;
       if (name === "__array_from")
         return (iterable: any, mapFn: any): any[] => {
           const iter = _materializeIterable(iterable, callbackState);
+          // (#1320) A plain JS object whose own @@iterator is a Wasm closure
+          // (typeof "object") would make native Array.from throw
+          // "items[Symbol.iterator] … must be a function". Drive the protocol
+          // manually in that case, then apply mapFn over the collected values.
+          const drained = _drainWasmClosureIterable(iter, callbackState);
+          if (drained !== null) {
+            if (mapFn == null) return drained;
+            const fn = _isWasmStruct(mapFn) ? (_wrapWasmClosure(mapFn, 2, callbackState) ?? mapFn) : mapFn;
+            return typeof fn === "function" ? drained.map((v, i) => fn(v, i)) : drained;
+          }
           if (mapFn == null) return Array.from(iter);
           if (_isWasmStruct(mapFn)) {
             const wrapped = _wrapWasmClosure(mapFn, 2, callbackState);
