@@ -423,8 +423,12 @@ function compileExpressionBody(
     }
   }
 
-  // Fast-path: null/undefined in struct ref context
-  if (expectedType && (expectedType.kind === "ref_null" || expectedType.kind === "ref")) {
+  // Fast-path: null/undefined in struct ref context (skip for $AnyValue — handled below)
+  if (
+    expectedType &&
+    (expectedType.kind === "ref_null" || expectedType.kind === "ref") &&
+    !isAnyValue(expectedType, ctx)
+  ) {
     let inner: ts.Expression = expr;
     while (
       ts.isAsExpression(inner) ||
