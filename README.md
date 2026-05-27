@@ -172,7 +172,17 @@ The imports a module needs depend on the compile target:
   supplied by the js2wasm JS runtime, so instantiating with an empty `{}`
   throws `Import #0 "string_constants": module is not an object or function`.
   Use this mode when you run the output alongside the JS runtime that provides
-  those imports.
+  those imports. The result carries a ready-to-pass `result.importObject` that
+  wires those host helpers for you — pass it straight to
+  `WebAssembly.instantiate` with no hand-wiring:
+
+  ```ts
+  const r = compile(`
+    export function add(a: number, b: number): number { return a + b; }
+  `);
+  const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
+  (instance.exports as any).add(2, 3); // → 5
+  ```
 - **Standalone mode** (`target: "standalone"`, also `target: "wasi"`) emits a
   pure WasmGC module with Wasm-native intrinsics and **no host imports**, so it
   instantiates with `WebAssembly.instantiate(binary, {})` and runs anywhere
