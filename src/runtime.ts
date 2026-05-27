@@ -3817,19 +3817,26 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter") {
+      if (name === "__array_from_iter" || name === "__array_from_iter_n") {
         // Cache the original Array.prototype[Symbol.iterator] so we can
         // detect when user code (e.g. test262 iter-get-err-array-prototype)
         // has overridden it. When overridden, we must invoke the protocol
         // rather than fast-pathing the array — otherwise a throwing custom
         // @@iterator on Array.prototype is silently swallowed (#1454).
         const _origArrayIter: any = (Array.prototype as any)[Symbol.iterator];
-        return (obj: any): any => {
-          // Materialize an iterable/array-like to a real JS array so downstream
-          // destructuring can walk it via .length + indexed access. For proper
-          // iterators (e.g. generators) this invokes the iterator protocol and
-          // propagates any throws from .next() — needed for spec-compliant
-          // destructuring of throwing iterators (#1150).
+        // Materialize an iterable/array-like to a real JS array, consuming AT
+        // MOST `limit` iterator steps. `limit === Infinity` (the unbounded
+        // case, used by rest patterns and spread) is byte-for-byte the legacy
+        // __array_from_iter behavior. A finite `limit` calls the iterator's
+        // .next() at most `limit` times — required for array binding patterns
+        // without a rest element, where the spec (§8.5.3) consumes exactly one
+        // IteratorStep per slot (INCLUDING elision holes), not a full drain
+        // (#1592). Stopping at the bound is a NormalCompletion: it must NOT
+        // trigger IteratorClose (only the defensive MAX_ITER cap does).
+        const _arrayFromIter = (obj: any, limit: number): any => {
+          // For proper iterators (e.g. generators) this invokes the iterator
+          // protocol and propagates any throws from .next() — needed for
+          // spec-compliant destructuring of throwing iterators (#1150).
           if (obj == null) return [];
           if (Array.isArray(obj)) {
             // #1454: Real arrays normally take a fast path, but if the user has
@@ -3841,10 +3848,13 @@ assert._isSameValue = isSameValue;
             const ownIter = (obj as any)[Symbol.iterator];
             if (ownIter !== _origArrayIter) {
               // Non-default iterator: fall through to the protocol path below
-              // by treating the array as a generic iterable.
-              return Array.from(obj);
+              // by treating the array as a generic iterable (bounded by limit).
+              return _drainIterable(obj, limit);
             }
-            return obj;
+            // Default array iterator: a finite bound just slices the prefix;
+            // the iterator protocol on a default array is side-effect-free so
+            // slicing is observationally identical to stepping `limit` times.
+            return limit < obj.length ? obj.slice(0, limit) : obj;
           }
           // Compiled sources that do `iter[Symbol.iterator] = fn` often land the
           // function under a stringified "Symbol(Symbol.iterator)" key rather
@@ -3922,6 +3932,24 @@ assert._isSameValue = isSameValue;
                       return undefined;
                     };
                     while (true) {
+                      // Bounded materialization (#1592): stop once we've
+                      // collected `limit` values. A no-rest array binding
+                      // pattern consumes EXACTLY `limit` IteratorStep calls;
+                      // §8.5.3 then requires IteratorClose because the iterator
+                      // record's [[Done]] is still false (we stopped while it
+                      // was still yielding). So this counts as an abrupt-from-
+                      // the-iterator's-view termination → set cappedOut to
+                      // trigger iterator.return() below. (This is the SAME
+                      // close path #1219 exercises for the single-element `[x]`
+                      // pattern over an infinite iterator.) Rest patterns pass
+                      // limit === Infinity and never take this branch, so they
+                      // drain to natural done and do NOT close — preserving the
+                      // dstr/*-ary-init-iter-no-close.js tuning. Checked before
+                      // MAX_ITER so a finite bound always wins.
+                      if (out.length >= limit) {
+                        cappedOut = true;
+                        break;
+                      }
                       if (iterCount++ >= MAX_ITER) {
                         cappedOut = true;
                         break;
@@ -3975,13 +4003,34 @@ assert._isSameValue = isSameValue;
                 }
               }
               const out: any[] = [];
-              const len = typeof (obj as any).length === "number" ? (obj as any).length >>> 0 : 0;
+              const lenRaw = typeof (obj as any).length === "number" ? (obj as any).length >>> 0 : 0;
+              const len = Math.min(lenRaw, limit);
               for (let i = 0; i < len; i++) out.push((obj as any)[i]);
               return out;
             }
           }
-          return Array.from(obj);
+          return _drainIterable(obj, limit);
         };
+        // Walk a plain iterable's @@iterator protocol, collecting at most
+        // `limit` values. Replaces `Array.from(obj)` so a finite bound can stop
+        // early (Array.from can't be bounded). Throws from @@iterator / .next()
+        // / the .value getter propagate unchanged (#1150/#1454). With
+        // limit === Infinity this matches Array.from's full drain.
+        function _drainIterable(obj: any, limit: number): any[] {
+          if (!(limit < Infinity)) return Array.from(obj);
+          const itFn = (obj as any)?.[Symbol.iterator];
+          if (typeof itFn !== "function") return Array.from(obj);
+          const it = itFn.call(obj);
+          const out: any[] = [];
+          while (out.length < limit) {
+            const r = it.next();
+            if (r == null || r.done) break;
+            out.push(r.value);
+          }
+          return out;
+        }
+        if (name === "__array_from_iter") return (obj: any): any => _arrayFromIter(obj, Infinity);
+        return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0);
       }
       if (name === "__extern_slice")
         return (arr: any, start: number) => {

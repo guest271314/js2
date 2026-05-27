@@ -1,11 +1,10 @@
 ---
 id: 1592
 title: "Array pattern elision holes and rest-array in destructuring consume wrong iterator step (~305 fails)"
-status: blocked
+status: in-review
 created: 2026-05-24
 updated: 2026-05-27
-blocked_on: 1555
-duplicate_of: 1555
+related: 1555
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -109,3 +108,62 @@ fix would fight the #1555 streaming rewrite and risk regressing the tuned
 The streaming-iterator refactor is the correct, single fix for the whole
 ~305-test bucket. Escalation tag on the task was correct — this needs the
 architect's #1555 streaming design, not a dev hotfix.
+
+## Implementation (dev, 2026-05-27) — bounded-helper Phase 1
+
+Implemented the incremental bounded-materialization fix (architect's Phase-1
+plan), NOT the full #1555 streaming rewrite.
+
+### Changes
+- **`src/runtime.ts`**: refactored the `__array_from_iter` closure body into a
+  shared `_arrayFromIter(obj, limit)` and added `__array_from_iter_n(obj, n)`
+  (n<0 ⇒ `limit = Infinity`, byte-identical to the old unbounded drain; n≥0 ⇒
+  consume at most `n` IteratorStep calls). Default-array slice fast path, a new
+  bounded `_drainIterable` (replaces `Array.from` so a finite bound stops
+  early), and a bounded break in the wasm-closure manual walk.
+- **`src/codegen/destructuring-params.ts`**: exported
+  `patternIteratorStepCount(elements)` (elisions count, rest ⇒ -1); the
+  externref param/decl fallback now imports `__array_from_iter_n` and pushes
+  `f64.const stepCount` before the call.
+- **`src/codegen/expressions/assignment.ts`**: array-assignment-pattern
+  materialization swapped to `__array_from_iter_n` with the same step count.
+
+### IteratorClose correction (vs the architect note)
+The architect plan said a bounded stop must NOT close. That is wrong for a
+**no-rest** pattern: §8.5.3 calls IteratorClose after the last element because
+`iteratorRecord.[[Done]]` is still false. Verified against native V8 and against
+test262 `*-ary-init-iter-close.js` (next×2 → return×1 for `[a,b]`; `[x]` over a
+never-done iterator → return×1). So the bounded break sets `cappedOut = true`
+→ closes. Natural `done:true` before the bound still does NOT close (matches
+`*-ary-init-iter-no-close.js`); rest patterns drain unbounded and never close.
+This made the existing #1219 unit test #2's `doneCallCount === 0` assertion
+(tuned to the old eager over-read) spec-incorrect — updated to `=== 1`.
+
+### Scope / residual
+The two patched sites (function/class-method params, decl-var, array
+assignment) are fixed: plain-object iterators consume exactly the
+pattern-length steps and close per spec (verified). One residual remains, OUT
+OF SCOPE for this fix: **compiled `function*` generators eagerly advance past a
+yield** — `_arrayFromIter`/`_drainIterable` correctly request only N steps
+(traced: one `.next()` call), but the generator host-bridge runs the body to
+the *next* yield, so a `[,]` over `function* g(){first++; yield; second++}`
+still observes `second === 1`. That is a generator-suspension codegen bug
+(separate from iterator-step accounting) and belongs with the deeper
+generator/lazy-default work (#1555 / generator codegen), as the architect noted
+for the lazy-default-interleaving sub-case. The for-of-loop-LHS destructuring
+(`for (let [x] of [iter])`) is a third codegen path not touched here and
+remains as-is (pre-existing).
+
+## Test Results
+- New `tests/issue-1592.test.ts` — 8 cases (single/gap/trailing elision, rest,
+  short source, assignment pattern, IteratorClose-on-non-done, rest no-close):
+  all pass.
+- `tests/issue-1219.test.ts` updated (test #2 → spec-correct `doneCallCount===1`)
+  — all pass.
+- Regression suite (1432, 1450, 1158, test262-dstr-patterns, basic/array-rest/
+  generator-method destructuring, iterators, symbol-iterator-protocol,
+  null-destructuring, 43-assign-dstr, 1372-ir): 82 tests pass, 0 failures.
+- test262 spot-check (sync): `*-iter-no-close` pass; `*-iter-step-err` /
+  `*-iter-val-err` pass; plain-object elision/close cases corrected. Async
+  (`for-await-of`) and generator-source variants still fail on the residual
+  above (pre-existing, not regressed). CI measures the net bucket delta.
