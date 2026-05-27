@@ -648,8 +648,15 @@ export function collectClassDeclaration(
     ctx.classStaticMethodNames.set(className, staticMethodNames);
   }
 
-  // Register static properties as module globals
+  // Register static properties as module globals, and queue static `{ ... }`
+  // blocks for execution. Both field initializers and static blocks must run
+  // in source order during class evaluation (§15.7.10), so we iterate members
+  // once and push to the shared `staticInitExprs` queue in declaration order.
   for (const member of decl.members) {
+    if (ts.isClassStaticBlockDeclaration(member)) {
+      ctx.staticInitExprs.push({ staticBlock: member, className });
+      continue;
+    }
     if (ts.isPropertyDeclaration(member) && member.name && hasStaticModifier(member)) {
       const propName = resolveClassMemberName(ctx, member.name);
       if (propName === undefined) continue; // dynamic computed name — skip
