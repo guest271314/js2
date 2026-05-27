@@ -28,28 +28,73 @@ Pulled into S50 alongside the original closure/dispatch cohort. Direct-dispatch 
 - File icons show which codegen file is primarily touched:
   `[E]` = expressions.ts, `[S]` = statements.ts, `[I]` = index.ts, `[T]` = test262-runner.ts
 
+## Destructuring-lane sweep follow-ups (added 2026-05-24)
+
+From the dev-1553b destructuring-lane verification sweep. #1659 (CI equivalence
+coverage) gates #1658 in the sense that #1658 is only CI-visible once #1659 lands.
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1659 | CI does not run tests/equivalence/ (OOM) — equivalence regressions land silently | high | medium | **Ready** (gates CI-visibility of #1658) |
+| 1658 | Destructured/scalar function-parameter default not applied (returns 30, expects 40) | high | medium | **Ready** (depends on #1659 for CI gating) |
+
+## Sprint 55 — docs (added 2026-05-25)
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1661 | README programmatic-API example fails — `instantiate(binary, {})` vs default-mode host imports (guest #601) | high | easy | **Ready** (sprint 55, docs, plan-only) |
+| 1667 | DX: `compile()` returns a ready-to-pass import object for default/JS-host mode (guest #601) | medium | medium | **Ready** (Backlog, feature). Complements #1661 — adds the JS-host convenience; standalone stays the recommended default |
+
 ## WASI Native Messaging — AssemblyScript-reference alignment (added 2026-05-24)
 
 Compiler gaps blocking full convergence of `examples/native-messaging/host.ts`
 (#1530) on the AssemblyScript reference `nm_assemblyscript.ts`.
+
+**Direction (2026-05-24):** host capabilities are exposed as **standard Node.js
+APIs** (`process.stdin` / `process.stdout`), never bespoke builtins. The
+example is being rewritten onto `process.stdin.read()` (#1653) + already-shipped
+`process.stdout.write()` (#1651), with `Buffer`/`DataView` framing.
 
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
 | 1654 | DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under --target wasi | high | medium | **Ready** (root) |
 | 1653 | process.stdin.read(buffer, offset?) — binary incremental stdin read (keystone) | high | hard | Blocked by #1654 |
 | 1655 | process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal | medium | easy | Blocked by #1654 |
+| 1530 | Native Messaging host example — Node-style rewrite (no bespoke builtins) | medium | medium | **Reopened** (`in-progress`); Blocked by #1653 + #1654 |
+| ~~1628~~ | ~~raw-byte stdout builtin `writeStdout(bytes)`~~ | — | — | **wont-fix** — superseded by `process.stdout.write` (#1651), the standard Node API; bespoke builtin is the wrong shape |
 
 ```
+#1651 (process.stdout.write) -- DONE (standard Node write API; supersedes #1628/#1617)
 #1654 (ArrayBuffer/DataView valid standalone) -- root, unblocks both
-  ├── #1653 (binary stdin read) -- keystone
+  ├── #1653 (binary stdin read, process.stdin.read) -- keystone
+  │     └── #1530 (Native Messaging example, Node-style rewrite) -- also needs #1654 directly
   └── #1655 (stdout write ArrayBuffer)
+
+#1530 depends on #1653 + #1654.
+#1628 (a.k.a. "#1617" in the #1530 history) -> wont-fix (superseded by #1651).
+```
+
+## Governance / legal — CLA gate (added 2026-05-24)
+
+Gates merges of **external** PRs (including guest271314's PR #589, which is
+attached to #1530). The current `cla-check` workflow is a no-op placeholder that
+records no acceptance, so external contributions land with no auditable CLA
+sign-off.
+
+| #    | Title | Priority | Feasibility | Status |
+|------|-------|----------|-------------|--------|
+| 1660 | Replace placeholder cla-check with a real CLA signature/approval gate | high | medium | **Done** — self-hosted in-repo signature gate (`.github/cla/`); internal/bot authors exempt, external humans sign by comment. Promotion to a *required* check deferred to an admin (see issue follow-up). |
+
+```
+#1660 (real CLA gate) -- DONE: gates external-PR merges once promoted to required
+  └── PR #589 (guest271314, attached to #1530) -- HOLD until guest's CLA acceptance is recorded
 ```
 
 ## Sprint 55 — repo structure / website (added 2026-05-24)
 
 | #    | Title | Priority | Feasibility | Status |
 |------|-------|----------|-------------|--------|
-| 1656 | Consolidate all website/frontend files under website/ | medium | medium | **Ready** — needs architect spec (`arch(#1656)`) before dev; one PR. Related: #1583, #1590 |
+| 1656 | Consolidate all website/frontend files under website/ | medium | medium | **Ready — specced** (`## Implementation Plan` in issue file). Dev-claimable; one PR. NOTE: site config is `playground/vite.config.ts` (NOT root `vite.config.ts` = library build); wide `..`→repo-root fan-out in playground plugins + scripts. `deploy-pages.yml` edit needs CODEOWNERS review. Related: #1583, #1590 |
 | 1657 | Skip merge_group test262 shards for non-src changes (keep required check green) | medium | medium | **In review** — `changes` job + conservative path detector gates the merge_group shard matrix; "merge shard reports" always green. Related: #1656 |
 
 ---
@@ -318,10 +363,17 @@ All independent — can run in parallel.
 #681 (pure Wasm iterators) -- enables broader standalone coverage
 #682 (RegExp standalone) ──→ #1105 Tier 2 string methods (match, replace, search)
 #1101 (WeakRef) ──→ #1103 WeakMap/WeakSet (strong-ref fallback available without #1101)
+#1666 (invalid-wasm cluster) ──→ #1664 (residual object/extern leaks), #1665 (native generators)
+#1662 (audit) -- empirical --target wasi host-import map; spawned #1663–#1666
 ```
 
 | #   | Title | Impact | Ready? |
 |-----|-------|--------|--------|
+| 1662 | Audit: standalone (--target wasi) host-import leaks per construct | Standalone gap map | **Done** (audit record) |
+| 1666 | Bug: --target wasi emits invalid wasm (class/closure/number→string/typed-array) | Standalone correctness | **Ready** (H) |
+| 1663 | Pure-Wasm parseInt / parseFloat / Number(string) | Standalone numerics | **Ready** (M, #1471 closed without it) |
+| 1664 | Residual __extern_/__register_/__iterator/__array_ leaks after #1472 | Standalone objects/iterators | **Ready** (H, after #1666) |
+| 1665 | Wasm-native generators (retire __gen_/__create_generator) | Standalone generators | **Ready** (H, after #1666) |
 | 1099 | Standalone execution demo — FizzBuzz on Wasmtime, zero JS | Production credibility | **Ready** (H, depends on #1094) |
 | 1103 | Wasm-native Map, Set, WeakMap, WeakSet | Standalone collections | **Ready** (H) |
 | 1105 | Wasm-native String methods on i16 arrays | Standalone string ops | **Ready** (H) |

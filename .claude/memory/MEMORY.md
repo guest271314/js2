@@ -8,6 +8,10 @@
 - **NEVER delete worktrees without checking diffs first.** Run `git -C <wt> diff --stat` for EACH one, show to user, ask before deleting.
 - **NEVER work on agent branches/worktrees.** Always verify `pwd` is `/workspace` and branch is `main` before edits/commits.
 - **NEVER kill running tests without asking.**
+- **NEVER comment on/close/reopen GitHub issues opened by external users without consent, and NEVER `gh issue create`** — track internal work in `plan/issues/<id>-slug.md`. See [feedback_no_github_issue_comments.md](feedback_no_github_issue_comments.md).
+- **NEVER force-push or rewrite published history on public `main`** — append-only; fix forward via revert PRs (it already broke guest271314's pull). See [feedback_public_main_append_only.md](feedback_public_main_append_only.md).
+- **NEVER merge an external-contributor PR without a recorded affirmative CLA acceptance** — `cla-check.yml` is a placeholder stub; hold guest271314's #589 until a real CLA accept. See [feedback_cla_gate.md](feedback_cla_gate.md).
+- **Mimic standard Node.js / Web Worker APIs; never invent bespoke compiler builtins** (no `readStdin`/`writeStdout`). See [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md).
 
 ## Single source of truth
 - Team setup, memory budget, spawn config, communication protocol: **`plan/method/team-setup.md`**
@@ -20,6 +24,7 @@
 - [user_role.md](user_role.md) — Project lead: challenges assumptions, thinks in compilation strategies
 - [project_team_setup.md](project_team_setup.md) — All agents as teammates via TeamCreate; details in plan/method/team-setup.md
 - [project_next_session.md](project_next_session.md) — Session state: 16,013 pass, honest baseline after exception tag fix
+- [project_bigint_i64_brand_gate.md](project_bigint_i64_brand_gate.md) — #1349/#1644 BigInt fixes gated on architect i64-bigint-brand ValType decision; not a dev codegen guard
 
 ### Team & agents (rules not in plan/method/team-setup.md)
 - [feedback_architect_worktree_isolation.md](feedback_architect_worktree_isolation.md) — Always spawn architects with isolation:worktree — they stall and request respawn without it
@@ -86,12 +91,14 @@
 - [feedback_no_adhoc_scripts.md](feedback_no_adhoc_scripts.md) — Use existing scripts, never ad-hoc Python
 - [feedback_nothing_impossible.md](feedback_nothing_impossible.md) — Don't label features impossible — find the compilation strategy
 - [feedback_compile_away.md](feedback_compile_away.md) — Compile away, don't emulate — resolve JS semantics statically, zero runtime overhead
+- [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md) — No bespoke builtins (readStdin/writeStdout); expose standard Node.js (process.stdin/stdout) / Web Worker (postMessage) APIs and compile them to WASI
 - [feedback_no_nuclear_option.md](feedback_no_nuclear_option.md) — Never take destructive shortcuts without consent
 - [feedback_wait_for_answer.md](feedback_wait_for_answer.md) — Ask then STOP — never act on assumed "yes" in the same message
 - [feedback_check_before_cleanup.md](feedback_check_before_cleanup.md) — Check worktree diffs before removing
 - [feedback_refactoring_failures.md](feedback_refactoring_failures.md) — After refactoring: check missing imports first, not circular deps
 - [feedback_sprint_tags.md](feedback_sprint_tags.md) — Tag sprint-N/begin at start, sprint/N at end
 - [feedback_no_stash_before_merge.md](feedback_no_stash_before_merge.md) — Never stash before merge, commit first
+- [feedback_no_git_stash_in_worktree.md](feedback_no_git_stash_in_worktree.md) — NEVER `git stash` in a worktree; stash stack is shared across worktrees, concurrent agents clobber each other
 - [feedback_regression_analysis.md](feedback_regression_analysis.md) — Regressions may be false-positive exposure, not real regressions; `pass → compile_timeout` is runner-load flake unless baseline compile >5s
 
 Most project context lives in `/workspace/CLAUDE.md`.

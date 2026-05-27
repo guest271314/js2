@@ -1,10 +1,11 @@
+import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * new/super/class expression compilation.
  */
-import { ts, forEachChild } from "../../ts-api.js";
-import type { FieldDef, Instr, ValType } from "../../ir/types.js";
-import { collectReferencedIdentifiers, collectWrittenIdentifiers } from "../closures.js";
+import { isSymbolType } from "../../checker/type-mapper.js";
+import { forEachChild, ts } from "../../ts-api.js";
+import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -18,6 +19,8 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
 import {
   coerceType,
@@ -32,15 +35,16 @@ import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
+  emitThrowReferenceError,
   emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
+  noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
-import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 
 function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   if (fctx.enclosingClassName) return fctx.enclosingClassName;
@@ -50,6 +54,87 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
 }
 
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */
+/**
+ * (#1614) Dispatch `super.method(args)` where the parent is a builtin extern
+ * class (Set/Map/Array/...) whose methods are host-backed and therefore not
+ * present in `funcMap`. Emits __extern_method_call(this, methodName, argsArray)
+ * and returns externref. Returns null when the parent is not a known extern
+ * class or the required host imports cannot be registered (caller then reports
+ * the original "Cannot find method" error).
+ */
+function emitSuperExternMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  methodName: string,
+  parentClassName: string,
+): ValType | null {
+  // Only applies when the parent (or an ancestor) is a registered extern class.
+  let externAncestor: string | undefined = parentClassName;
+  while (externAncestor && !ctx.externClasses.has(externAncestor)) {
+    externAncestor = ctx.classParentMap.get(externAncestor);
+  }
+  if (!externAncestor) return null;
+
+  const selfIdx = fctx.localMap.get("this");
+  if (selfIdx === undefined) return null;
+
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+  const methodCallIdx = ensureLateImport(
+    ctx,
+    "__extern_method_call",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (arrNewIdx === undefined || arrPushIdx === undefined || methodCallIdx === undefined) return null;
+
+  // Receiver = `this`, coerced to externref.
+  fctx.body.push({ op: "local.get", index: selfIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  const recvLocal = allocLocal(fctx, `__super_emc_recv_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  fctx.body.push({ op: "local.set", index: recvLocal });
+
+  // Build args array.
+  fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+  const argsLocal = allocLocal(fctx, `__super_emc_args_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  fctx.body.push({ op: "local.set", index: argsLocal });
+
+  for (const arg of expr.arguments) {
+    const valueExpr = ts.isSpreadElement(arg) ? arg.expression : arg;
+    fctx.body.push({ op: "local.get", index: argsLocal });
+    const argType = compileExpression(ctx, fctx, valueExpr, {
+      kind: "externref",
+    });
+    if (argType && argType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" });
+    } else if (argType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const finalPushIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+    fctx.body.push({ op: "call", funcIdx: finalPushIdx });
+  }
+
+  // __extern_method_call(receiver, methodName, args)
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  addStringConstantGlobal(ctx, methodName);
+  const strIdx = ctx.stringGlobalMap.get(methodName);
+  if (strIdx !== undefined) {
+    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+  } else {
+    compileStringLiteral(ctx, fctx, methodName);
+  }
+  fctx.body.push({ op: "local.get", index: argsLocal });
+  const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
+  fctx.body.push({ op: "call", funcIdx: finalMcIdx });
+  return { kind: "externref" };
+}
+
 function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
   const propAccess = expr.expression as ts.PropertyAccessExpression;
   const methodName = propAccess.name.text;
@@ -113,6 +198,11 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (funcIdx === undefined) {
+    // (#1614) The parent may be a builtin extern class (Set/Map/Array/...)
+    // whose methods are host-backed, not compiled into funcMap. Dispatch
+    // `super.method(args)` dynamically via __extern_method_call(this, name, args).
+    const externResult = emitSuperExternMethodCall(ctx, fctx, expr, methodName, parentClassName);
+    if (externResult !== null) return externResult;
     reportError(ctx, expr, `Cannot find method '${methodName}' on parent class '${parentClassName}'`);
     return null;
   }
@@ -203,6 +293,9 @@ function compileSuperElementMethodCall(
   }
 
   if (funcIdx === undefined) {
+    // (#1614) Builtin extern-class parent — dispatch dynamically.
+    const externResult = emitSuperExternMethodCall(ctx, fctx, expr, methodName, parentClassName);
+    if (externResult !== null) return externResult;
     reportError(ctx, expr, `Cannot find method '${methodName}' on parent class '${parentClassName}'`);
     return null;
   }
@@ -708,7 +801,10 @@ function compileNewFunctionDeclaration(
   // Widen non-null ref fields to ref_null so struct.new can use ref.null defaults
   for (const field of fields) {
     if (field.type.kind === "ref") {
-      field.type = { kind: "ref_null", typeIdx: (field.type as { typeIdx: number }).typeIdx };
+      field.type = {
+        kind: "ref_null",
+        typeIdx: (field.type as { typeIdx: number }).typeIdx,
+      };
     }
   }
 
@@ -749,7 +845,10 @@ function compileNewFunctionDeclaration(
   ctx.mod.functions.push(ctorFunc);
 
   // Cache the mapping
-  ctx.funcConstructorMap.set(funcName, { structTypeIdx, ctorFuncName: ctorName });
+  ctx.funcConstructorMap.set(funcName, {
+    structTypeIdx,
+    ctorFuncName: ctorName,
+  });
 
   // 4. Compile the constructor body
   const paramDefs: { name: string; type: ValType }[] = [];
@@ -791,9 +890,15 @@ function compileNewFunctionDeclaration(
     } else if (field.type.kind === "externref") {
       ctorFctx.body.push({ op: "ref.null.extern" });
     } else if (field.type.kind === "ref_null") {
-      ctorFctx.body.push({ op: "ref.null", typeIdx: (field.type as { typeIdx: number }).typeIdx } as Instr);
+      ctorFctx.body.push({
+        op: "ref.null",
+        typeIdx: (field.type as { typeIdx: number }).typeIdx,
+      } as Instr);
     } else if (field.type.kind === "ref") {
-      ctorFctx.body.push({ op: "ref.null", typeIdx: (field.type as { typeIdx: number }).typeIdx } as Instr);
+      ctorFctx.body.push({
+        op: "ref.null",
+        typeIdx: (field.type as { typeIdx: number }).typeIdx,
+      } as Instr);
     } else {
       ctorFctx.body.push({ op: "i32.const", value: 0 });
     }
@@ -801,7 +906,10 @@ function compileNewFunctionDeclaration(
   ctorFctx.body.push({ op: "struct.new", typeIdx: structTypeIdx } as Instr);
 
   // Store in __self local
-  const selfLocal = allocLocal(ctorFctx, "__self", { kind: "ref", typeIdx: structTypeIdx });
+  const selfLocal = allocLocal(ctorFctx, "__self", {
+    kind: "ref",
+    typeIdx: structTypeIdx,
+  });
   ctorFctx.body.push({ op: "local.set", index: selfLocal });
 
   // Bind `this` to the struct
@@ -919,7 +1027,14 @@ function compileNewFunctionExpression(
     const isMutable = writtenInClosure.has(name);
     const alreadyBoxed = !!fctx.boxedCaptures?.has(name);
     const valType = alreadyBoxed ? fctx.boxedCaptures!.get(name)!.valType : undefined;
-    captures.push({ name, type, localIdx, mutable: isMutable, alreadyBoxed, valType });
+    captures.push({
+      name,
+      type,
+      localIdx,
+      mutable: isMutable,
+      alreadyBoxed,
+      valType,
+    });
   }
 
   // 4. Build the closure struct type
@@ -1032,7 +1147,10 @@ function compileNewFunctionExpression(
       // Check if this capture is an already-boxed ref cell from the outer scope
       const outerBoxed = fctx.boxedCaptures?.get(cap.name);
       if (outerBoxed && (cap.type.kind === "ref" || cap.type.kind === "ref_null")) {
-        const refCellType: ValType = { kind: "ref_null", typeIdx: outerBoxed.refCellTypeIdx };
+        const refCellType: ValType = {
+          kind: "ref_null",
+          typeIdx: outerBoxed.refCellTypeIdx,
+        };
         const localIdx = allocLocal(liftedFctx, cap.name, refCellType);
         liftedFctx.body.push({ op: "local.get", index: 0 });
         liftedFctx.body.push({
@@ -1196,8 +1314,15 @@ function compileNewFunctionExpression(
     compileExpression(ctx, fctx, flatArgs[i]!, formalParams[i]);
   }
 
-  // Call the lifted function
-  fctx.body.push({ op: "call", funcIdx: liftedFuncIdx });
+  // Call the lifted function. Re-resolve its index from funcMap: compiling the
+  // arguments above may have added late imports (e.g. an object-spread arg like
+  // `{...null}` pulls in `__new_plain_object`/`__object_assign`), which shifts
+  // every defined-function index up. The shift machinery patches funcMap and the
+  // already-emitted `ref.func` instruction, but the `liftedFuncIdx` captured at
+  // registration time is stale — using it here would make `call` and `ref.func`
+  // disagree, emitting an invalid module (#1602).
+  const resolvedLiftedIdx = ctx.funcMap.get(closureName) ?? liftedFuncIdx;
+  fctx.body.push({ op: "call", funcIdx: resolvedLiftedIdx });
 
   // new expression returns the constructed object — produce externref null
   // since we don't construct actual objects, and callers typically discard the result
@@ -1210,7 +1335,67 @@ function compileNewFunctionExpression(
  * The class should already be collected during the collection phase.
  * We produce the constructor function reference so the class can be instantiated.
  */
+/**
+ * §15.7.1 ClassDefinitionEvaluation: a named class binds its own name in an
+ * inner scope that is populated only AFTER the `extends` clause is evaluated.
+ * Referencing that name inside `extends` hits the TDZ — `(class x extends x {})`
+ * must throw ReferenceError (#1594B). The inner binding shadows any outer `x`,
+ * so any reference to the class's own name in `extends` is the TDZ binding.
+ */
+function classExtendsReferencesOwnName(expr: ts.ClassExpression): boolean {
+  if (!expr.name) return false;
+  const ownName = expr.name.text;
+  if (!expr.heritageClauses) return false;
+  for (const clause of expr.heritageClauses) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const typeNode of clause.types) {
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (found) return;
+        if (ts.isIdentifier(node) && node.text === ownName) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeNode.expression);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * (#1602) Emit a class-expression-as-value: the constructor wrapped in a
+ * closure-struct converted to externref. A bare `ref.func` (funcref) is NOT a
+ * subtype of anyref/externref, so when the class value flowed into an externref
+ * context — `(class {...}).f` member read feeding `__extern_get`, or passed as
+ * a call argument — the raw funcref was left on the stack where externref was
+ * required, producing an invalid module (`call expected externref, found
+ * ref.func`). Mirror the proven `ClassName.constructor` / static-method
+ * extraction path: wrap the ctor funcref in a closure struct and
+ * `extern.convert_any`. Falls back to the legacy funcref only if closure
+ * construction fails (signature unresolvable), preserving prior behaviour.
+ */
+function emitClassCtorValue(ctx: CodegenContext, fctx: FunctionContext, ctorName: string, funcIdx: number): ValType {
+  const closureRef = emitFuncRefAsClosure(ctx, fctx, ctorName, funcIdx);
+  if (closureRef) {
+    fctx.body.push({ op: "extern.convert_any" });
+    return { kind: "externref" };
+  }
+  fctx.body.push({ op: "ref.func", funcIdx });
+  return { kind: "funcref" };
+}
+
 function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.ClassExpression): ValType | null {
+  // §15.7.1: the class-expression name is in TDZ during its own `extends`
+  // evaluation. `(class x extends x {})` must throw ReferenceError (#1594B).
+  if (classExtendsReferencesOwnName(expr)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${expr.name!.text}' before initialization`);
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+
   // Look up the synthetic name assigned during the collection phase
   const syntheticName = ctx.anonClassExprNames.get(expr);
   const classNameForCheck = syntheticName ?? expr.name?.text;
@@ -1226,9 +1411,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     const ctorName = `${syntheticName}_new`;
     const funcIdx = ctx.funcMap.get(ctorName);
     if (funcIdx !== undefined) {
-      // Produce a ref.func to the constructor as the class value
-      fctx.body.push({ op: "ref.func", funcIdx });
-      return { kind: "funcref" };
+      return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
     }
   }
 
@@ -1239,8 +1422,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
       const ctorName = `${className}_new`;
       const funcIdx = ctx.funcMap.get(ctorName);
       if (funcIdx !== undefined) {
-        fctx.body.push({ op: "ref.func", funcIdx });
-        return { kind: "funcref" };
+        return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
       }
     }
   }
@@ -1410,6 +1592,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Number(x) → create real JS Number wrapper object via __new_Number host import
         // (typeof new Number(0) === "object", not "number")
         if (args.length >= 1) {
+          // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
+          // ToNumber on its argument before boxing. Mirror the `Number(sym)`
+          // call-path guard so `new Number(Symbol())` throws too (#1564).
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+            return { kind: "externref" };
+          }
           compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
@@ -1443,7 +1634,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Boolean(x) → create real JS Boolean wrapper object via __new_Boolean host import
         // (typeof new Boolean(false) === "object", not "boolean")
         if (args.length >= 1) {
-          compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
+          // coerces the arg to f64 first, which would silently lose the Symbol.
+          // A Symbol arg should produce a truthy wrapper: box 1.0.
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "f64.const", value: 1 });
+          } else {
+            compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          }
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
         }
@@ -1520,7 +1720,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
     // Compile errors argument (iterable) as externref
     if (args.length >= 1) {
-      const errorsType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+      const errorsType = compileExpression(ctx, fctx, args[0]!, {
+        kind: "externref",
+      });
       if (errorsType && errorsType.kind !== "externref") {
         coerceType(ctx, fctx, errorsType, { kind: "externref" });
       }
@@ -1529,7 +1731,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
     // Compile message argument as externref
     if (args.length >= 2) {
-      const msgType = compileExpression(ctx, fctx, args[1]!, { kind: "externref" });
+      const msgType = compileExpression(ctx, fctx, args[1]!, {
+        kind: "externref",
+      });
       if (msgType && msgType.kind !== "externref") {
         coerceType(ctx, fctx, msgType, { kind: "externref" });
       }
@@ -1538,7 +1742,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
     // Compile options argument as externref (for cause property)
     if (args.length >= 3) {
-      const optsType = compileExpression(ctx, fctx, args[2]!, { kind: "externref" });
+      const optsType = compileExpression(ctx, fctx, args[2]!, {
+        kind: "externref",
+      });
       if (optsType && optsType.kind !== "externref") {
         coerceType(ctx, fctx, optsType, { kind: "externref" });
       }
@@ -1549,6 +1755,36 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       ctx,
       "__new_AggregateError",
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
+  // Handle `new SuppressedError(error, suppressed, message, options?)` (#1634).
+  // Spec §20.5.10.1: all four arguments are externref; `options.cause` is
+  // installed via the dedicated `__new_SuppressedError` host import. The generic
+  // 3-param extern-class path dropped `options` (no `cause`) and mishandled the
+  // message coercion, so route through the dedicated import like AggregateError.
+  if (ts.isIdentifier(expr.expression) && expr.expression.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
     );
     flushLateImportShifts(ctx, fctx);
@@ -1659,7 +1895,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // clock_time_get via the __wasi_date_now helper (registered up front in
       // registerWasiImports).
       if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
-        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+        fctx.body.push({
+          op: "call",
+          funcIdx: ctx.funcMap.get("__wasi_date_now")!,
+        } as Instr);
         fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
         fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
         return { kind: "ref", typeIdx: dateTypeIdx };
@@ -1868,6 +2107,29 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // vs an array/iterable (copy constructor)
         const argType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSym = argType.getSymbol?.();
+        // #1654 — `new Uint8Array(arrayBuffer)` views the buffer's bytes. The
+        // ArrayBuffer/DataView is backed by an i32_byte vec; copy the bytes
+        // into this TypedArray's f64 backing array. Must precede the
+        // size-constructor path (an ArrayBuffer is NOT a numeric length).
+        //
+        // #1670 — only in no-JS-host mode. The byte-buffer view path emits an
+        // unconditional `ref.cast` to the native `i32_byte` vec. In JS-host
+        // mode an ArrayBuffer / SharedArrayBuffer is NOT lowered to that vec
+        // (e.g. `new SharedArrayBuffer(n)` has no native struct), so the cast
+        // traps with `illegal cast` before any spec validation runs — this
+        // regressed 28 Atomics negative tests built on
+        // `new Int32Array(new SharedArrayBuffer(...))`. Host mode already
+        // handles the buffer arg correctly via the runtime, so skip the
+        // native view path there.
+        const argSymName = argSym?.name;
+        if (
+          noJsHost(ctx) &&
+          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView") &&
+          !ts.isNumericLiteral(args[0]!) &&
+          emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)
+        ) {
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
         const isArrayLike =
           argSym?.name === "Array" ||
           ((argType.flags & ts.TypeFlags.Object) !== 0 &&
@@ -2011,6 +2273,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return null;
   }
 
+  // #1679 — `new this(...)` inside a static method: the callee is `this`, which
+  // the checker resolves to the enclosing constructor (e.g. acorn's `Parser`
+  // function-style class). It is not an identifier, so the function-constructor
+  // path below is skipped. Route a `this`-callee that resolves to a known
+  // function-style constructor (or one we can build from its declaration) to the
+  // same `<Class>_new` machinery, keyed by the resolved className.
+  if (className && !ctx.classSet.has(className) && expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const cachedFnCtor = ctx.funcConstructorMap.get(className);
+    if (cachedFnCtor) {
+      const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
+      if (ctorFuncIdx !== undefined) {
+        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const args = expr.arguments ?? [];
+        for (let i = 0; i < args.length; i++) {
+          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+        }
+        if (paramTypes) {
+          for (let i = args.length; i < paramTypes.length; i++) {
+            pushDefaultValue(fctx, paramTypes[i]!, ctx);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+        return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
+      }
+    } else {
+      // Build the constructor from the resolved constructor function's declaration.
+      const decls = symbol?.getDeclarations();
+      if (decls) {
+        for (const decl of decls) {
+          if (ts.isFunctionDeclaration(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(ctx, fctx, expr, className, decl);
+            if (result) return result;
+            break;
+          }
+          // `var Parser = function Parser(...) {...}` (acorn): the constructor's
+          // symbol resolves directly to the FunctionExpression node, or to the
+          // VariableDeclaration whose initializer is one.
+          if (ts.isFunctionExpression(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(
+              ctx,
+              fctx,
+              expr,
+              className,
+              decl as unknown as ts.FunctionDeclaration,
+            );
+            if (result) return result;
+            break;
+          }
+          if (ts.isVariableDeclaration(decl) && decl.initializer) {
+            let init: ts.Expression = decl.initializer;
+            while (ts.isParenthesizedExpression(init)) init = init.expression;
+            if (ts.isFunctionExpression(init) && init.body) {
+              const result = compileNewFunctionDeclaration(
+                ctx,
+                fctx,
+                expr,
+                className,
+                init as unknown as ts.FunctionDeclaration,
+              );
+              if (result) return result;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Check if the identifier resolves to a function declaration used as constructor
   // (e.g. `function Foo() { this.x = 1; }; new Foo()`)
   if ((!className || !ctx.classSet.has(className)) && ts.isIdentifier(expr.expression)) {
@@ -2082,7 +2412,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // new ArrayBuffer(byteLength) — validate non-negative integer length
     if (ctorName === "ArrayBuffer" && args.length >= 1) {
       compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
-      const lenF64 = allocLocal(fctx, `__ab_len_f64_${fctx.locals.length}`, { kind: "f64" });
+      const lenF64 = allocLocal(fctx, `__ab_len_f64_${fctx.locals.length}`, {
+        kind: "f64",
+      });
       fctx.body.push({ op: "local.set", index: lenF64 });
       // Check: len != floor(len) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: lenF64 });
@@ -2097,12 +2429,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array buffer length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2140,12 +2471,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Start offset is outside the bounds of the buffer";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2153,7 +2483,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Validate byteLength (3rd arg) if provided
       if (args.length >= 3) {
         compileExpression(ctx, fctx, args[2]!, { kind: "f64" });
-        const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, { kind: "f64" });
+        const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, {
+          kind: "f64",
+        });
         fctx.body.push({ op: "local.set", index: lenF64 });
         // NaN → 0
         fctx.body.push({ op: "local.get", index: lenF64 });
@@ -2179,12 +2511,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Invalid DataView length";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2194,7 +2525,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // new Array(n) — validate non-negative integer length < 2^32
     if (ctorName === "Array" && args.length === 1) {
       compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
-      const nF64 = allocLocal(fctx, `__arr_n_f64_${fctx.locals.length}`, { kind: "f64" });
+      const nF64 = allocLocal(fctx, `__arr_n_f64_${fctx.locals.length}`, {
+        kind: "f64",
+      });
       fctx.body.push({ op: "local.set", index: nF64 });
       // Check: n != floor(n) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: nF64 });
@@ -2214,12 +2547,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2382,6 +2714,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
         fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
       } else {
+        // #1654 — `new Uint8Array(arrayBuffer)` must VIEW the buffer's bytes,
+        // not treat the buffer as a numeric length. The ArrayBuffer is backed
+        // by an `i32_byte` vec (one i32 per byte). Detect that case and copy the
+        // bytes into the f64-element vec this TypedArray uses (so e.g.
+        // process.stdout.write, which expects a vec_f64, sees the real bytes).
+        const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
+        const argSymName = argTsType.getSymbol?.()?.name;
+        // #1670 — gate on no-JS-host (see the matching guard above): the
+        // native byte-buffer view emits an unconditional `ref.cast` to the
+        // `i32_byte` vec that traps in JS-host mode, where the buffer is not
+        // that struct.
+        const isBufferArg =
+          noJsHost(ctx) &&
+          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView");
+        if (isBufferArg && emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)) {
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
         // new Uint8Array(n) → array of size n, all zeros
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         fctx.body.push({ op: "i32.trunc_sat_f64_s" });
@@ -2424,12 +2773,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array buffer length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2470,7 +2818,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Offset and length f64 locals (used for validation AND view-metadata
       // registration). Defaults: offset=0, length=bufferByteLength-offset.
       const offsetF64 = allocLocal(fctx, `__dv_offset_f64_${fctx.locals.length}`, { kind: "f64" });
-      const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, { kind: "f64" });
+      const lenF64 = allocLocal(fctx, `__dv_len_f64_${fctx.locals.length}`, {
+        kind: "f64",
+      });
 
       if (args.length >= 2) {
         // #1515 ToIndex(byteOffset) per ECMA §7.1.22:
@@ -2510,7 +2860,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         if (isStructBuf) {
           fctx.body.push({ op: "local.get", index: offsetF64 });
           fctx.body.push({ op: "local.get", index: bufLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // buffer length
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: vecTypeIdx,
+            fieldIdx: 0,
+          }); // buffer length
           fctx.body.push({ op: "f64.convert_i32_s" });
           fctx.body.push({ op: "f64.gt" });
           fctx.body.push({ op: "i32.or" });
@@ -2519,12 +2873,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Start offset is outside the bounds of the buffer";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2568,7 +2921,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           fctx.body.push({ op: "local.get", index: lenF64 });
           fctx.body.push({ op: "f64.add" });
           fctx.body.push({ op: "local.get", index: bufLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: vecTypeIdx,
+            fieldIdx: 0,
+          });
           fctx.body.push({ op: "f64.convert_i32_s" });
           fctx.body.push({ op: "f64.gt" });
           fctx.body.push({ op: "i32.or" });
@@ -2577,12 +2934,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         {
           const rangeErrMsg = "RangeError: Invalid DataView length";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -2697,7 +3053,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     if (arrTypeIdx < 0) {
       // Fallback: use externref vec type for Array<any> or unresolvable element types
-      vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+      vecTypeIdx = getOrRegisterVecType(ctx, "externref", {
+        kind: "externref",
+      });
       arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       elemWasm = { kind: "externref" };
     }
@@ -2725,7 +3083,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
       // RangeError validation: n must be a non-negative integer < 2^32
       // Check: n != floor(n) || n < 0 || n >= 2^32 → throw RangeError
-      const nF64Local = allocLocal(fctx, `__arr_n_f64_${fctx.locals.length}`, { kind: "f64" });
+      const nF64Local = allocLocal(fctx, `__arr_n_f64_${fctx.locals.length}`, {
+        kind: "f64",
+      });
       fctx.body.push({ op: "local.tee", index: nF64Local });
       // Check n != floor(n) (non-integer or NaN)
       fctx.body.push({ op: "local.get", index: nF64Local });
@@ -2745,12 +3105,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       {
         const rangeErrMsg = "RangeError: Invalid array length";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
       }
@@ -2789,6 +3148,124 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   reportError(ctx, expr, `Unsupported new expression for class: ${className}`);
   return null;
+}
+
+/**
+ * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
+ * TypedArray's f64-element backing array.
+ *
+ * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
+ * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
+ * variables to externref, so recover the struct via any.convert_extern +
+ * ref.cast, read its length, allocate an f64 array of that length, and copy
+ * byte-by-byte (i32 → f64). Returns true on success; false to let the caller
+ * fall back to the numeric-length path.
+ */
+function emitTypedArrayFromByteBuffer(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: ts.Expression,
+  dstVecTypeIdx: number,
+  dstArrTypeIdx: number,
+): boolean {
+  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
+  if (srcArrTypeIdx < 0 || dstArrTypeIdx < 0) return false;
+
+  // Compile the buffer expression and recover the i32_byte vec struct.
+  const bufType = compileExpression(ctx, fctx, bufExpr);
+  if (!bufType) return false;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && bufType.typeIdx !== srcVecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return false;
+  }
+  const srcVecLocal = allocLocal(fctx, `__tab_src_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: srcVecTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: srcVecLocal });
+
+  // len = src.length (field 0)
+  const lenLocal = allocLocal(fctx, `__tab_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: srcVecTypeIdx,
+    fieldIdx: 0,
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+
+  // srcArr = src.data (field 1)
+  const srcArrLocal = allocLocal(fctx, `__tab_srcarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: srcArrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: srcVecTypeIdx,
+    fieldIdx: 1,
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: srcArrLocal });
+
+  // dstArr = new f64[len]
+  const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: dstArrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dstArrLocal });
+
+  // for (i = 0; i < len; i++) dstArr[i] = f64(srcArr[i] & 0xff)
+  const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, {
+    kind: "i32",
+  });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal });
+  const loopBody: Instr[] = [
+    // if (i >= len) break (br 1 out of loop)
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // dstArr[i] = f64(srcArr[i] & 0xff)
+    { op: "local.get", index: dstArrLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: srcArrLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
+    { op: "i32.const", value: 0xff } as Instr,
+    { op: "i32.and" } as Instr,
+    { op: "f64.convert_i32_u" } as Instr,
+    { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
+    // i++
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: iLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // struct.new dstVec(len, dstArr)
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: dstArrLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: dstVecTypeIdx } as Instr);
+  return true;
 }
 
 export {

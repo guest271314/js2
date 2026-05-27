@@ -124,3 +124,61 @@ jobs:
       #         git push
       #       fi
       #     fi
+
+  # #1659 — Run tests/equivalence/ in CI. Previously skipped because the full
+  # suite OOMed under file-parallelism. Each shard runs single-fork (peak
+  # ~1 GB RAM, ~1-2 min) and emits a partial failure list; the merge job
+  # combines partials and gates against scripts/equivalence-baseline.json —
+  # only NEW failures (not in the baseline) fail CI, so the existing failure
+  # backlog does not block every PR while still catching genuine regressions.
+  equivalence-shard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Run equivalence shard ${{ matrix.shard }}/8
+        env:
+          SHARD: ${{ matrix.shard }}/8
+          PARTIAL_OUT: equiv-partial-${{ matrix.shard }}.json
+        run: node scripts/equivalence-gate.mjs
+      - name: Upload partial result
+        uses: actions/upload-artifact@v4
+        with:
+          name: equiv-partial-${{ matrix.shard }}
+          path: equiv-partial-${{ matrix.shard }}.json
+          retention-days: 3
+
+  equivalence-gate:
+    runs-on: ubuntu-latest
+    needs: equivalence-shard
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Download shard partials
+        uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-partial-*
+          path: equiv-partials
+          merge-multiple: true
+      - name: Gate against baseline
+        env:
+          MERGE_PARTIALS_DIR: equiv-partials
+        run: node scripts/equivalence-gate.mjs

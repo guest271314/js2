@@ -61,19 +61,31 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
-  # Per-ref concurrency. Global serialization (test262-sharded-global) was
-  # causing push:main runs to cancel within 8 seconds of start — most push:main
-  # test262 runs since 2026-05-23T02:00Z were aborted before baselines could
-  # refresh. The exact cancellation mechanism appears to be GitHub's merge
-  # queue rebuilding merge_groups whenever main moves, which cascaded through
-  # the shared concurrency group to abort the unrelated push:main runs queued
-  # behind them.
+  # Per-EVENT-and-ref concurrency. Global serialization (test262-sharded-global)
+  # was causing push:main runs to cancel within 8 seconds of start — most
+  # push:main test262 runs since 2026-05-23T02:00Z were aborted before baselines
+  # could refresh. The mechanism: GitHub's merge queue rebuilds merge_groups
+  # whenever main moves, which cascaded through the shared concurrency group to
+  # abort the unrelated push:main runs queued behind them.
   #
-  # Per-ref concurrency: each ref (main, gh-readonly-queue/main/pr-N, PR N)
-  # gets its own slot. push:main runs no longer compete with merge_group runs.
-  # PR-level pushes still cancel previous in-flight runs for the same PR
-  # (cancel-in-progress: true) — that's the right behavior for PR updates.
-  group: test262-sharded-${{ github.ref }}
+  # The fix has two parts and BOTH are load-bearing for baseline-refresh:
+  #   1. The group key includes github.event_name, so a push:main run can never
+  #      share a slot with a merge_group run (they previously collided on
+  #      refs/heads/main vs the merge_group ref via a global group). A push:main
+  #      run also never shares with a workflow_dispatch run on main — important
+  #      because the manual authoritative-number runs and the auto push runs
+  #      must not cancel each other.
+  #   2. cancel-in-progress is TRUE only for pull_request. For push,
+  #      workflow_dispatch and merge_group it is FALSE — a newer run QUEUES
+  #      behind the in-flight one instead of cancelling it. This guarantees a
+  #      baseline-refresh run (push:main / workflow_dispatch) always runs to
+  #      completion and reaches promote-baseline. PR-level pushes still cancel
+  #      previous in-flight runs for the same PR (the right behavior for PR
+  #      iteration; PRs never promote a baseline).
+  #
+  # DO NOT reintroduce a single global group or set cancel-in-progress: true for
+  # push/workflow_dispatch — either change re-breaks the baseline refresh.
+  group: test262-sharded-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -463,6 +475,80 @@ jobs:
             --baseline-generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             ${{ github.event_name != 'workflow_dispatch' && '--include-proposals' || (inputs.include_proposals && '--include-proposals' || '') }}
 
+      # #1668 — HARD catastrophic-regression guard. Lives INSIDE the REQUIRED
+      # "merge shard reports" check so it blocks the merge queue. The
+      # fine-grained `regression-gate` job below fails on ANY regression but is
+      # advisory / NOT a required check — which is exactly how PR #608/#1666
+      # merged a −3,600-pass test262 harness corruption. This guard is the
+      # belt-and-suspenders that a catastrophe cannot slip past. Threshold is
+      # deliberately HIGH so baseline drift (#1235, typically <50 tests) never
+      # trips it; only a genuine codegen/harness break (hundreds–thousands of
+      # pass→fail with changed wasm) fails the build. On the no-shards path
+      # (SHARDS_RAN != true) it's skipped, matching the required check's
+      # existing no-op-pass behaviour for non-test262 changes.
+      - name: Catastrophic regression guard (#1668)
+        if: env.SHARDS_RAN == 'true'
+        env:
+          CATASTROPHIC_REGRESSION_THRESHOLD: "200"
+        run: |
+          git clone --depth=1 https://github.com/loopdive/js2wasm-baselines.git /tmp/cat-baselines 2>/dev/null || true
+          if [ ! -f /tmp/cat-baselines/test262-current.jsonl ]; then
+            echo "::warning::No baseline JSONL available — skipping catastrophic guard (first seed)."
+            exit 0
+          fi
+          set +e
+          npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-current.jsonl \
+            merged-reports/test262-results-merged.jsonl --quiet > /tmp/cat-diff.txt 2>&1
+          diff_exit=$?
+          set -e
+          if [ "$diff_exit" -gt 1 ]; then
+            echo "::error::diff-test262 failed (exit $diff_exit) — cannot evaluate catastrophic guard."
+            cat /tmp/cat-diff.txt
+            exit "$diff_exit"
+          fi
+          NET=$(grep -oE 'Regressions with wasm-hash change: [0-9]+' /tmp/cat-diff.txt | grep -oE '[0-9]+' | head -1)
+          NET="${NET:-0}"
+          echo "Catastrophic guard: ${NET} wasm-change regressions vs baseline (threshold ${CATASTROPHIC_REGRESSION_THRESHOLD})."
+          if [ "$NET" -gt "$CATASTROPHIC_REGRESSION_THRESHOLD" ]; then
+            echo "::error::CATASTROPHIC test262 regression: ${NET} tests went pass→fail with changed wasm, exceeding the ${CATASTROPHIC_REGRESSION_THRESHOLD} threshold. This blocks the merge queue. A regression this large is almost always a codegen/harness corruption (cf. #608). Investigate before merging."
+            echo "----- regression sample (first 40 lines) -----"
+            head -40 /tmp/cat-diff.txt
+            exit 1
+          fi
+
+      # #1668 — HARD stale-baseline guard. The catastrophic guard above (and the
+      # advisory regression-gate) are only as trustworthy as the baseline they
+      # diff against. The baseline is refreshed per-merge by the promote-baseline
+      # job → js2wasm-baselines repo. If that pipeline ever silently breaks, the
+      # baseline falls behind main and the gates go blind to new regressions
+      # (they'd compare against an ancient state). This fails the REQUIRED check
+      # when the baseline's recorded main-sha is too far behind main HEAD.
+      # Normal operation is 0–1 behind; a quiet period is 0 behind (no merges →
+      # no drift), so a large lag specifically means promotion is broken — the
+      # threshold is generous so only genuine breakage trips it.
+      - name: Stale-baseline guard (#1668)
+        if: env.SHARDS_RAN == 'true'
+        env:
+          MAX_BASELINE_COMMITS_BEHIND: "50"
+        run: |
+          if [ ! -d /tmp/cat-baselines ]; then
+            echo "::warning::baselines clone missing — skipping stale-baseline guard."
+            exit 0
+          fi
+          # Baseline commit subject: "chore(test262): refresh baseline — N/T pass (<main-sha>)"
+          BSHA=$(git -C /tmp/cat-baselines log -1 --format=%s | grep -oE '[0-9a-f]{7,40}' | tail -1)
+          if [ -z "$BSHA" ]; then
+            echo "::warning::could not parse baseline main-sha from commit subject — skipping stale-baseline guard."
+            exit 0
+          fi
+          git fetch --depth=200 origin main 2>/dev/null || true
+          BEHIND=$(git rev-list --count "${BSHA}..origin/main" 2>/dev/null || echo 999)
+          echo "Baseline main-sha ${BSHA} is ${BEHIND} commit(s) behind origin/main (max ${MAX_BASELINE_COMMITS_BEHIND})."
+          if [ "$BEHIND" -gt "$MAX_BASELINE_COMMITS_BEHIND" ]; then
+            echo "::error::STALE BASELINE: the js2wasm-baselines JSONL is ${BEHIND} commits behind main HEAD (baseline main-sha ${BSHA}). The promote-baseline pipeline is likely broken, so the regression gates are blind to new regressions. Fix baseline promotion before merging. See #1668."
+            exit 1
+          fi
+
       - name: Upload merged reports
         if: always() && env.SHARDS_RAN == 'true'
         uses: actions/upload-artifact@v6
@@ -646,6 +732,9 @@ jobs:
     name: promote merged report to main baseline
     needs: merge-report
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -653,10 +742,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-          # Authenticate via SSH deploy key so the post-merge baseline-refresh
-          # commit can be pushed. The merge_queue ruleset blocks GITHUB_TOKEN
-          # pushes — MAIN_DEPLOY_KEY is in the ruleset's bypass_actors list.
-          ssh-key: ${{ secrets.MAIN_DEPLOY_KEY }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -773,22 +858,79 @@ jobs:
             git push
           fi
 
-      # Step removed (2026-05-22): the post-baseline commit to main was blocked
-      # by the merge_queue ruleset ('Changes must be made through the merge queue').
-      # Baseline data now lives only in loopdive/js2wasm-baselines (pushed by
-      # the previous step). The landing page reads from there via raw URL.
-      # Local devs running `pnpm build:pages` etc. fetch the same data from
-      # the baselines repo at build time.
+      # RESTORED (2026-05-25): commit the small summary JSON files back to main.
       #
-      # NOTE (#1522): The original PR added a "Sync conformance numbers into docs"
-      # step plus extra `git add` lines (ROADMAP.md, plan/goals/goal-graph.md,
-      # README.md, CLAUDE.md) to this commit step. Since the commit step itself
-      # was removed by the merge_queue ruleset, the conformance-sync mechanism
-      # needs to be re-attached to a workflow that CAN push to main (e.g. the
-      # baselines-repo push or a follow-up scheduled workflow). Tracking issue
-      # remains open at plan/issues/backlog/1522-race-local-test262-vs-ci.md.
-
-
+      # History: this step was removed on 2026-05-22 (36d8eb849) because the
+      # merge_queue ruleset blocked the push with GH013 ('Changes must be made
+      # through the merge queue'). BUT those GH013 failures predated 15ff85dda
+      # (landed 37 min earlier), which switched the `Checkout` step above to
+      # `ssh-key: MAIN_DEPLOY_KEY` precisely so this push CAN bypass the ruleset
+      # (the deploy key is in the ruleset's bypass_actors). Removing the step
+      # threw out the working push and left the committed
+      # benchmarks/results/test262-current.json frozen at its 2026-05-22 value
+      # (28842/43159) while the baselines repo moved on — so `git status`, the
+      # dashboard build's committed-file fallback, and fresh clones all showed a
+      # phantom ~500-test regression. This step restores main/baselines parity.
+      #
+      # Only the *small* JSON files go to main (the large jsonl lives only in the
+      # baselines repo, per #1528). `[skip ci]` prevents self-retrigger. The PR
+      # path uses GITHUB_TOKEN — no deploy key needed. JSON-only changes skip
+      # test262 shards in the merge queue, so the PR lands in ~2 min.
+      - name: Commit refreshed summary JSON to main repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.pass)")
+          TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.total)")
+          # Sanity check: never promote a corrupt/empty report to main.
+          if [ "$PASS" -lt 1000 ] || [ "$TOTAL" -lt 40000 ]; then
+            echo "ABORT: report looks corrupt (pass=$PASS total=$TOTAL). Not committing to main."
+            exit 0
+          fi
+          stage_files() {
+            git add -f benchmarks/results/test262-current.json \
+              benchmarks/results/test262-report.json \
+              public/benchmarks/results/test262-report.json
+            # editions JSON is regenerated into public/ by the earlier step
+            [ -f public/benchmarks/results/test262-editions.json ] && \
+              git add -f public/benchmarks/results/test262-editions.json || true
+          }
+          stage_files
+          if git diff --cached --quiet; then
+            echo "No JSON changes to commit to main."
+            exit 0
+          fi
+          # Skip when only volatile metadata (timestamp / baseline_sha) changed —
+          # avoids a churn commit on every push that produced identical results.
+          if [ -f /tmp/js2wasm-before-refresh/test262-current.json ] && \
+            node scripts/compare-test262-artifact.mjs \
+              --type report \
+              --baseline /tmp/js2wasm-before-refresh/test262-current.json \
+              --candidate benchmarks/results/test262-current.json; then
+            echo "Only volatile test262 report metadata changed — skipping main commit."
+            exit 0
+          fi
+          # Open a PR so the summary JSON reaches main through the merge queue.
+          # This avoids needing MAIN_DEPLOY_KEY: the merge-queue ruleset only
+          # blocks direct pushes to main, not feature-branch pushes or PRs.
+          # JSON-only changes skip the test262 shard matrix (no test262-relevant
+          # paths changed), so the merge-report job passes trivially and the
+          # PR lands in ~2 min via cheap-gate + quality alone.
+          BRANCH="baseline-refresh-${GITHUB_SHA:0:8}-${GITHUB_RUN_ID}"
+          git checkout -b "$BRANCH"
+          git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create \
+            --title "chore(test262): baseline — ${PASS}/${TOTAL} pass" \
+            --body "Automated baseline promotion (JSON summary only). Pass: ${PASS}/${TOTAL}. Triggered by merge of \`${GITHUB_SHA:0:8}\`." \
+            --base main \
+            --head "$BRANCH" 2>&1)
+          echo "Opened baseline PR: $PR_URL"
+          gh pr merge --auto "$BRANCH" 2>/dev/null || \
+            echo "::warning::auto-merge enable failed — PR may need manual queue."
 
       - name: Audit forced baseline refresh
         if: github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES'

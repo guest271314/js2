@@ -17,7 +17,11 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.j
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure } from "./closures.js";
 import { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
-import { emitThrowTypeError, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
+import {
+  classifyPrivateMember,
+  emitThrowTypeError,
+  resolveDeclaringClassForPrivateName,
+} from "./expressions/helpers.js";
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { addUnionImports, resolveWasmType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -748,10 +752,6 @@ export function compileOptionalPropertyAccess(
   const objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
 
-  const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
-  fctx.body.push({ op: "local.tee", index: tmp });
-  fctx.body.push({ op: "ref.is_null" });
-
   // Determine result type from the TS type of the property being accessed
   const tsPropType = ctx.checker.getTypeAtLocation(expr);
   let resultType: ValType = resolveWasmType(ctx, tsPropType);
@@ -759,6 +759,28 @@ export function compileOptionalPropertyAccess(
   if (resultType.kind === "ref" || resultType.kind === "ref_null") {
     resultType = { kind: "externref" };
   }
+
+  // `?.` short-circuits on null/undefined. `ref.is_null` only validates on a
+  // reference operand, but the receiver can lower to a non-reference value
+  // type — e.g. a module-level `const obj = undefined` is stored as an i32
+  // global, so reading it yields i32 (#1603). A non-reference receiver here is
+  // the compiler's representation of `undefined`/`null`, which always
+  // short-circuits the chain: drop the receiver and emit the default result.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    if (resultType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (resultType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return resultType;
+  }
+
+  const tmp = allocLocal(fctx, `__opt_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
 
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);
@@ -776,8 +798,12 @@ export function compileOptionalPropertyAccess(
   // else branch (non-null path): get the property from the temp
   fctx.body = [];
   fctx.body.push({ op: "local.get", index: tmp });
-  // Compile the property access part without the receiver
-  const tsObjType = ctx.checker.getTypeAtLocation(expr.expression);
+  // Compile the property access part without the receiver. After the
+  // `ref.is_null` short-circuit the receiver is known non-null, so resolve
+  // the property against the non-nullable part of the union — the bare
+  // `C | null` union symbol is anonymous and would fail struct resolution,
+  // leaving the receiver ref stranded on the stack (#1603).
+  const tsObjType = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(expr.expression));
   const propName = expr.name.text;
   let elseResultType: ValType | null = null;
   if (isExternalDeclaredClass(tsObjType, ctx.checker)) {
@@ -849,8 +875,15 @@ export function compileOptionalPropertyAccess(
     }
   }
 
+  if (elseResultType === null) {
+    // Property could not be resolved to a concrete struct field/getter. The
+    // receiver ref is still on the stack from `local.get tmp`; coerce it to
+    // the block result type so the `if` typechecks rather than leaving a
+    // mismatched ref as the else-branch fallthrough (#1603).
+    elseResultType = objType;
+  }
   // Coerce else branch result to match the block result type
-  if (elseResultType && !valTypesMatch(elseResultType, resultType)) {
+  if (!valTypesMatch(elseResultType, resultType)) {
     coerceType(ctx, fctx, elseResultType, resultType);
   }
   const elseInstrs = fctx.body;
@@ -1047,6 +1080,89 @@ export function compilePropertyAccess(
         } as Instr);
         releaseTempLocal(fctx, tmpAny);
         return fieldType;
+      }
+    }
+    // #1680 — Brand check for private *accessor* (getter) and *method*
+    // reads. The field path above only fires for struct-backed private
+    // fields; a `get #m()` / `#m() {}` member is registered in
+    // classAccessorSet / classMethodSet, not structFields, so `declared`
+    // is undefined (or fieldIdx < 0) and the field path is skipped.
+    //
+    // Per ES2022 §15.7 PrivateFieldGet step 4 (PrivateBrandCheck): reading
+    // `o.#m` when `o` lacks the brand of the declaring class throws a
+    // TypeError. Without this, the generic getter dispatch below calls the
+    // getter with a wrong-brand receiver and silently misbehaves (test262
+    // private-{getter,method}-brand-check cases).
+    //
+    // We emit the same ref.test guard as the field path, then on success
+    // dispatch the getter call (accessor) or return the brand-checked
+    // receiver as a value (method-as-value). Skipped when the receiver is
+    // `this` inside the declaring class body — TS guarantees the brand.
+    const cls = classifyPrivateMember(ctx, expr.name);
+    if (
+      cls &&
+      (cls.kind === "method" || cls.kind === "accessor" || cls.kind === "accessor-readonly") &&
+      expr.expression.kind !== ts.SyntaxKind.ThisKeyword
+    ) {
+      const structTypeIdx = ctx.structMap.get(cls.className);
+      const getterName = `${cls.className}_get_${cls.fieldName}`;
+      const canEmit = structTypeIdx !== undefined && (cls.kind === "method" || ctx.funcMap.has(getterName));
+      if (canEmit) {
+        const objResult = compileExpression(ctx, fctx, expr.expression);
+        const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
+        if (objResult?.kind === "externref") {
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+        }
+        fctx.body.push({ op: "local.set", index: tmpAny });
+        fctx.body.push({ op: "local.get", index: tmpAny });
+        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx! } as Instr);
+
+        // Build the failure (throw) branch FIRST. emitThrowTypeError may
+        // register late imports, which shift every funcMap index (the
+        // getter's included). Settling those shifts before we read the
+        // getter funcIdx keeps the `call` target correct — the same reason
+        // the field path above only emits struct.get (immune to shifts).
+        const savedBody = fctx.body;
+        fctx.body = [];
+        const message = `Cannot read private member #${expr.name.text.slice(1)} from an object whose class did not declare it`;
+        emitThrowTypeError(ctx, fctx, message);
+        const failureInstrs = fctx.body;
+        fctx.body = savedBody;
+
+        // Success path: cast to the declaring struct, then either call the
+        // getter (accessor) or return the receiver itself (method value).
+        const successInstrs: Instr[] = [
+          { op: "local.get", index: tmpAny } as Instr,
+          { op: "ref.cast", typeIdx: structTypeIdx! } as Instr,
+        ];
+        let resultKind: ValType;
+        if (cls.kind === "method") {
+          // Reading a private method as a value: the brand-checked receiver
+          // is returned as an externref view. The spec only mandates the
+          // brand check throws on a wrong receiver here; `o.#m()` call sites
+          // go through calls.ts, not this read path.
+          successInstrs.push({ op: "extern.convert_any" } as Instr);
+          resultKind = { kind: "externref" };
+        } else {
+          // Resolve the getter funcIdx AFTER the throw branch settled imports.
+          const getterIdx = ctx.funcMap.get(getterName)!;
+          successInstrs.push({ op: "call", funcIdx: getterIdx });
+          const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
+          const typeDef = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
+          resultKind =
+            typeDef && typeDef.kind === "func" && typeDef.results.length > 0
+              ? typeDef.results[0]!
+              : { kind: "externref" };
+        }
+
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: resultKind },
+          then: successInstrs,
+          else: failureInstrs,
+        } as Instr);
+        releaseTempLocal(fctx, tmpAny);
+        return resultKind;
       }
     }
     // Resolver failure (no enclosing class declares this private name).
@@ -1270,12 +1386,48 @@ export function compilePropertyAccess(
     if (enumStrVal !== undefined) {
       return compileStringLiteral(ctx, fctx, enumStrVal);
     }
+
+    // (#1639) `g.prototype` where `g` is a generator-function declaration must
+    // return `%GeneratorPrototype%` (the object whose `next`/`return`/`throw`
+    // carry the brand check). The compiled closure backing a `function*` is
+    // opaque to the host, so resolve the member access statically here by
+    // routing to a dedicated runtime import. Tests reach
+    // `%AsyncIteratorPrototype%` via `getPrototypeOf(getPrototypeOf(g.prototype))`.
+    if (propName === "prototype" && ctx.generatorFunctions.has(objName)) {
+      const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+      const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+      const isAsyncGen =
+        !!decl &&
+        (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) &&
+        decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
+      const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (helperIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: helperIdx });
+        return { kind: "externref" };
+      }
+      // Standalone mode (no host): fall through to legacy path.
+    }
   }
 
   // Check for static property access via 'this' in a static method context.
   // In a static method, 'this' refers to the class constructor (no local 'this' param).
   // e.g., `this.#m` in `static fieldAccess()` where `#m` is a static private field.
-  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.localMap.get("this") === undefined) {
+  //
+  // (#1681) Also fire inside a closure spawned from a static context: an arrow
+  // function or inner function declared in a static method captures `this` as a
+  // local, so `localMap.get("this")` is defined — but `this` still denotes the
+  // class constructor, not a per-instance struct. Without the static-context
+  // escape hatch the generic struct path below tries to cast the captured
+  // externref `this` to the class struct and emits an invalid
+  // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
+  // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
+  // it identifies exactly this case.
+  if (
+    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
     // Resolve the enclosing class name from context.
     // Try enclosingClassName first (set for closures), then scan the function name
     // for a class name prefix by checking each underscore-delimited prefix against classSet.
@@ -1332,6 +1484,32 @@ export function compilePropertyAccess(
   // Check for static property access: ClassName.staticProp
   if (ts.isIdentifier(expr.expression)) {
     const objName = expr.expression.text;
+
+    // (#1639) `genFn.prototype` where `genFn` is a `function*` / `async function*`
+    // declaration must return the intrinsic `%GeneratorPrototype%` /
+    // `%AsyncGeneratorPrototype%` (= `%GeneratorFunction.prototype%.prototype`).
+    // The compiled closure backing the generator is opaque to the host, so we
+    // route the member access through a dedicated runtime import — mirroring the
+    // `Object.getPrototypeOf(genFn)` handling in calls.ts. Tests rely on the
+    // resulting chain: `Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))`
+    // === `%(Async)IteratorPrototype%`.
+    if (propName === "prototype" && ctx.generatorFunctions.has(objName)) {
+      let isAsyncGen = false;
+      const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+      const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+      if (decl && (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl))) {
+        isAsyncGen = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      }
+      const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
+      const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (helperIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: helperIdx });
+        return { kind: "externref" };
+      }
+      // Standalone mode (no host import): fall through to legacy handling.
+    }
+
     // Resolve class expressions (var C = class {}) through the expr-name map
     const resolvedClass = ctx.classExprNameMap.get(objName) ?? objName;
     if (ctx.classSet.has(resolvedClass)) {

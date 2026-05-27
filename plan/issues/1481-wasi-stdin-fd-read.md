@@ -133,3 +133,13 @@ program read `"hello\n"` as a string.
 1. Check `/workspace/.claude/ci-status/pr-400.json` — if `head_sha` matches `f2879c74f` and `net_per_test > 0`, ratio <10%, no bucket >50: `gh pr merge 400 --merge --admin`.
 2. If regressions, run `/dev-self-merge 400` to see analysis.
 3. After merge: set `status: done` in this file, `rm /workspace/.claude/agent-status/issue-1481-wasi-stdin.json`, `git worktree remove /workspace/.claude/worktrees/issue-1481-wasi-stdin`.
+
+## Deprecated by #1653 (2026-05-24)
+
+`readStdin()` is superseded by the standard Node API
+`process.stdin.read(buf, offset?)` (#1653) for binary input. `readStdin()`
+drains fd=0 to EOF, UTF-8-decodes to a string (losing binary fidelity), and
+cannot read incrementally — so it cannot frame a 4-byte-LE-header + N-body
+message nor sustain a continuous `while (true)` port loop. It remains
+available for back-compat and is annotated deprecated in
+`src/codegen/expressions/calls.ts`; new code should use `process.stdin.read`.

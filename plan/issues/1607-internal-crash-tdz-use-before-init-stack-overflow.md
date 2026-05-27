@@ -1,9 +1,10 @@
 ---
 id: 1607
 title: "codegen crash: 'Maximum call stack size exceeded' on use-before-initialization (TDZ) in declaration statements"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -51,3 +52,23 @@ emit the TDZ `ReferenceError` for self-referential lexical initializers.
 - The three example tests compile without a stack-overflow crash.
 - All 8 tests move off `compile_error` (ideally to pass with a TDZ
   `ReferenceError`).
+
+## Resolution
+
+Root cause: `tryStaticToNumber` in `src/codegen/expressions/misc.ts` traces an
+identifier back to its `const`/`using`/`await using` declaration initializer
+(line ~450) to fold constants. For a self-referential lexical initializer
+(`const x = x;`, `await using x = x + 1;`) the initializer names the very
+binding it declares, so the trace re-enters the same declaration node forever,
+overflowing the JS call stack during codegen. The crash only surfaced under the
+test262 path because that uses `skipSemanticDiagnostics: true`, which suppresses
+the TS pre-check that otherwise short-circuits these forms.
+
+Fix: add a `visitedDecls: Set<ts.Node>` cycle guard threaded through the
+recursive calls. Before tracing through a declaration we check whether it is
+already on the current path; if so we return `undefined` (bail to runtime),
+which lets the normal codegen path emit the spec-required TDZ `ReferenceError`
+instead of recursing. Non-cyclic constant folding is unaffected.
+
+Regression test: `tests/issue-1607.test.ts` (8 self-referential cases compile
+without an internal/stack-overflow error; one non-cyclic fold still succeeds).

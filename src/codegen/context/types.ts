@@ -404,7 +404,12 @@ export interface CodegenContext {
    * inside the initializer (and any closures it spawns) resolves to the
    * class-object singleton via `emitLazyClassObjectGet`.
    */
-  staticInitExprs: { globalIdx: number; initializer: ts.Expression; className?: string }[];
+  staticInitExprs: {
+    globalIdx?: number;
+    initializer?: ts.Expression;
+    staticBlock?: ts.ClassStaticBlockDeclaration;
+    className?: string;
+  }[];
   /** Counter for generated closure types/functions */
   closureCounter: number;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
@@ -550,6 +555,12 @@ export interface CodegenContext {
   testRuntime: boolean;
   /** Map from native string helper name → function index */
   nativeStrHelpers: Map<string, number>;
+  /** #1677: import-function count captured the instant the native-string
+   *  helpers were first emitted (mid-finalize). Used by
+   *  `reconcileNativeStrFinalizeShift` to shift the helper bodies + map by the
+   *  number of imports added afterwards during the rest of finalize. -1 until
+   *  helpers are emitted; reset to -1 once reconciled. */
+  nativeStrHelperImportBase: number;
   /** Map from value type kind → ref cell struct type index */
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
@@ -586,6 +597,37 @@ export interface CodegenContext {
   externrefAccessorVars: Set<string>;
   /** Math methods that need inline Wasm implementations */
   pendingMathMethods: Set<string>;
+  /**
+   * (#1602) Object-method-as-closure trampolines whose body forwards the
+   * method's params positionally. The method's `func.typeIdx` can be
+   * re-resolved (param types / order finalized) AFTER the trampoline was
+   * emitted, which would leave the eagerly-built forwarding body referencing a
+   * stale signature and produce an invalid module. We rebuild each trampoline
+   * body against the method's FINAL signature in a post-pass after all function
+   * bodies are compiled.
+   */
+  pendingMethodTrampolines: {
+    trampolineBody: Instr[];
+    /** The trampoline's own func index. */
+    trampolineFuncIdx: number;
+    methodFuncIdx: number;
+    objStructTypeIdx: number;
+    /** User-param count the wrapper func type was built with (excludes self). */
+    userParamCount: number;
+    /**
+     * (#1669) The wrapper func type's user-param types and result, captured at
+     * emit time. These are the static types of the `local.get`s the forwarding
+     * body reads, and the type the trampoline must return. The method's
+     * signature can drift away from these during later body compilation; the
+     * finalize pass coerces each forwarded arg from `wrapperUserParams[i]` to
+     * the method's final param type, and the method's result back to
+     * `wrapperResult`, so the rebuilt body validates against both signatures.
+     * Captured directly (not re-derived from `trampolineFuncIdx`) because late
+     * import shifting can move that index relative to the recorded value.
+     */
+    wrapperUserParams: ValType[];
+    wrapperResult: ValType | undefined;
+  }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
   /** Map from class name → class AST declaration node */

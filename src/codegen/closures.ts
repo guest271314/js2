@@ -16,7 +16,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
-import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
+import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
@@ -55,6 +55,7 @@ import {
 } from "./statements.js";
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
 import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
+import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
 import { detectStringBuilders } from "./string-builder.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
@@ -2007,7 +2008,6 @@ export function compileArrowAsClosure(
       flushLateImportShiftsShared(ctx, liftedFctx);
     }
 
-    const numArgs = arrowParams.length;
     const elemType: ValType = { kind: "externref" };
     const vti = getOrRegisterVecType(ctx, "externref", elemType);
     const ati = getArrTypeIdxFromVec(ctx, vti);
@@ -2015,38 +2015,16 @@ export function compileArrowAsClosure(
     const argsLocal = allocLocal(liftedFctx, "arguments", vecRef);
     const arrTmp = allocLocal(liftedFctx, "__args_arr_tmp", { kind: "ref", typeIdx: ati });
 
-    // Push each param coerced to externref (skip __self at index 0)
-    for (let i = 0; i < numArgs; i++) {
-      liftedFctx.body.push({ op: "local.get", index: i + 1 }); // +1 for __self
-      const pt = arrowParams[i]!;
-      if (pt.kind === "f64") {
-        const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) {
-          liftedFctx.body.push({ op: "call", funcIdx: boxIdx });
-        } else {
-          liftedFctx.body.push({ op: "drop" });
-          liftedFctx.body.push({ op: "ref.null.extern" });
-        }
-      } else if (pt.kind === "i32") {
-        liftedFctx.body.push({ op: "f64.convert_i32_s" });
-        const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) {
-          liftedFctx.body.push({ op: "call", funcIdx: boxIdx });
-        } else {
-          liftedFctx.body.push({ op: "drop" });
-          liftedFctx.body.push({ op: "ref.null.extern" });
-        }
-      } else if (pt.kind === "ref" || pt.kind === "ref_null") {
-        liftedFctx.body.push({ op: "extern.convert_any" });
-      }
-      // externref params are already externref — no conversion needed
-    }
-    liftedFctx.body.push({ op: "array.new_fixed", typeIdx: ati, length: numArgs });
-    liftedFctx.body.push({ op: "local.set", index: arrTmp });
-    liftedFctx.body.push({ op: "i32.const", value: numArgs });
-    liftedFctx.body.push({ op: "local.get", index: arrTmp });
-    liftedFctx.body.push({ op: "struct.new", typeIdx: vti });
-    liftedFctx.body.push({ op: "local.set", index: argsLocal });
+    // (#779e) Build the arguments vec via the shared extras-aware helper so the
+    // closure sees the TRUE call-site argument count (from __argc/__extras_argv
+    // set by the closure call site, #1511) — not just its declared arity.
+    // paramOffset is 1 because lifted closures carry __self at local index 0.
+    emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, {
+      vecTypeIdx: vti,
+      arrTypeIdx: ati,
+      argsLocalIdx: argsLocal,
+      arrTmpIdx: arrTmp,
+    });
   }
 
   let conciseBodyHasValue = false;
@@ -2405,13 +2383,25 @@ export function compileArrowAsCallback(
     }
   }
 
-  const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+  // #1606: For functions parsed from a foreign SourceFile (e.g. statically
+  // inlined `eval("...")` bodies), the checker has no symbol binding for the
+  // declaration. `getSignatureFromDeclaration` then dereferences `.declarations`
+  // on an undefined symbol deep inside TypeScript and throws
+  // "Cannot read properties of undefined (reading 'declarations')". Guard the
+  // signature/return-type resolution so the callback compiles with a void/any
+  // return type instead of crashing the whole compile — the body still coerces
+  // its actual return value via the normal path.
   let cbReturnType: ValType | null = null;
-  if (sig) {
-    const retType = ctx.checker.getReturnTypeOfSignature(sig);
-    if (!isVoidType(retType)) {
-      cbReturnType = resolveWasmType(ctx, retType);
+  try {
+    const sig = ctx.checker.getSignatureFromDeclaration(arrow);
+    if (sig) {
+      const retType = ctx.checker.getReturnTypeOfSignature(sig);
+      if (!isVoidType(retType)) {
+        cbReturnType = resolveWasmType(ctx, retType);
+      }
     }
+  } catch {
+    cbReturnType = null;
   }
 
   const cbResults: ValType[] = cbReturnType ? [cbReturnType] : [];
@@ -3074,11 +3064,188 @@ export function emitObjectMethodAsClosure(
   });
   ctx.funcMap.set(trampolineName, trampolineFuncIdx);
 
+  // (#1602) The method's `func.typeIdx` may be re-resolved after this point
+  // (generator/default-param methods finalize their param types/order during
+  // body compilation). The forwarding body built above snapshots the CURRENT
+  // signature; record it so a post-pass can rebuild it against the method's
+  // final signature once all function bodies are compiled.
+  ctx.pendingMethodTrampolines.push({
+    trampolineBody,
+    trampolineFuncIdx,
+    methodFuncIdx,
+    objStructTypeIdx,
+    userParamCount: userParams.length,
+    wrapperUserParams: userParams,
+    wrapperResult: results[0],
+  });
+
   // Emit: ref.func $trampoline, struct.new $closure_struct
   fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
   fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
 
   return { kind: "ref", typeIdx: structTypeIdx };
+}
+
+/**
+ * (#1602) Rebuild every object-method-as-closure trampoline body against the
+ * method's FINAL signature. Must run after all function bodies are compiled
+ * (so `func.typeIdx` re-resolution has settled) and BEFORE late-import index
+ * shifting, since the rebuilt body re-emits `call methodFuncIdx` at the current
+ * (pre-shift) index — the shift machinery then walks it like any other body.
+ *
+ * The trampoline's own signature (its wrapper func type) is left untouched; we
+ * only fix the forwarding body so its `local.get` count and the `call`'s
+ * operand types match the method's resolved params. The wrapper's user-param
+ * count is invariant (derived from the same method), so the trampoline param
+ * indices stay valid; only the per-arg coercion is what could drift, and any
+ * coercion the call needs is applied by mirroring the method's param types.
+ */
+export function finalizeMethodTrampolines(ctx: CodegenContext): void {
+  for (const t of ctx.pendingMethodTrampolines) {
+    const sig = getFuncSignature(ctx, t.methodFuncIdx);
+    if (!sig || sig.params.length === 0) continue;
+    const methodUserParams = sig.params.slice(1);
+    // Only rebuild when the user-param arity is unchanged. The trampoline's
+    // OWN func type (its wrapper type) was fixed at registration with
+    // `userParamCount` params and is shared/cached, so it cannot change here;
+    // forwarding a different number of params would violate that contract and
+    // produce an invalid `local.get` index. An arity change (e.g. async method
+    // param injection) is a separate concern handled by its own codegen path.
+    if (methodUserParams.length !== t.userParamCount) continue;
+
+    // (#1669) The trampoline's OWN signature (the wrapper func type, captured
+    // when the closure value was emitted) fixes the types of the `local.get`s
+    // the forwarding body reads. The method's signature may have been
+    // re-resolved during body compilation (default-param / generator / async
+    // methods finalize their param types and order then), so the wrapper param
+    // types and the method param types can DRIFT — e.g. a default-param method
+    // resolves its param to `f64` while the closure-value ABI typed the wrapper
+    // param `externref`, or two structurally-deduped sibling literals swap a
+    // param's `f64`/`externref` position. Forwarding the wrapper-typed value
+    // straight into `call methodFuncIdx` then emits an invalid `call`
+    // ("expected externref, found (ref null N)" / "expected externref, found
+    // f64"). The same drift can affect the RESULT: the wrapper's declared
+    // result is `externref` while the method now returns `(ref null N)`, which
+    // shows up as a `fallthru` type error.
+    //
+    // #1602 introduced this rebuild but forwarded the params verbatim with no
+    // coercion, which is correct only when the types did not drift. Re-emit the
+    // forwarding with a per-arg coercion from the WRAPPER param type to the
+    // METHOD param type, and a final coercion from the method result to the
+    // wrapper result, so the rebuilt body validates against both signatures.
+    // The wrapper signature is captured at emit time (the static types of the
+    // `local.get`s the body reads and the type it must return). Re-deriving it
+    // from `t.trampolineFuncIdx` is unsafe: late-import shifting can move that
+    // index relative to the recorded value, returning a different function's
+    // signature (observed for async methods).
+    const wrapperUserParams = t.wrapperUserParams;
+    const wrapperResult = t.wrapperResult;
+    const methodResult = sig.results[0];
+
+    // Build a minimal FunctionContext so coercions that need a scratch local
+    // (externref → ref/ref_null) can allocate one. Its `params` mirror the
+    // trampoline's wrapper signature exactly (closure_self at index 0, then the
+    // wrapper's user params at 1..N) so `allocTempLocal` computes a temp index
+    // past the real params; the allocated `localDefs` are attached to the
+    // registered trampoline function below.
+    const localDefs: LocalDef[] = [];
+    const tFctx: FunctionContext = {
+      name: `__obj_meth_tramp_finalize_${t.trampolineFuncIdx}`,
+      params: [
+        { name: "__self", type: { kind: "anyref" } },
+        ...wrapperUserParams.map((p, i) => ({ name: `__p${i}`, type: p })),
+      ],
+      locals: localDefs,
+      localMap: new Map(),
+      returnType: wrapperResult ?? null,
+      body: [],
+      blockDepth: 0,
+      breakStack: [],
+      continueStack: [],
+      labelMap: new Map(),
+      savedBodies: [],
+    };
+
+    const newBody: Instr[] = [{ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr];
+    for (let i = 0; i < methodUserParams.length; i++) {
+      newBody.push({ op: "local.get", index: i + 1 } as Instr);
+      const from = wrapperUserParams[i];
+      const to = methodUserParams[i]!;
+      if (from && from.kind !== to.kind) {
+        tFctx.body = newBody;
+        newBody.push(...coercionInstrs(ctx, from, to, tFctx));
+      } else if (
+        from &&
+        (from.kind === "ref" || from.kind === "ref_null") &&
+        (to.kind === "ref" || to.kind === "ref_null")
+      ) {
+        // Same kind but possibly different struct typeIdx — guarded re-cast.
+        const fromIdx = (from as { typeIdx?: number }).typeIdx;
+        const toIdx = (to as { typeIdx?: number }).typeIdx;
+        if (fromIdx !== toIdx && toIdx !== undefined) {
+          tFctx.body = newBody;
+          newBody.push(...coercionInstrs(ctx, from, to, tFctx));
+        }
+      }
+    }
+    newBody.push({ op: "call", funcIdx: t.methodFuncIdx } as Instr);
+    // Reconcile the result arity/type with the wrapper's declared result.
+    if (methodResult && !wrapperResult) {
+      // Method now returns a value the void wrapper must discard.
+      newBody.push({ op: "drop" } as Instr);
+    } else if (wrapperResult && methodResult && wrapperResult.kind !== methodResult.kind) {
+      tFctx.body = newBody;
+      newBody.push(...coercionInstrs(ctx, methodResult, wrapperResult, tFctx));
+    } else if (
+      wrapperResult &&
+      methodResult &&
+      (wrapperResult.kind === "ref" || wrapperResult.kind === "ref_null") &&
+      (methodResult.kind === "ref" || methodResult.kind === "ref_null") &&
+      (wrapperResult as { typeIdx?: number }).typeIdx !== (methodResult as { typeIdx?: number }).typeIdx
+    ) {
+      // (#1672) Both results are GC struct refs but with DIFFERENT typeIdx.
+      // This happens when the wrapper captured the method's result struct type
+      // at closure-emit time (`results[0]`), but the method body later resolved
+      // its return to a structurally-distinct struct type (e.g. two
+      // iterator-result-like struct shapes built at different points — the
+      // AsyncFromSyncIterator `next`/`return`/`throw` accessor path). `coercionInstrs`
+      // is a NO-OP for same-`kind` operands (`from.kind === to.kind`), so the
+      // earlier reliance on it left the body returning `ref methodTypeIdx` where
+      // the wrapper's func type declares `ref wrapperTypeIdx` — an invalid module
+      // ("fallthru" / result type error compiling `__obj_meth_tramp_*`). Emit an
+      // explicit cast to the wrapper's declared result type instead. The cast is
+      // routed through `anyref` so it works regardless of whether the two struct
+      // types share a supertype (a direct `ref.cast` between unrelated GC types is
+      // itself invalid). At runtime the method's generator/iterator-result object
+      // is a valid instance of the wrapper's result shape, so the cast succeeds.
+      const wrapperTypeIdx = (wrapperResult as { typeIdx: number }).typeIdx;
+      if (methodResult.kind === "ref") {
+        // Non-null source: cast directly.
+        newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+      } else {
+        // Nullable source: a null must stay null; cast preserves nullability when
+        // the target is also nullable, else guard. Wrapper result kind dictates.
+        if (wrapperResult.kind === "ref_null") {
+          newBody.push({ op: "ref.cast_null", typeIdx: wrapperTypeIdx } as Instr);
+        } else {
+          newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+        }
+      }
+    }
+
+    // Mutate the existing body array in place so the already-registered
+    // function keeps the same body reference, and attach any temp locals
+    // coercion allocated for this trampoline. The function is located by body
+    // identity (not by `trampolineFuncIdx`, which may have shifted): the
+    // registered trampoline holds the SAME `t.trampolineBody` array reference.
+    if (localDefs.length > 0) {
+      const func = ctx.mod.functions.find((f) => f.body === t.trampolineBody);
+      if (func) func.locals.push(...localDefs);
+    }
+    t.trampolineBody.length = 0;
+    t.trampolineBody.push(...newBody);
+  }
+  ctx.pendingMethodTrampolines.length = 0;
 }
 
 /**
@@ -3147,6 +3314,27 @@ export function emitCachedMethodClosureAccess(
     });
     ctx.funcMap.set(trampolineName, trampolineFuncIdx);
     ctx.mod.declaredFuncRefs.push(trampolineFuncIdx);
+
+    // (#1669) The method's `func.typeIdx` may still be re-resolved after this
+    // first cached access (the method body is compiled later in the same pass,
+    // and generator/default-param/async methods finalize their param types and
+    // order during that body compile). The trampoline body built above forwards
+    // `local.get`s typed by THIS wrapper signature into `call methodFuncIdx`,
+    // which validates against the method's FINAL signature. If they drift, the
+    // module is invalid. #1602 fixed exactly this for the per-call-site
+    // (non-cached) trampoline via `pendingMethodTrampolines`; the cached
+    // singleton trampoline was never enrolled, so it kept the stale forwarding.
+    // Enroll it so `finalizeMethodTrampolines` rebuilds the body against the
+    // method's final signature (with per-arg externref coercion).
+    ctx.pendingMethodTrampolines.push({
+      trampolineBody,
+      trampolineFuncIdx,
+      methodFuncIdx,
+      objStructTypeIdx,
+      userParamCount: userParams.length,
+      wrapperUserParams: userParams,
+      wrapperResult: results[0],
+    });
   }
 
   // Reuse or allocate the cache global. Type is externref so the value

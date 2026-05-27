@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { ts, forEachChild } from "../ts-api.js";
 import type { CompileError, CompileOptions } from "../index.js";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { forEachChild, ts } from "../ts-api.js";
 
 // Default blocked members on extern classes in safe mode
 const DEFAULT_BLOCKED_MEMBERS = new Set([
@@ -14,7 +14,10 @@ const DEFAULT_BLOCKED_MEMBERS = new Set([
   "insertAdjacentHTML",
 ]);
 
-function getApproxSourceLocation(sourceFile: ts.SourceFile): { line: number; column: number } {
+function getApproxSourceLocation(sourceFile: ts.SourceFile): {
+  line: number;
+  column: number;
+} {
   const anchor = sourceFile.statements[0] ?? sourceFile;
   const { line, character } = sourceFile.getLineAndCharacterOfPosition(anchor.getStart(sourceFile));
   return { line: line + 1, column: character + 1 };
@@ -726,6 +729,19 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           if (isLexical && init.declarations.length > 1) {
             addError(node, "Only a single declaration is allowed in a for-in statement");
           }
+          // ES spec: It is a Syntax Error if BoundNames of ForDeclaration
+          // contains any duplicate entries (lexical only) — e.g.
+          // `for (let [x, x] in {}) {}` / `for (const [x, x] in {}) {}`.
+          if (isLexical) {
+            const seen = new Set<string>();
+            const dupes = new Set<string>();
+            for (const decl of init.declarations) {
+              collectBindingNamesWithDuplicateCheck(decl.name, seen, dupes);
+            }
+            for (const name of dupes) {
+              addError(node, `Duplicate binding '${name}' in for-in declaration`);
+            }
+          }
         }
       }
     }
@@ -1005,7 +1021,10 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       // label: let x; or label: const x;
       if (ts.isVariableStatement(stmt)) {
         const flags = stmt.declarationList.flags;
-        if ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) {
+        if (
+          ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) &&
+          !isAsiLetExpressionStatement(stmt, flags)
+        ) {
           addError(node, "Lexical declaration (let/const) cannot appear in a labeled statement");
         }
       }
@@ -1022,7 +1041,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       const flags = node.declarationList.flags;
       if ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) {
         const parent = node.parent;
-        if (parent && isStatementPosition(parent, node)) {
+        if (parent && isStatementPosition(parent, node) && !isAsiLetExpressionStatement(node, flags)) {
           addError(node, "Lexical declaration cannot appear in a single-statement context");
         }
       }
@@ -2457,7 +2476,10 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
         const existing = privateNames.get(name);
         if (!existing) {
-          privateNames.set(name, { kinds: new Set([kind]), isStatic: memberIsStatic });
+          privateNames.set(name, {
+            kinds: new Set([kind]),
+            isStatic: memberIsStatic,
+          });
         } else {
           // get+set pair is allowed ONLY if both have the same staticness
           const combined = new Set([...existing.kinds, kind]);
@@ -2578,6 +2600,36 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
         return false; // Found a non-generator function boundary
       }
       current = current.parent;
+    }
+    return false;
+  }
+
+  /**
+   * TypeScript parses `let` followed by a LineTerminator and then an identifier
+   * or `{` (e.g. `if (false) let\nx = 1;`) as a LexicalDeclaration, but per
+   * ECMA-262 the ExpressionStatement lookahead restriction is only `let [`
+   * (with NO `[no LineTerminator here]`). So `let` + newline + (anything but
+   * `[`) is actually an ExpressionStatement (`let` identifier reference) closed
+   * by ASI, which is valid in single-statement position. `let [` stays a
+   * lexical declaration even across a newline, and `const` is always a reserved
+   * word so it is never an expression statement.
+   */
+  function isAsiLetExpressionStatement(node: ts.VariableStatement, flags: ts.NodeFlags): boolean {
+    if ((flags & ts.NodeFlags.Let) === 0) return false;
+    const decls = node.declarationList.declarations;
+    if (decls.length !== 1) return false;
+    const binding = decls[0].name;
+    // `let [` is a lexical declaration / array destructuring even after a newline.
+    if (ts.isArrayBindingPattern(binding)) return false;
+    // Source text between the `let` keyword and the first binding: a line
+    // terminator there means ASI applies and `let` is an identifier reference.
+    const declList = node.declarationList;
+    const keywordEnd = declList.getStart(sourceFile) + "let".length;
+    const between = sourceFile.text.slice(keywordEnd, binding.getStart(sourceFile));
+    for (const ch of between) {
+      const c = ch.charCodeAt(0);
+      // LF, CR, LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029)
+      if (c === 0x0a || c === 0x0d || c === 0x2028 || c === 0x2029) return true;
     }
     return false;
   }
@@ -3311,7 +3363,12 @@ function hasExportModifier(node: ts.Node): boolean {
 function validateHardenedMode(
   sourceFile: ts.SourceFile,
 ): Array<{ message: string; line: number; column: number; severity: "error" }> {
-  const errors: Array<{ message: string; line: number; column: number; severity: "error" }> = [];
+  const errors: Array<{
+    message: string;
+    line: number;
+    column: number;
+    severity: "error";
+  }> = [];
 
   function visit(node: ts.Node): void {
     // Reject eval() calls

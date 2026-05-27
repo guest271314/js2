@@ -30,7 +30,7 @@ import type {
 } from "./context/types.js";
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
-import { emitUndefined } from "./expressions/late-imports.js";
+import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -39,6 +39,7 @@ import {
   repairStructTypeMismatches,
 } from "./fixups.js";
 import { emitInlineMathFunctions } from "./math-helpers.js";
+import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
 import {
@@ -808,6 +809,14 @@ export function generateModule(
       addImport(ctx, "env", "__register_class_object", { kind: "func", typeIdx: regClassTypeIdx });
     }
 
+    // #1677 — reconcile native-string helper func indices before emitting more
+    // defined helpers that look them up. Imports registered after the helpers
+    // (e.g. the __register_prototype / __register_class_object pair above)
+    // shift the helpers' true indices but not their baked-in sibling-call
+    // targets nor the `nativeStrHelpers` / funcMap entries the deferred WASI
+    // write helpers read. Incremental + no-op on the default GC path.
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Emit inline Wasm implementations for Math methods (after all imports are registered)
     if (ctx.pendingMathMethods.size > 0) {
       emitInlineMathFunctions(ctx, ctx.pendingMathMethods);
@@ -832,6 +841,14 @@ export function generateModule(
     // the function's signature instead of being patched after the fact.
     ctx.numericReturnTypes = inferNumericReturnTypes(ctx, ast.sourceFile);
 
+    // #1677 — final reconcile of native-string helper indices before any USER
+    // function is registered. Any imports added by the deferred-helper
+    // emitters above are folded in here; afterward the compilation-phase
+    // late-import path (ensureLateImport → flushLateImportShifts, which now
+    // also shifts `nativeStrHelpers`) keeps them correct. Incremental no-op
+    // when nothing drifted.
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Second pass: collect all function declarations and interfaces
     collectDeclarations(ctx, ast.sourceFile);
 
@@ -840,6 +857,11 @@ export function generateModule(
 
     // Third pass: compile function bodies
     compileDeclarations(ctx, ast.sourceFile);
+
+    // (#1602) Rebuild object-method-as-closure trampoline bodies against the
+    // method's now-final signature (param types/order may have been re-resolved
+    // during body compilation above).
+    finalizeMethodTrampolines(ctx);
 
     // Experimental IR path: for functions selected by `planIrCompilation`,
     // rebuild their bodies via the middle-end IR (AST → IR → Wasm). Runs
@@ -3132,6 +3154,10 @@ export function generateMultiModule(
       collectAllSourceImports(ctx, sf);
     }
 
+    // #1677 — reconcile native-string helper indices before emitting deferred
+    // helpers that look them up (see single-module path).
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Emit inline Wasm implementations for Math methods (after all imports are registered)
     if (ctx.pendingMathMethods.size > 0) {
       emitInlineMathFunctions(ctx, ctx.pendingMathMethods);
@@ -3157,6 +3183,9 @@ export function generateMultiModule(
       ctx.numericReturnTypes = merged;
     }
 
+    // #1677 — final reconcile before any user function is registered.
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
@@ -3172,6 +3201,9 @@ export function generateMultiModule(
     for (const sf of multiAst.sourceFiles) {
       compileDeclarations(ctx, sf);
     }
+
+    // (#1602) Rebuild method-closure trampolines against final method sigs.
+    finalizeMethodTrampolines(ctx);
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
     fixupStructNewArgCounts(ctx);
@@ -3521,6 +3553,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     }
     // #1481: readStdin() builtin → triggers fd_read import + helper
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "readStdin") {
+      needsFdRead = true;
+    }
+    // #1653: process.stdin.read(buf, offset?) → triggers fd_read import (the
+    // binary, incremental Node-API replacement for readStdin()). Detect the
+    // `process.stdin.read(...)` call shape so fd_read is registered even when
+    // readStdin() is never used.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "read" &&
+      ts.isPropertyAccessExpression(node.expression.expression) &&
+      node.expression.expression.name.text === "stdin" &&
+      ts.isIdentifier(node.expression.expression.expression) &&
+      node.expression.expression.expression.text === "process"
+    ) {
       needsFdRead = true;
     }
     forEachChild(node, visit);
@@ -3894,7 +3941,7 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  *   - WASI_WRITE_SCRATCH_START = 128KB (page 2) — fd_write staging buffer
  * `registerWasiImports` reserves 3 pages so both always exist.
  */
-const WASI_STDIN_BUF_START = 64 * 1024;
+export const WASI_STDIN_BUF_START = 64 * 1024;
 const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
@@ -5978,6 +6025,7 @@ export const FUNCTIONAL_ARRAY_METHODS = new Set([
   "filter",
   "map",
   "reduce",
+  "reduceRight",
   "forEach",
   "find",
   "findIndex",
@@ -5994,7 +6042,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name.text;
       if (FUNCTIONAL_ARRAY_METHODS.has(method)) {
-        if (method === "reduce") {
+        if (method === "reduce" || method === "reduceRight") {
           need2 = true;
         } else {
           need1 = true;
@@ -6004,7 +6052,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
       if (method === "call" && ts.isPropertyAccessExpression(node.expression.expression)) {
         const innerMethod = node.expression.expression.name.text;
         if (FUNCTIONAL_ARRAY_METHODS.has(innerMethod)) {
-          if (innerMethod === "reduce") {
+          if (innerMethod === "reduce" || innerMethod === "reduceRight") {
             need2 = true;
           } else {
             need1 = true;
@@ -6721,23 +6769,15 @@ export function addIteratorImports(ctx: CodegenContext): void {
   const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__iterator", { kind: "func", typeIdx: extToExt });
 
-  // __iterator_next: (externref) → externref — calls iter.next()
+  // __iterator_next: (externref) → (i32 done, externref value) — calls iter.next()
+  // Multi-value result avoids the $IteratorResult struct: a freshly-built WasmGC
+  // struct cannot survive the JS import hop (it surfaces as undefined in V8/Node;
+  // see #1620 BLOCKED). The two primitives (i32 + externref) cross the JS↔Wasm
+  // multi-value ABI cleanly, eliminating __iterator_done / __iterator_value.
+  const extToDoneValue = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }, { kind: "externref" }]);
   addImport(ctx, "env", "__iterator_next", {
     kind: "func",
-    typeIdx: extToExt,
-  });
-
-  // __iterator_done: (externref) → i32 — returns result.done ? 1 : 0
-  const extToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__iterator_done", {
-    kind: "func",
-    typeIdx: extToI32,
-  });
-
-  // __iterator_value: (externref) → externref — returns result.value
-  addImport(ctx, "env", "__iterator_value", {
-    kind: "func",
-    typeIdx: extToExt,
+    typeIdx: extToDoneValue,
   });
 
   // __iterator_return: (externref) → void — calls iter.return() if it exists
@@ -7413,11 +7453,32 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (ctx.funcMap.has(fullName)) continue; // already registered
 
     const sig = callSigs[0]!;
-    // Build parameter types: self (ref $structTypeIdx) + declared params
+    // Build parameter types: self (ref $structTypeIdx) + declared params.
+    // (#1671) This pre-registration is the CANONICAL `funcMap` entry that
+    // direct calls `obj.method()` dispatch through. Its param types MUST match
+    // what the method body actually compiles to in
+    // `compileObjectLiteralForStruct` (search "methodParams" in literals.ts) —
+    // applying the same default-init `ref→ref_null` widening AND the
+    // binding-pattern `→externref` destructure widening (#1151 Gap B).
+    // Otherwise the body-compile detects a signature mismatch, forks a
+    // per-literal funcIdx, and leaves THIS canonical func an empty stub body —
+    // so a direct `obj.method()` lands on the stub and traps
+    // ("dereferencing a null pointer" / iterator "reading 'next' of null").
     const methodParams: ValType[] = [{ kind: "ref", typeIdx }];
     for (const param of sig.parameters) {
       const paramDecl = param.valueDeclaration;
-      if (paramDecl) {
+      if (paramDecl && ts.isParameter(paramDecl)) {
+        const pt = ctx.checker.getTypeAtLocation(paramDecl);
+        let wasmType = resolveWasmType(ctx, pt);
+        if (paramDecl.initializer && wasmType.kind === "ref") {
+          wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+        }
+        const hasBindingPattern = ts.isArrayBindingPattern(paramDecl.name) || ts.isObjectBindingPattern(paramDecl.name);
+        if (hasBindingPattern && !paramDecl.type && !paramDecl.dotDotDotToken && wasmType.kind !== "externref") {
+          wasmType = { kind: "externref" };
+        }
+        methodParams.push(wasmType);
+      } else if (paramDecl) {
         const pt = ctx.checker.getTypeAtLocation(paramDecl);
         methodParams.push(resolveWasmType(ctx, pt));
       } else {
@@ -7564,6 +7625,32 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
       namespacePath: [],
       className: "WeakSet",
       constructorParams: [{ kind: "externref" }],
+      methods,
+      properties: new Map(),
+    });
+  }
+
+  // FinalizationRegistry (#1600) — host-delegate in JS mode, no-op stub in
+  // standalone. The spec never guarantees cleanup callbacks run, so a registry
+  // that tracks register/unregister but never fires the callback is fully
+  // conformant. The host import builds a real engine FinalizationRegistry;
+  // register/unregister forward to it.
+  if (!ctx.externClasses.has("FinalizationRegistry")) {
+    const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
+    // register(target, heldValue, unregisterToken?) → undefined
+    methods.set("register", {
+      params: [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      results: [{ kind: "externref" }],
+      requiredParams: 2,
+    });
+    // unregister(token) → boolean (externref)
+    methods.set("unregister", externMethod(1));
+
+    ctx.externClasses.set("FinalizationRegistry", {
+      importPrefix: "FinalizationRegistry",
+      namespacePath: [],
+      className: "FinalizationRegistry",
+      constructorParams: [{ kind: "externref" }], // new FinalizationRegistry(cleanupCallback)
       methods,
       properties: new Map(),
     });
@@ -7894,6 +7981,10 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
       // not a host import — skip the env.readStdin stub so the codegen path in
       // compileCallExpression takes over.
       if (ctx.wasi && name === "readStdin") continue;
+      // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
+      // skip the stub so the unified-collector finalize can emit the WasmGC
+      // native scanners (registered under the same funcMap names) instead.
+      if ((ctx.wasi || ctx.standalone) && (name === "parseInt" || name === "parseFloat")) continue;
       if (!ctx.funcMap.has(name)) {
         const sig = ctx.checker.getSignatureFromDeclaration(stmt);
         if (sig) {
@@ -9096,7 +9187,7 @@ export function hoistLetConstWithTdz(
  * Returns false if every access to the symbol is provably after the declaration
  * in straight-line code (same function, no closures, loop-local safe).
  */
-function needsTdzFlag(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
+export function needsTdzFlag(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);
   if (!symbol) return true;
   const declEnd = decl.getEnd();

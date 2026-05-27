@@ -1,10 +1,9 @@
 ---
 id: 1530
 title: "wasi: Native Messaging host example (Chrome extension integration)"
-status: done
+status: in-progress
 created: 2026-05-20
 updated: 2026-05-24
-completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: low
@@ -15,7 +14,8 @@ goal: wasi-completeness
 sprint: 55
 github_issue: 389
 filed_by: guest271314
-related: [1482, 1483, 1484]
+depends_on: [1653, 1654]
+related: [1482, 1483, 1484, 1651, 1653, 1654, 1655]
 ---
 ## Problem
 
@@ -206,3 +206,104 @@ Until those land, `examples/native-messaging/host.ts` **deliberately** uses
 the string-based `readStdin()` (#1481) for input and the `Uint8Array`-literal
 `process.stdout.write` (#1651) for the length prefix — the working subset the
 current compiler supports. `host.ts` is intentionally left unchanged.
+
+## Reopened (2026-05-24) — premature `done`
+
+This issue was closed `done` on 2026-05-24, but the example **does not actually
+work end-to-end**: the original delivery's own findings (above) record that the
+framed-response path is broken, and guest271314 (the original filer, #389) has
+since reported the example doesn't work as shipped. A non-working example is
+not done. Reopened to `in-progress`.
+
+The previous delivery also leaned on a **bespoke `readStdin()` intrinsic**,
+which is the wrong shape per the project's no-bespoke-builtins direction. The
+chosen direction: host capabilities are exposed as **standard Node.js APIs**
+(`process.stdin` / `process.stdout`) that guest TypeScript already knows —
+never as invented intrinsics. guest271314's feedback **"I don't see an
+implementation of `readStdin`"** is the motivating signal: intrinsics aren't
+real APIs (no Node reference, no ecosystem familiarity, nothing to import), so
+the example must be rewritten onto the standard APIs.
+
+## Node-style rewrite plan (gated on #1653 + #1654)
+
+The rewrite below is **dispatched only after #1653 and #1654 land**. It does not
+happen in this plan-only PR.
+
+### 1. Rewrite `host.ts` onto standard Node APIs
+
+Rewrite `examples/native-messaging/host.ts` to use **only standard Node.js
+APIs** — no bespoke builtins:
+
+- **Read side** — `process.stdin.read(buffer, offset?)` (#1653, the keystone)
+  for the framed read loop:
+  1. Read exactly the **4-byte LE length header** into a 4-byte buffer.
+  2. Decode the `uint32` length with `DataView.getUint32(0, true)` (needs #1654).
+  3. Read exactly **N body bytes** into an N-byte buffer.
+  4. `JSON.parse` the UTF-8 body.
+- **Write side** — `process.stdout.write()` (#1651, already shipped) for the
+  response: write the **4-byte LE length prefix** then the JSON body, no
+  newline. Build the prefix with `Buffer` / `DataView.setUint32(0, len, true)`
+  over an `ArrayBuffer` (needs #1654).
+- Model the read-header-then-read-body framing + the continuous
+  `while (true)` port loop on guest271314's reference
+  [`nm_typescript.ts`](https://github.com/guest271314/NativeMessagingHosts/blob/main/nm_typescript.ts)
+  — **credit guest271314** in the example header. This is the Node/TypeScript
+  analogue of the AssemblyScript reference, expressed in exactly the standard
+  APIs js2wasm now mimics.
+
+### 2. Deprecate / remove the bespoke `readStdin()`
+
+**Remove `readStdin()` from the example entirely** (the `declare function
+readStdin(): string;` line and all call sites). It is replaced by
+`process.stdin.read()` (#1653). No bespoke builtins remain in the example after
+the rewrite.
+
+### 3. Incorporate guest271314's PR #589 improvements (with attribution)
+
+guest271314's PR #589 adds a real MV3 web-extension scaffold around the example.
+Incorporate its improvements **with attribution to guest271314** — but **fix its
+two flaws**:
+
+- **Adopt (attributed to guest271314):**
+  - `background.js` — MV3 service-worker that opens the native-messaging port.
+  - `manifest.json` — repurposed/added as the **web-extension manifest** (MV3).
+  - `nm_js2wasm.json` — the **native-host manifest** (the `path` + `type:
+    "stdio"` + `allowed_origins` descriptor Chrome reads).
+  - The accompanying file renames from PR #589.
+- **Fix flaw 1 — runner shebang Wasm proposals:** the `nm_js2wasm.sh` runner
+  must pass `-W gc=y,function-references=y,tail-call=y,exceptions=y` to wasmtime,
+  **NOT** `-W all-proposals=y`. `all-proposals=y` enables stack-switching, which
+  breaks wasmtime 44 with a stack-switching error. Pin the exact proposal set
+  js2wasm output needs.
+- **Fix flaw 2 — runner robustness:** restore the **executable bit** on the
+  runner script and use a **portable path-resolution** scheme (resolve the
+  `.wasm` relative to the script's own location, not a hard-coded absolute
+  path), so the native-host manifest's `path` works regardless of install
+  location.
+
+### Acceptance
+
+- The example works **end-to-end under real wasmtime**: a framed
+  `{"ping":true}` request (4-byte LE prefix + JSON body on fd=0) produces a
+  correct framed response (4-byte LE prefix + JSON body on fd=1), verified by
+  `examples/native-messaging/smoke-test.sh`.
+- **No bespoke builtins remain** — input via `process.stdin.read()`, output via
+  `process.stdout.write()`, framing via `Buffer`/`DataView`/`ArrayBuffer`.
+- The MV3 scaffold (`background.js`, web-extension `manifest.json`,
+  `nm_js2wasm.json`) is present and credited to guest271314; the runner uses the
+  pinned proposal set, is executable, and resolves the `.wasm` portably.
+
+### Sequencing / external-PR note
+
+- The rewrite is **dispatched after #1653 + #1654 land** (depends_on). Do not
+  start the `host.ts` rewrite before the binary stdin read + ArrayBuffer/DataView
+  validity are in.
+- **HOLD — do not merge guest271314's PR #589 until guest has an affirmative
+  CLA acceptance recorded (gated on #1660).** Our current `cla-check` workflow
+  is a no-op placeholder that records nothing, so we have no evidence guest271314
+  ever accepted the CLA. PR #589 must wait behind a real CLA gate (#1660) before
+  it can land.
+- **How to integrate vs guest271314's PR #589 is a maintainer decision.** Do
+  **not** clobber the external PR — coordinate so guest's contribution lands
+  with attribution rather than being silently re-implemented. This plan
+  describes the target shape; the merge mechanics are the maintainer's call.

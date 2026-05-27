@@ -3,7 +3,7 @@ id: 1632
 title: "spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails)"
 status: ready
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -90,3 +90,84 @@ then discarded). We need to either:
 
 - `test262/test/built-ins/Function/prototype/bind/length.js`
 - `test262/test/built-ins/Function/prototype/toString/built-in-function-object.js`
+
+## Investigation 2026-05-27 (issue-1318-v2 / dev-1608)
+
+Smoke-tested current main (`a619649a`) against the three target buckets via
+`runTest262File`:
+
+| Bucket | Pass / Total |
+|--------|--------------|
+| `built-ins/Function/prototype/bind` | **34 / 100** (66 fail) |
+| `built-ins/Function/prototype/toString` | **67 / 80** (13 fail) |
+| `built-ins/Function/internals` | **3 / 8** (5 fail — Proxy/realm, hard) |
+
+The acceptance-criteria probes are **already split**: `bind/length.js`,
+`bind/name.js` already PASS (they test `Function.prototype.bind`'s OWN
+`.length===1`/`.name==="bind"`, which the codegen resolves). What FAILS is
+`bind/instance-name.js` — the **bound function's** `.name` must be
+`"bound target"` (criterion 3).
+
+### Root cause confirmed — identity-bind is the blocker
+
+`fn.bind(...)` lowers via the **identity-bind** path at
+`src/codegen/expressions/calls.ts:2068`: it drops all bind args and returns the
+**target receiver externref unchanged** (an intentional documented
+simplification). Consequences, all confirmed by probe:
+
+- `target.bind().name` → `"target"` (should be `"bound target"`) — the bound
+  object IS the target, so it carries the target's name.
+- `target.bind(undefined,1).length` → `0` (should be recomputed
+  `max(0, target.length - boundArgs.length)`) — the result is plain externref,
+  losing the TS call signatures the `.length` branch
+  (`property-access.ts:1552`) needs.
+- `target.bind(undefined,5)()` → RUNERR — the externref isn't a real callable
+  bound function with `[[BoundArguments]]` prepending.
+
+These three are NOT independently fixable on the identity-bind path: correct
+`.name`/`.length`/`[[Call]]`/`[[Construct]]` all require the bound function to
+be a **distinct object** carrying its own metadata. 19 of the 66 bind fails
+also need `[[Construct]]` (`new`/`instanceof`).
+
+### A localized hack is not viable
+
+Prepending `"bound "` only when `.name` is accessed directly on a `bind()`
+call-expression would fix exactly one shape (`target.bind().name`) and miss the
+dominant via-local form (`const b = target.bind(); b.name`), which has already
+collapsed to the target externref by the time `.name` is read. It would not
+touch `.length` or call semantics. Net test262 movement ≈ 1, with fragility
+risk. Rejected.
+
+### toString sub-bucket (13 fail) is a separate feature
+
+The `prototype/toString` failures need **verbatim source-text retention**
+(including interior comments like `async f /* a */ ( /* b */ )`) or a
+`[native code]` form that matches the `NativeFunction` grammar in
+`nativeFunctionMatcher.js`. Two are `compile_error` on async/getter
+class-expression parsing. This is orthogonal to bind and warrants its own
+sub-issue.
+
+### Recommendation — ESCALATE for architect spec, then carve
+
+The load-bearing change is the **bound-function representation**, which is a
+real WasmGC design decision (matches the issue's own `feasibility: medium /
+reasoning_effort: high` and "Files to modify" list spanning `closures.ts` +
+`index.ts` + `runtime.ts`). Suggested carve:
+
+1. **#1632a — bound-function object** (architect spec needed): WasmGC closure
+   struct (or host-`Function.prototype.bind` delegation in JS mode) carrying
+   `[[BoundTargetFunction]]`/`[[BoundThis]]`/`[[BoundArguments]]` + recomputed
+   `length`/`name` (`"bound "` prefix) + `[[Call]]`/`[[Construct]]`. Closes the
+   bulk of the 66 bind fails. The JS-host-delegation angle is attractive but
+   blocked by the fact that a compiled local `var f = function(){}` is a WasmGC
+   closure, not a host callable — so the host's real `bind` can't be applied
+   without first wrapping the closure as a host function (see `_wrapForHost`,
+   `src/runtime.ts:2118`).
+2. **#1632b — Function.prototype.toString source retention** (13 fail):
+   per-function verbatim source slice in a side-table, surfaced by
+   `__function_to_string`.
+3. **#1632 internals** (5 fail): Proxy/realm `[[Call]]`/`[[Construct]]`
+   receiver semantics — likely defer (Proxy is a skip-filter feature).
+
+No code change landed; reverted worktree to clean. Recommend re-routing #1632
+to architect for the #1632a spec before any dev implementation.
