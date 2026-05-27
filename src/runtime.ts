@@ -4268,13 +4268,25 @@ assert._isSameValue = isSameValue;
           if (obj == null) return {};
           const excluded = new Set(excludedKeysStr ? String(excludedKeysStr).split(",") : []);
           const result: Record<string, any> = {};
+          // ES §14.7.4 CopyDataProperties copies only ENUMERABLE own properties.
+          // Sidecar descriptors (set via Object.defineProperty) may mark a key
+          // non-enumerable; consult the descriptor map to skip those. Plain
+          // struct fields and sidecar entries without an explicit descriptor
+          // default to enumerable. (#1552)
+          const descs = _isWasmStruct(obj) ? _wasmPropDescs.get(obj) : undefined;
+          const isEnumerable = (key: string): boolean => {
+            if (!descs) return true;
+            const flags = descs.get(_normalizeDescKey(key));
+            if (flags === undefined) return true;
+            return !!(flags & _SC_ENUMERABLE);
+          };
           // For WasmGC structs, use exported getters to read fields
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               for (const key of fieldNames) {
-                if (!excluded.has(key)) {
+                if (!excluded.has(key) && isEnumerable(key)) {
                   const getter = exports?.[`__sget_${key}`];
                   if (typeof getter === "function") result[key] = getter(obj);
                 }
@@ -4289,7 +4301,7 @@ assert._isSameValue = isSameValue;
           const sc = _wasmStructProps.get(obj);
           if (sc) {
             for (const key of Object.keys(sc)) {
-              if (!excluded.has(key) && !(key in result)) result[key] = sc[key];
+              if (!excluded.has(key) && !(key in result) && isEnumerable(key)) result[key] = sc[key];
             }
           }
           return result;
