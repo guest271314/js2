@@ -603,6 +603,44 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     return { kind: "externref" };
   }
 
+  // (#820h) Explicit Resource Management constructors referenced as *values*
+  // (not in `new`/method position) — e.g. `DisposableStack.prototype`,
+  // `Reflect.construct(DisposableStack, …)`, `Object.getOwnPropertyDescriptor`.
+  // The extern-class machinery only models `new X()` / `x.method()`; a bare
+  // identifier falls through to the null-externref fallback below, so reflective
+  // test262 cases see `null` instead of the host constructor. Resolve them to
+  // the real host global via `__extern_get(__get_globalThis(), name)` so the
+  // native constructor object (with its prototype + accessor descriptors) is
+  // visible. Scope strictly to these host-delegated ERM globals and only when
+  // the name is not shadowed by a local/captured binding.
+  if (
+    (name === "DisposableStack" || name === "AsyncDisposableStack" || name === "SuppressedError") &&
+    !fctx.localMap.has(name) &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (gtFuncIdx !== undefined && getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+      addStringConstantGlobal(ctx, name);
+      const strGlobalIdx = ctx.stringGlobalMap.get(name);
+      if (strGlobalIdx !== undefined) {
+        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      return { kind: "externref" };
+    }
+  }
+
   // Built-in numeric constants: NaN, Infinity
   if (name === "NaN") {
     fctx.body.push({ op: "f64.const", value: NaN });
