@@ -1,9 +1,9 @@
 ---
 id: 1630
 title: "spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fails)"
-status: ready
+status: blocked
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -87,3 +87,51 @@ type carries an accessor), pick the slow path.
 - `test262/test/built-ins/Object/assign/source-own-prop-error.js`
 - `test262/test/built-ins/Object/assign/target-set-symbol.js`
 - `test262/test/built-ins/Object/assign/source-own-prop-keys-error.js`
+
+## Investigation (2026-05-27, dev-1568) — MIS-SCOPED, needs decomposition
+
+Reproduced against current main. Baseline JSONL (May 25): **15 pass / 23 fail**.
+The task title ("Object.assign drops getters / Symbol keys") does **not** match
+the actual failures — getters and Symbol keys already work via host delegation.
+Verified with direct probes:
+
+- `Object.assign(plainTgt, {get a(){return 7}})` → `tgt.a === 7` PASS (getter invoked)
+- `Object.assign(plainTgt, symbolKeyedSrc)` → Symbol copied PASS
+- `Object.assign(plainTgt, nonEnumSrc)` → **copies non-enumerable** FAIL (root cause is
+  `Object.defineProperty enumerable:false` not honored on the struct mirror — NOT assign)
+
+The decisive split is the **target type**, not source accessors:
+- target is plain externref (`{} as any`) → assign fully correct (getter+data both copy).
+- target is a **typed wasmGC struct** (`{a:0,b:0}`) → **both** getter-sourced and plain
+  data writeback fail (`tgt.a` AND `tgt.b` stay 0).
+
+Root cause of the struct-target failure (runtime.ts):
+`__object_assign` wraps the struct target via `_wrapForHost` and runs native
+`Object.assign`. The Proxy `set` trap calls `_safeSet(obj, key, val)`
+(runtime.ts:2177), which writes only to `obj[key]=val` (silently dropped — wasmGC
+structs are opaque to JS) and the **sidecar** `_wasmStructProps`. It never invokes
+a `__sset_<key>` struct-field writeback export. The compiled `tgt.a` read uses the
+struct field (`__sget_a` / direct struct.get), which the sidecar never updated →
+reads stay 0. There is no per-field `__sset_` setter export wired into `_safeSet`.
+
+This is an architectural limitation: **JS-host mutation of wasmGC struct fields
+cannot write back.** Fixing it requires emitting per-field `__sset_<key>` exports
+and routing `_safeSet` through them — a codegen + runtime change spanning the whole
+struct-mirror subsystem, far beyond Object.assign.
+
+The 23 fails decompose into >=4 independent root causes, none a localized assign fix:
+1. **Struct-target writeback** via `_wrapForHost`/`_safeSet` (`Override*`, `Target-Object`).
+2. **Descriptor attributes** enumerable/writable not honored on struct mirror
+   (`source-non-enum`, `target-set-not-writable`) — overlaps `Object.defineProperty`.
+3. **freeze/seal/preventExtensions** not enforced → Set doesn't throw TypeError
+   (`target-is-frozen-*`, `target-is-sealed-*`, `target-is-non-extensible-*`).
+4. **Boxed wrapper `.valueOf()`** round-trip (`Target-Number/String`) — same
+   limitation noted in #1568, shared by number/string/boolean wrappers.
+5. Getter-invocation **order** + Proxy ownKeys (`strings-and-symbol-order*`,
+   `source-own-prop-*-error`) — needs a real per-key Get/Set protocol over structs.
+
+**Recommendation**: re-route to architect for an object-descriptor-model spec, or
+split into sub-issues (struct-writeback mirror; descriptor attributes; freeze/seal
+enforcement; wrapper valueOf). The current single "medium / localized to
+object-ops.ts" framing is not achievable — `compileObjectAssign` does not exist;
+assign already delegates to host `__object_assign` (correct for plain objects).
