@@ -2030,6 +2030,21 @@ function compilePropertyAssignment(
     const setterName = `${typeName}_set_${fieldName}`;
     const funcIdx = ctx.funcMap.get(setterName);
     if (funcIdx !== undefined) {
+      // `C.prototype.<setter> = v` and `C.<static setter> = v` both write
+      // through a receiver that is an externref (the prototype singleton or the
+      // class object), not a struct instance. Coercing that externref to the
+      // setter's struct `this` param produces an invalid `local.tee` (externref
+      // temp fed a struct ref.null). Use the dummy-struct call path (same as
+      // `C.prototype[key] = v`) so the setter receives a throwaway struct
+      // receiver and the value flows through unchanged.
+      const receiverIsProto =
+        ts.isPropertyAccessExpression(target.expression) &&
+        ts.isIdentifier(target.expression.name) &&
+        target.expression.name.text === "prototype";
+      const receiverIsClassObject = ts.isIdentifier(target.expression) && ctx.classSet.has(target.expression.text);
+      if (receiverIsProto || receiverIsClassObject) {
+        return emitSetterCallWithDummy(ctx, fctx, typeName, setterName, funcIdx, value);
+      }
       // Get setter's parameter types to provide type hints
       const setterParamTypes = getFuncParamTypes(ctx, funcIdx);
       const setterObjResult = compileExpression(ctx, fctx, target.expression, setterParamTypes?.[0]);
