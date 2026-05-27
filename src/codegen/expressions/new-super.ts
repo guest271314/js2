@@ -2254,6 +2254,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return null;
   }
 
+  // #1679 — `new this(...)` inside a static method: the callee is `this`, which
+  // the checker resolves to the enclosing constructor (e.g. acorn's `Parser`
+  // function-style class). It is not an identifier, so the function-constructor
+  // path below is skipped. Route a `this`-callee that resolves to a known
+  // function-style constructor (or one we can build from its declaration) to the
+  // same `<Class>_new` machinery, keyed by the resolved className.
+  if (className && !ctx.classSet.has(className) && expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const cachedFnCtor = ctx.funcConstructorMap.get(className);
+    if (cachedFnCtor) {
+      const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
+      if (ctorFuncIdx !== undefined) {
+        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const args = expr.arguments ?? [];
+        for (let i = 0; i < args.length; i++) {
+          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+        }
+        if (paramTypes) {
+          for (let i = args.length; i < paramTypes.length; i++) {
+            pushDefaultValue(fctx, paramTypes[i]!, ctx);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+        return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
+      }
+    } else {
+      // Build the constructor from the resolved constructor function's declaration.
+      const decls = symbol?.getDeclarations();
+      if (decls) {
+        for (const decl of decls) {
+          if (ts.isFunctionDeclaration(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(ctx, fctx, expr, className, decl);
+            if (result) return result;
+            break;
+          }
+          // `var Parser = function Parser(...) {...}` (acorn): the constructor's
+          // symbol resolves directly to the FunctionExpression node, or to the
+          // VariableDeclaration whose initializer is one.
+          if (ts.isFunctionExpression(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(
+              ctx,
+              fctx,
+              expr,
+              className,
+              decl as unknown as ts.FunctionDeclaration,
+            );
+            if (result) return result;
+            break;
+          }
+          if (ts.isVariableDeclaration(decl) && decl.initializer) {
+            let init: ts.Expression = decl.initializer;
+            while (ts.isParenthesizedExpression(init)) init = init.expression;
+            if (ts.isFunctionExpression(init) && init.body) {
+              const result = compileNewFunctionDeclaration(
+                ctx,
+                fctx,
+                expr,
+                className,
+                init as unknown as ts.FunctionDeclaration,
+              );
+              if (result) return result;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Check if the identifier resolves to a function declaration used as constructor
   // (e.g. `function Foo() { this.x = 1; }; new Foo()`)
   if ((!className || !ctx.classSet.has(className)) && ts.isIdentifier(expr.expression)) {
