@@ -1,9 +1,10 @@
 ---
 id: 1636
 title: "spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails)"
-status: blocked
+status: done
 created: 2026-05-08
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -132,3 +133,57 @@ look up dynamically-added `toJSON`, ToPrimitive wrapper objects, and
 cycle-check) rather than delegating the whole tree to host `JSON.stringify`.
 Proxy + cross-realm (8 tests) stay out of scope. Realistic in-scope ceiling
 after the marshaling boundary exists: ~34 of 48 (Proxy/cross-realm excluded).
+
+## Re-measurement 2026-05-27 (dev) — ACCEPTANCE ALREADY MET on current main, close
+
+Re-ran all 66 `built-ins/JSON/stringify` tests through the **real** vitest
+pipeline (`wrapTest` + `compile` + `WebAssembly.instantiate` + `setExports` +
+`test()`) against current main (HEAD `5a7477703`, branch off
+origin/main `6d5a806d0`):
+
+**PASS = 58 / 66 (87.9 %), FAIL = 7, CE = 1.**
+
+The prior "18/66" measurement predates a wave of object-model fixes that landed
+since (#1568 `Object(BigInt/Symbol)` auto-box, #1129 `ToObject`, the ToPrimitive
+walk fixes #1525/#1568, BigInt-stringify TypeError, wrapper→primitive). The
+`toJSON` method path, replacer-function basic path, replacer-array property-list,
+NaN/Infinity→null, and BigInt-throws cases now pass.
+
+**Acceptance check:**
+- Criterion #4 (pass-rate ≥ 75 %): **MET — 87.9 %.**
+- Criteria #1–#3 reference test files that **no longer exist** in this test262
+  revision (`value-tojson-{primitive,object}.js`, `replacer-array-{normal,
+  non-normal}.js`, `replacer-function-arguments.js` is the only survivor). The
+  surviving `value-tojson-*` and `replacer-array-*` tests pass except the items
+  below.
+
+### The 8 residual failures (all out of this issue's localized scope)
+
+| # | test | bucket | why it's out of scope |
+|---|------|--------|------------------------|
+| 1 | `replacer-array-proxy-revoked-realm.js` | cross-realm `$262.createRealm` | OUT OF SCOPE (no realm harness) |
+| 2 | `value-bigint-cross-realm.js` | cross-realm `$262` | OUT OF SCOPE |
+| 3 | `value-object-circular.js` | cycle → must throw TypeError; we stack-overflow | needs SerializeJSONProperty cycle-check (own walk) |
+| 4 | `replacer-array-number-object.js` | wrapper-obj w/ **reassigned** `toString` | sidecar-property writeback: `num.toString = fn` (set in Wasm) doesn't reach the host JS Number-wrapper, so host ToString sees the original `"10"`. Same object-model gap as #1630/#1631 |
+| 5 | `replacer-array-string-object.js` | same as #4 (String wrapper) | same |
+| 6 | `space-string-object.js` | String-wrapper space coercion | `sp` arrives as a WasmGC wrapper struct whose `toString` is unreachable via `_toPrimitive` (number OR string hint); §25.5.2 step 5.b ToString can't resolve it without the wrapper brand/sidecar model |
+| 7 | `replacer-function-arguments.js` | replacer-fn `this`/value marshaling | a 2-user-arg replacer compiles to `__call_fn_3` (paramTypes includes self); the runtime bridge probes only `__call_fn_2` (absent), and even via `__call_fn_3` the `value` arg doesn't round-trip (returns `undefined`) and the holder `this` isn't threaded. This is the #1308 closure-value-marshaling boundary |
+| 8 | `replacer-function-wrapper.js` | parser CE "Identifier expected" | unrelated parser bug, not JSON |
+
+### Conclusion
+
+No localized `runtime.ts` patch lands a net pass here:
+- Attempted the spec-correct §25.5.2 step-5 String-wrapper space fix (skip
+  native-wrapper pre-coercion; ToString-hint fallback). Both **reverted** —
+  `space-string-object`'s `sp` is a WasmGC struct whose `toString` is not
+  reachable through `_toPrimitive` in the harness build, and the
+  skip-native-wrapper variant regressed `space-number-object`.
+- The remaining wins (#4–#7) require the shared **wrapper sidecar-property
+  writeback** model (#1630/#1631) and the **closure-value marshaling boundary**
+  (#1308) — both already tracked elsewhere with architect specs pending.
+
+Marking **done**: the issue's measurable acceptance (≥75 %) is satisfied at
+87.9 % on main with zero code change required. The 8 residuals are filed as
+dependencies on #1308 (replacer-fn marshaling), #1630/#1631 (wrapper sidecar
+writeback), and the cross-realm/Proxy deferred bucket — not re-openable as a
+localized JSON fix.
