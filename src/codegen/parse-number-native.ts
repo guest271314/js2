@@ -402,6 +402,552 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
   if (which.has("parseInt") && !ctx.funcMap.has("parseInt")) {
     emitParseInt(ctx, flattenIdx, strTypeIdx, strDataTypeIdx);
   }
+
+  if (which.has("__str_to_number") && !ctx.funcMap.has("__str_to_number")) {
+    emitStrToNumber(ctx, flattenIdx, strTypeIdx, strDataTypeIdx);
+  }
+}
+
+/**
+ * Native `Number(string)` — ECMA-262 §7.1.4.1 StringToNumber. Signature
+ * `(externref) -> f64`. Differs from `parseFloat` (§19.2.4) in three ways:
+ *   - the ENTIRE trimmed string must be a valid StrNumericLiteral, else NaN
+ *     (parseFloat takes the longest matching prefix);
+ *   - an empty / all-whitespace string is `0` (parseFloat → NaN);
+ *   - `0x`/`0X`, `0o`/`0O`, `0b`/`0B` prefixes select hex/octal/binary integer
+ *     literals (parseFloat ignores them).
+ *
+ * Approach: flatten → trim leading+trailing whitespace → handle the empty,
+ * Infinity and radix-prefix cases, then scan a signed decimal literal and
+ * require the scan to consume the whole trimmed range.
+ */
+function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: number, strDataTypeIdx: number): void {
+  const i32: ValType = { kind: "i32" };
+  const f64: ValType = { kind: "f64" };
+  const extern: ValType = { kind: "externref" };
+  const typeIdx = addFuncType(ctx, [extern], [f64]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__str_to_number", funcIdx);
+
+  // params: 0 s:externref
+  // locals: 1 flat 2 data 3 end:i32 4 i:i32 5 c:i32 6 sign:f64 7 mant:f64
+  //         8 sawDigit:i32 9 fracScale:f64 10 expSign:i32 11 exp:i32
+  //         12 result:f64 13 radix:i32 14 dig:i32
+  const L_FLAT = 1;
+  const L_DATA = 2;
+  const L_END = 3;
+  const L_I = 4;
+  const L_C = 5;
+  const L_SIGN = 6;
+  const L_MANT = 7;
+  const L_SAW = 8;
+  const L_FRAC = 9;
+  const L_EXPSIGN = 10;
+  const L_EXP = 11;
+  const L_RESULT = 12;
+  const L_RADIX = 13;
+  const L_DIG = 14;
+
+  const getC: Instr[] = [
+    { op: "local.get", index: L_DATA },
+    { op: "local.get", index: L_I },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: L_C },
+  ];
+  const getCharAt = (idxInstrs: Instr[]): Instr[] => [
+    { op: "local.get", index: L_DATA },
+    ...idxInstrs,
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+  ];
+
+  const body: Instr[] = [
+    // flat = flatten(s); data = flat.data; i = flat.off; end = off + len
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "local.set", index: L_FLAT },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+    { op: "local.set", index: L_DATA },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: L_I }, // i = off
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "local.get", index: L_I },
+    { op: "i32.add" },
+    { op: "local.set", index: L_END }, // end = off + len
+
+    // --- trim leading whitespace ---
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_END },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            ...getC,
+            ...isWsBody(L_C),
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // --- trim trailing whitespace (shrink end while end>i and data[end-1] ws) ---
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_END },
+            { op: "local.get", index: L_I },
+            { op: "i32.le_s" },
+            { op: "br_if", depth: 1 }, // end<=i → done
+            ...getCharAt([{ op: "local.get", index: L_END }, { op: "i32.const", value: 1 }, { op: "i32.sub" }]),
+            { op: "local.set", index: L_C },
+            ...isWsBody(L_C),
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 }, // not ws → done
+            { op: "local.get", index: L_END },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "local.set", index: L_END },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // --- empty (after trim) → 0 ---
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "f64.const", value: 0 }, { op: "return" }],
+    },
+
+    // --- optional sign ---
+    { op: "f64.const", value: 1 },
+    { op: "local.set", index: L_SIGN },
+    ...getC,
+    { op: "local.get", index: L_C },
+    { op: "i32.const", value: C_MINUS },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "f64.const", value: -1 },
+        { op: "local.set", index: L_SIGN },
+        { op: "local.get", index: L_I },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_I },
+      ],
+      else: [
+        { op: "local.get", index: L_C },
+        { op: "i32.const", value: C_PLUS },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+          ],
+        },
+      ],
+    },
+
+    // --- Infinity (must be exactly "Infinity" to the end) ---
+    ...emitInfinityExact(L_I, L_END, L_DATA, L_SIGN, strDataTypeIdx),
+
+    // --- radix prefix 0x / 0o / 0b (only valid when NO sign was consumed;
+    //     StrNumericLiteral allows them only as NonDecimalIntegerLiteral with
+    //     no sign). We detect "0[xob]" at the current i and require i to be the
+    //     original start with sign==1; to keep it simple we allow it whenever
+    //     two chars remain — sign already shifted i, and a signed 0x is NaN per
+    //     spec, so guard on sign==1. ---
+    ...emitRadixPrefixParse(L_I, L_END, L_DATA, L_C, L_SIGN, L_RADIX, L_DIG, L_RESULT, L_SAW, strDataTypeIdx),
+
+    // --- decimal mantissa ---
+    { op: "f64.const", value: 0 },
+    { op: "local.set", index: L_MANT },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_SAW },
+    // integer digits
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_END },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            ...getC,
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: C_ZERO },
+            { op: "i32.lt_s" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: C_NINE },
+            { op: "i32.gt_s" },
+            { op: "i32.or" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L_MANT },
+            { op: "f64.const", value: 10 },
+            { op: "f64.mul" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: C_ZERO },
+            { op: "i32.sub" },
+            { op: "f64.convert_i32_s" },
+            { op: "f64.add" },
+            { op: "local.set", index: L_MANT },
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: L_SAW },
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // fraction
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...getC,
+        { op: "local.get", index: L_C },
+        { op: "i32.const", value: C_DOT },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "f64.const", value: 0.1 },
+            { op: "local.set", index: L_FRAC },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: L_I },
+                    { op: "local.get", index: L_END },
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
+                    ...getC,
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: C_ZERO },
+                    { op: "i32.lt_s" },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: C_NINE },
+                    { op: "i32.gt_s" },
+                    { op: "i32.or" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: L_MANT },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: C_ZERO },
+                    { op: "i32.sub" },
+                    { op: "f64.convert_i32_s" },
+                    { op: "local.get", index: L_FRAC },
+                    { op: "f64.mul" },
+                    { op: "f64.add" },
+                    { op: "local.set", index: L_MANT },
+                    { op: "local.get", index: L_FRAC },
+                    { op: "f64.const", value: 0.1 },
+                    { op: "f64.mul" },
+                    { op: "local.set", index: L_FRAC },
+                    { op: "i32.const", value: 1 },
+                    { op: "local.set", index: L_SAW },
+                    { op: "local.get", index: L_I },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: L_I },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    // if no digit seen at all → NaN (e.g. ".", "+", "e5")
+    { op: "local.get", index: L_SAW },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+    },
+    // exponent
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_EXP },
+    { op: "i32.const", value: 1 },
+    { op: "local.set", index: L_EXPSIGN },
+    ...emitExponent(L_I, L_END, L_DATA, L_C, L_EXP, L_EXPSIGN, strDataTypeIdx, getC),
+    // full-match requirement: if i != end → NaN (trailing junk)
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.ne" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+    },
+    // result = sign * mant * 10^(expSign*exp)
+    { op: "local.get", index: L_SIGN },
+    { op: "local.get", index: L_MANT },
+    { op: "f64.mul" },
+    { op: "local.set", index: L_RESULT },
+    ...emitApplyExp(L_EXP, L_EXPSIGN, L_RESULT),
+    { op: "local.get", index: L_RESULT },
+    { op: "return" },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__str_to_number",
+    typeIdx,
+    locals: [
+      { name: "flat", type: { kind: "ref", typeIdx: strTypeIdx } },
+      { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
+      { name: "end", type: i32 },
+      { name: "i", type: i32 },
+      { name: "c", type: i32 },
+      { name: "sign", type: f64 },
+      { name: "mant", type: f64 },
+      { name: "sawDigit", type: i32 },
+      { name: "fracScale", type: f64 },
+      { name: "expSign", type: i32 },
+      { name: "exp", type: i32 },
+      { name: "result", type: f64 },
+      { name: "radix", type: i32 },
+      { name: "dig", type: i32 },
+    ],
+    body,
+    exported: false,
+  });
+}
+
+/**
+ * `if (data[i..end] === "Infinity") return sign*Infinity`. Requires the match
+ * to span exactly to `end` (StringToNumber is a full-match grammar).
+ */
+function emitInfinityExact(
+  L_I: number,
+  L_END: number,
+  L_DATA: number,
+  L_SIGN: number,
+  strDataTypeIdx: number,
+): Instr[] {
+  const word = "Infinity";
+  const charChecks: Instr[] = [];
+  for (let k = 0; k < word.length; k++) {
+    charChecks.push({ op: "local.get", index: L_DATA });
+    charChecks.push({ op: "local.get", index: L_I });
+    charChecks.push({ op: "i32.const", value: k });
+    charChecks.push({ op: "i32.add" });
+    charChecks.push({ op: "array.get_u", typeIdx: strDataTypeIdx });
+    charChecks.push({ op: "i32.const", value: word.charCodeAt(k) });
+    charChecks.push({ op: "i32.eq" });
+    if (k > 0) charChecks.push({ op: "i32.and" });
+  }
+  return [
+    // require exactly word.length chars remaining: i + 8 == end
+    { op: "local.get", index: L_I },
+    { op: "i32.const", value: word.length },
+    { op: "i32.add" },
+    { op: "local.get", index: L_END },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...charChecks,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_SIGN },
+            { op: "f64.const", value: Infinity },
+            { op: "f64.mul" },
+            { op: "return" },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * Detect a `0x`/`0X`/`0o`/`0O`/`0b`/`0B` prefix at `L_I` and, if present, parse
+ * the remainder as a NonDecimalIntegerLiteral in radix 16/8/2. The entire
+ * remaining range must be valid digits, else NaN. Only fires when no sign was
+ * consumed (sign==1) — a signed non-decimal literal is NaN per spec. Returns
+ * directly from the enclosing function on a match (value or NaN).
+ */
+function emitRadixPrefixParse(
+  L_I: number,
+  L_END: number,
+  L_DATA: number,
+  L_C: number,
+  L_SIGN: number,
+  L_RADIX: number,
+  L_DIG: number,
+  L_RESULT: number,
+  L_SAW: number,
+  strDataTypeIdx: number,
+): Instr[] {
+  const buildArm = (lc: number, uc: number, radix: number): Instr => ({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // second char is lc/uc?
+      { op: "local.get", index: L_DATA },
+      { op: "local.get", index: L_I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
+      { op: "local.tee", index: L_C },
+      { op: "i32.const", value: lc },
+      { op: "i32.eq" },
+      { op: "local.get", index: L_C },
+      { op: "i32.const", value: uc },
+      { op: "i32.eq" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: radix },
+          { op: "local.set", index: L_RADIX },
+          // advance past "0x"
+          { op: "local.get", index: L_I },
+          { op: "i32.const", value: 2 },
+          { op: "i32.add" },
+          { op: "local.set", index: L_I },
+          // require at least one digit
+          { op: "local.get", index: L_I },
+          { op: "local.get", index: L_END },
+          { op: "i32.ge_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+          },
+          { op: "f64.const", value: 0 },
+          { op: "local.set", index: L_RESULT },
+          // digit loop over [i, end)
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: L_I },
+                  { op: "local.get", index: L_END },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
+                  ...([
+                    { op: "local.get", index: L_DATA },
+                    { op: "local.get", index: L_I },
+                    { op: "array.get_u", typeIdx: strDataTypeIdx },
+                    { op: "local.set", index: L_C },
+                  ] as Instr[]),
+                  ...emitDigitValue(L_C, L_DIG),
+                  // invalid digit or >= radix → NaN
+                  { op: "local.get", index: L_DIG },
+                  { op: "i32.const", value: 0 },
+                  { op: "i32.lt_s" },
+                  { op: "local.get", index: L_DIG },
+                  { op: "i32.const", value: radix },
+                  { op: "i32.ge_s" },
+                  { op: "i32.or" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+                  },
+                  { op: "local.get", index: L_RESULT },
+                  { op: "f64.const", value: radix },
+                  { op: "f64.mul" },
+                  { op: "local.get", index: L_DIG },
+                  { op: "f64.convert_i32_s" },
+                  { op: "f64.add" },
+                  { op: "local.set", index: L_RESULT },
+                  { op: "local.get", index: L_I },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: L_I },
+                  { op: "br", depth: 0 },
+                ],
+              },
+            ],
+          },
+          { op: "local.get", index: L_RESULT },
+          { op: "return" },
+        ],
+      },
+    ],
+  });
+  void L_SAW;
+  return [
+    // guard: sign==1 (no sign consumed) && i+1 < end && data[i]=='0'
+    { op: "local.get", index: L_SIGN },
+    { op: "f64.const", value: 1 },
+    { op: "f64.eq" },
+    { op: "local.get", index: L_I },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.get", index: L_END },
+    { op: "i32.lt_s" },
+    { op: "i32.and" },
+    { op: "local.get", index: L_DATA },
+    { op: "local.get", index: L_I },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "i32.const", value: C_ZERO },
+    { op: "i32.eq" },
+    { op: "i32.and" },
+    buildArm(C_LC_X, C_UC_X, 16),
+  ];
 }
 
 /** Emit `if (substring starting at i == "Infinity") return sign*Infinity`. */
