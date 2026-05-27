@@ -6366,6 +6366,15 @@ export function addUnionImports(ctx: CodegenContext): void {
     if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
       ctx.mod.startFuncIdx += delta;
     }
+    // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
+    // for this import batch — the inline shiftFuncIndices above already corrected all
+    // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
+    if (ctx.nativeStrHelperImportBase >= 0) {
+      for (const [name, idx] of ctx.nativeStrHelpers) {
+        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+      ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+    }
   }
 }
 
