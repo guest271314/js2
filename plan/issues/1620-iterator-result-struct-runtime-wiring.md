@@ -1,7 +1,7 @@
 ---
 id: 1620
 title: "$IteratorResult struct: eliminate __iterator_done/__iterator_value host imports (runtime wiring gap)"
-status: ready
+status: blocked
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
@@ -278,3 +278,61 @@ change), keeps the import surface reduced, and removes the latent trap.
   iterator is consumed via a *different* `next` import, that import needs the same
   struct-construction treatment, or its for-of read must keep a separate path.
   Check `ensureAsyncIterator` and async-iterator tests before assuming parity.
+
+## BLOCKED — Option C is not viable as specced (verified 2026-05-27, dev-1593)
+
+Option C assumes the `$__IteratorResult` struct can be built in Wasm
+(`__make_iterator_result`, exported), returned to the JS `__iterator_next`
+bridge, and then flow back into Wasm as the import's `externref` result, where
+the for-of read recovers it via `any.convert_extern` + `ref.cast`. **This
+round-trip does not work in V8 (Node 25).**
+
+Verified empirically (probes in `.tmp/`, branch `issue-1620-iterator-result-struct`):
+
+- `__make_iterator_result` is exported and reachable (`setExports` wired).
+- Calling it directly from JS — `instance.exports.__make_iterator_result(0, 7)`
+  — returns **`undefined`** (`=== undefined` is `true`), whether the helper
+  returns `(ref null $IteratorResult)` *or* externalizes via
+  `extern.convert_any` to return `externref`. WAT confirms `struct.new 11`
+  + `extern.convert_any` are emitted and the export signature is
+  `(param i32 externref) (result externref)`.
+- So the runtime's `return make(done?1:0, value)` hands `undefined` back as the
+  `__iterator_next` import result. Wasm sees a null externref, the for-of
+  `ref.test (ref $__IteratorResult)` guard is **false**, and the hardened
+  else-branch throws `TypeError` (the `Exception` the failing test observes).
+- The 5 string-for-of cases in `tests/iterators.test.ts` pass **only because
+  strings never call `__iterator_next`** — they use the in-codegen array
+  fast-path. Confirmed: wrapping `__iterator_next` shows it is never invoked
+  for string for-of. So those green tests do **not** exercise the struct path;
+  the **custom-iterable** case in `symbol-iterator-protocol.test.ts` is the
+  only one that does, and it fails.
+
+**Root cause:** a freshly-constructed internal WasmGC struct, externalized and
+returned through a *plain JS import boundary*, is surfaced to JS as `undefined`
+and cannot be re-internalized by the consumer. The struct cannot survive the
+JS hop that `__iterator_next` (a JS host import) forces. This is the real
+"runtime wiring gap" the issue warned about — it is a design constraint, not a
+localized bug.
+
+**Why the obvious fixes don't apply:**
+- Externalizing in `__make_iterator_result` (the change tried) does not help —
+  the externref still surfaces as `undefined`.
+- Reverting to read `done`/`value` from the raw JS result object in Wasm would
+  require `__iterator_done` / `__iterator_value` host imports — the very imports
+  this issue exists to remove (Option B, already rejected in the spec).
+
+**Needs architect respec.** Candidate directions (need a decision):
+1. Build the `$__IteratorResult` struct **at the for-of call site in Wasm**,
+   after `__iterator_next` returns the *raw JS result object* (which survives
+   as externref). Reading `done`/`value` from a JS object in pure Wasm without
+   host imports is the open problem — possibly via a single combined
+   `__iterator_next_done_value` import that returns the two primitives packed,
+   or via a Wasm-native iterator representation for compiler-emitted iterators
+   (relates to #1665 native generators / shared `$Iterator` design).
+2. Accept a narrowed scope: keep the host imports for the *JS-host* mode and
+   only use the struct path in *standalone* mode where iterators are
+   Wasm-native end to end (no JS hop). This satisfies `goal: host-independence`
+   for standalone without breaking JS-host custom iterables.
+
+WIP (this investigation + the externref attempt) is committed on branch
+`issue-1620-iterator-result-struct` for the architect to build on.

@@ -1,7 +1,7 @@
 ---
 id: 1636
 title: "spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails)"
-status: blocked
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium

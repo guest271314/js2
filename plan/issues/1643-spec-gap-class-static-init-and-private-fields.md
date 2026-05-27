@@ -1,7 +1,7 @@
 ---
 id: 1643
 title: "spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: high

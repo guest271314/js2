@@ -1,9 +1,9 @@
 ---
 id: 1637
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -17,6 +17,26 @@ parent: 1328
 related: 1319
 ---
 # #1343 — Boolean wrapper coercion + Symbol primitive coercion
+
+> **Status 2026-05-27 — BOTH halves fixed (two branches, consolidating into one PR):**
+> - **Boolean half** (~24 fails): `Boolean.prototype.toString/valueOf.call(prim)`
+>   now coerce numeric receivers via `thisBooleanValue` in `__extern_method_call`
+>   (`src/runtime.ts`). Branch `issue-1637-bool-symbol-coercion`, commit
+>   `8d70a45e6`, PR #659.
+> - **Symbol→string half** (~45 fails): implicit Symbol→string coercion now
+>   throws `TypeError` via a static `isSymbolType` guard in
+>   `src/codegen/string-ops.ts` (concat/template) and
+>   `src/codegen/expressions/calls.ts` (`Symbol.for`). Branch
+>   `issue-1637-boolean-symbol-coercion`, commit `9aadfafc3`.
+>
+> The earlier plan to defer the Symbol half to a separate architect-spec issue
+> (#1658) was **dropped** — the static guard fixes it at compile time, no
+> value-representation change needed. #1658 is closed wont-fix.
+>
+> The "Files to modify" paths below were **stale** — `registry/boolean.ts` /
+> `registry/symbol.ts` do not exist; the real sites are `src/runtime.ts`
+> (`__extern_method_call`), `src/codegen/string-ops.ts`
+> (`compileStringBinaryOp`), and `src/codegen/expressions/calls.ts`.
 
 ## Problem
 
