@@ -75,6 +75,12 @@ let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
 let _AsyncGeneratorPrototypeCache: any = null;
 let _AsyncGeneratorFunctionPrototypeCache: any = null;
+// (#1639) `genFn.prototype` — the per-function instance prototype. Per spec
+// §27.3.4 / §27.4.4 it is `OrdinaryObjectCreate(%(Async)GeneratorPrototype%)`,
+// one level below the shared `%(Async)GeneratorPrototype%`. Generator instances
+// inherit from this object, so `Object.getPrototypeOf(instance) === genFn.prototype`.
+let _GeneratorInstancePrototypeCache: any = null;
+let _AsyncGeneratorInstancePrototypeCache: any = null;
 
 /**
  * Install a built-in method on a prototype with spec-mandated descriptor
@@ -118,9 +124,20 @@ function _getGeneratorPrototype(): any {
   if (_GeneratorPrototypeCache) return _GeneratorPrototypeCache;
   // GeneratorPrototype inherits from IteratorPrototype so .map/.filter/etc.
   // (#1367) resolve via the prototype chain.
-  const iterProto = (
-    typeof (globalThis as any).Iterator === "function" ? ((globalThis as any).Iterator as any).prototype : null
-  ) as any;
+  let iterProto: any =
+    typeof (globalThis as any).Iterator === "function" ? ((globalThis as any).Iterator as any).prototype : null;
+  if (iterProto == null) {
+    // Recover the intrinsic %IteratorPrototype% from a native `function*`'s
+    // prototype chain on hosts that don't expose a global `Iterator`.
+    try {
+      const nativeG = function* () {}; // eslint-disable-line @typescript-eslint/no-empty-function
+      const gProto = Object.getPrototypeOf((nativeG as any).prototype);
+      const candidate = gProto != null ? Object.getPrototypeOf(gProto) : null;
+      if (candidate != null && candidate !== Object.prototype) iterProto = candidate;
+    } catch {
+      /* fall back below */
+    }
+  }
   const proto = iterProto ? Object.create(iterProto) : Object.create(Object.prototype);
   _GeneratorPrototypeCache = proto;
 
@@ -194,6 +211,18 @@ function _getGeneratorPrototype(): any {
   return proto;
 }
 
+/**
+ * (#1639) Build the per-`function*` instance prototype `genFn.prototype`
+ * (spec §27.3.4): `OrdinaryObjectCreate(%GeneratorPrototype%)`. Generator
+ * instances inherit from this object so the spec chain holds:
+ *   instance → genFn.prototype → %GeneratorPrototype% → %IteratorPrototype%.
+ */
+function _getGeneratorInstancePrototype(): any {
+  if (_GeneratorInstancePrototypeCache) return _GeneratorInstancePrototypeCache;
+  _GeneratorInstancePrototypeCache = Object.create(_getGeneratorPrototype());
+  return _GeneratorInstancePrototypeCache;
+}
+
 /** Build `%GeneratorFunction.prototype%` (= `%Generator%`, spec §27.3.3). */
 function _getGeneratorFunctionPrototype(): any {
   if (_GeneratorFunctionPrototypeCache) return _GeneratorFunctionPrototypeCache;
@@ -224,11 +253,28 @@ function _getGeneratorFunctionPrototype(): any {
 /** Build `%AsyncGeneratorPrototype%` (spec §27.6.1). */
 function _getAsyncGeneratorPrototype(): any {
   if (_AsyncGeneratorPrototypeCache) return _AsyncGeneratorPrototypeCache;
-  const asyncIterProto = (
-    typeof (globalThis as any).AsyncIterator === "function"
-      ? ((globalThis as any).AsyncIterator as any).prototype
-      : null
-  ) as any;
+  // %AsyncIteratorPrototype% is the [[Prototype]] of %AsyncGeneratorPrototype%
+  // (spec §27.6.1). Prefer the global `AsyncIterator.prototype`, but several
+  // hosts (Node ≤25 / V8) ship the intrinsic %AsyncIteratorPrototype% — with a
+  // spec-correct `[Symbol.asyncIterator]` returning `this` — without exposing
+  // a global `AsyncIterator` constructor. Recover it from a native
+  // `async function*`'s prototype chain so the test262 `AsyncIteratorPrototype`
+  // reflection suite (Object.getPrototypeOf(Object.getPrototypeOf(g.prototype)))
+  // sees the real intrinsic rather than a bare Object.prototype fallback.
+  let asyncIterProto: any = null;
+  if (typeof (globalThis as any).AsyncIterator === "function") {
+    asyncIterProto = ((globalThis as any).AsyncIterator as any).prototype ?? null;
+  }
+  if (asyncIterProto == null) {
+    try {
+      const nativeAG = async function* () {}; // eslint-disable-line @typescript-eslint/no-empty-function
+      const agProto = Object.getPrototypeOf((nativeAG as any).prototype);
+      const candidate = agProto != null ? Object.getPrototypeOf(agProto) : null;
+      if (candidate != null && candidate !== Object.prototype) asyncIterProto = candidate;
+    } catch {
+      /* host without native async generators — fall back below */
+    }
+  }
   const proto = asyncIterProto ? Object.create(asyncIterProto) : Object.create(Object.prototype);
   _AsyncGeneratorPrototypeCache = proto;
 
@@ -311,6 +357,17 @@ function _getAsyncGeneratorPrototype(): any {
   });
 
   return proto;
+}
+
+/**
+ * (#1639) Build the per-`async function*` instance prototype `genFn.prototype`
+ * (spec §27.4.4): `OrdinaryObjectCreate(%AsyncGeneratorPrototype%)`. The chain
+ * is: instance → genFn.prototype → %AsyncGeneratorPrototype% → %AsyncIteratorPrototype%.
+ */
+function _getAsyncGeneratorInstancePrototype(): any {
+  if (_AsyncGeneratorInstancePrototypeCache) return _AsyncGeneratorInstancePrototypeCache;
+  _AsyncGeneratorInstancePrototypeCache = Object.create(_getAsyncGeneratorPrototype());
+  return _AsyncGeneratorInstancePrototypeCache;
 }
 
 /** Build `%AsyncGeneratorFunction.prototype%` (= `%AsyncGenerator%`, spec §27.4.3). */
@@ -4462,6 +4519,14 @@ assert._isSameValue = isSameValue;
       // through this dedicated import instead of the generic `__getPrototypeOf`.
       if (name === "__get_generator_function_prototype") return () => _getGeneratorFunctionPrototype();
       if (name === "__get_async_generator_function_prototype") return () => _getAsyncGeneratorFunctionPrototype();
+      // (#1639) `genFn.prototype` member access — returns `%GeneratorPrototype%`
+      // (= `%GeneratorFunction.prototype%.prototype`) directly. The compiled
+      // closure backing a `function*` is opaque to the host, so codegen routes
+      // the well-typed member access `g.prototype` (g ∈ ctx.generatorFunctions)
+      // through this import. `Object.getPrototypeOf(g.prototype)` then yields
+      // `%IteratorPrototype%` / `%AsyncIteratorPrototype%` correctly.
+      if (name === "__get_generator_prototype") return () => _getGeneratorInstancePrototype();
+      if (name === "__get_async_generator_prototype") return () => _getAsyncGeneratorInstancePrototype();
       // __create_descriptor(value, flags) → {value, writable, enumerable, configurable}
       // flags: bit 0 = writable, bit 1 = enumerable, bit 2 = configurable
       if (name === "__create_descriptor")
@@ -5716,7 +5781,11 @@ assert._isSameValue = isSameValue;
           // %GeneratorPrototype% inherits from %IteratorPrototype% so
           // .map/.filter/.drop/.take/... (#1367) still resolve through the
           // chain.
-          const proto = _getGeneratorPrototype();
+          // (#1639) Instances inherit from the per-function instance prototype
+          // (`genFn.prototype`), which in turn inherits from %GeneratorPrototype%,
+          // so `Object.getPrototypeOf(instance) === genFn.prototype` per spec and
+          // `next`/`return`/`throw` still resolve up the chain.
+          const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -5727,7 +5796,9 @@ assert._isSameValue = isSameValue;
           // matching comment on `__create_generator`. The instance is just a
           // plain object whose [[Prototype]] is the singleton — state lives in
           // `_AsyncGeneratorState`.
-          const proto = _getAsyncGeneratorPrototype();
+          // (#1639) See __create_generator — inherit from the instance prototype
+          // so `Object.getPrototypeOf(instance) === asyncGenFn.prototype`.
+          const proto = _getAsyncGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;

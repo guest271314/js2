@@ -1,9 +1,9 @@
 ---
 id: 1639
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: ready
+status: in-progress
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -90,3 +90,38 @@ even though tests check just for its existence).
 - `test262/test/built-ins/GeneratorPrototype/next/this-val-not-generator.js`
 - `test262/test/built-ins/GeneratorPrototype/throw/from-state-completed.js`
 - `test262/test/built-ins/AsyncGeneratorPrototype/throw/throw-promise-rejected.js`
+
+## Progress (2026-05-27, AsyncIteratorPrototype + chain slice)
+
+Fixed the prototype-chain navigation gap that blocked the entire
+`built-ins/AsyncIteratorPrototype` suite (13 tests) and the
+`Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))` reflection used by
+many GeneratorPrototype tests:
+
+- **Root cause**: `genFn.prototype` (member access on a `function*` /
+  `async function*` declaration identifier) resolved to `undefined`. There was a
+  dedicated codegen path for `Object.getPrototypeOf(genFn)` (calls.ts) but none
+  for the `.prototype` member access, so the reflection chain trapped in
+  `__to_object` ("Cannot convert undefined to object").
+- **Codegen** (`src/codegen/property-access.ts`): route `genFn.prototype` (for
+  `genFn ∈ ctx.generatorFunctions`) to new runtime imports
+  `__get_generator_prototype` / `__get_async_generator_prototype`.
+- **Runtime** (`src/runtime.ts`):
+  - new `_get(Async)GeneratorInstancePrototype()` = the per-function instance
+    prototype `OrdinaryObjectCreate(%(Async)GeneratorPrototype%)` (spec §27.3.4 /
+    §27.4.4), so the chain is instance → `genFn.prototype` →
+    `%(Async)GeneratorPrototype%` → `%(Async)IteratorPrototype%`.
+  - `__create_(async_)generator` now build instances off the instance prototype,
+    preserving `Object.getPrototypeOf(instance) === genFn.prototype`.
+  - `_get(Async)GeneratorPrototype` now recover the intrinsic
+    `%(Async)IteratorPrototype%` from a native `(async) function*` chain when the
+    host lacks a global `Iterator` / `AsyncIterator` (Node ≤25 / V8), so
+    `[Symbol.asyncIterator]` (returns `this`, name `[Symbol.asyncIterator]`,
+    length 0) is present.
+- **Tests**: `tests/issue-1639.test.ts` — chain reflection, `@@asyncIterator`
+  name/length, instance-prototype identity, brand-check TypeError, iteration.
+
+**Still open in this issue** (not in this slice): GeneratorPrototype `.return` /
+`.throw` state-machine semantics (suspendedStart/suspendedYield/executing), the
+async `.return`/`.throw` resolve/reject behaviour, and the remaining
+`unreachable`-trap → TypeError conversions for the receiver brand checks.
