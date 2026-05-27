@@ -3189,13 +3189,27 @@ function compileArrayIndexOf(
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // For externref elements, use the `equals` string import (JS ===) for comparison
-  // For ref/ref_null elements, use ref.eq for reference identity comparison
+  // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
+  // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
+  // comparisons all follow spec. The wasm:js-string `equals` builtin coerces
+  // both operands to strings, which mis-matches object/boolean/number
+  // elements (#786 — `indexOf` on an externref vec).
+  // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let eqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
-    eqInstrs = [{ op: "call", funcIdx: equalsIdx } as Instr];
+    const hostEqIdx = ensureLateImport(
+      ctx,
+      "__host_eq",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
+    if (finalHostEqIdx === undefined) {
+      reportError(ctx, callExpr, "indexOf: failed to bind __host_eq import");
+      return null;
+    }
+    eqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     eqInstrs = [{ op: "ref.eq" }];
   } else {
@@ -3389,14 +3403,28 @@ function compileArrayIncludes(
       { op: "i32.or" } as Instr,
     ];
   } else if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
+    // SameValueZero (§7.2.11) via __same_value_zero: NaN matches NaN, object
+    // identity, cross-type → false. The wasm:js-string `equals` builtin
+    // coerces both operands to strings, mis-matching object/boolean/number
+    // elements (#786 — `includes` on an externref vec).
+    const svzIdx = ensureLateImport(
+      ctx,
+      "__same_value_zero",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalSvzIdx = ctx.funcMap.get("__same_value_zero") ?? svzIdx;
+    if (finalSvzIdx === undefined) {
+      reportError(ctx, callExpr, "includes: failed to bind __same_value_zero import");
+      return null;
+    }
     comparisonInstrs = [
       { op: "local.get", index: dataTmp } as Instr,
       { op: "local.get", index: iTmp } as Instr,
       { op: getOp, typeIdx: arrTypeIdx } as Instr,
       { op: "local.get", index: valTmp } as Instr,
-      { op: "call", funcIdx: equalsIdx } as Instr,
+      { op: "call", funcIdx: finalSvzIdx } as Instr,
     ];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     comparisonInstrs = [
@@ -6042,13 +6070,26 @@ function compileArrayLastIndexOf(
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // For externref elements, use the `equals` string import (JS ===) for comparison
-  // For ref/ref_null elements, use ref.eq for reference identity comparison
+  // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
+  // object identity, cross-type, and string comparisons follow spec. The
+  // wasm:js-string `equals` builtin coerces both operands to strings, which
+  // mis-matches object/boolean/number elements (#786).
+  // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let liofEqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
-    liofEqInstrs = [{ op: "call", funcIdx: equalsIdx } as Instr];
+    const hostEqIdx = ensureLateImport(
+      ctx,
+      "__host_eq",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
+    if (finalHostEqIdx === undefined) {
+      reportError(ctx, callExpr, "lastIndexOf: failed to bind __host_eq import");
+      return null;
+    }
+    liofEqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     liofEqInstrs = [{ op: "ref.eq" }];
   } else {

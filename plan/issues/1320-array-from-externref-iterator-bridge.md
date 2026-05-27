@@ -1,9 +1,9 @@
 ---
 id: 1320
 title: "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -116,3 +116,77 @@ and throws.
 
 - Prototype-poisoning leak handling (covered by #1154 — closed).
 - Any non-`Array.from` / non-`Iterator.from` symbol-iterator bugs.
+
+## Investigation + partial fix 2026-05-27 (dev-1605)
+
+**Root cause (confirmed, refines the hypothesis above):** the assignment
+`items[Symbol.iterator] = fn` is NOT mis-routed — the key arrives at `_safeSet`
+as a real `symbol` and the function is stored under the correct
+`[Symbol.iterator]` slot. The real problem is that `fn` is a **compiled Wasm
+closure struct** — `typeof items[Symbol.iterator] === "object"`, not
+`"function"`. Native `Array.from` / `Iterator.from` read the @@iterator method,
+see a non-callable object, and throw
+`%Array%.from requires that … items[Symbol.iterator] … be a function`. The
+iterator object the closure returns (and its `.next`) are likewise Wasm
+closures, so even invoking @@iterator isn't enough — the whole protocol must be
+driven through `__call_fn_0`.
+
+**Fixed in this PR (the `__array_from` host-import path):** added a module-level
+`_drainWasmClosureIterable(obj, callbackState)` in `src/runtime.ts` that, when a
+plain JS object's own @@iterator is a Wasm closure, invokes it via `__call_fn_0`,
+then walks the returned iterator's (also-closure) `.next`, reading
+`value`/`done` via `_safeGet` + `__sget_*`. Wired into the `__array_from`
+import. Result: `built-ins/Array/from/iter-set-length.js` now **PASSES** (was
+FAIL). Covered by `tests/issue-1320.test.ts` (2 cases: no spurious TypeError;
+@@iterator invoked exactly once).
+
+**Residual — the other 3 listed tests need other bridge paths (NOT fixed here):**
+
+1. `iter-cstm-ctor.js` uses `Array.from.call(C, items)` → routes through
+   `__extern_method_call` (obj=`Array.from`, method=`"call"`), hits native
+   `Array.from` directly. Needs the same drain applied to the `.call`/`.apply`
+   dispatch where the iterable is `wrappedArgs[1]`.
+2. `Iterator/from/iterable-primitives.js` + `flatMap/...` use
+   `Number.prototype[Symbol.iterator] = function*(){…}` (a **generator** on a
+   prototype) and `Array.from(5)` (primitive → ToObject). Different facets:
+   prototype-level @@iterator + primitive coercion + `function*` lowering.
+
+**Separate lurking codegen bug (carved to #1684):** an iterator-result object
+literal returned from a *nested closure* does not round-trip across the
+Wasm→host boundary. The 4 listed tests use empty/trivial iterators so they
+dodge this. This overlaps the iterator bridge family (#1620 / #1633) and the
+live-mirror struct-field readback (#983d).
+
+## `.call` / `Iterator.from` blocker confirmed (2026-05-27, dev-1605)
+
+The `.call`-path drain is correctly wired (`__extern_method_call`,
+`wrappedArgs[1]`), and `_drainWasmClosureIterable` is reached for
+`Array.from.call(C, items)`. Traced through the real `runTest262File`
+harness with `iter-cstm-ctor.js`:
+
+- `items` arrives as a **plain JS object** (`var items = {}`, not a wasm
+  struct), passed through unwrapped — correct.
+- its own `[Symbol.iterator]` IS a wasm closure struct — drain guard passes.
+- `__call_fn_0` is present; the drain invokes `callFn0(iterFn)` to run the
+  `@@iterator()` closure.
+- **`callFn0(iterFn)` returns `null`** instead of the iterator object
+  `{ next: … }`. The closure's object-literal return value does not
+  materialize to the host. The drain then bails at the `iteratorObj == null`
+  guard and returns `null`, so the native `Array.from.call(C, items)` runs
+  with the un-drained object and throws the "items[Symbol.iterator] … must be
+  a function" error.
+
+So the residual `.call` / `Iterator.from` failures are **NOT a host-bridge
+gap** — the bridge is wired and reached. They are blocked on the
+**closure object-literal return readback** carved to **#1684** (a codegen-layer
+bug, not a runtime-bridge one). `iter-set-length.js` PASSES because its
+iterator round-trips via the already-working `__array_from` path with a
+structure that does materialize.
+
+**Recommendation:** land the `__array_from` + `.call`/`.apply` drain wiring
+(regression-free, banks 1 test + focused unit tests). The remaining 3 tests
+(`iter-cstm-ctor`, `Iterator/from/iterable-primitives`,
+`flatMap/iterable-primitives-are-not-flattened`) are gated on **#1684**
+(closure-return struct readback) — they cannot go green at the host-bridge
+layer. Status `in-review` for the partial PR; residual tracked in #1684 +
+the iterator-bridge family (#1620/#1633).
