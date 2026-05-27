@@ -1,7 +1,8 @@
 ---
 id: 786
 title: "- Multi-assertion failures: returned N > 2 (~1,183 tests)"
-status: in-progress
+status: done
+completed: 2026-05-27
 created: 2026-03-25
 updated: 2026-05-27
 priority: medium
