@@ -3,6 +3,7 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 /**
  * new/super/class expression compilation.
  */
+import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
 import { reportError } from "../context/errors.js";
@@ -34,6 +35,7 @@ import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
+  emitThrowReferenceError,
   emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
@@ -1334,6 +1336,36 @@ function compileNewFunctionExpression(
  * We produce the constructor function reference so the class can be instantiated.
  */
 /**
+ * §15.7.1 ClassDefinitionEvaluation: a named class binds its own name in an
+ * inner scope that is populated only AFTER the `extends` clause is evaluated.
+ * Referencing that name inside `extends` hits the TDZ — `(class x extends x {})`
+ * must throw ReferenceError (#1594B). The inner binding shadows any outer `x`,
+ * so any reference to the class's own name in `extends` is the TDZ binding.
+ */
+function classExtendsReferencesOwnName(expr: ts.ClassExpression): boolean {
+  if (!expr.name) return false;
+  const ownName = expr.name.text;
+  if (!expr.heritageClauses) return false;
+  for (const clause of expr.heritageClauses) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const typeNode of clause.types) {
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (found) return;
+        if (ts.isIdentifier(node) && node.text === ownName) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeNode.expression);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * (#1602) Emit a class-expression-as-value: the constructor wrapped in a
  * closure-struct converted to externref. A bare `ref.func` (funcref) is NOT a
  * subtype of anyref/externref, so when the class value flowed into an externref
@@ -1356,6 +1388,14 @@ function emitClassCtorValue(ctx: CodegenContext, fctx: FunctionContext, ctorName
 }
 
 function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.ClassExpression): ValType | null {
+  // §15.7.1: the class-expression name is in TDZ during its own `extends`
+  // evaluation. `(class x extends x {})` must throw ReferenceError (#1594B).
+  if (classExtendsReferencesOwnName(expr)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${expr.name!.text}' before initialization`);
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+
   // Look up the synthetic name assigned during the collection phase
   const syntheticName = ctx.anonClassExprNames.get(expr);
   const classNameForCheck = syntheticName ?? expr.name?.text;
@@ -1552,6 +1592,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Number(x) → create real JS Number wrapper object via __new_Number host import
         // (typeof new Number(0) === "object", not "number")
         if (args.length >= 1) {
+          // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
+          // ToNumber on its argument before boxing. Mirror the `Number(sym)`
+          // call-path guard so `new Number(Symbol())` throws too (#1564).
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+            return { kind: "externref" };
+          }
           compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
@@ -1585,7 +1634,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Boolean(x) → create real JS Boolean wrapper object via __new_Boolean host import
         // (typeof new Boolean(false) === "object", not "boolean")
         if (args.length >= 1) {
-          compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
+          // coerces the arg to f64 first, which would silently lose the Symbol.
+          // A Symbol arg should produce a truthy wrapper: box 1.0.
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "f64.const", value: 1 });
+          } else {
+            compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          }
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
         }
@@ -1697,6 +1755,36 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       ctx,
       "__new_AggregateError",
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
+  // Handle `new SuppressedError(error, suppressed, message, options?)` (#1634).
+  // Spec §20.5.10.1: all four arguments are externref; `options.cause` is
+  // installed via the dedicated `__new_SuppressedError` host import. The generic
+  // 3-param extern-class path dropped `options` (no `cause`) and mishandled the
+  // message coercion, so route through the dedicated import like AggregateError.
+  if (ts.isIdentifier(expr.expression) && expr.expression.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
     );
     flushLateImportShifts(ctx, fctx);
@@ -2183,6 +2271,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         "Recompile without --target standalone.",
     );
     return null;
+  }
+
+  // #1679 — `new this(...)` inside a static method: the callee is `this`, which
+  // the checker resolves to the enclosing constructor (e.g. acorn's `Parser`
+  // function-style class). It is not an identifier, so the function-constructor
+  // path below is skipped. Route a `this`-callee that resolves to a known
+  // function-style constructor (or one we can build from its declaration) to the
+  // same `<Class>_new` machinery, keyed by the resolved className.
+  if (className && !ctx.classSet.has(className) && expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const cachedFnCtor = ctx.funcConstructorMap.get(className);
+    if (cachedFnCtor) {
+      const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
+      if (ctorFuncIdx !== undefined) {
+        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const args = expr.arguments ?? [];
+        for (let i = 0; i < args.length; i++) {
+          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+        }
+        if (paramTypes) {
+          for (let i = args.length; i < paramTypes.length; i++) {
+            pushDefaultValue(fctx, paramTypes[i]!, ctx);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+        return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
+      }
+    } else {
+      // Build the constructor from the resolved constructor function's declaration.
+      const decls = symbol?.getDeclarations();
+      if (decls) {
+        for (const decl of decls) {
+          if (ts.isFunctionDeclaration(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(ctx, fctx, expr, className, decl);
+            if (result) return result;
+            break;
+          }
+          // `var Parser = function Parser(...) {...}` (acorn): the constructor's
+          // symbol resolves directly to the FunctionExpression node, or to the
+          // VariableDeclaration whose initializer is one.
+          if (ts.isFunctionExpression(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(
+              ctx,
+              fctx,
+              expr,
+              className,
+              decl as unknown as ts.FunctionDeclaration,
+            );
+            if (result) return result;
+            break;
+          }
+          if (ts.isVariableDeclaration(decl) && decl.initializer) {
+            let init: ts.Expression = decl.initializer;
+            while (ts.isParenthesizedExpression(init)) init = init.expression;
+            if (ts.isFunctionExpression(init) && init.body) {
+              const result = compileNewFunctionDeclaration(
+                ctx,
+                fctx,
+                expr,
+                className,
+                init as unknown as ts.FunctionDeclaration,
+              );
+              if (result) return result;
+              break;
+            }
+          }
+        }
+      }
+    }
   }
 
   // Check if the identifier resolves to a function declaration used as constructor

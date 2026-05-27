@@ -1,10 +1,9 @@
 ---
 id: 1680
 title: "Private setter write falls through to struct-field write — stacked private accessors cross-talk (~132 fails)"
-status: done
+status: ready
 created: 2026-05-27
 updated: 2026-05-27
-completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -127,32 +126,3 @@ pursued.
   `/class/elements/`: `private` = 533 bad (largest sub-bucket after `dstr`).
 - Repro scripts under `.tmp/` (`stacked-test.js`, `stacked2.js`, `stacked3.js`,
   `run2.mts`) — run via `runTest262File` from `tests/test262-runner.ts`.
-
-## Resolution
-
-Added the missing `accessor` / `accessor-writeonly` branch in
-`compilePropertyAssignment` (`src/codegen/expressions/assignment.ts`, the
-`classifyPrivateMember` block). It compiles the receiver, compiles the RHS to
-the setter's value-parameter type, `local.tee`s the RHS aside, calls
-`<Class>_set_<__priv_name>`, then re-pushes the RHS as the assignment value
-(per spec, `=` evaluates to the RHS). The funcIdx is re-read after RHS
-compilation to survive late-import index shifts (`addUnionImports`).
-
-Verified: setter now dispatches (no longer falls through to the phantom
-`__priv_<name>` data slot), and two stacked private setters no longer
-cross-talk. Tests in `tests/issue-1680.test.ts` (single setter, two stacked
-setters, get/set pair roundtrip) all pass. Typecheck clean; no regressions in
-`tests/classes.test.ts` / `class-elements-619` / `accessor-side-effects`
-(failure counts identical with and without the change — all pre-existing
-test-harness `string_constants` import limitations).
-
-### Known separate defect (NOT this issue, NOT a regression)
-
-When a **single method** both writes a private accessor (`this.#a = v`) and
-then reads any instance field afterward, the method self-recurses at runtime
-(`C_run → C_run`). This reproduces on **unmodified `origin/main`** too (with
-the field-write fallthrough, before this fix), so it is a pre-existing codegen
-bug in how a write-only-accessor assignment *statement* compiles alongside a
-subsequent field read — independent of setter dispatch. The setter-dispatch
-fix here is correct and is exercised via the separated-method pattern in the
-tests. The same-method recursion should be tracked as its own issue.

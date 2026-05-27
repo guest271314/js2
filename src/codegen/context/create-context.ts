@@ -116,6 +116,7 @@ export function createCodegenContext(
     nativeStrExternBridgeEmitted: false,
     testRuntimeStringHelpersEmitted: false,
     nativeStrHelpers: new Map(),
+    nativeStrHelperImportBase: -1,
     refCellTypeMap: new Map(),
     anyValueTypeIdx: -1,
     anyHelpers: new Map(),

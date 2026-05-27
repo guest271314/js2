@@ -26,6 +26,15 @@ describe("#1639 generator prototype receiver checks", () => {
     expect(r).toBe(1);
   });
 
+  it("generator instance [[Prototype]] === genFn.prototype (spec identity)", async () => {
+    const r = await runReturningNumber(`export function test(): number {
+      function* g() { yield 1; }
+      const it = g();
+      return (Object.getPrototypeOf(it) === g.prototype) ? 1 : 0;
+    }`);
+    expect(r).toBe(1);
+  });
+
   it("Generator.prototype.next on a non-generator throws TypeError (no trap)", async () => {
     const r = await runReturningNumber(`export function test(): number {
       function* gen(){ yield 1; }

@@ -1,12 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../../src/index.js";
-import { buildImports } from "./helpers.js";
+import { instantiateWithRuntime } from "./helpers.js";
 
 async function compileAndRun(source: string) {
   const result = compile(source, { fileName: "test.ts" });
   expect(result.success, `CE: ${result.errors.map((e) => e.message).join("; ")}`).toBe(true);
-  const imports = buildImports(result);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports);
+  const instance = await instantiateWithRuntime(result);
   return instance.exports as Record<string, Function>;
 }
 

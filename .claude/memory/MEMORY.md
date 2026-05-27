@@ -24,6 +24,7 @@
 - [user_role.md](user_role.md) — Project lead: challenges assumptions, thinks in compilation strategies
 - [project_team_setup.md](project_team_setup.md) — All agents as teammates via TeamCreate; details in plan/method/team-setup.md
 - [project_next_session.md](project_next_session.md) — Session state: 16,013 pass, honest baseline after exception tag fix
+- [project_bigint_i64_brand_gate.md](project_bigint_i64_brand_gate.md) — #1349/#1644 BigInt fixes gated on architect i64-bigint-brand ValType decision; not a dev codegen guard
 
 ### Team & agents (rules not in plan/method/team-setup.md)
 - [feedback_architect_worktree_isolation.md](feedback_architect_worktree_isolation.md) — Always spawn architects with isolation:worktree — they stall and request respawn without it
