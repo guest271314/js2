@@ -1,9 +1,11 @@
 ---
 id: 1640
 title: "spec gap: Reflect.* invariant checks mirror internal-method bugs (83 test262 fails)"
-status: ready
+status: blocked
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
+blocked_on: [1630, 1631]
+investigation_done: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -77,3 +79,77 @@ typed-struct objects don't expose Symbol keys at all (they have no Symbol-keyed 
 
 - `test262/test/built-ins/Reflect/defineProperty/symbol-key.js`
 - `test262/test/built-ins/Reflect/ownKeys/return-on-corresponding-order-large-index.js`
+
+## Findings (2026-05-27, dev investigation)
+
+Ran the full `built-ins/Reflect` suite through `runTest262File` on current
+main: **106/153 pass (69%), 47 fail, 0 skip** — already well above the
+issue's stated 46% baseline (the descriptor-attribute work since this issue
+was filed lifted it). The named sample files in the issue
+(`defineProperty/symbol-key.js`, `getOwnPropertyDescriptor/return-undefined-for-non-existent-key.js`)
+no longer exist in the vendored test262 — filenames are stale.
+
+The **Reflect.* host bridges themselves are already spec-correct.** Each
+`__reflect_*` in `src/runtime.ts:4847-4953` delegates to the host's
+`Reflect.X` (wrapping wasm structs via `_wrapForHost`), so invariant checks,
+boolean returns, and prototype-chain walks are inherited from V8. There is
+**no missing-invariant bug to patch in the Reflect layer.** A focused
+"audit Reflect invariants" PR would change nothing.
+
+The 47 failures decompose into two deeper, already-tracked subsystem gaps:
+
+### Cluster A — accessor-descriptor model on struct objects (~30 fails)
+
+Confirmed by direct probe:
+`Object.defineProperty(o, 'p', { get() { return 42 } })` then
+`Reflect.get(o, 'p')` returns `undefined`, not `42` — the getter is never
+wired into the struct-backed object's slot. This is the SAME root cause as
+plain member access over a defineProperty getter. Surfaces as the
+`get/return-*`, `has/return-boolean`, `getOwnPropertyDescriptor/return-from-*`,
+`defineProperty/define-*` ("Getter must be a function: null"),
+`ownKeys/*` and `set/*` buckets. **Tracked by #1630 (descriptor-model
+writeback, escalated needs-spec) and #1631 (Object.create descriptor map
+drops struct-backed descriptors).** Reflect inherits the fix for free.
+
+### Cluster B — compiled-function as host-callable (~8 fails)
+
+`Reflect.apply(fn, thisArg, args)` / `Reflect.construct(ctor, args)` where
+`fn`/`ctor` is a compiled wasm function fails with
+`Function.prototype.apply was called on [object Object], which is not a
+function` — the function reaches the host as a non-callable `_wrapForHost`
+struct wrapper. Surfaces as `apply/call-target.js`, `apply/*-array-like*`,
+`construct/return-with-newtarget-argument.js`, `construct/*`. This is the
+wasm-function → host-callable bridging gap, not Reflect-specific (any host
+MOP that needs to *invoke* a compiled function hits it).
+
+### Recommendation
+
+Close as **wont-fix-standalone / superseded**: there is no Reflect-layer
+patch that moves the needle. Re-validate the Reflect suite after #1630 +
+#1631 (Cluster A) land — that should recover ~30 of the 47. File a separate
+issue for Cluster B (compiled-function host-callable bridging) if one does
+not already exist; it is orthogonal to the descriptor model and to Reflect.
+
+## Re-verification (2026-05-27, dev-1608, task #67)
+
+Confirmed the prior finding on current main without re-running the full
+suite (test262 submodule not initialized in this worktree; the recorded
+106/153 count stands):
+
+- All 13 `__reflect_*` host bridges are present in `src/runtime.ts`
+  (`__reflect_get/set/has/deleteProperty/defineProperty/getOwnPropertyDescriptor/
+  getPrototypeOf/setPrototypeOf/ownKeys/isExtensible/preventExtensions/apply/
+  construct`), each delegating to the host `Reflect.X`. **Nothing is missing
+  to implement** — there is no absent Reflect method and no incorrect
+  invariant wrapper.
+- Both downstream clusters are already tracked, so no new issue is needed:
+  - **Cluster A** (accessor-descriptor model on struct objects, ~30 fails)
+    → #1630 (descriptor-model writeback) + #1631 (Object.create descriptor map).
+  - **Cluster B** (compiled-function as host-callable, ~8 fails) → **#1596**
+    (`Function.prototype.apply/.call not accessible on compiled Wasm
+    functions`); related #1632 (bind/toString).
+
+**Verdict:** #1640 stays `status: blocked` on #1630/#1631. No developer-lane
+implementation work exists here; it resolves for free when Cluster A lands.
+Task #67 closed as *verified — no action* (not implemented, because there is
+nothing at the Reflect layer to fix).

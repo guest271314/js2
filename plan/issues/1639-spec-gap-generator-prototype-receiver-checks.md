@@ -1,7 +1,7 @@
 ---
 id: 1639
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium
