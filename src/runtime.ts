@@ -3351,7 +3351,17 @@ function resolveImport(
         if (self == null) return undefined;
         // Method call — check sidecar if direct method missing
         const fn = self[m] ?? _sidecarGet(self, m);
-        if (typeof fn === "function") return fn.call(self, ...args);
+        if (typeof fn === "function") {
+          // (#1332) Wrap wasmGC-struct args via _wrapForHost so a native
+          // prototype method (e.g. RegExp.prototype.exec/test) can ToString
+          // or read properties off an opaque wasm struct argument. Mirrors
+          // the Set-method path above and __extern_method_call.
+          const exports = callbackState?.getExports();
+          const hasStructArg = args.some((a) => _isWasmStruct(a));
+          if (!hasStructArg) return fn.call(self, ...args);
+          const wrappedArgs = args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          return fn.call(self, ...wrappedArgs);
+        }
         return undefined;
       };
     }
