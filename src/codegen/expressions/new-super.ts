@@ -33,6 +33,7 @@ import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
+  emitThrowReferenceError,
   emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
@@ -1219,7 +1220,45 @@ function compileNewFunctionExpression(
  * The class should already be collected during the collection phase.
  * We produce the constructor function reference so the class can be instantiated.
  */
+/**
+ * §15.7.1 ClassDefinitionEvaluation: a named class binds its own name in an
+ * inner scope that is populated only AFTER the `extends` clause is evaluated.
+ * Referencing that name inside `extends` hits the TDZ — `(class x extends x {})`
+ * must throw ReferenceError (#1594B). The inner binding shadows any outer `x`,
+ * so any reference to the class's own name in `extends` is the TDZ binding.
+ */
+function classExtendsReferencesOwnName(expr: ts.ClassExpression): boolean {
+  if (!expr.name) return false;
+  const ownName = expr.name.text;
+  if (!expr.heritageClauses) return false;
+  for (const clause of expr.heritageClauses) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const typeNode of clause.types) {
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (found) return;
+        if (ts.isIdentifier(node) && node.text === ownName) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeNode.expression);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
 function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.ClassExpression): ValType | null {
+  // §15.7.1: the class-expression name is in TDZ during its own `extends`
+  // evaluation. `(class x extends x {})` must throw ReferenceError (#1594B).
+  if (classExtendsReferencesOwnName(expr)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${expr.name!.text}' before initialization`);
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+
   // Look up the synthetic name assigned during the collection phase
   const syntheticName = ctx.anonClassExprNames.get(expr);
   const classNameForCheck = syntheticName ?? expr.name?.text;

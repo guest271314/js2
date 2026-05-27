@@ -18,7 +18,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
-import { emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
+import { emitThrowReferenceError, emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
   compileClassBodies,
@@ -43,6 +43,34 @@ import {
   registerHoistFunctionDeclarations,
 } from "../shared.js";
 
+/**
+ * §15.7.1 ClassDefinitionEvaluation: the class name binding is added to the
+ * class's inner scope AFTER the `extends` clause is evaluated. Referencing the
+ * class name inside its own `extends` expression therefore hits the TDZ and
+ * must throw ReferenceError (e.g. `class x extends x {}`). Returns true if the
+ * extends heritage clause contains an identifier equal to the class name.
+ */
+function extendsReferencesClassName(decl: ts.ClassDeclaration, className: string): boolean {
+  if (!decl.heritageClauses) return false;
+  for (const clause of decl.heritageClauses) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const typeNode of clause.types) {
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (found) return;
+        if (ts.isIdentifier(node) && node.text === className) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeNode.expression);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
 export function compileNestedClassDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -50,6 +78,13 @@ export function compileNestedClassDeclaration(
 ): void {
   if (!decl.name) return;
   const className = decl.name.text;
+
+  // §15.7.1: the class name is in TDZ while its own `extends` clause is
+  // evaluated. `class x extends x {}` must throw ReferenceError (#1594B).
+  if (extendsReferencesClassName(decl, className)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${className}' before initialization`);
+    return;
+  }
 
   const isDeferred = ctx.deferredClassBodies.has(className);
   // Skip if already collected AND not deferred (already fully compiled)

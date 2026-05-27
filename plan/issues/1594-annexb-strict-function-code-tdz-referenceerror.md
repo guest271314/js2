@@ -65,3 +65,26 @@ Spec §15.7.1 ClassDeclaration: the class name binding is added to the class's i
 - Sub-cluster B is a 2-line fix (install class-name binding after extends evaluation, not before). High confidence / easy to isolate.
 - Sub-cluster A requires understanding the AnnexB §B.3.3 legacy binding rules and how we implement strict-mode block function declarations. May require a separate approach.
 - Consider splitting into #1594A (class-name TDZ, 2 tests, trivial) and #1594B (AnnexB block-fn, ~98 tests, medium) if implementation complexity diverges significantly.
+
+## Sub-cluster B — FIXED (2026-05-27)
+
+Class name in its own `extends` expression is now a TDZ ReferenceError. Both
+the declaration path (`compileNestedClassDeclaration`) and the class-expression
+path (`compileClassExpression`) statically detect a reference to the class's own
+name inside the heritage `extends` clause and emit a real `ReferenceError`
+instance via `emitThrowReferenceError` (works in both JS-host and standalone
+modes). Previously the declaration path silently swallowed the self-reference
+(`class-bodies.ts:147` set `parentClassName = undefined`) and the
+class-expression path either succeeded (returning 2) or null-deref'd.
+
+**Files**: `src/codegen/statements/nested-declarations.ts`,
+`src/codegen/expressions/new-super.ts`. Tests: `tests/issue-1594b.test.ts`.
+
+**test262 results (verified via `runTest262File`)**:
+- `language/statements/class/name-binding/in-extends-expression.js` — pass
+- `language/statements/class/name-binding/in-extends-expression-grouped.js` — pass (class-expression path)
+- `language/statements/class/name-binding/in-extends-expression-assigned.js` — pass (was a crash; now correct)
+
+Sub-cluster A (AnnexB block-fn legacy hoisting, ~98 fails) remains open and is
+escalated to the architect — it is a deep cross-cutting change unrelated to
+this fix.
