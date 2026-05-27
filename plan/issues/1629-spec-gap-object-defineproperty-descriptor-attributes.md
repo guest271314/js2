@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: 50
+sprint: 56
 renumbered_from: 1335
 parent: 1328
 ---
