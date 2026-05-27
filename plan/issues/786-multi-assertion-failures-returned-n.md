@@ -1,9 +1,10 @@
 ---
 id: 786
 title: "- Multi-assertion failures: returned N > 2 (~1,183 tests)"
-status: in-review
+status: done
 created: 2026-03-25
-updated: 2026-04-28
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: high
