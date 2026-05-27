@@ -3324,7 +3324,7 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // `compileExpression(ThisKeyword)`. We toggle these per-entry rather
     // than spawning a fresh fctx because the body must accumulate into
     // a single `__module_init` and globals/locals are shared.
-    for (const { globalIdx, initializer, className } of ctx.staticInitExprs) {
+    for (const { globalIdx, initializer, staticBlock, className } of ctx.staticInitExprs) {
       const savedEnclosing = initFctx.enclosingClassName;
       const savedIsStatic = initFctx.isStaticContext;
       if (className !== undefined) {
@@ -3332,9 +3332,16 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         initFctx.isStaticContext = true;
       }
       try {
-        const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
-        compileExpression(ctx, initFctx, initializer, globalDef?.type);
-        initFctx.body.push({ op: "global.set", index: globalIdx });
+        if (staticBlock) {
+          // `static { ... }` block — execute its statements in source order.
+          for (const s of staticBlock.body.statements) {
+            compileStatement(ctx, initFctx, s);
+          }
+        } else if (initializer && globalIdx !== undefined) {
+          const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+          compileExpression(ctx, initFctx, initializer, globalDef?.type);
+          initFctx.body.push({ op: "global.set", index: globalIdx });
+        }
       } finally {
         initFctx.enclosingClassName = savedEnclosing;
         initFctx.isStaticContext = savedIsStatic;

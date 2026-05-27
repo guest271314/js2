@@ -4,7 +4,7 @@
  */
 import { ts, forEachChild } from "../../ts-api.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
-import { collectReferencedIdentifiers, collectWrittenIdentifiers } from "../closures.js";
+import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -1250,6 +1250,28 @@ function classExtendsReferencesOwnName(expr: ts.ClassExpression): boolean {
   return false;
 }
 
+/**
+ * (#1602) Emit a class-expression-as-value: the constructor wrapped in a
+ * closure-struct converted to externref. A bare `ref.func` (funcref) is NOT a
+ * subtype of anyref/externref, so when the class value flowed into an externref
+ * context — `(class {...}).f` member read feeding `__extern_get`, or passed as
+ * a call argument — the raw funcref was left on the stack where externref was
+ * required, producing an invalid module (`call expected externref, found
+ * ref.func`). Mirror the proven `ClassName.constructor` / static-method
+ * extraction path: wrap the ctor funcref in a closure struct and
+ * `extern.convert_any`. Falls back to the legacy funcref only if closure
+ * construction fails (signature unresolvable), preserving prior behaviour.
+ */
+function emitClassCtorValue(ctx: CodegenContext, fctx: FunctionContext, ctorName: string, funcIdx: number): ValType {
+  const closureRef = emitFuncRefAsClosure(ctx, fctx, ctorName, funcIdx);
+  if (closureRef) {
+    fctx.body.push({ op: "extern.convert_any" });
+    return { kind: "externref" };
+  }
+  fctx.body.push({ op: "ref.func", funcIdx });
+  return { kind: "funcref" };
+}
+
 function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.ClassExpression): ValType | null {
   // §15.7.1: the class-expression name is in TDZ during its own `extends`
   // evaluation. `(class x extends x {})` must throw ReferenceError (#1594B).
@@ -1274,9 +1296,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     const ctorName = `${syntheticName}_new`;
     const funcIdx = ctx.funcMap.get(ctorName);
     if (funcIdx !== undefined) {
-      // Produce a ref.func to the constructor as the class value
-      fctx.body.push({ op: "ref.func", funcIdx });
-      return { kind: "funcref" };
+      return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
     }
   }
 
@@ -1287,8 +1307,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
       const ctorName = `${className}_new`;
       const funcIdx = ctx.funcMap.get(ctorName);
       if (funcIdx !== undefined) {
-        fctx.body.push({ op: "ref.func", funcIdx });
-        return { kind: "funcref" };
+        return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
       }
     }
   }

@@ -1,7 +1,7 @@
 ---
 id: 1594
 title: "AnnexB strict function-code / class name-binding TDZ: ReferenceError not thrown (~100 fails)"
-status: backlog
+status: in-review
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: classes, annex-b, tdz, strict-mode, let, const
 goal: spec-completeness
-sprint: Backlog
+sprint: 56
 test262_fail: 100
 test262_category: annexB/language/function-code, annexB/language/global-code, language/statements/class
 ---
@@ -66,25 +66,50 @@ Spec §15.7.1 ClassDeclaration: the class name binding is added to the class's i
 - Sub-cluster A requires understanding the AnnexB §B.3.3 legacy binding rules and how we implement strict-mode block function declarations. May require a separate approach.
 - Consider splitting into #1594A (class-name TDZ, 2 tests, trivial) and #1594B (AnnexB block-fn, ~98 tests, medium) if implementation complexity diverges significantly.
 
-## Sub-cluster B — FIXED (2026-05-27)
+## Investigation 2026-05-27 (dev) — ESCALATED, needs architect spec
 
-Class name in its own `extends` expression is now a TDZ ReferenceError. Both
-the declaration path (`compileNestedClassDeclaration`) and the class-expression
-path (`compileClassExpression`) statically detect a reference to the class's own
-name inside the heritage `extends` clause and emit a real `ReferenceError`
-instance via `emitThrowReferenceError` (works in both JS-host and standalone
-modes). Previously the declaration path silently swallowed the self-reference
-(`class-bodies.ts:147` set `parentClassName = undefined`) and the
-class-expression path either succeeded (returning 2) or null-deref'd.
+Ran the full `annexB/language/{function-code,global-code}` clusters through
+`runTest262File` on current main: **pass=108, fail=202, ce=2** (the fail count
+is ~2× the issue's ~98 estimate). The dominant failure mode is the **opposite**
+of the issue's framing:
 
-**Files**: `src/codegen/statements/nested-declarations.ts`,
-`src/codegen/expressions/new-super.ts`. Tests: `tests/issue-1594b.test.ts`.
+- **Sub-cluster A is NOT primarily about strict-mode skipping the legacy
+  binding.** The bulk of fails are the *positive* AnnexB cases
+  (`*-func-init`, `*-func-update`, `*-existing-*-update`, across
+  block/if/switch/try/loop containers) where a block-scoped `function f` with
+  **no** conflict *must* create a function-scope (var-like) binding visible
+  after the block. We fail these. The `*-skip-early-err*` (conflict) cases
+  already **pass** on main.
+- Minimal repro:
+  ```ts
+  function outer(): string {
+    let after: any;
+    { function f() { return 'decl'; } }
+    after = f;           // f IS resolvable (hoisted), but...
+    return typeof after; // returns "object", should be "function"
+  }
+  ```
+  So `hoistFunctionDeclarations` (src/codegen/statements/nested-declarations.ts)
+  does hoist the block function to function scope, but the **hoisted
+  function-value representation reports `typeof` as `"object"` not
+  `"function"`**. The root cause is in how block-hoisted function declarations
+  are represented as values + the AnnexB legacy-binding wiring across all
+  container kinds (if/switch/try/loop) — a deep, cross-cutting change to
+  shared function-body/closure codegen, not a scoped fix.
 
-**test262 results (verified via `runTest262File`)**:
-- `language/statements/class/name-binding/in-extends-expression.js` — pass
-- `language/statements/class/name-binding/in-extends-expression-grouped.js` — pass (class-expression path)
-- `language/statements/class/name-binding/in-extends-expression-assigned.js` — pass (was a crash; now correct)
-
-Sub-cluster A (AnnexB block-fn legacy hoisting, ~98 fails) remains open and is
-escalated to the architect — it is a deep cross-cutting change unrelated to
-this fix.
+**Recommendation**: split.
+- **#1594A (AnnexB legacy block-function hoisting)** — ~202 fails. Needs an
+  architect spec: correct §B.3.3.1 FunctionDeclarationInstantiation legacy
+  var-binding semantics, including (a) the function-value `typeof` fix for
+  block-hoisted decls and (b) the skip-conditions (strict mode + would-be
+  early error). Touches `nested-declarations.ts` + closure/function-value
+  representation. ESCALATED.
+- **#1594B (class-name TDZ in `extends`)** — 2 fails
+  (`language/statements/class/name-binding/in-extends-expression{,-grouped}.js`).
+  Both still fail on main (we don't throw). Classes compile away with no
+  runtime TDZ binding, so the class name referenced in its own `extends` is a
+  *statically detectable* TDZ violation; the fix is to detect it (class name
+  ∈ identifiers of its own heritage clause) and emit a **runtime
+  ReferenceError throw** at the class expression's evaluation point (the test
+  wraps it in `assert.throws`, so a compile error would NOT satisfy it).
+  Isolable from A; small but not a literal 2-liner.
