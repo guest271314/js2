@@ -1,7 +1,7 @@
 ---
 id: 1593
 title: "Destructuring default initializer triggers on null — spec requires undefined-only check (~165 fails)"
-status: backlog
+status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, default-initializer, for-of, for-await-of, classes
 goal: spec-completeness
-sprint: Backlog
+sprint: 56
 test262_fail: 165
 test262_category: language/statements/class/dstr, language/statements/for-await-of, language/statements/for-of, language/statements/for
 ---
