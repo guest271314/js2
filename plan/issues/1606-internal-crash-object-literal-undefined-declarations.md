@@ -1,7 +1,7 @@
 ---
 id: 1606
 title: "codegen crash: 'Cannot read properties of undefined (reading declarations)' on object-literal expressions"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-24
 priority: high

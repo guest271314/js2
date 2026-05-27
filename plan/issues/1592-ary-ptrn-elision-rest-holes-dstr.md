@@ -1,7 +1,7 @@
 ---
 id: 1592
 title: "Array pattern elision holes and rest-array in destructuring consume wrong iterator step (~305 fails)"
-status: blocked
+status: in-review
 created: 2026-05-24
 updated: 2026-05-27
 blocked_on: 1555

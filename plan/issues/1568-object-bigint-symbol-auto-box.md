@@ -1,11 +1,11 @@
 ---
 id: 1568
 title: "Object(BigInt) and Object(Symbol) must auto-box to wrappers (typeof === \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"object\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\")"
-status: ready
+status: done
 created: 2026-05-21
 updated: 2026-05-21
 feasibility: easy
-sprint: Backlog
+sprint: 56
 depends_on: [1129]
 owner: developer
 type: fix

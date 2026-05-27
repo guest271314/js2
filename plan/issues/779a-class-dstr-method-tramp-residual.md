@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: class-destructuring-methods
 goal: property-model
-sprint: Backlog
+sprint: 56
 parent: 779
 es_edition: ES2017
 test262_fail: 727

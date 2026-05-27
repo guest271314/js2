@@ -1,7 +1,7 @@
 ---
 id: 1635
 title: "spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails)"
-status: ready
+status: done
 created: 2026-05-08
 updated: 2026-05-24
 priority: high

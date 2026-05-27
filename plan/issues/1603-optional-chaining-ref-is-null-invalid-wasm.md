@@ -1,9 +1,9 @@
 ---
 id: 1603
 title: "codegen: optional-chaining short-circuit emits invalid wasm (ref.is_null expected i32, found ref)"
-status: ready
+status: done
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-27
 priority: high
 feasibility: medium
 task_type: bugfix

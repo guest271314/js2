@@ -1,7 +1,7 @@
 ---
 id: 820k
 title: "Object.* receiver TypeError on null/undefined (ToObject step) (~39 fails)"
-status: ready
+status: in-review
 created: 2026-05-21
 updated: 2026-05-21
 priority: medium

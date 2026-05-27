@@ -1,9 +1,9 @@
 ---
 id: 1611
 title: "parser: lexical declaration in single-statement context rejected for valid newline-separated cases"
-status: ready
+status: done
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 task_type: bugfix
