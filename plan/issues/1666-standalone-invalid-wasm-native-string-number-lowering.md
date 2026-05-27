@@ -1,7 +1,8 @@
 ---
 id: 1666
 title: "bug: --target wasi emits INVALID wasm for class/closure/callback/number→string/regex/generator/typed-array (native helper type mismatch + unbound late global)"
-status: ready
+status: done
+completed: 2026-05-27
 created: 2026-05-25
 priority: high
 feasibility: hard
@@ -18,6 +19,14 @@ related: [1662, 1335, 1470, 1472]
 > corrupted the default-GC trampoline path → −3,600 test262). Re-land must
 > scope the func-index fixup so it never re-shifts already-emitted bodies in
 > the default (non-standalone) path. See #1668. Status stays `ready`.
+>
+> **SAFE RE-LAND (2026-05-27):** Signature B (unbound late global) is
+> re-landed with a mode-agnostic, no-func-index-bookkeeping fix that does
+> NOT touch the trampoline shift path — it cannot reproduce the #618
+> regression. Signature A (native string helper func-index shift
+> collisions) is the actual #618 shift-regime hazard and is **explicitly
+> deferred** to a follow-up architect-routed issue (see "Remaining —
+> Signature A" below). It is NOT included in this re-land.
 
 ## Problem
 
@@ -112,3 +121,54 @@ because the modules fail full validation.
 This bug likely **masks** part of the residual-leak analysis in #1664 — fix
 this first; some leaks may resolve once the native lowering path is
 exercised correctly.
+
+## Progress — Signature B FIXED (2026-05-27, dev-1611)
+
+**Signature B (unbound late global `0xffffffff`) is fixed** and covered by
+`tests/issue-1666.test.ts` (5 tests). Root cause + fix:
+
+- The RangeError-validation throw path in
+  `Number.prototype.{toString(radix),toFixed,toPrecision,toExponential}`
+  (src/codegen/expressions/calls.ts) emitted `global.get <strIdx>` where
+  `strIdx = ctx.stringGlobalMap.get(rangeErrMsg)`. Under `nativeStrings`
+  (auto-on for `--target wasi`), `addStringConstantGlobal` records the
+  message with the `-1` "materialize inline" sentinel rather than a real
+  `string_constants` global, so `strIdx === -1` → `global.get 0xffffffff`,
+  which fails validation.
+- Fix: replace the inline `[{global.get strIdx}, {throw}]` with
+  `[...stringConstantExternrefInstrs(ctx, rangeErrMsg), {throw}]`. That
+  helper inlines a native `$NativeString` and `extern.convert_any`s it to
+  the externref the exn tag expects (host mode still uses the real global).
+  Mode-agnostic, no func-index bookkeeping, zero risk to the default GC path.
+- Verified: `(3.14159).toFixed(2)`, `(255).toString(16)`,
+  `(123.456).toPrecision(4)`, `(12345).toExponential(2)` all instantiate
+  under `--target wasi`; `tests/issue-733.test.ts` (15) and
+  `tests/issue-49-number-format-nonfinite.test.ts` (7) still green.
+
+## Remaining — Signature A (NEEDS ARCHITECT / shift-regime unification)
+
+**Signature A (`__str_flatten`/`__str_to_extern` `call[k] expected <T>`) is
+NOT fixed here** and should be tracked separately. Root cause confirmed:
+
+- Native string helpers (`__str_flatten`, etc.) are emitted as DEFINED
+  functions during the import-collection finalize phase
+  (`finalizeUnifiedCollector` → `ensureNativeStringHelpers`). Later finalize
+  blocks call raw `addImport`, which bumps `numImportFuncs` WITHOUT shifting
+  the already-emitted helper bodies' internal `call`/`ref.func` targets — so
+  those targets become stale and resolve to wrong-signature functions.
+- An incremental, finalize-scoped `addImport` shift (gated on a pinned
+  helper base so the default GC path is never touched) fixes ~6/8 probes
+  (array-map, class, closure, generator, numstr, uint8) BUT the lazy
+  `__str_to_extern` bridge (`ensureNativeStringExternBridge`, emitted during
+  function COMPILATION via `ensureLateImport`/`flushLateImportShifts`)
+  overlaps with that second shift regime — `str-template` still fails, and
+  gating the finalize shift to the finalize phase regresses class/uint8.
+- This is exactly the **#618 hazard** (PR #608's eager `fixupModuleFuncIndices`
+  in `addImport` corrupted the default trampoline path → −3,600). A correct
+  full fix requires **unifying the two shift regimes** (finalize-phase eager
+  helper shift vs. compilation-phase `flushLateImportShifts`) so a helper
+  emitted in either phase is reconciled consistently without double-shift.
+  That is an architect-level change to the import/func-index bookkeeping.
+- Recommendation: split a new issue "Signature A: native string helper
+  func-index shift unification" and route to architect/senior-dev. The probes
+  are in `.tmp/probes-1666/` and the failing signatures are documented above.
