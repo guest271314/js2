@@ -6746,23 +6746,15 @@ export function addIteratorImports(ctx: CodegenContext): void {
   const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__iterator", { kind: "func", typeIdx: extToExt });
 
-  // __iterator_next: (externref) → externref — calls iter.next()
+  // __iterator_next: (externref) → (i32 done, externref value) — calls iter.next()
+  // Multi-value result avoids the $IteratorResult struct: a freshly-built WasmGC
+  // struct cannot survive the JS import hop (it surfaces as undefined in V8/Node;
+  // see #1620 BLOCKED). The two primitives (i32 + externref) cross the JS↔Wasm
+  // multi-value ABI cleanly, eliminating __iterator_done / __iterator_value.
+  const extToDoneValue = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }, { kind: "externref" }]);
   addImport(ctx, "env", "__iterator_next", {
     kind: "func",
-    typeIdx: extToExt,
-  });
-
-  // __iterator_done: (externref) → i32 — returns result.done ? 1 : 0
-  const extToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__iterator_done", {
-    kind: "func",
-    typeIdx: extToI32,
-  });
-
-  // __iterator_value: (externref) → externref — returns result.value
-  addImport(ctx, "env", "__iterator_value", {
-    kind: "func",
-    typeIdx: extToExt,
+    typeIdx: extToDoneValue,
   });
 
   // __iterator_return: (externref) → void — calls iter.return() if it exists

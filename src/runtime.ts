@@ -5875,53 +5875,51 @@ assert._isSameValue = isSameValue;
           );
         };
       if (name === "__iterator_next")
-        return (iter: any) => {
+        // #1620 v2: returns the iterator step as a Wasm multi-value
+        // [i32 done, externref value]. V8 destructures the returned 2-element
+        // array onto the Wasm stack (the import is declared `(result i32 externref)`).
+        // Folds in the old __iterator_done / __iterator_value extraction — those
+        // separate imports are gone. No $IteratorResult struct crosses the JS hop.
+        return (iter: any): [number, any] => {
+          // Resolve iter.next: own → sidecar → __sget_next → WasmGC closure → __call_next.
+          let raw: any;
           let next = iter.next ?? _sidecarGet(iter, "next");
-          // Try struct getter for "next" method
           if (next === undefined) {
             const exports = callbackState?.getExports();
             next = exports?.__sget_next?.(iter);
           }
-          if (typeof next === "function") return next.call(iter);
-          // If next is a WasmGC closure, call via __call_fn_0
-          if (next != null && _isWasmStruct(next)) {
+          if (typeof next === "function") {
+            raw = next.call(iter);
+          } else if (next != null && _isWasmStruct(next)) {
             const exports = callbackState?.getExports();
             const callFn0 = (exports as any)?.__call_fn_0;
-            if (typeof callFn0 === "function") {
-              const result = callFn0(next);
-              if (result != null) return result;
-            }
+            if (typeof callFn0 === "function") raw = callFn0(next);
           }
-          // Try __call_next dispatch for WasmGC struct iterators
-          {
+          // Try __call_next dispatch for WasmGC struct iterators.
+          if (raw == null) {
             const exports = callbackState?.getExports();
             const callNext = (exports as any)?.["__call_next"];
-            if (typeof callNext === "function") {
-              const result = callNext(iter);
-              if (result != null) return result;
-            }
+            if (typeof callNext === "function") raw = callNext(iter);
           }
-          throw new TypeError("iterator.next is not a function");
-        };
-      if (name === "__iterator_done")
-        return (result: any) => {
-          let done = result.done ?? _sidecarGet(result, "done");
-          // Try struct getter for "done" field
+          if (raw == null) throw new TypeError("iterator.next is not a function");
+
+          // Extract done: own → sidecar → __sget_done.
+          let done = raw.done ?? _sidecarGet(raw, "done");
           if (done === undefined) {
             const exports = callbackState?.getExports();
-            done = exports?.__sget_done?.(result);
+            done = exports?.__sget_done?.(raw);
           }
-          return done ? 1 : 0;
-        };
-      if (name === "__iterator_value")
-        return (result: any) => {
-          let val = result.value;
-          if (val !== undefined) return val;
-          val = _sidecarGet(result, "value");
-          if (val !== undefined) return val;
-          // Try struct getter for "value" field
-          const exports = callbackState?.getExports();
-          return exports?.__sget_value?.(result);
+          // Extract value: own → sidecar → __sget_value.
+          let value = raw.value;
+          if (value === undefined) {
+            value = _sidecarGet(raw, "value");
+            if (value === undefined) {
+              const exports = callbackState?.getExports();
+              value = exports?.__sget_value?.(raw);
+            }
+          }
+          // Multi-value ABI: return an iterable of [i32 done, externref value].
+          return [done ? 1 : 0, value];
         };
       if (name === "__iterator_rest")
         return (iter: any) => {

@@ -3231,9 +3231,9 @@ function findStructFieldsByTypeIdx(
  * Generated Wasm pseudo-code:
  *   iter = __iterator(obj)
  *   loop:
- *     result = __iterator_next(iter)
- *     if __iterator_done(result) → break
- *     elem = __iterator_value(result)
+ *     (done, value) = __iterator_next(iter)   // multi-value result
+ *     if done → break
+ *     elem = value
  *     <body>
  *     br loop
  */
@@ -3328,18 +3328,19 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.body.push({ op: "call", funcIdx: iteratorIdx });
 
   const nextIdx = ctx.funcMap.get("__iterator_next");
-  const doneIdx = ctx.funcMap.get("__iterator_done");
-  const valueIdx = ctx.funcMap.get("__iterator_value");
   const returnIdx = ctx.funcMap.get("__iterator_return");
-  if (nextIdx === undefined || doneIdx === undefined || valueIdx === undefined) {
+  if (nextIdx === undefined) {
     reportError(ctx, stmt, "for-of on non-array type requires iterator imports");
     return;
   }
   const iterLocal = allocLocal(fctx, `__forof_iter_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: iterLocal });
 
-  // Allocate locals for iterator result and loop element
+  // Allocate locals for the iterator-step result. __iterator_next now returns a
+  // multi-value (i32 done, externref value); resultLocal holds the value, and
+  // nextDoneLocal the done flag (#1620 v2 — no $IteratorResult struct).
   const resultLocal = allocLocal(fctx, `__forof_result_${fctx.locals.length}`, { kind: "externref" });
+  const nextDoneLocal = allocLocal(fctx, `__forof_done_raw_${fctx.locals.length}`, { kind: "i32" });
 
   // Declare the loop variable (element type is externref for iterator protocol)
   const elemType: ValType = { kind: "externref" };
@@ -3439,14 +3440,16 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.body.push({ op: "i32.gt_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break if >1M iterations
 
-  // Call __iterator_next(iter) → result
+  // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
+  // Results are pushed left-to-right, so value (externref) is on top of the
+  // stack and done (i32) below it: pop value first, then done.
   fctx.body.push({ op: "local.get", index: iterLocal });
   fctx.body.push({ op: "call", funcIdx: nextIdx });
-  fctx.body.push({ op: "local.set", index: resultLocal });
+  fctx.body.push({ op: "local.set", index: resultLocal }); // externref value (top)
+  fctx.body.push({ op: "local.set", index: nextDoneLocal }); // i32 done (below)
 
-  // Check done: __iterator_done(result) → i32, break if truthy
-  fctx.body.push({ op: "local.get", index: resultLocal });
-  fctx.body.push({ op: "call", funcIdx: doneIdx });
+  // Check done: read the i32 directly, break if truthy
+  fctx.body.push({ op: "local.get", index: nextDoneLocal });
   // If done, set the done flag to 1 before breaking
   fctx.body.push({
     op: "if",
@@ -3459,9 +3462,8 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     else: [],
   });
 
-  // Get value: elem = __iterator_value(result)
+  // Get value: elem = value (already in resultLocal)
   fctx.body.push({ op: "local.get", index: resultLocal });
-  fctx.body.push({ op: "call", funcIdx: valueIdx });
   fctx.body.push({ op: "local.set", index: elemLocal });
 
   // If destructuring pattern, destructure from the element
