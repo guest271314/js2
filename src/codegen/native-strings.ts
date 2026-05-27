@@ -194,6 +194,13 @@ export function flatStringType(ctx: CodegenContext): ValType {
 export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   if (ctx.nativeStrHelpersEmitted) return;
   ctx.nativeStrHelpersEmitted = true;
+  // #1677: snapshot the import-function count at the instant the helpers are
+  // emitted. Imports added later during the same finalize phase shift these
+  // helpers' true indices but NOT their baked-in sibling-call targets;
+  // `reconcileNativeStrFinalizeShift` applies that delta at finalize end.
+  if (ctx.nativeStrHelperImportBase < 0) {
+    ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+  }
 
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
   const strTypeIdx = ctx.nativeStrTypeIdx; // NativeString (FlatString) struct type index
