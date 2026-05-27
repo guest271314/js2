@@ -1,9 +1,10 @@
 ---
 id: 1620
 title: "$IteratorResult struct: eliminate __iterator_done/__iterator_value host imports (runtime wiring gap)"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -631,3 +632,33 @@ already handle arbitrary result vectors):
   defined+exported helper).
 - **No `context/types.ts` change**: `iteratorResultTypeIdx` is not introduced.
 - Coexists cleanly with `__iterator_rest` (#1052) — untouched.
+
+## Resolution (v2 — DONE 2026-05-27)
+
+Direction 1 (multi-value import) implemented and verified. Changes:
+
+- **`src/codegen/index.ts` `addIteratorImports`**: `__iterator_next` now
+  `(externref) → (i32 done, externref value)`; `__iterator_done`,
+  `__iterator_value`, and the unused `extToI32` registration removed.
+- **`src/codegen/statements/loops.ts` `compileForOfIterator`**: single
+  multi-value call; pop value (top, externref) into `resultLocal`, then done
+  (i32) into a new `nextDoneLocal`; read done directly for the break test.
+- **`src/ir/lower.ts`**: the `forof.iter` IR path (the parallel implementation)
+  updated to the same multi-value sequence — value → `elementSlot`, done →
+  `br_if`. The dead standalone `iter.next/done/value` IR cases now throw a clear
+  lowering error (only `forof.iter` is emitted by the frontend; verified).
+- **`src/runtime.ts` `__iterator_next`**: folds done/value extraction (same
+  own→sidecar→`__sget_*`→`__call_fn_0`→`__call_next` resolution order) and
+  returns `[done ? 1 : 0, value]`; `__iterator_done`/`__iterator_value` branches
+  deleted.
+- **Tests**: `tests/iterators.test.ts` WAT assertions now assert the two imports
+  are *absent*; `tests/equivalence/helpers.ts` `__iterator_next` returns the
+  `[done, value]` array; new `tests/issue-1620.test.ts` pins the multi-value WAT
+  + two custom-iterable round-trips (sum=10, break=3) — the exact case that
+  failed on the v1 struct branch with the `undefined`-struct `TypeError`.
+
+Verified: `tests/iterators.test.ts` (6) + `tests/symbol-iterator-protocol.test.ts`
+(4) + `tests/issue-1620.test.ts` (3) all pass; `tsc --noEmit` clean. The V8
+`undefined`-struct hazard is structurally impossible (no GC struct crosses the
+JS hop). Host calls per step: 3 → 1. Imports eliminated: `__iterator_done`,
+`__iterator_value` (acceptance + `goal: host-independence` met).

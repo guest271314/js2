@@ -555,6 +555,12 @@ export interface CodegenContext {
   testRuntime: boolean;
   /** Map from native string helper name → function index */
   nativeStrHelpers: Map<string, number>;
+  /** #1677: import-function count captured the instant the native-string
+   *  helpers were first emitted (mid-finalize). Used by
+   *  `reconcileNativeStrFinalizeShift` to shift the helper bodies + map by the
+   *  number of imports added afterwards during the rest of finalize. -1 until
+   *  helpers are emitted; reset to -1 once reconciled. */
+  nativeStrHelperImportBase: number;
   /** Map from value type kind → ref cell struct type index */
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */

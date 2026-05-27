@@ -1,7 +1,8 @@
 ---
 id: 1679
 title: "Stress test: compile acorn.js — `new this(...)` dynamic constructor unsupported"
-status: ready
+status: done
+completed: 2026-05-27
 created: 2026-05-27
 updated: 2026-05-27
 priority: medium
@@ -125,3 +126,4 @@ npx tsx .tmp/compile-acorn.mts
 - Related: #1519 (other `new`-expression edge cases — spread, non-constructor
   TypeError, new.target), #1609 (non-literal spread in `new`). This is a
   distinct construct (constructor-via-`this`), not covered by either.
+

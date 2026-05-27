@@ -1,83 +1,99 @@
 ---
 id: 1678
-title: "externref-typed default value of array/rest binding param not materialised to native array (Array.isArray false) (~dominant share of #779a 727)"
-status: ready
+title: "externref-typed array/rest binding default not recognised by Array.isArray"
+status: done
 created: 2026-05-27
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix
 area: codegen
-language_feature: destructuring-defaults
+language_feature: class-destructuring-methods
 goal: property-model
-sprint: Backlog
-parent: 779
+sprint: 56
+parent: 779a
 es_edition: ES2017
+test262_fail: 727
 ---
-# #1678 — externref default-value of array/rest binding param not materialised to native array
+# #1678 — externref-typed array/rest binding default fails Array.isArray
 
 ## Problem
 
-When an array/rest binding-pattern parameter has a **default value whose static
-type is `any` (externref)**, the bound result is an externref that
-`Array.isArray` rejects — it is not wrapped as a native vec/array. The static
-type of the **default value** (not the binding shape) decides the outcome.
-
-Isolated repro (verified on main, 2026-05-27):
+Carved from #779a. The dominant share of the ~727 `class/dstr-dflt` test262
+failures is `assert(Array.isArray(x))` returning false for a rest/array
+binding whose **default value** is statically typed `any` (externref).
 
 ```ts
-// FAILS (ret=2): default value typed `any` (externref)
+// FAILS: default value typed `any` (externref)
 let values: any; values = [1, 2, 3];
 class C { static method([...x] = values) { /* Array.isArray(x) === false */ } }
 
-// PASSES (ret=1): default value typed number[] (vec struct)
-var values = [1, 2, 3];   // inferred number[]
+// PASSES: default value typed number[] (vec struct)
+var values = [1, 2, 3];
 class C { static method([...x] = values) { /* Array.isArray(x) === true */ } }
 ```
 
-## Why this matters
+The test262 harness declares `let values;` (type `any`) then assigns
+`values = [...]`, so every `*-dflt-*` test takes the failing branch.
 
-This is the **dominant share** of the ~727 `class/dstr` `assertion_fail`
-failures originally bucketed under #779a. The test262 harness declares
-`let values: any;` then assigns `values = [1,2,3]`, so every `*-dflt-*` test
-(`meth-dflt-*`, `gen-meth-dflt-*`, `async-gen-meth-dflt-*`, `private-*-dflt-*`,
-…) takes the failing branch. The first failing assertion is
-`assert(Array.isArray(x))`.
+## Root cause (isolated 2026-05-27)
 
-This is **independent of and larger than** the nested-class global-index-drift
-sub-bug fixed in #779a (PR #678). That fix resolved the documented invalid-Wasm
-repro; this issue covers the remaining behavioural failures.
+`Array.isArray(x)` was lowered as a **compile-time constant** in
+`src/codegen/expressions/calls.ts` (the `Array.isArray` interceptor):
 
-## Root cause
+```ts
+const isArr = argWasmType.kind === "ref" || argWasmType.kind === "ref_null";
+fctx.body.push({ op: "i32.const", value: isArr ? 1 : 0 });
+```
 
-The array/rest binding-default lowering does not convert an externref default
-value to a native array (vec struct). When the default value is externref, the
-binding receives the raw externref; `Array.isArray`, `.length`, and indexed
-access then behave as for an opaque host value, not a native array.
+When the argument's static type is `any`/`unknown`, `argWasmType.kind` is
+`externref`, so the fold produced `i32.const 0` — always false — regardless
+of the runtime value. The rest binding `x` is correctly materialised to a
+`__vec_externref` at runtime (its `.length` and element access work), but the
+static fold never inspected it.
 
-## Fix direction
+## Fix
 
-In the array/rest binding-default lowering (destructuring-params path): when the
-default value is externref-typed, materialise/convert it to a native array (vec
-struct) before binding — so `Array.isArray`, `.length`, and index access work.
-Mirror whatever conversion the `number[]`-typed path already produces.
+`src/codegen/expressions/calls.ts` — when the `Array.isArray` argument is
+`externref`-typed, emit a **runtime check** instead of a constant: compile the
+arg to externref, `any.convert_extern`, then `ref.test` against every
+registered vec struct type, OR-ing the results. Pure Wasm — no host import,
+works in standalone/WASI mode, and matches how the compiler represents JS
+arrays (vec structs). Statically-typed args keep the existing compile-time
+fold (a `ref`/`ref_null` vec is an array; everything else is not).
 
 ## Acceptance criteria
 
-- [ ] `[...x] = values` (and `[a, b] = values`) with an `any`-typed `values`
-      binds a native array such that `Array.isArray(x) === true`.
-- [ ] The dominant `class/dstr` `*-dflt-*` test262 buckets flip to `pass`.
-- [ ] No regression in `number[]`-typed default paths or in already-passing
-      `class/dstr` tests.
+- [x] `Array.isArray(x)` is true for a rest/array binding whose default value
+      is `any`-typed and resolves to an array at runtime.
+- [x] No regression: `Array.isArray` still false for `any`-typed
+      object/string/number/null and true for statically-typed arrays.
+- [x] Pure Wasm (no new host import) so standalone/WASI keep working.
 
-## Spec reference
+## Notes / known limitation
 
-- ECMAScript §8.6.3 IteratorBindingInitialization (binding-element default)
-- §23.1.3.2 Array.isArray
+- A vec struct backs both real arrays and `arguments` objects, so
+  `Array.isArray(arguments)` is (still) true under this representation — a
+  pre-existing limitation of the vec-as-array model, not introduced here.
+- `nativeStrings` mode uses a distinct string type (not an array vec), so
+  `Array.isArray("...")` stays false.
 
-## Notes
+## Test Results
 
-- Split out of #779a (parent #779). See #779a "Sharper root cause of the
-  residual" section for the isolation work that produced this issue.
-- Related families: #820, #1130, #1633 (iterator-protocol / array-identity).
+`tests/issue-1678.test.ts` (added) — 8 cases pass. Existing
+`tests/issue-779a.test.ts` (5 cases) still pass.
+
+## Merge note (2026-05-27, PR #705 ← main)
+
+Main landed #1328's `Array.isArray` externref path (host predicate
+`__extern_is_array`) while this branch was open. The two are complementary,
+not exclusive: #1328 detects genuine host JS arrays (e.g. RegExp match
+results) that are *not* WasmGC vec structs, whereas this fix detects compiled
+native arrays materialised into the externref slot. The conflict was resolved
+by **OR-ing both checks** in the `externref` branch — `ref.test` against every
+vec struct type *and* the `__extern_is_array` host predicate when present.
+Standalone/WASI builds (no host import) keep only the `ref.test` path; JS-host
+builds get both. The externref value is stashed in a temp local so both checks
+can consume it.
