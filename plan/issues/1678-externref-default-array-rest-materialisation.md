@@ -84,3 +84,16 @@ fold (a `ref`/`ref_null` vec is an array; everything else is not).
 
 `tests/issue-1678.test.ts` (added) — 8 cases pass. Existing
 `tests/issue-779a.test.ts` (5 cases) still pass.
+
+## Merge note (2026-05-27, PR #705 ← main)
+
+Main landed #1328's `Array.isArray` externref path (host predicate
+`__extern_is_array`) while this branch was open. The two are complementary,
+not exclusive: #1328 detects genuine host JS arrays (e.g. RegExp match
+results) that are *not* WasmGC vec structs, whereas this fix detects compiled
+native arrays materialised into the externref slot. The conflict was resolved
+by **OR-ing both checks** in the `externref` branch — `ref.test` against every
+vec struct type *and* the `__extern_is_array` host predicate when present.
+Standalone/WASI builds (no host import) keep only the `ref.test` path; JS-host
+builds get both. The externref value is stashed in a temp local so both checks
+can consume it.
