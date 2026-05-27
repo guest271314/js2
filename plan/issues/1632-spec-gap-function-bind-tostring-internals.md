@@ -1,7 +1,7 @@
 ---
 id: 1632
 title: "spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails)"
-status: blocked
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium

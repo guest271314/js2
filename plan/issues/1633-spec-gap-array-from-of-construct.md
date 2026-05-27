@@ -1,7 +1,7 @@
 ---
 id: 1633
 title: "spec gap: Array.from / Array.of constructor semantics (39 test262 fails, wasm_compile dominant)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium
