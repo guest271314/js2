@@ -20,6 +20,7 @@ import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
 import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
+import { emitClosureCallArgcExtras, emitResetArgcExtras } from "./calls.js";
 
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
@@ -106,18 +107,17 @@ export function compileClosureCall(
     compileExpression(ctx, fctx, expr.arguments[i]!, info.paramTypes[i]);
   }
 
-  // Drop excess arguments beyond the closure's parameter count (evaluate for side effects)
-  for (let i = paramCount; i < expr.arguments.length; i++) {
-    const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-    if (extraType !== null) {
-      fctx.body.push({ op: "drop" });
-    }
-  }
-
   // Pad missing arguments with defaults (arity mismatch)
   for (let i = expr.arguments.length; i < info.paramTypes.length; i++) {
     pushDefaultValue(fctx, info.paramTypes[i]!, ctx);
   }
+
+  // (#779e/#1511) Overflow args beyond the closure's declared arity are NOT
+  // pushed to the wasm stack — instead pack them into `__extras_argv` and set
+  // `__argc` so a callee that reads `arguments` sees the true call-site length.
+  // emitClosureCallArgcExtras evaluates the overflow args itself (into the
+  // global), so we must NOT also evaluate them above. Cleanup after call_ref.
+  emitClosureCallArgcExtras(ctx, fctx, expr.arguments, paramCount);
 
   // Push the funcref from the closure struct (field 0) and cast to typed ref
   pushClosureRef();
@@ -132,6 +132,18 @@ export function compileClosureCall(
 
   // call_ref with the lifted function's type index
   fctx.body.push({ op: "call_ref", typeIdx: info.funcTypeIdx });
+
+  // (#779e/#1511) Reset __argc / __extras_argv. A callee that doesn't read
+  // `arguments` never consumed them and would otherwise leak stale values
+  // into the next call that does. Preserve the return value across the reset.
+  if (info.returnType === null || info.returnType === undefined) {
+    emitResetArgcExtras(ctx, fctx);
+  } else {
+    const retLocal = allocLocal(fctx, `__cc_ret_${fctx.locals.length}`, info.returnType);
+    fctx.body.push({ op: "local.set", index: retLocal });
+    emitResetArgcExtras(ctx, fctx);
+    fctx.body.push({ op: "local.get", index: retLocal });
+  }
 
   // Return VOID_RESULT for void closures so compileExpression doesn't treat
   // the null return as a compilation failure and roll back the emitted instructions
@@ -247,12 +259,6 @@ export function compileGetterCallable(
     for (let i = 0; i < Math.min(expr.arguments.length, methodParamCount); i++) {
       compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + selfOffset]);
     }
-    for (let i = methodParamCount; i < expr.arguments.length; i++) {
-      const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-      if (extraType !== null) {
-        fctx.body.push({ op: "drop" });
-      }
-    }
     // Pad missing arguments
     if (paramTypes) {
       for (let i = Math.min(expr.arguments.length, methodParamCount) + selfOffset; i < paramTypes.length; i++) {
@@ -260,10 +266,29 @@ export function compileGetterCallable(
       }
     }
 
+    // (#779e/#1511) Overflow args beyond the method's declared arity go into
+    // `__extras_argv` (with `__argc`) so a callee reading `arguments` sees the
+    // true call-site length. emitClosureCallArgcExtras evaluates the overflow
+    // args itself, so we must NOT also drop-evaluate them above.
+    emitClosureCallArgcExtras(ctx, fctx, expr.arguments, methodParamCount);
+
     // Re-lookup: receiver/arg compilation may have triggered late imports
     // (e.g. emitUndefined for missing tuple elements) that shift function indices.
     const finalCandidateIdx = ctx.funcMap.get(candidateName) ?? candidateIdx;
     fctx.body.push({ op: "call", funcIdx: finalCandidateIdx });
+    // Reset globals so a callee that doesn't read `arguments` can't leak stale
+    // extras into the next call. Preserve the return value across the reset.
+    {
+      const retWasm = getWasmFuncReturnType(ctx, finalCandidateIdx);
+      if (retWasm && !wasmFuncReturnsVoid(ctx, finalCandidateIdx)) {
+        const retLocal = allocLocal(fctx, `__gc_ret_${fctx.locals.length}`, retWasm);
+        fctx.body.push({ op: "local.set", index: retLocal });
+        emitResetArgcExtras(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: retLocal });
+      } else {
+        emitResetArgcExtras(ctx, fctx);
+      }
+    }
 
     // Determine return type
     const sig = ctx.checker.getResolvedSignature(expr);

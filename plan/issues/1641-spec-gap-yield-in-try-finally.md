@@ -1,7 +1,7 @@
 ---
 id: 1641
 title: "spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium
