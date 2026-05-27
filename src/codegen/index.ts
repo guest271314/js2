@@ -30,7 +30,7 @@ import type {
 } from "./context/types.js";
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
-import { emitUndefined } from "./expressions/late-imports.js";
+import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -809,6 +809,14 @@ export function generateModule(
       addImport(ctx, "env", "__register_class_object", { kind: "func", typeIdx: regClassTypeIdx });
     }
 
+    // #1677 — reconcile native-string helper func indices before emitting more
+    // defined helpers that look them up. Imports registered after the helpers
+    // (e.g. the __register_prototype / __register_class_object pair above)
+    // shift the helpers' true indices but not their baked-in sibling-call
+    // targets nor the `nativeStrHelpers` / funcMap entries the deferred WASI
+    // write helpers read. Incremental + no-op on the default GC path.
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Emit inline Wasm implementations for Math methods (after all imports are registered)
     if (ctx.pendingMathMethods.size > 0) {
       emitInlineMathFunctions(ctx, ctx.pendingMathMethods);
@@ -832,6 +840,14 @@ export function generateModule(
     // collectDeclarations so the inferred f64 return shows up directly in
     // the function's signature instead of being patched after the fact.
     ctx.numericReturnTypes = inferNumericReturnTypes(ctx, ast.sourceFile);
+
+    // #1677 — final reconcile of native-string helper indices before any USER
+    // function is registered. Any imports added by the deferred-helper
+    // emitters above are folded in here; afterward the compilation-phase
+    // late-import path (ensureLateImport → flushLateImportShifts, which now
+    // also shifts `nativeStrHelpers`) keeps them correct. Incremental no-op
+    // when nothing drifted.
+    reconcileNativeStrFinalizeShift(ctx);
 
     // Second pass: collect all function declarations and interfaces
     collectDeclarations(ctx, ast.sourceFile);
@@ -3138,6 +3154,10 @@ export function generateMultiModule(
       collectAllSourceImports(ctx, sf);
     }
 
+    // #1677 — reconcile native-string helper indices before emitting deferred
+    // helpers that look them up (see single-module path).
+    reconcileNativeStrFinalizeShift(ctx);
+
     // Emit inline Wasm implementations for Math methods (after all imports are registered)
     if (ctx.pendingMathMethods.size > 0) {
       emitInlineMathFunctions(ctx, ctx.pendingMathMethods);
@@ -3162,6 +3182,9 @@ export function generateMultiModule(
       }
       ctx.numericReturnTypes = merged;
     }
+
+    // #1677 — final reconcile before any user function is registered.
+    reconcileNativeStrFinalizeShift(ctx);
 
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
     for (const sf of multiAst.sourceFiles) {
@@ -6757,23 +6780,15 @@ export function addIteratorImports(ctx: CodegenContext): void {
   const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__iterator", { kind: "func", typeIdx: extToExt });
 
-  // __iterator_next: (externref) → externref — calls iter.next()
+  // __iterator_next: (externref) → (i32 done, externref value) — calls iter.next()
+  // Multi-value result avoids the $IteratorResult struct: a freshly-built WasmGC
+  // struct cannot survive the JS import hop (it surfaces as undefined in V8/Node;
+  // see #1620 BLOCKED). The two primitives (i32 + externref) cross the JS↔Wasm
+  // multi-value ABI cleanly, eliminating __iterator_done / __iterator_value.
+  const extToDoneValue = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }, { kind: "externref" }]);
   addImport(ctx, "env", "__iterator_next", {
     kind: "func",
-    typeIdx: extToExt,
-  });
-
-  // __iterator_done: (externref) → i32 — returns result.done ? 1 : 0
-  const extToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__iterator_done", {
-    kind: "func",
-    typeIdx: extToI32,
-  });
-
-  // __iterator_value: (externref) → externref — returns result.value
-  addImport(ctx, "env", "__iterator_value", {
-    kind: "func",
-    typeIdx: extToExt,
+    typeIdx: extToDoneValue,
   });
 
   // __iterator_return: (externref) → void — calls iter.return() if it exists

@@ -127,9 +127,12 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
       if (asyncIter) return asyncIter.call(obj);
       return obj[Symbol.iterator]();
     },
-    __iterator_next: (iter: any) => iter.next(),
-    __iterator_done: (result: any) => (result.done ? 1 : 0),
-    __iterator_value: (result: any) => result.value,
+    // #1620 v2: multi-value result [i32 done, externref value]; __iterator_done
+    // and __iterator_value imports are eliminated.
+    __iterator_next: (iter: any): [number, any] => {
+      const r = iter.next();
+      return [r.done ? 1 : 0, r.value];
+    },
     __iterator_return: (iter: any) => {
       if (iter && typeof iter.return === "function") iter.return();
     },
@@ -183,6 +186,31 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
     "wasm:js-string": jsStringPolyfill,
     string_constants: buildStringConstants(result.stringPool),
   } as WebAssembly.Imports;
+}
+
+/**
+ * Instantiate a compiled result with full host-import fidelity (#1659).
+ *
+ * Unlike calling `buildImports` + `WebAssembly.instantiate` directly, this
+ * overlays the runtime's faithful host imports (struct sidecar reads,
+ * iterator protocol) AND registers the wasm exports via `setExports` so
+ * runtime callbacks like `__extern_get`'s `__sget_<field>` struct-getter
+ * fallback work. Direct `buildImports` callers that skip `setExports` see
+ * `undefined` for opaque WasmGC struct fields, which makes destructuring
+ * defaults wrongly fire in the harness even when the real runtime is correct.
+ */
+export async function instantiateWithRuntime(result: CompileResult) {
+  const imports = buildImports(result);
+  let setExportsFn: ((exports: Record<string, Function>) => void) | undefined;
+  if (result.imports && result.imports.length > 0) {
+    const runtimeResult = buildRuntimeImports(result.imports, undefined, result.stringPool);
+    setExportsFn = runtimeResult.setExports;
+    imports.env = { ...(imports.env as Record<string, Function>), ...runtimeResult.env };
+    if (runtimeResult.string_constants) imports.string_constants = runtimeResult.string_constants;
+  }
+  const { instance } = await WebAssembly.instantiate(result.binary, imports);
+  if (setExportsFn) setExportsFn(instance.exports as Record<string, Function>);
+  return instance;
 }
 
 /**

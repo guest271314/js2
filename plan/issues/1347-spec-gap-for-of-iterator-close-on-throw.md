@@ -154,3 +154,40 @@ Existing iterator/close suites pass: `issue-851.test.ts` (5 tests),
 `for-of-array-destructuring.test.ts` and `for-of-generator.test.ts`
 are unrelated module-resolution errors (missing `./helpers.js`),
 not regressions from this fix.
+
+## Re-verification 2026-05-27 (dev-1603)
+
+Re-checked the full close protocol against current main. The fix is
+merged and the core IteratorClose semantics are verified correct:
+
+- `tests/issue-1347.test.ts` — 5/5 pass.
+- test262 acceptance files pass through `runTest262File`:
+  `iterator-close-via-throw.js`, `iterator-close-via-break.js`,
+  `iterator-close-via-return.js`, `iterator-close-via-continue.js`.
+- Direct compile+run probes (host `getIterable()`, non-callable
+  `return: 1`) confirm both branches of §7.4.6:
+  - **non-throw break** → IteratorClose's TypeError propagates (step 7),
+    `iterationCount === 1`. ✓
+  - **body throw** → original error wins, close TypeError suppressed
+    (step 6), `iterationCount === 1`. ✓
+
+The `language/statements/for-of/iterator-close-*-get-method-*.js` test262
+files still report fail, but the cause is **not** the IteratorClose
+protocol — it is test262 harness wrapping (`assert.throws(TypeError,
+function(){…})` + `var iterationCount` closure-capture across the nested
+function), which surfaces as the `returned N` harness-encoding artifact
+(#1318), plus destructuring residuals. Compiling the same iterator
+logic as a plain function yields the spec-correct result, so the gap
+lives in the harness/closure-capture path, not here.
+
+**Criteria status**: #1-#4 (named close files + protocol semantics) —
+PASS, verified. #5 (for-of pass-rate ≥75%) — NOT met; for-of sits at
+64.3% (117/182), driven by unrelated harness-wrapping (#1318) and
+destructuring residuals, explicitly deferred to separate issues per the
+dev-a note above.
+
+**Recommendation**: close #1347 as done (its scoped protocol work is
+complete and verified) and carve criterion #5 (the broad for-of
+pass-rate target) into the #1318 harness + destructuring tracking issues,
+since no IteratorClose code change can move it. No source change in this
+PR — docs-only verification + status reconciliation.

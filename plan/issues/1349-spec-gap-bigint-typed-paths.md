@@ -1,9 +1,9 @@
 ---
 id: 1349
 title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)"
-status: ready
+status: wont-fix
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,8 +13,16 @@ language_feature: bigint
 goal: spec-completeness
 sprint: 50
 parent: 1328
+duplicate_of: 1644
 ---
 # #1349 — BigInt: typed paths assume f64 too eagerly
+
+> **DUPLICATE of [#1644](1644-spec-gap-bigint-typed-paths.md).** Closed as
+> `wont-fix` (duplicate) 2026-05-27. Both issues describe the identical defect
+> ("BigInt typed-path eager f64 assumptions, 47 fails"); #1644 is the canonical
+> tracking issue and carries the full investigation (merged PR #675) plus the
+> architect implementation plan. All BigInt typed-path work happens on #1644.
+> This file is retained only as a redirect.
 
 ## Problem
 
