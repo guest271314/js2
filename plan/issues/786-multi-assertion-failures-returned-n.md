@@ -1,9 +1,9 @@
 ---
 id: 786
 title: "- Multi-assertion failures: returned N > 2 (~1,183 tests)"
-status: ready
+status: in-progress
 created: 2026-03-25
-updated: 2026-04-28
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -151,3 +151,37 @@ separate Wasm functions cannot read/write variables from the enclosing function 
 - Top categories fixed: `class/dstr` (524 tests), `object/dstr` (166), `function/dstr` (51),
   `generators/dstr` (55), `arrow-function/dstr` (30), `async-generator/dstr` (81)
 - Estimated total fix: ~900+ tests (those where callCount is the only failing assertion)
+
+## Implementation notes (Object.keys/values/entries codegen crash — 2026-05-27)
+
+### Bug: invalid wasm for Object.keys on dynamically-extended objects
+
+`Object.keys/values/entries` on an object whose own properties are added
+*after* an empty `{}` initializer (e.g. `const o = {}; o.a = 1; o.b = 2;
+Object.keys(o)`) emitted invalid wasm — instantiation failed with
+"not enough arguments on the stack for array.new_fixed (need 2, got 0)".
+
+Root cause: `compileObjectKeysOrValues` (`src/codegen/object-ops.ts`) built the
+field-name string array by consulting only `stringGlobalMap` /
+`stringLiteralMap`. Dynamically-added own-property names are not collected in
+the first string-literal pass, so the per-field push loop emitted **nothing**,
+then `array.new_fixed length: count` underflowed the stack.
+
+Fix: route each field name through `compileStringLiteral`, which late-registers
+the string constant on demand (same mechanism template literals use). Applied to
+both the `keys`/`values` path and the `entries` tuple-key path.
+
+### Tests added
+- `tests/issue-786-object-keys-dynamic.test.ts`: 6 tests — dynamic keys count,
+  dynamic key name preservation, values, entries, empty-object zero, and the
+  inline-field regression guard.
+
+### Remaining sub-clusters (scoped OUT of this fix — need their own issues)
+- **for-in over plain objects yields 0 keys** — `for (const k in o)` never enters
+  the loop body even though `Object.keys(o)` is correct. The `__for_in_keys`
+  host import / `__struct_field_names` struct enumeration does not surface the
+  object's own enumerable keys. Overlaps the escalated #1130 accessor work.
+- **Map.forEach / Set.forEach callback never fires** — `m.forEach(cb)` runs the
+  callback zero times even though `m.size` is correct and `for...of m` works.
+  The runtime forEach bridge (`src/runtime.ts:2958`) is not invoking the wrapped
+  wasm closure.
