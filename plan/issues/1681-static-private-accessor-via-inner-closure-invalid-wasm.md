@@ -1,9 +1,10 @@
 ---
 id: 1681
 title: "Static private accessor reached through inner closure emits invalid Wasm (extern.convert_any) / infinite recursion (~10 fails)"
-status: ready
+status: done
 created: 2026-05-27
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -108,6 +109,59 @@ grep -E 'static.*(getter|setter)|(getter|setter).*static' \
     | sed 's#^test262/##') | grep -i privat > .tmp/static-acc.txt
 npx tsx .tmp/probe-class108.mts .tmp/static-acc.txt   # probe harness from task #108
 ```
+
+## Resolution (2026-05-27, PR for #1681)
+
+Root cause: a static private accessor reached through `this` inside a closure
+spawned in a static method was mis-lowered. The closure captures `this` (the
+class-constructor externref), so `fctx.localMap.get("this")` is *defined* — the
+existing static-`this` handler (gated on that being `undefined`) was skipped,
+and the generic struct path cast the captured externref to the class struct,
+emitting an invalid `extern.convert_any` (anyref-expected / externref-found) or
+re-entering the accessor trampoline.
+
+Fix (2 files, ~30 LOC, gated on `fctx.isStaticContext`):
+- `src/codegen/property-access.ts` — the static-`this` member-read handler now
+  fires when `fctx.isStaticContext` is true, not only when `this` is absent
+  from the local map. Routes `this.#getter` to the static-global accessor path.
+- `src/codegen/class-bodies.ts` — static getter/setter *bodies* are now compiled
+  with `isStaticContext: true` + `enclosingClassName`, so `this.<prop>` inside
+  the accessor body routes through the static-global path rather than casting
+  the class-constructor externref to the struct.
+
+Result: the invalid-Wasm crash and trampoline recursion are eliminated for the
+static getter read path via an inner (or nested) arrow — it now compiles to
+valid Wasm and returns the correct value. No regression in the existing
+static-private-field/method buckets.
+
+The static **setter** write via inner closure is deliberately NOT included in
+this fix: a correct setter dispatch must pass the real class-object receiver
+(the setter body mutates `this`, e.g. `this._v = v`). A dummy-receiver dispatch
+compiles but silently drops the mutation, so it was rejected — this is the same
+real-receiver dispatch gap as the private-setter work in #1680. Tracked below.
+
+### Residual (out of scope — shared with #1680)
+
+These remain `fail` and are tracked as the static-private brand-check /
+real-receiver dispatch gap (see #1680, #1683-brand):
+- **PrivateBrandCheck**: `C.access.call({})` must throw TypeError when `this`
+  is not the declaring class. Static accessors currently ignore the receiver
+  (dummy struct), so no brand check fires. A `ref.test` brand check against the
+  class-object struct re-enters the class-object init (infinite recursion when
+  attempted), so it needs the shared dispatch redesign, not a localised fix.
+- **`self.#f` aliasing** (inner-function template): the receiver is an aliased
+  local (`const self = this`), not `this`, so the static-context route does not
+  apply; the generic path still recurses. Same brand-check dependency.
+- **Static setter `this._v` writeback via inner closure**: the setter mutates
+  the class constructor, so it needs the real class-object receiver — the static
+  dummy-receiver dispatch can't carry the mutation. Same #1680 real-receiver gap.
+
+## Test Results
+
+`tests/issue-1681.test.ts` — 3 cases, all pass:
+- static private getter read via inner arrow function
+- direct static private getter access (no-regression guard)
+- static private getter via deeply nested arrow
 
 ## Investigation 2026-05-27 (dev-1659-ci-equivalence)
 
