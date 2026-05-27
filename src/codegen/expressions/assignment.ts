@@ -24,7 +24,7 @@ import {
   localGlobalIdx,
   resolveWasmType,
 } from "../index.js";
-import { buildDestructureNullThrow } from "../destructuring-params.js";
+import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitNullGuardedStructGet, isProvablyNonNull, isSafeBoundsEliminated } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
@@ -1335,14 +1335,25 @@ function compileExternrefArrayDestructuringAssignment(
   // before reading binding elements. The previous `tmpLocal[i]` via
   // __extern_get path bypassed the @@iterator getter and .next() calls,
   // so a throwing @@iterator (iter-get-err) or throwing .next() (iter-step-err)
-  // was silently swallowed. Materialize the source via __array_from_iter
+  // was silently swallowed. Materialize the source via __array_from_iter_n
   // first — it invokes @@iterator + .next() and propagates throws.
-  // Plain arrays with the default @@iterator take the fast path.
+  // Plain arrays with the default @@iterator take the fast path. The f64
+  // step-count bounds consumption so a no-rest pattern (`[a,,b] = gen()`)
+  // consumes EXACTLY target.elements.length iterator steps rather than
+  // draining a lazy generator; a rest element passes -1 → unbounded, which is
+  // byte-identical to the legacy __array_from_iter drain (#1592).
   if (resultType.kind === "externref" && target.elements.length > 0) {
-    const matIterIdx = ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const matStepCount = patternIteratorStepCount(target.elements);
+    const matIterIdx = ensureLateImport(
+      ctx,
+      "__array_from_iter_n",
+      [{ kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+    );
     flushLateImportShifts(ctx, fctx);
     if (matIterIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: tmpLocal });
+      fctx.body.push({ op: "f64.const", value: matStepCount });
       fctx.body.push({ op: "call", funcIdx: matIterIdx });
       fctx.body.push({ op: "local.set", index: tmpLocal });
     }
