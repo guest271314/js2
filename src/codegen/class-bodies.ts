@@ -813,6 +813,40 @@ export function compileClassBodies(
     return;
   }
 
+  // (#779a) For nested class declarations, an enclosing function may still be
+  // mid-compilation (its `fctx.body` holds the captured-global copy emitted by
+  // `promoteAccessorCapturesToGlobals`). Compiling constructor/method bodies
+  // below overwrites `ctx.currentFunc`, so a string-constant import added
+  // during a binding-pattern destructure (e.g. the "Cannot destructure ..."
+  // message) would run `fixupModuleGlobalIndices` WITHOUT the enclosing body in
+  // its shift set — leaving its already-emitted `global.set`/`global.get`
+  // indices stale while the captured-global maps shift past them. Register the
+  // enclosing function on the shift-tracking stacks so its body is shifted too
+  // (mirrors the object-literal method path in literals.ts:1663-1666).
+  const enclosingFunc = ctx.currentFunc;
+  if (enclosingFunc) {
+    ctx.funcStack.push(enclosingFunc);
+    ctx.parentBodiesStack.push(enclosingFunc.body);
+  }
+  try {
+    compileClassBodiesInner(ctx, decl, funcByName, className, structTypeIdx, fields);
+  } finally {
+    if (enclosingFunc) {
+      ctx.funcStack.pop();
+      ctx.parentBodiesStack.pop();
+      ctx.currentFunc = enclosingFunc;
+    }
+  }
+}
+
+function compileClassBodiesInner(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  funcByName: Map<string, number>,
+  className: string,
+  structTypeIdx: number,
+  fields: FieldDef[],
+): void {
   // Compile constructor
   const ctor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
   const ctorName = `${className}_new`;
