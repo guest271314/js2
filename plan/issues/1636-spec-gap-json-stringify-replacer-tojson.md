@@ -125,7 +125,17 @@ architect spec.
 ## Dependencies
 
 - **#1308 / #1382** — JS↔Wasm closure marshaling (replacer + `toJSON`
-  callbacks must be JS-callable with correct `this`).
+  callbacks must be JS-callable with correct `this`). This is the
+  closure-value boundary the live-value walk depends on.
+- **#1644** — BigInt i64-bigint-brand representation. `JSON.stringify` must
+  throw `TypeError` on a BigInt value (§25.5.2.2 step 12) and must invoke a
+  BigInt `toJSON` if present; both need the BigInt brand to be observable at
+  the serialization boundary, which #1644 establishes.
+- **#1630 / #1631** — struct-target writeback + descriptor model. Wrapper
+  `[[PrimitiveValue]]` unwrap and `toJSON` result substitution both depend on
+  the descriptor/writeback model these issues define for struct-backed
+  objects; without it the live-value walk cannot faithfully observe wrapper
+  brands or replaced values.
 - **#1324** — pure-Wasm JSON (the standalone-mode counterpart; the spec
   should decide whether the two paths unify).
 
