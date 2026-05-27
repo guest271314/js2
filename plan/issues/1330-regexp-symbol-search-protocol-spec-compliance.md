@@ -1,9 +1,10 @@
 ---
 id: 1330
 title: "RegExp host-mode: Symbol.search protocol spec compliance (37 fails)"
-status: in-progress
+status: done
 created: 2026-05-08
 updated: 2026-05-27
+completed: 2026-05-27
 priority: low
 feasibility: medium
 reasoning_effort: medium
