@@ -1,9 +1,10 @@
 ---
 id: 1604
 title: "codegen: String case methods (toUpperCase/toLowerCase/toLocale*) return i32 into f64 comparison — invalid wasm"
-status: ready
+status: done
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -53,3 +54,34 @@ in numeric/equality contexts.
 
 - The three example tests compile to valid Wasm.
 - All 8 tests move off `compile_error`.
+
+## Resolution (2026-05-27)
+
+The `f64.ne expected f64, found i32` **compile_error was already fixed on
+main** (likely via the call-site argument coercion work in #1602): all 8 case
+tests already validate to valid Wasm and sit at `fail` (not `compile_error`) in
+the current baseline — acceptance criteria met.
+
+The remaining failure was a **`wrapTest` harness bug**, not a compiler bug.
+`tests/test262-runner.ts` unconditionally rewrote `__expected.index` /
+`__expected.input` *reads* into the extracted variables `__expected_index` /
+`__expected_input`. Those vars are only declared when the source *assigns*
+`__expected.index = N` (the RegExp-exec result pattern). The case-conversion
+tests only read `.index`/`.input` (both `undefined` on a plain string) and
+never assign them, so the rewrite left a reference to an undeclared variable
+→ `__expected_index is not defined`.
+
+Fix: guard the read-rewrite on whether the corresponding declaration was
+actually extracted; otherwise leave the property read intact (compiles to
+`undefined`).
+
+Result: **+4 tests** fail→pass (the `_T4` empty-string variants:
+`toLowerCase` `S15.5.4.16_A1_T4`, `toUpperCase` `S15.5.4.18_A1_T4`,
+`toLocaleLowerCase` `S15.5.4.17_A1_T4`, `toLocaleUpperCase`
+`S15.5.4.19_A1_T4`). The 4 `_T9` variants stay `fail` — a separate
+`new String(obj)` ToPrimitive issue (`{valueOf:fn, toString:void 0}` throwing
+"Cannot convert object to primitive value"), out of scope here. RegExp-exec
+result tests that *do* assign `__expected.index` (e.g. `S15.10.6.2_A*`) keep
+the extraction transform and remain `pass` — no regressions.
+
+Regression test: `tests/issue-1604.test.ts`.
