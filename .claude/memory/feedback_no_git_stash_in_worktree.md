@@ -16,3 +16,5 @@ Never run `git stash` / `git stash pop` inside an agent worktree under `/workspa
 - spin up a separate throwaway `git worktree add` on origin/main and run the baseline there; or
 - just `git commit` your WIP first (commits are per-branch, not shared) and compare commits.
 If you ever DO find a stash collision, never `git stash drop` — use `git stash list` and `git stash apply stash@{N}` by explicit ref, and re-stash any misplaced work with a `MISPLACED-...recover` label so the rightful owner can find it. Related: [[feedback_no_stash_before_merge]].
+
+**Recurred 2026-05-27 on issue-1332** despite this rule: stashed a 1-line runtime.ts fix to measure a baseline; a concurrent agent (issue-1682) pushed its own stash and my entry vanished from the stack entirely (working tree came back clean, fix lost). Recovery was trivial only because the change was tiny and I had the verbatim diff in context — re-applied via Edit. Lesson reinforced: for a SMALL change, never stash at all; if you must measure a baseline, `git commit` the WIP first (per-branch, never shared) or use a throwaway `git worktree add origin/main`.

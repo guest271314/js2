@@ -1,8 +1,9 @@
 ---
 id: 1677
 title: "Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi)"
-status: ready
+status: in-progress
 created: 2026-05-27
+updated: 2026-05-27
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -149,3 +150,39 @@ and `addImport` and choose the one that does not introduce a re-shift hazard.
 - Residual host-import leak elimination — #1664.
 - Native generators shared `$Iterator` design — #1665.
 - Pure-Wasm number→string lowering — #1335.
+
+## WIP status (2026-05-27, senior-developer)
+
+Worktree `/workspace/.claude/worktrees/issue-1677-funcidx-shift`, branch
+`issue-1677-funcidx-shift`. **Uncommitted** (one docs commit `b95d26d26` on top
+of main; the implementation is unstaged). Builds + typechecks clean. **No PR.**
+
+Approach taken: option 3 from "What an architect-level fix looks like" — an
+incremental, finalize-scoped reconcile (`reconcileNativeStrFinalizeShift` in
+`src/codegen/expressions/late-imports.ts`) gated on a pinned helper base
+(`ctx.nativeStrHelperImportBase`, snapshotted in `ensureNativeStringHelpers`),
+called at two points in `generateModule`/`generateMultiModule`. Also shifts
+`nativeStrHelpers` inside `shiftLateImportIndices` to keep the compilation-phase
+regime in lockstep.
+
+Probe results under `--target wasi` (`.tmp/p1677/`):
+- `klass` (extends/super), `closure` — now **VALID** (were failing on baseline).
+- `str-template` — still fails `__str_to_extern call[0] expected f64, found i32`
+  (the compilation-phase bridge overlap; this is the hard remaining case the
+  issue flagged).
+- `array-map` — fails `__module_init call[1] expected (ref null 5), found
+  global.get f64` (a distinct unbound-global-ish signature, may be separate).
+- `generator` — fails `__vec_get not enough arguments on stack` — a **NEW**
+  signature not present on baseline (baseline was a `__str_flatten` mismatch).
+  This is the #618-class over-shift hazard the issue warns against: the
+  reconcile is shifting a body whose call-target should not move. `__vec_get`
+  is not a native-string helper, so a caller in `helperNames` is being shifted
+  and dropping an argument. **Must be root-caused before any merge** — the
+  helper-name-gated body shift is over-reaching.
+
+Not mergeable as-is: 3/5 probes still invalid (criterion 1 unmet), one is a
+regression-shaped new failure, and `tests/issue-1677.test.ts` (criterion 3) is
+not written. Needs a focused continuation: tighten the body-shift gate so only
+helper *bodies* (not arbitrary callers reachable through them) move, then
+reconcile the compilation-phase `__str_to_extern` bridge with the finalize
+reconcile so `str-template` validates.
