@@ -1659,12 +1659,21 @@ function testWithTypedArrayConstructors(fn: any): void {
   }
 
   if (needsTypedArrayBinding) {
-    // Substitute for the abstract %TypedArray% intrinsic — see note at detection
-    // site. Int8Array.prototype.X === %TypedArray%.prototype.X in practice for
-    // the proto methods these tests exercise.
+    // Substitute for the abstract %TypedArray% intrinsic. `%TypedArray%` is the constructor
+    // that `Int8Array` (and every concrete TypedArray) inherits from; on the host it is
+    // exactly `Object.getPrototypeOf(Int8Array.prototype).constructor`. Binding to it (rather
+    // than `Int8Array` directly) exposes the descriptor accessors that live on
+    // `%TypedArray%.prototype` — e.g. the `length`/`byteLength`/`buffer`/`@@toStringTag`
+    // getters — which are *inherited* by `Int8Array.prototype`, not own. The old
+    // `const TypedArray = Int8Array` shim made `Object.getOwnPropertyDescriptor(
+    // TypedArray.prototype, "length")` return `undefined`, silently failing the
+    // `built-ins/TypedArray/prototype/*` descriptor tests (#1567). We route through
+    // `Int8Array.prototype` (member access on a builtin, which the compiler resolves to the
+    // host prototype) rather than the bare `Int8Array` identifier (which the compiler does
+    // not evaluate as a first-class value).
     p += `
 
-const TypedArray: any = Int8Array;`;
+const TypedArray: any = Object.getPrototypeOf(Int8Array.prototype).constructor;`;
   }
 
   if (needsIteratorBinding) {
