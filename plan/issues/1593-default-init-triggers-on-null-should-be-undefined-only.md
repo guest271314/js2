@@ -1,10 +1,9 @@
 ---
 id: 1593
 title: "Destructuring default initializer triggers on null — spec requires undefined-only check (~165 fails)"
-status: done
+status: ready
 created: 2026-05-24
-updated: 2026-05-27
-completed: 2026-05-27
+updated: 2026-05-24
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -12,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring, default-initializer, for-of, for-await-of, classes
 goal: spec-completeness
-sprint: Backlog
+sprint: 56
 test262_fail: 165
 test262_category: language/statements/class/dstr, language/statements/for-await-of, language/statements/for-of, language/statements/for
 ---
@@ -86,34 +85,3 @@ The guard likely uses `ref.is_null` or a host import that checks for `null || un
 - Spec: ECMA-262 §13.3.3.1 BindingElement Evaluation, step 5.c.ii: "If Initializer is present and v is **undefined**"
 - The `initCount` pattern in test files uses a side-effectful counter to verify the initializer body does not execute at all
 - Easy fix: a one-line guard change in `emitDefaultValueCheck`, but must also verify the `destructureParamObject` / `destructureParamArray` paths use the same guard
-
-## Resolution (2026-05-27)
-
-The null-vs-undefined *guard* was already correct on main — `emitExternrefDefaultCheck`
-uses `__extern_is_undefined` exclusively (landed via #1550/#1553e), so `[null]`
-and `{s: null}` correctly skip the default. The faithful test262 `init-skipped`
-templates (`[null, 0, false, '']` / `{s: null, u: 0, ...}` / for-of) already
-passed once reproduced exactly.
-
-The remaining failures were a **codegen type bug**, not a guard bug: in
-`emitDefaultValueCheck` (`src/codegen/statements/destructuring.ts`) the
-then-branch compiled the default initializer and `local.set` its result
-without coercing to the binding local's declared type. test262 init-skipped
-tests use a `counter()` that returns **void** (`undefined`), which lowers to an
-`externref` on the stack. When the binding local is `f64` (e.g. field `u: 0`),
-the `local.set` failed Wasm validation (`local.set expected type f64, found
-call of type externref`) — failing the *whole* `if/else` (and thus the test)
-even though the default never fires at runtime.
-
-Fix: a shared `emitDefaultIntoLocal` closure compiles the initializer, maps a
-`VOID_RESULT` to `externref`, and coerces to `getLocalType(localIdx)` before
-`local.set`. Applied to all three branches (externref / f64 / ref).
-
-Tests: `tests/issue-1593.test.ts` (array / object / for-of init-skipped +
-numeric-field-void-default compile + missing-prop-triggers-default).
-
-Out of scope (separate pre-existing bugs, still failing on main, NOT touched):
-- single-element `[null as any]` / `[undefined as any]` value corruption
-  (mixed-type array element narrowing) — distinct from init-skipped cluster.
-- `function f(x: number = 42)` returning `0` when arg omitted
-  (`default-params.test.ts`) — pre-existing param-default failure on main.

@@ -1,7 +1,7 @@
 ---
 id: 1605
 title: "codegen: class computed-property-name / setter param-scope emits invalid wasm (local.tee externref mismatch)"
-status: ready
+status: in-review
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
@@ -56,3 +56,36 @@ setter parameter scope copy-out.
 
 - The three example tests compile to valid Wasm.
 - All 6 tests move off `compile_error`.
+
+## Sub-cluster CPN — FIXED (2026-05-27)
+
+Root cause was **not** in class/accessor codegen — the setter call was lowered
+correctly (`local.get self`, `ref.null.extern` value, `local.tee` temp,
+`call C_set_null`). The bug was in the **call-arg fixup** in
+`src/codegen/fixups.ts` (the "ref.null extern where (ref null N) is expected"
+pass, ~line 878). It walks backwards from a `call` mapping params to preceding
+instructions, skipping multi-consuming producers (`struct.new`,
+`array.new_fixed`, nested `call`). It did **not** account for `local.tee`,
+which is stack-neutral (pops 1, pushes 1) and therefore transparent — not an
+arg producer. With a value `ref.null.extern` tee'd into a temp before the
+`call`, the walk treated the `local.tee` as the param-1 producer, then
+mis-mapped the underlying `ref.null.extern` to param 0 (the struct receiver
+`(ref null N)`), rewriting it to `ref.null <struct>`. That mismatched the
+externref temp the value was tee'd into → `local.tee[N] expected externref,
+found ref.null of <struct>`.
+
+Fix: in the backward arg-walk, treat `local.tee` as transparent — skip it
+without advancing the param index so the real producer beneath maps to the
+current param.
+
+**File**: `src/codegen/fixups.ts`. Test: `tests/issue-1605-cpn.test.ts`.
+
+**test262 results (verified via `runTest262File`)**:
+- `cpn-class-decl-accessors-computed-property-name-from-null.js` — **pass** (was compile_error)
+- `scope-setter-paramsbody-var-close.js` — compile_error → **fail** (now valid wasm; remaining `returned 2` is a separate setter param/body var-close scope-semantics bug, NOT invalid-wasm)
+- `scope-static-setter-paramsbody-var-close.js` — compile_error → **fail** (same; off compile_error)
+
+All three are off `compile_error`. The two `scope-*-var-close` runtime
+semantics failures are a distinct sub-cluster left to the broader #1605 work.
+A 100-file slice of `language/statements/class` shows identical status counts
+to clean main (82 pass / 13 fail / 5 ce) — no regression from the fixup change.
