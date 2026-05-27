@@ -7,6 +7,7 @@
 import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
+import { isStrictFunction } from "../helpers/is-strict-function.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import {
   collectFunctionOwnLocals,
@@ -352,7 +353,7 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt));
     }
 
     if (isGenerator) {
@@ -590,7 +591,7 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, isStrictFunction(stmt));
     }
 
     if (isGenerator) {
@@ -1153,6 +1154,7 @@ export function emitArgumentsObject(
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped = false,
 ): void {
   const numArgs = paramTypes.length;
   const elemType: ValType = { kind: "externref" };
@@ -1170,15 +1172,19 @@ export function emitArgumentsObject(
     flushLateImportShifts(ctx, fctx);
   }
 
-  // Set up mapped arguments info for param ↔ arguments bidirectional sync (#849)
-  fctx.mappedArgsInfo = {
-    argsLocalIdx: argsLocal,
-    arrTypeIdx: ati,
-    vecTypeIdx: vti,
-    paramCount: numArgs,
-    paramOffset,
-    paramTypes: paramTypes.slice(),
-  };
+  // Set up mapped arguments info for param ↔ arguments bidirectional sync (#849).
+  // Strict-mode functions get an *unmapped* arguments object (§10.4.4): skip the
+  // sync so writes to `arguments[i]` don't reflect into the named param (#779e).
+  if (!unmapped) {
+    fctx.mappedArgsInfo = {
+      argsLocalIdx: argsLocal,
+      arrTypeIdx: ati,
+      vecTypeIdx: vti,
+      paramCount: numArgs,
+      paramOffset,
+      paramTypes: paramTypes.slice(),
+    };
+  }
 
   // Build the arguments vec by concatenating formal params with
   // extras delivered via the __extras_argv global (#1053).
