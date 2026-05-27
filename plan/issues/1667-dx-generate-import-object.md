@@ -1,9 +1,10 @@
 ---
 id: 1667
 title: "DX: compile() should return a ready-to-pass import object for default/JS-host mode"
-status: ready
+status: done
 created: 2026-05-25
-updated: 2026-05-25
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 task_type: feature
@@ -80,3 +81,18 @@ Complementary, not duplicate:
 - **#1667** (this issue, feature) — adds the JS-host convenience: a generated
   import object the caller can pass directly, so default-mode output also
   instantiates without hand-wiring.
+
+## Resolution
+
+`CompileResult` now exposes `importObject` (`WebAssembly.Imports`), attached at
+the public `compile` / `compileMulti` / `compileFiles` / `compileProject` entry
+points in `src/index.ts` via `withImportObject`. It is a lazily-computed,
+cached getter that wires the existing `buildImports()` runtime into
+`{ env, "wasm:js-string", string_constants }` — the polyfill instantiation
+shape. Standalone / `wasi` (zero-import) and failed compiles return `{}`, so
+the field is always safe to pass to `WebAssembly.instantiate`.
+
+The standalone / zero-import path stays the recommended portable default — this
+is an opt-in convenience for the JS-host path only; default codegen is
+unchanged. README "Compile modes and imports" documents the new affordance
+alongside the standalone option. Tests in `tests/issue-1667.test.ts`.

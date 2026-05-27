@@ -404,7 +404,12 @@ export interface CodegenContext {
    * inside the initializer (and any closures it spawns) resolves to the
    * class-object singleton via `emitLazyClassObjectGet`.
    */
-  staticInitExprs: { globalIdx: number; initializer: ts.Expression; className?: string }[];
+  staticInitExprs: {
+    globalIdx?: number;
+    initializer?: ts.Expression;
+    staticBlock?: ts.ClassStaticBlockDeclaration;
+    className?: string;
+  }[];
   /** Counter for generated closure types/functions */
   closureCounter: number;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
