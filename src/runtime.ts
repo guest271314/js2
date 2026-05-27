@@ -2776,6 +2776,14 @@ function resolveImport(
           options == null ? self.addEventListener(type, listener) : self.addEventListener(type, listener, options);
       }
       if (intent.action === "new") {
+        // (#1568) `__new_BigInt(v)` / `__new_Symbol(v)` — Object(bigint) /
+        // Object(symbol) auto-boxing (§7.1.18 ToObject). BigInt and Symbol are
+        // NOT constructors, so `new BigInt(v)` throws; box via the spec's
+        // literal `Object(v)`, yielding an object (typeof "object") whose
+        // valueOf() returns the underlying primitive.
+        if (intent.className === "BigInt" || intent.className === "Symbol") {
+          return (v: any): any => Object(v);
+        }
         // Test262Error is a simple Error subclass used by the test262 harness
         class Test262Error extends Error {
           constructor(msg?: string) {
