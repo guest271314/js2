@@ -3,7 +3,7 @@ id: 1643
 title: "spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails)"
 status: in-review
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -82,3 +82,30 @@ Each sub-task is medium-sized; consider creating sub-issues if devs prefer.
 - `test262/test/language/expressions/class/elements/private-field-as-instance.js`
 - `test262/test/language/statements/class/subclass/builtin-objects/Array/super-must-be-called-1.js`
 - `test262/test/language/statements/class/static-block-private-name.js`
+
+## Progress
+
+### 2026-05-27 — static `{ ... }` initializer blocks (sub-problem 1, partial)
+
+`static { ... }` blocks were parsed (statements.ts:246) but never executed:
+they were not queued into `ctx.staticInitExprs`, so `__module_init` ran only
+static **field** initializers. Reproduced on main: `static { C.y = C.x + 10 }`
+left `C.y` at 0.
+
+Fix queues static blocks alongside static field initializers in source order
+(§15.7.10) so they run interleaved in `__module_init`:
+- `class-bodies.ts` — single source-order member scan pushes a
+  `{ staticBlock, className }` entry for each `ClassStaticBlockDeclaration`.
+- `context/types.ts` — `staticInitExprs` entries now carry an optional
+  `staticBlock` (and `globalIdx`/`initializer` become optional).
+- `declarations.ts` — `__module_init` builder compiles the block's statements
+  with `enclosingClassName`/`isStaticContext` set (so `this`/`C.x` resolve).
+- `registry/imports.ts` — index-shift guard skips entries without `globalIdx`.
+
+Verified (tests/issue-1643.test.ts): single block reads earlier field, source
+order (later field not visible to block), multiple blocks accumulate, private
+fields unaffected. Private instance fields already passed on main.
+
+**Still open** (not in this slice): super-class field shadow, private-field
+deletion/brand-check exotics, computed-name side-effect ordering. Issue stays
+`ready` for those.
