@@ -75,6 +75,8 @@ let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
 let _AsyncGeneratorPrototypeCache: any = null;
 let _AsyncGeneratorFunctionPrototypeCache: any = null;
+let _IteratorPrototypeCache: any = null;
+let _AsyncIteratorPrototypeCache: any = null;
 
 /**
  * Install a built-in method on a prototype with spec-mandated descriptor
@@ -113,15 +115,71 @@ function _installBuiltinMethod(
   });
 }
 
+/**
+ * Build `%IteratorPrototype%` (spec §27.1.2). Its sole own property is
+ * `[Symbol.iterator]()` which returns `this`. `%GeneratorPrototype%` inherits
+ * from it so generators are iterable. (#1639) We build it explicitly rather
+ * than borrowing `globalThis.Iterator.prototype`, which may be absent and in
+ * any case is not the object test262 walks to via the generator's proto chain.
+ */
+function _getIteratorPrototype(): any {
+  if (_IteratorPrototypeCache) return _IteratorPrototypeCache;
+  const proto = Object.create(Object.prototype);
+  _IteratorPrototypeCache = proto;
+  const fn = function (this: any) {
+    return this;
+  };
+  Object.defineProperty(fn, "length", { value: 0, writable: false, enumerable: false, configurable: true });
+  Object.defineProperty(fn, "name", {
+    value: "[Symbol.iterator]",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(proto, Symbol.iterator, {
+    value: fn,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
+
+/**
+ * Build `%AsyncIteratorPrototype%` (spec §27.1.3). Its sole own property is
+ * `[Symbol.asyncIterator]()` which returns `this`. `%AsyncGeneratorPrototype%`
+ * inherits from it. (#1639)
+ */
+function _getAsyncIteratorPrototype(): any {
+  if (_AsyncIteratorPrototypeCache) return _AsyncIteratorPrototypeCache;
+  const proto = Object.create(Object.prototype);
+  _AsyncIteratorPrototypeCache = proto;
+  const fn = function (this: any) {
+    return this;
+  };
+  Object.defineProperty(fn, "length", { value: 0, writable: false, enumerable: false, configurable: true });
+  Object.defineProperty(fn, "name", {
+    value: "[Symbol.asyncIterator]",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(proto, Symbol.asyncIterator, {
+    value: fn,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
+
 /** Build `%GeneratorPrototype%` (spec §27.5.1). Idempotent. */
 function _getGeneratorPrototype(): any {
   if (_GeneratorPrototypeCache) return _GeneratorPrototypeCache;
-  // GeneratorPrototype inherits from IteratorPrototype so .map/.filter/etc.
-  // (#1367) resolve via the prototype chain.
-  const iterProto = (
-    typeof (globalThis as any).Iterator === "function" ? ((globalThis as any).Iterator as any).prototype : null
-  ) as any;
-  const proto = iterProto ? Object.create(iterProto) : Object.create(Object.prototype);
+  // GeneratorPrototype inherits from %IteratorPrototype% so .map/.filter/etc.
+  // (#1367) resolve via the prototype chain, and test262 reaches
+  // %IteratorPrototype% via getPrototypeOf(getPrototypeOf(g.prototype)). (#1639)
+  const proto = Object.create(_getIteratorPrototype());
   _GeneratorPrototypeCache = proto;
 
   _installBuiltinMethod(proto, "next", 1, function (this: any, _value?: any) {
@@ -224,12 +282,9 @@ function _getGeneratorFunctionPrototype(): any {
 /** Build `%AsyncGeneratorPrototype%` (spec §27.6.1). */
 function _getAsyncGeneratorPrototype(): any {
   if (_AsyncGeneratorPrototypeCache) return _AsyncGeneratorPrototypeCache;
-  const asyncIterProto = (
-    typeof (globalThis as any).AsyncIterator === "function"
-      ? ((globalThis as any).AsyncIterator as any).prototype
-      : null
-  ) as any;
-  const proto = asyncIterProto ? Object.create(asyncIterProto) : Object.create(Object.prototype);
+  // Inherits from %AsyncIteratorPrototype% (#1639) — test262 reaches it via
+  // getPrototypeOf(getPrototypeOf(asyncGen.prototype)).
+  const proto = Object.create(_getAsyncIteratorPrototype());
   _AsyncGeneratorPrototypeCache = proto;
 
   function mkResult(value: any, done: boolean) {
@@ -4462,6 +4517,16 @@ assert._isSameValue = isSameValue;
       // through this dedicated import instead of the generic `__getPrototypeOf`.
       if (name === "__get_generator_function_prototype") return () => _getGeneratorFunctionPrototype();
       if (name === "__get_async_generator_function_prototype") return () => _getAsyncGeneratorFunctionPrototype();
+      // (#1639) `g.prototype` (member access on a generator-function object).
+      // Spec §27.3.3 / §27.4.3: a (async) generator function's `.prototype` is a
+      // *fresh per-function object* whose [[Prototype]] is %(Async)GeneratorPrototype%
+      // — NOT the shared prototype itself. So tests walk:
+      //   getPrototypeOf(g.prototype)              → %(Async)GeneratorPrototype%
+      //   getPrototypeOf(getPrototypeOf(g.prototype)) → %(Async)IteratorPrototype%
+      // The compiled closure is opaque to the host, so codegen routes the
+      // member access `g.prototype` (where `g ∈ ctx.generatorFunctions`) here.
+      if (name === "__get_generator_prototype") return () => Object.create(_getGeneratorPrototype());
+      if (name === "__get_async_generator_prototype") return () => Object.create(_getAsyncGeneratorPrototype());
       // __create_descriptor(value, flags) → {value, writable, enumerable, configurable}
       // flags: bit 0 = writable, bit 1 = enumerable, bit 2 = configurable
       if (name === "__create_descriptor")
