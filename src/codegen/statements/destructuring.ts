@@ -34,7 +34,6 @@ import {
   registerEmitNestedBindingDefault,
   registerEnsureBindingLocals,
   valTypesMatch,
-  VOID_RESULT,
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
 import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
@@ -319,6 +318,21 @@ export function emitDefaultValueCheck(
 ): void {
   const hintType = targetType ?? fieldType;
 
+  // Compile the default initializer and store it into localIdx, coercing the
+  // initializer's actual result type to the local's declared type. Without this
+  // coercion the then-branch can push a value whose Wasm type differs from the
+  // local (e.g. a void `counter()` call yields externref while the local is
+  // f64), making the *whole* if/else fail to validate even when the default
+  // never fires at runtime (#1593).
+  const emitDefaultIntoLocal = (): void => {
+    const initType = compileExpression(ctx, fctx, initializer, hintType);
+    const localType = getLocalType(fctx, localIdx);
+    if (initType && localType && !valTypesMatch(initType, localType)) {
+      coerceType(ctx, fctx, initType, localType);
+    }
+    fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+  };
+
   // Build the else branch (value is NOT undefined — use it as-is, with coercion)
   const buildElseBranch = (tmpField: number): Instr[] => {
     if (targetType && !valTypesMatch(fieldType, targetType)) {
@@ -336,10 +350,7 @@ export function emitDefaultValueCheck(
     const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
     fctx.body.push({ op: "local.tee", index: tmpField });
     emitExternrefDefaultCheck(ctx, fctx, tmpField);
-    const thenInstrs = collectInstrs(fctx, () => {
-      compileExpression(ctx, fctx, initializer, hintType);
-      fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-    });
+    const thenInstrs = collectInstrs(fctx, emitDefaultIntoLocal);
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
@@ -354,10 +365,7 @@ export function emitDefaultValueCheck(
     fctx.body.push({ op: "i64.reinterpret_f64" });
     fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
     fctx.body.push({ op: "i64.eq" });
-    const thenInstrs = collectInstrs(fctx, () => {
-      compileExpression(ctx, fctx, initializer, hintType);
-      fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-    });
+    const thenInstrs = collectInstrs(fctx, emitDefaultIntoLocal);
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
@@ -369,10 +377,7 @@ export function emitDefaultValueCheck(
     const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
     fctx.body.push({ op: "local.tee", index: tmpField });
     fctx.body.push({ op: "ref.is_null" } as Instr);
-    const thenInstrs = collectInstrs(fctx, () => {
-      compileExpression(ctx, fctx, initializer, hintType);
-      fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-    });
+    const thenInstrs = collectInstrs(fctx, emitDefaultIntoLocal);
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
