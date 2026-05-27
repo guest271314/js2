@@ -642,9 +642,27 @@ export function destructureParamObject(
   // Always treat as nullable — callers may pass mismatched values that
   // compile to ref.null even when the declared type is non-nullable ref (#852).
   const isNullable = paramType.kind === "ref_null" || paramType.kind === "ref";
+  // Pre-warm the null-guard message before populating the detached
+  // `destructInstrs` buffer (#1529 — same rationale as the vec/tuple paths,
+  // #1553d). `buildDestructureNullThrow` calls `addStringConstantGlobal`, which
+  // inserts an import global and shifts every existing global.get/global.set
+  // index. By the time it fires (in the null-guard close below) `fctx.body` has
+  // already been restored to `savedBody`, and `destructInstrs` lives only in
+  // the not-yet-pushed `if.else`, so a default like `{ c = ++n }` that reads a
+  // module global kept a stale index pointing at the new string-constant import
+  // (externref) instead of the intended f64 global. Warming the constant up
+  // front makes the close a no-op for global indices.
+  if (isNullable && pattern.elements.length > 0) {
+    addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
+  }
   const savedBody = fctx.body;
   const destructInstrs: Instr[] = [];
   if (isNullable) {
+    // Keep `destructInstrs` reachable to global/late-import index fixups while
+    // it is the active emission buffer (#1553d) — a function-call default
+    // (`{ c = f() }`, where `f` adds a late import) would otherwise corrupt
+    // indices in this buffer.
+    fctx.savedBodies.push(destructInstrs);
     fctx.body = destructInstrs;
   }
 
@@ -714,6 +732,11 @@ export function destructureParamObject(
   // Skip for empty `{}` patterns (#225): the guard should only fire when there are
   // actual property accesses that would trap.
   if (isNullable && pattern.elements.length > 0) {
+    // `buildDestructureNullThrow` may still add a late import (its TypeError
+    // construction), so keep `destructInstrs` on `fctx.savedBodies` until after
+    // the `if.else` is assembled — then pop it, since it is reachable via the
+    // restored `savedBody` and an extra stack entry would be walked twice by a
+    // later shift (#1529).
     fctx.body = savedBody;
     fctx.body.push({ op: "local.get", index: paramIdx });
     fctx.body.push({ op: "ref.is_null" } as Instr);
@@ -723,9 +746,11 @@ export function destructureParamObject(
       then: buildDestructureNullThrow(ctx, fctx),
       else: destructInstrs,
     });
+    fctx.savedBodies.pop();
   } else if (isNullable) {
     fctx.body = savedBody;
     fctx.body.push(...destructInstrs);
+    fctx.savedBodies.pop();
   }
 }
 
