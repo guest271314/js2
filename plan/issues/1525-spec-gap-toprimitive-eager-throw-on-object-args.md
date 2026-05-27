@@ -72,3 +72,38 @@ instead of throwing), which is the *opposite* failure mode.
 
 **~170 test262 tests**, distributed across Array, String, DataView,
 Boolean, equality operators.
+
+## Investigation 2026-05-27 (dev-1593)
+
+Re-baselined on current main. The `Cannot convert object to primitive`
+cluster is **150** failing entries. It decomposes into **three independent
+root causes**, not one runtime-walker fix:
+
+1. **`new Object()` / `Object()` → null-prototype object [FIXED here].**
+   Both forms were lowered to `__object_create(null)` (→ `Object.create(null)`),
+   which has no `Object.prototype.toString`/`valueOf`. Any ToPrimitive
+   coercion (`==`, arithmetic, `String(...)`) on the result threw instead of
+   producing `"[object Object]"`. Per §20.1.1.1 `new Object()` must inherit
+   the ordinary `Object.prototype`. Fix: lower both via `__new_plain_object`
+   (the path `{}` literals already use) — `src/codegen/expressions/new-super.ts`
+   and `src/codegen/expressions/calls.ts`. Verified: `NaN != new Object()` no
+   longer throws; `language/expressions/does-not-equals/S11.9.2_A4.1_T1.js`
+   PASSES; `Boolean(new Object())` is `true`. tsc clean.
+
+2. **Object-literal with user `toString`/`valueOf` coerced via `String(obj)`
+   / `String.prototype.trim*` / `charAt` etc. [NOT fixed — the dominant ~142].**
+   These throw because the object-method trampoline + `__extern_toString`
+   path can't dispatch the user method. The concrete failure is invalid Wasm
+   in `finalizeMethodTrampolines` (`src/codegen/closures.ts`): the result
+   coercion emits a double `f64.convert_i32_s` (`expected i32, found f64`)
+   when the wrapper/method result kinds drift. This is a hard codegen effort
+   overlapping #1602/#1669 (trampoline signature drift) and the host
+   struct-method dispatch in #1130/#983. **Recommend carve to a new issue
+   (#1525b) with an architect spec.**
+
+3. **§7.1.1.1 step-6 TypeError when both `valueOf` and `toString` return
+   objects [NOT fixed].** Currently bottoms out instead of throwing.
+
+Note: `tests/issue-1525.test.ts` already existed on main (old TaskList #14
+was marked "completed" but the source fix never landed) — 8/10 pass, the 2
+failing cases are bugs #2 and #3 above.
