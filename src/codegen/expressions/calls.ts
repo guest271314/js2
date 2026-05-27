@@ -2732,6 +2732,28 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // Check the TypeScript type of the argument at compile time
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
+      // externref args carry host JS values whose array-ness can't be decided
+      // statically (e.g. a RegExp match result). Defer to the host predicate
+      // (#1328) rather than emitting a wrong compile-time `false`.
+      if (argWasmType.kind === "externref") {
+        const argSideType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argSideType && argSideType.kind !== "externref") {
+          // Non-externref value reaching here is never a host array.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        const isArrIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
+        if (isArrIdx === undefined) {
+          // Host predicate unavailable (e.g. standalone) — drop and fall back.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: isArrIdx });
+        return { kind: "i32" };
+      }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
       const isArr = argWasmType.kind === "ref" || argWasmType.kind === "ref_null";
       // Still compile the argument for side effects, then drop it

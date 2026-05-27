@@ -3540,6 +3540,10 @@ assert._isSameValue = isSameValue;
           return v.toLocaleString();
         };
       if (name === "__extern_is_undefined") return (v: any) => (v === undefined ? 1 : 0);
+      // (#1328) Array.isArray on an externref value (e.g. a RegExp match
+      // result returned from the host). The compile-time type can't decide
+      // this for `externref`, so defer to the real spec predicate.
+      if (name === "__extern_is_array") return (v: any) => (Array.isArray(v) ? 1 : 0);
       if (name === "__get_undefined") return () => undefined;
       // (#1343) ToBoolean for externref values per ECMA-262 §7.1.2.
       // The pre-existing externref path for `Boolean(x)` only checked
