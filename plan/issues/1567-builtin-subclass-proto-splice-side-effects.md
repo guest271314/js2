@@ -1,9 +1,10 @@
 ---
 id: 1567
 title: "Builtin subclass prototype splice leaks side effects (TypedArray length descriptor + RegExp brand)"
-status: ready
+status: done
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
+completed: 2026-05-27
 feasibility: hard
 sprint: 56
 owner: senior-developer
@@ -66,3 +67,52 @@ In `src/runtime.ts`, the host import that backs `RegExp.prototype.test` (likely 
 - PR #459 / commit `ca3e37094` "fix(#1455): make `instance instanceof Sub` work for builtin subclasses"
 - Investigation: `plan/issues/sprints/53/post-wave-regression-investigation.md`
 - Failing tests sampled locally on `main` (Wasm-side, not JS host) and still fail.
+
+## Resolution (2026-05-27, senior-dev)
+
+**The root-cause hypothesis above was wrong.** `__set_subclass_proto` was never
+involved — none of the three failing tests contain a `class extends`, so the
+helper is never invoked for them, and PR #459's runtime changes are unrelated.
+The real cause was **test-harness fidelity**, not the runtime.
+
+What actually happened, per failure:
+
+1. **`TypedArray/prototype/length/length.js`** and the `findLastIndex/BigInt/
+   get-length-ignores-length-prop.js` family: `wrapTest` injected
+   `const TypedArray = Int8Array` as the stand-in for the abstract `%TypedArray%`
+   intrinsic. The `length`/`byteLength`/`buffer`/`@@toStringTag` getters live on
+   `%TypedArray%.prototype` and are **inherited** by `Int8Array.prototype`, not
+   own — so `Object.getOwnPropertyDescriptor(Int8Array.prototype, "length")`
+   returned `undefined`, and `desc.get` threw. Every
+   `built-ins/TypedArray/prototype/*` descriptor test was silently failing on
+   this, far beyond the two named here.
+2. **`RegExp/prototype/test/S15.10.6.3_A2_T8.js`** already **passes** on current
+   `main` — the brand check was fixed by later work. Locked with a regression
+   test, no code change needed.
+
+**Fix** (`tests/test262-runner.ts`, the only source change): bind `TypedArray`
+to the real `%TypedArray%` intrinsic, which on the host is
+`Object.getPrototypeOf(Int8Array.prototype).constructor`. We route through
+`Int8Array.prototype` (member access on a builtin, which the compiler resolves
+to the host prototype) rather than the bare `Int8Array` identifier — the
+compiler does not evaluate bare builtin-constructor identifiers as first-class
+values (`Object.getPrototypeOf(Int8Array)` compiles `Int8Array` → `undefined`
+and throws `Cannot convert undefined to object`).
+
+**Validated impact** (per-process, isolated like CI forks — *not* the shared
+single-process probe, which produces spurious cascading CEs):
+
+| dir set | before | after |
+|---------|--------|-------|
+| `prototype/{length,byteLength,byteOffset,buffer,name,toStringTag}` | 37 pass / 27 fail | **53 pass / 11 fail** |
+| `prototype/{every,find}` sample (24) | 15 pass / 9 fail | **20 pass / 4 fail** |
+
+Net positive on both descriptor and method tests; zero new compile errors.
+The blanket abstract-intrinsic binding is safe because `%TypedArray%.prototype.X`
+=== `Int8Array.prototype.X` for every proto method, and the harness's
+`testWith*TypedArrayConstructors` helpers iterate the concrete constructors
+directly (they never call `new TypedArray()`).
+
+Tests: `tests/issue-1567.test.ts` (4 tests — descriptor getter `.length`,
+the wrapped `length.js` end-to-end through `wrapTest`, the shim-binding
+assertion, and the RegExp brand-check regression lock).
