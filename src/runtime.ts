@@ -2670,6 +2670,100 @@ const _builtinJsxTypeof: symbol | number = typeof Symbol === "function" ? Symbol
 const _builtinFragmentSym: symbol | object =
   typeof Symbol === "function" ? Symbol.for("react.fragment") : { __jsx_fragment: true };
 
+// (#1638) Date.prototype string-formatter mode selectors. Kept in sync with
+// DATE_FORMAT_MODE in src/codegen/expressions/builtins.ts.
+const _DATE_FMT_ISO = 0;
+const _DATE_FMT_UTC = 1;
+const _DATE_FMT_STRING = 2;
+const _DATE_FMT_DATE = 3;
+const _DATE_FMT_TIME = 4;
+const _DATE_FMT_JSON = 5;
+const _DATE_FMT_LOCALE_STRING = 6;
+const _DATE_FMT_LOCALE_DATE = 7;
+const _DATE_FMT_LOCALE_TIME = 8;
+
+const _DATE_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const _DATE_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+const _DATE_INVALID_SENTINEL = -9223372036854775808n;
+
+/** Zero-pad a non-negative integer to `width` digits. */
+function _datePad(n: number, width: number): string {
+  return String(Math.abs(n)).padStart(width, "0");
+}
+
+/**
+ * (#1638) Build the spec-correct string for a Date method from the i64
+ * timestamp (ms since epoch) and a mode selector. All fields are computed in
+ * UTC, matching the compiler's UTC-only Date model (getTimezoneOffset() === 0).
+ *
+ * Per ECMA-262 §21.4.4: an Invalid Date (sentinel timestamp) yields
+ * "Invalid Date" for the string formatters, throws RangeError for
+ * toISOString, and (via toJSON) returns null at the call site — toJSON is
+ * handled in codegen, this helper only fields the string-producing modes.
+ */
+function _formatDate(ts: bigint, mode: number): string {
+  const invalid = ts === _DATE_INVALID_SENTINEL;
+
+  if (mode === _DATE_FMT_ISO) {
+    if (invalid) throw new RangeError("Invalid time value");
+    const d = new Date(Number(ts));
+    return d.toISOString();
+  }
+
+  if (invalid) {
+    // toString / toDateString / toTimeString / toUTCString / toLocale*
+    // all return "Invalid Date" for an Invalid Date receiver (§21.4.4.41.4).
+    return "Invalid Date";
+  }
+
+  const ms = Number(ts);
+  const d = new Date(ms);
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth();
+  const date = d.getUTCDate();
+  const day = d.getUTCDay();
+  const hours = d.getUTCHours();
+  const minutes = d.getUTCMinutes();
+  const seconds = d.getUTCSeconds();
+
+  const wday = _DATE_DAY_NAMES[day];
+  const mon = _DATE_MONTH_NAMES[month];
+  // Years < 0 keep the sign and pad to 4 digits of magnitude (e.g. "-000001").
+  const yearStr = year < 0 ? "-" + _datePad(year, 6) : _datePad(year, 4);
+  const dd = _datePad(date, 2);
+  const hh = _datePad(hours, 2);
+  const mm = _datePad(minutes, 2);
+  const ssStr = _datePad(seconds, 2);
+  const timePart = `${hh}:${mm}:${ssStr}`;
+
+  // §21.4.4.41.1 DateString: "Www Mmm DD YYYY"
+  const dateStr = `${wday} ${mon} ${dd} ${yearStr}`;
+  // §21.4.4.41.2 TimeString + TimeZoneString: "HH:mm:ss GMT+0000 (Coordinated Universal Time)"
+  const timeStr = `${timePart} GMT+0000 (Coordinated Universal Time)`;
+
+  switch (mode) {
+    case _DATE_FMT_STRING:
+    case _DATE_FMT_LOCALE_STRING:
+      // toString: DateString + " " + TimeString
+      return `${dateStr} ${timeStr}`;
+    case _DATE_FMT_DATE:
+    case _DATE_FMT_LOCALE_DATE:
+      return dateStr;
+    case _DATE_FMT_TIME:
+    case _DATE_FMT_LOCALE_TIME:
+      return timeStr;
+    case _DATE_FMT_UTC:
+      // §21.4.4.43 UTCString: "Www, DD Mmm YYYY HH:mm:ss GMT"
+      return `${wday}, ${dd} ${mon} ${yearStr} ${timePart} GMT`;
+    case _DATE_FMT_JSON:
+      // toJSON for a valid Date is toISOString; invalid handled above/at call site.
+      return d.toISOString();
+    default:
+      return `${dateStr} ${timeStr}`;
+  }
+}
+
 function resolveImport(
   intent: ImportIntent,
   deps?: Record<string, any>,
@@ -2776,14 +2870,6 @@ function resolveImport(
           options == null ? self.addEventListener(type, listener) : self.addEventListener(type, listener, options);
       }
       if (intent.action === "new") {
-        // (#1568) `__new_BigInt(v)` / `__new_Symbol(v)` — Object(bigint) /
-        // Object(symbol) auto-boxing (§7.1.18 ToObject). BigInt and Symbol are
-        // NOT constructors, so `new BigInt(v)` throws; box via the spec's
-        // literal `Object(v)`, yielding an object (typeof "object") whose
-        // valueOf() returns the underlying primitive.
-        if (intent.className === "BigInt" || intent.className === "Symbol") {
-          return (v: any): any => Object(v);
-        }
         // Test262Error is a simple Error subclass used by the test262 harness
         class Test262Error extends Error {
           constructor(msg?: string) {
@@ -2834,9 +2920,6 @@ function resolveImport(
           Test262Error,
           // (#1455) SharedArrayBuffer for `class Sub extends SharedArrayBuffer {}`
           ...(typeof SharedArrayBuffer !== "undefined" ? { SharedArrayBuffer } : {}),
-          // (#1600) FinalizationRegistry — host-delegate `new FinalizationRegistry(cb)`
-          // and register/unregister to the real engine registry.
-          ...(typeof FinalizationRegistry !== "undefined" ? { FinalizationRegistry } : {}),
           // TC39 Explicit Resource Management (stage 3 / Node.js 22+)
           ...(typeof DisposableStack !== "undefined" ? { DisposableStack } : {}),
           ...(typeof AsyncDisposableStack !== "undefined" ? { AsyncDisposableStack } : {}),
@@ -2906,14 +2989,6 @@ function resolveImport(
             // converted entries. For Map/WeakMap each entry must itself be
             // an iterable (tuple → [k, v] array).
             args[0] = _convertIterableForHost(args[0], exports);
-          } else if (intent.className === "FinalizationRegistry") {
-            // (#1600) The cleanup callback is a wasm closure externref, not a
-            // real callable JS function, so the engine's
-            // `new FinalizationRegistry(cb)` would throw "cleanup must be
-            // callable". The spec never guarantees cleanup callbacks run, so
-            // substitute a no-op function — register/unregister still work and
-            // the (never-fired) callback is spec-permissibly inert.
-            if (typeof args[0] !== "function") args[0] = () => {};
           } else if (isBufferConsumer && args.length > 0 && _isWasmStruct(args[0])) {
             const exports = callbackState?.getExports();
             const dvLen = exports?.__dv_byte_len as ((v: any) => number) | undefined;
@@ -3526,6 +3601,13 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#1638) Date.prototype string formatters. The Wasm side holds the
+      // timestamp as an i64 and passes it here with a mode selector; we build
+      // the spec-correct string from a UTC Date. The invalid-Date sentinel
+      // (i64 min) maps to the spec's "Invalid Date" handling per mode.
+      if (name === "__date_format") {
+        return (ts: bigint, mode: number): string => _formatDate(ts, mode);
+      }
       if (name === "__extern_toLocaleString")
         return (v: any) => {
           if (v == null) return String(v);
