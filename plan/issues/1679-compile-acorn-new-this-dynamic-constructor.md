@@ -127,37 +127,3 @@ npx tsx .tmp/compile-acorn.mts
   TypeError, new.target), #1609 (non-literal spread in `new`). This is a
   distinct construct (constructor-via-`this`), not covered by either.
 
-## Resolution (2026-05-27)
-
-`src/codegen/expressions/new-super.ts` — added a `this`-callee branch right
-before the identifier function-constructor path. For `new this(...)` the
-checker resolves the type's symbol name to the enclosing constructor
-(`className = "Parser"`), but `Parser` is a function-style class, so it is NOT
-in `ctx.classSet` and the callee is a `ThisKeyword` (not an identifier) — every
-typed branch was skipped and control fell through to the
-`Unsupported new expression for class` error. The new branch, gated on
-`className && !ctx.classSet.has(className) && expr.expression.kind === ThisKeyword`:
-
-1. reuses a cached `funcConstructorMap` entry keyed by `className` if present
-   (emits the `<...>_new` call + threads args), else
-2. builds the constructor from the resolved symbol's declaration via
-   `compileNewFunctionDeclaration` — handling `FunctionDeclaration`,
-   `FunctionExpression` (acorn's `var Parser = function Parser(){}` resolves the
-   symbol directly to the FunctionExpression node), and
-   `VariableDeclaration`-with-FunctionExpression-initializer.
-
-Purely additive (68 lines, 0 deletions) — only reaches a path that previously
-errored, so it cannot affect existing passing paths.
-
-## Test Results
-
-- `tests/issue-1679.test.ts` — 3/3 pass: static factory via `new this()`
-  returns 42; multi-arg `new this(a,b)` returns 7; function-style class
-  (acorn idiom) compiles with 0 `Unsupported new expression` errors.
-- `compile(acorn.mjs)` — the 6 `Unsupported new expression for class: Parser`
-  errors drop to 0 (477 → 471 total; the remaining 471 are the out-of-scope
-  untyped-JS `Property does not exist` warnings).
-- No regression: `tests/class-method-struct-new.test.ts` (4 fail) and
-  `tests/classes.test.ts` (7 fail) fail IDENTICALLY on clean `origin/main`
-  (pre-existing `string_constants` harness + struct.get type issues, unrelated
-  to this change — verified by reverting `new-super.ts` to main and re-running).
