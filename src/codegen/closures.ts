@@ -55,6 +55,7 @@ import {
 } from "./statements.js";
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
 import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
+import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
 import { detectStringBuilders } from "./string-builder.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
@@ -2007,7 +2008,6 @@ export function compileArrowAsClosure(
       flushLateImportShiftsShared(ctx, liftedFctx);
     }
 
-    const numArgs = arrowParams.length;
     const elemType: ValType = { kind: "externref" };
     const vti = getOrRegisterVecType(ctx, "externref", elemType);
     const ati = getArrTypeIdxFromVec(ctx, vti);
@@ -2015,38 +2015,16 @@ export function compileArrowAsClosure(
     const argsLocal = allocLocal(liftedFctx, "arguments", vecRef);
     const arrTmp = allocLocal(liftedFctx, "__args_arr_tmp", { kind: "ref", typeIdx: ati });
 
-    // Push each param coerced to externref (skip __self at index 0)
-    for (let i = 0; i < numArgs; i++) {
-      liftedFctx.body.push({ op: "local.get", index: i + 1 }); // +1 for __self
-      const pt = arrowParams[i]!;
-      if (pt.kind === "f64") {
-        const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) {
-          liftedFctx.body.push({ op: "call", funcIdx: boxIdx });
-        } else {
-          liftedFctx.body.push({ op: "drop" });
-          liftedFctx.body.push({ op: "ref.null.extern" });
-        }
-      } else if (pt.kind === "i32") {
-        liftedFctx.body.push({ op: "f64.convert_i32_s" });
-        const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) {
-          liftedFctx.body.push({ op: "call", funcIdx: boxIdx });
-        } else {
-          liftedFctx.body.push({ op: "drop" });
-          liftedFctx.body.push({ op: "ref.null.extern" });
-        }
-      } else if (pt.kind === "ref" || pt.kind === "ref_null") {
-        liftedFctx.body.push({ op: "extern.convert_any" });
-      }
-      // externref params are already externref — no conversion needed
-    }
-    liftedFctx.body.push({ op: "array.new_fixed", typeIdx: ati, length: numArgs });
-    liftedFctx.body.push({ op: "local.set", index: arrTmp });
-    liftedFctx.body.push({ op: "i32.const", value: numArgs });
-    liftedFctx.body.push({ op: "local.get", index: arrTmp });
-    liftedFctx.body.push({ op: "struct.new", typeIdx: vti });
-    liftedFctx.body.push({ op: "local.set", index: argsLocal });
+    // (#779e) Build the arguments vec via the shared extras-aware helper so the
+    // closure sees the TRUE call-site argument count (from __argc/__extras_argv
+    // set by the closure call site, #1511) — not just its declared arity.
+    // paramOffset is 1 because lifted closures carry __self at local index 0.
+    emitArgumentsVecBody(ctx, liftedFctx, arrowParams, 1, {
+      vecTypeIdx: vti,
+      arrTypeIdx: ati,
+      argsLocalIdx: argsLocal,
+      arrTmpIdx: arrTmp,
+    });
   }
 
   let conciseBodyHasValue = false;
