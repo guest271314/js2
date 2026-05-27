@@ -1,10 +1,9 @@
 ---
 id: 779e
 title: "arguments-object mapped / trailing-comma / sloppy-strict residuals (~161 fails)"
-status: done
+status: in-review
 created: 2026-05-21
 updated: 2026-05-27
-completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: arguments-object
 goal: property-model
-sprint: Backlog
+sprint: 56
 parent: 779
 es_edition: ES5.1
 test262_fail: 161
@@ -59,50 +58,57 @@ remain. They cluster around:
 ## Acceptance criteria
 
 - [ ] At least 110 of the ~161 tests flip to `pass`.
-- [ ] No regressions in already-passing arguments-object tests.
+- [x] No regressions in already-passing arguments-object tests.
 - [ ] Both strict and sloppy variants pass for each touched test family.
 
-## Resolution (2026-05-27)
+## Root cause (2026-05-27)
 
-Triage against current main found only ONE of the three listed sub-clusters
-actually reproduces:
+`arguments.length` / `arguments[i]` reported the **declared parameter count**,
+not the **actual call-site argument count**, for indirect/closure call paths.
+Named top-level functions already solved this via the `__argc` / `__extras_argv`
+globals (#1053/#1511): overflow args beyond declared arity are packed into a
+module global the callee's prologue reads. But three paths never wired it up:
 
-- **Trailing comma** (cluster 2): already passing — the TS parser drops a
-  trailing comma, so `f(42, undefined,)` already gives `arguments.length === 2`.
-- **Sloppy mapped** (cluster 1a): already passing — sloppy `arguments[i] = v`
-  reflects into the named param (and vice-versa) via `fctx.mappedArgsInfo`.
-- **`eval("arguments = 10")` SyntaxError** (cluster 3): eval-family, test262-
-  skipped — out of scope.
-- **Strict unmapped** (cluster 1b): THE BUG. The arguments object was built as
-  *mapped* even in strict-mode functions, so writes to `arguments[i]` wrongly
-  reflected into the named parameter (and back). §10.4.4 requires strict
-  functions to get an *unmapped* arguments object.
+1. **Closure / function-expression calls** (`compileClosureCall`,
+   `src/codegen/expressions/calls-closures.ts`) — *dropped* excess args at the
+   call site and never set `__argc`/`__extras_argv`.
+2. **Getter-returned callable / class-private-method calls**
+   (`compileGetterCallable`, same file) — same drop-without-record bug.
+3. **Closure callee prologue** (`buildLiftedClosure`, `src/codegen/closures.ts`)
+   built the `arguments` vec sized to declared arity only, ignoring extras.
 
-### Fix
+## Fix
 
-New helper `src/codegen/helpers/is-strict-function.ts` — detects strict-mode
-functions via (a) a `"use strict"` directive prologue on the function or any
-enclosing function / the SourceFile, or (b) class context (class bodies are
-always strict). ES-module strictness is deliberately NOT inferred from
-top-level import/export, because the compiler wraps every program in a
-synthetic `export function test(...)` entry point — inferring module strictness
-there would wrongly unmap *all* sloppy functions.
+- Exported `emitClosureCallArgcExtras` / `emitResetArgcExtras` from `calls.ts`.
+- `compileClosureCall` + `compileGetterCallable`: replace the drop-excess-args
+  loops with `emitClosureCallArgcExtras(...)` (packs overflow into the global,
+  evaluating each arg exactly once) and `emitResetArgcExtras(...)` after the
+  call (preserving the return value), matching the existing #1511 indirect-call
+  paths.
+- Closure callee prologue now calls the shared `emitArgumentsVecBody(...)` with
+  `paramOffset = 1` (lifted closures carry `__self` at local 0), so it reads the
+  true call-site length from `__argc`/`__extras_argv`.
 
-The mapped-arguments wiring now skips `fctx.mappedArgsInfo` for strict
-functions, so the built `arguments` vec stays an independent copy:
+## Test Results (isolated test262 runs, `language/arguments-object/*`)
 
-- `src/codegen/function-body.ts` — top-level function declarations.
-- `src/codegen/statements/nested-declarations.ts` — `emitArgumentsObject` gains
-  an `unmapped` param; lifted function declarations pass `isStrictFunction`.
-- `src/codegen/class-bodies.ts` — class methods always pass `unmapped = true`.
-- `src/codegen/literals.ts` — object-literal methods pass `isStrictFunction`.
-- `src/codegen/shared.ts` — delegate signature threads the `unmapped` flag.
+| | baseline (main) | this branch |
+|---|---|---|
+| pass | 73 | **148** |
+| fail | 141 | 66 |
+| compile_error | 1 | 1 |
 
-### Tests
-
-`tests/issue-779e.test.ts` — 6 cases (sloppy/strict × both sync directions,
-trailing comma, class method). All pass. No new failures in the arguments
-suites that use the standard import harness (issue-849, issue-1053). Pre-
-existing failures in arguments-object.test.ts / issue-820b.test.ts are
-unrelated harness issues (`{env:{}}` import object / missing `./helpers.js`),
-not regressions from this change.
+- **+75 tests flip to pass, 0 regressions** within arguments-object.
+- Fixed: every `func-expr` / `gen-func-expr` / class `meth` / `private-meth` /
+  `gen-meth` / `async-private-gen-meth` trailing-comma family.
+- Still failing (out of scope, separate root causes):
+  - `*-args-trailing-comma-spread-operator` (32) — spread-arg call lowering, not
+    arguments-object.
+  - `async-gen-meth` object + `*-static` async-gen-meth (~12) — async-gen method
+    body goes through the generator trampoline, a different prologue.
+  - `10.6-*-s` / `S10.6_*` (~14) — strict/sloppy mapped-argument bidirectional
+    sync + `eval("arguments = …")` SyntaxError, distinct features.
+- Regression check: `test-call-ref`, `class-method-calls`, `getters-setters`,
+  `classes`, `class-methods` unit tests show identical pass/fail counts on this
+  branch vs clean main (their failures are a pre-existing host-import harness
+  issue, unrelated to this change). `issue-1053-arguments-global-staleness`,
+  `object-methods`, `generators`, `arguments-object` pass.

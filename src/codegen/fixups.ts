@@ -916,6 +916,17 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
         if (pos < 0) break;
         const argInstr = instrs[pos]!;
 
+        // local.tee is stack-neutral (pops 1, pushes 1) — it is NOT an arg
+        // producer, it sits between the real value producer and the consumer.
+        // Skip it WITHOUT advancing the param index so the producer beneath it
+        // maps to the current param. (Without this, a `ref.null.extern` value
+        // tee'd into a temp gets mis-assigned to the wrong param and rewritten
+        // to a struct null — #1605-cpn.)
+        if (argInstr.op === "local.tee") {
+          pi++; // counteract the loop's pi-- so this param is retried
+          continue;
+        }
+
         // struct.new consumes N fields and produces 1 value.
         // The current pos IS a call arg (the struct.new result), but the N
         // instructions before it are struct field args, NOT call args.

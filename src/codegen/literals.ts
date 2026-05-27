@@ -1597,10 +1597,18 @@ export function compileObjectLiteralForStruct(
       // dedicated funcIdx instead of overwriting the shared one.
       const perLiteralIdx = literalMethodFuncIdx.get(methodName);
       const existingFuncIdx = perLiteralIdx ?? ctx.funcMap.get(fullName);
+      // The shared `funcMap` entry can become stale when sibling object
+      // literals share a struct dedup-key (so they share `fullName`) but the
+      // earlier-recorded funcIdx points into the import range or past the
+      // current functions array — e.g. after late imports shifted indices or
+      // a prior literal's function was dropped. Resolving the slot blindly
+      // then crashed on `undefined.typeIdx` (#1608). Treat an unresolvable
+      // slot as "no existing function" and synthesize a fresh one.
+      const localIdx = existingFuncIdx !== undefined ? existingFuncIdx - ctx.numImportFuncs : -1;
+      const existingFunc = existingFuncIdx !== undefined && localIdx >= 0 ? ctx.mod.functions[localIdx] : undefined;
       let methodFunc: WasmFunction;
-      if (existingFuncIdx !== undefined) {
-        const localIdx = existingFuncIdx - ctx.numImportFuncs;
-        methodFunc = ctx.mod.functions[localIdx]!;
+      if (existingFunc !== undefined) {
+        methodFunc = existingFunc;
         // Update type in case it was refined
         methodFunc.typeIdx = methodTypeIdx;
       } else {
