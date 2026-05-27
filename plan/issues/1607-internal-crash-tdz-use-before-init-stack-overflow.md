@@ -4,6 +4,7 @@ title: "codegen crash: 'Maximum call stack size exceeded' on use-before-initiali
 status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 task_type: bugfix

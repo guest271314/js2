@@ -83,6 +83,27 @@ export interface CompileResult {
   hasMain: boolean;
   /** Whether the source has top-level executable statements (module init code) */
   hasTopLevelStatements: boolean;
+  /**
+   * Ready-to-pass JS-host import object for default/JS-host mode (#1667).
+   *
+   * In default mode the compiled binary needs host imports (`env.*`,
+   * `wasm:js-string`, `string_constants`), so `WebAssembly.instantiate(binary,
+   * {})` throws. This getter wires the runtime helpers from {@link buildImports}
+   * into a single object the caller passes directly:
+   *
+   * ```js
+   * const r = compile(src);
+   * const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
+   * ```
+   *
+   * Standalone / `wasi` mode is the zero-import portable default and needs no
+   * import object; for those targets this is an empty object. Computed lazily —
+   * accessing it builds the runtime once and caches the result.
+   *
+   * Always present on results from the public `compile*` entry points; the
+   * low-level `compile*Source` helpers in compiler.ts do not attach it.
+   */
+  readonly importObject?: WebAssembly.Imports;
 }
 
 export interface CompileError {
@@ -204,6 +225,7 @@ import * as path from "path";
 import { IncrementalLanguageService } from "./checker/index.js";
 import { compileFilesSource, compileMultiSource, compileSource, compileToObjectSource } from "./compiler.js";
 import { ModuleResolver, resolveAllImports } from "./resolve.js";
+import { buildImports as buildImportsRuntime } from "./runtime.js";
 
 /**
  * Compile TypeScript source to Wasm GC binary.
@@ -222,7 +244,45 @@ import { ModuleResolver, resolveAllImports } from "./resolve.js";
  * ```
  */
 export function compile(source: string, options?: CompileOptions): CompileResult {
-  return compileSource(source, options);
+  return withImportObject(compileSource(source, options));
+}
+
+/**
+ * Attach a lazily-computed `importObject` getter (#1667) to a compile result.
+ *
+ * Building the host runtime via {@link buildImports} is deferred until the
+ * caller actually reads `result.importObject`, so standalone / `wasi` outputs
+ * (which need no host imports) pay nothing, and the result stays cheap to
+ * produce. The built object is cached on first access.
+ *
+ * The returned object is a valid `WebAssembly.Imports`: `{ env, "wasm:js-string",
+ * string_constants }`. It targets the polyfill instantiation path
+ * (`WebAssembly.instantiate(binary, importObject)` with no extra options),
+ * which is what the issue's example uses.
+ */
+function withImportObject(result: CompileResult): CompileResult {
+  let cached: WebAssembly.Imports | undefined;
+  Object.defineProperty(result, "importObject", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (cached) return cached;
+      // Failed compile or zero-import (standalone / wasi) output needs no host
+      // runtime — return an empty, harmless import object.
+      if (!result.success || result.imports.length === 0) {
+        cached = {};
+        return cached;
+      }
+      const built = buildImportsRuntime(result.imports, undefined, result.stringPool);
+      cached = {
+        env: built.env,
+        "wasm:js-string": built["wasm:js-string"],
+        string_constants: built.string_constants,
+      } as unknown as WebAssembly.Imports;
+      return cached;
+    },
+  });
+  return result;
 }
 
 /**
@@ -234,7 +294,7 @@ export function compileMulti(
   entryFile: string,
   options?: CompileOptions,
 ): CompileResult {
-  return compileMultiSource(files, entryFile, options);
+  return withImportObject(compileMultiSource(files, entryFile, options));
 }
 
 /**
@@ -255,7 +315,7 @@ export function compileMulti(
  * ```
  */
 export function compileFiles(entryPath: string, options?: CompileOptions): CompileResult {
-  return compileFilesSource(entryPath, options);
+  return withImportObject(compileFilesSource(entryPath, options));
 }
 
 /** Only WAT text (debug) */
@@ -308,7 +368,7 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   // Entry file key
   const entryKey = `./${path.relative(rootDir, resolvedEntry)}`;
 
-  return compileMultiSource(files, entryKey, effectiveOptions);
+  return withImportObject(compileMultiSource(files, entryKey, effectiveOptions));
 }
 
 /**

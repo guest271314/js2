@@ -1,9 +1,10 @@
 ---
 id: 1318
 title: "test harness: 'returned N' bare exit code — capture last assertion detail (~8,900 vague failures)"
-status: ready
+status: done
+completed: 2026-05-27
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -53,3 +54,79 @@ In `scripts/test262-worker.mjs`, when the test calls `$262.$262Fail(msg)` or thr
 - `returned 2` with no context never appears — replaced by the last `$262.$262Fail` message.
 - Message field in JSONL is not truncated below 500 chars.
 - The truncated-assertion count drops by >80% (most become diagnosable).
+
+<<<<<<< HEAD
+## Resolution (2026-05-27)
+
+Two harness code paths build the failure-context string from a non-zero Wasm
+return code (the compiled module returns the **assert index** as an integer,
+not actual/expected values — so this layer surfaces the *assert source line +
+its message argument*, which is the actionable triage detail):
+
+1. **`tests/test262-runner.ts`** (`runTest262File`, used by equivalence /
+   smoke tests) — **already fixed** before this task: `ASSERT_LINE_MAX = 600`,
+   `assert #N at L<line>: <source>` format, `Test262Error #N` path, and the
+   worker (`scripts/test262-worker-esm.mjs`) raised its cap to 2000 chars.
+   Verified by `tests/issue-1318.test.ts` (3 tests, all pass).
+
+2. **`tests/test262-vitest.test.ts`** (`findNthAssert`, the **sharded
+   conformance runner** that writes the JSONL where the ~8.9k vague
+   `returned N` entries actually live) — **fixed in this task**. It still used
+   the old 120-char truncation. Changes:
+   - Raised the per-assert cap 120 → 500 and collapse internal whitespace.
+   - Bound the captured chunk to a single assert statement (stop at the next
+     assert / statement-terminating `;`) so a short assert can't borrow a
+     later assert's longer message.
+   - Surface the assertion's message-string argument explicitly
+     (`… — msg: <text>`).
+   - Clearer fall-through for out-of-range return codes (non-assert throw /
+     `proc_exit`).
+
+This brings the conformance-report path in line with the runner path, so the
+truncated-assertion entries in the JSONL now carry the full assert source +
+message instead of a 120-char fragment.
+
+## Test Results
+
+- `tests/issue-1318.test.ts` — 3/3 pass (acceptance criteria for the
+  `runTest262File` path: full long message preserved, `at L<n>:` format,
+  Test262Error message retained).
+- `findNthAssert` formatter (the changed `test262-vitest.test.ts` path)
+  verified via standalone probe: short asserts no longer bleed neighbouring
+  messages; multi-line asserts captured in full; out-of-range codes get a
+  descriptive fallback. (Function is module-internal to the sharded runner;
+  not exported to avoid disturbing the runner's top-level test registration.)
+=======
+## Resolution
+
+Landed in two parts.
+
+**Part 1 (commit 39fa6ef3f)** — improved the `runTest262File` smoke-test path
+in `tests/test262-runner.ts`: raised the assert-line truncation 160→600 chars,
+added the `assert #N at L<line>: <source>` format, added a `throw new
+Test262Error(...)` fallback, and bumped the worker JSONL `error` cap to 2000
+chars in `scripts/test262-worker-esm.mjs`.
+
+**Part 2 (this change)** — the **sharded CI runner** (`tests/test262-shared.ts`,
+driven by the `test262-chunk*.test.ts` files that generate the live conformance
+JSONL) and the legacy `tests/test262-vitest.test.ts` still used the OLD
+`findNthAssert`: a 120-char cap, a narrow `\b(assert|verify\w+)\b` regex, and a
+bare `returned N (found M asserts in source)` fallback. Extracted the locator
+into `tests/test262-assert-locator.ts` (side-effect-free, unit-tested) and used
+it from both runners. Improvements:
+
+- `extractFullAssert` balances parentheses across lines, capturing the full
+  `assert.sameValue(actual, expected, "message")` call — including the message
+  argument that `wrapTest` strips from the compiled body but is still in the
+  source — capped at 500 chars (was 120).
+- Broadened the assert-detection regex to also match `assert.*`, `compareArray`,
+  `$DONOTEVALUATE`, and `throw new Test262Error`.
+- When the executed-assert counter outruns the static source scan (loops,
+  helper-internal asserts), the diagnostic anchors on the **last** assertion in
+  the file instead of emitting a bare `returned N` — so the assertion_fail
+  bucket entries are diagnosable. The `returned N —` prefix is preserved so
+  `classifyError` bucketing is unchanged.
+
+Tests: `tests/issue-1318-locator.test.ts` (10 cases). Existing
+`tests/issue-1318.test.ts` (3 cases, Part 1 path) stays green.
+>>>>>>> 9da9b055d (fix(#1318): bring sharded CI runner up to parity for assert diagnostics)
