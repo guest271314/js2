@@ -160,6 +160,26 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * Coerce an already-pushed Number.prototype method argument (toFixed /
+ * toPrecision / toExponential digits) to f64. These runtime helpers take an
+ * f64 argument, but the source argument may be i32 (boolean) or externref/ref
+ * (e.g. a Symbol). Per §21.1.3.x the argument runs through ToInteger, which
+ * begins with ToNumber — and ToNumber(Symbol) throws TypeError (§7.1.4).
+ * Routing externref/ref through coerceType funnels Symbols into the throwing
+ * ToNumber path (#1564) and keeps the value stack f64-typed for the
+ * subsequent local.tee/local.set into an f64 local.
+ */
+function coerceNumberMethodArgToF64(ctx: CodegenContext, fctx: FunctionContext, argType: ValType | null): void {
+  if (!argType) return;
+  if (argType.kind === "f64") return;
+  if (argType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return;
+  }
+  coerceType(ctx, fctx, argType, { kind: "f64" });
+}
+
+/**
  * Look up closure info for a variable by checking if its local type
  * is a ref to a known closure struct. Handles cases like:
  *   var f = function() { ... }; f();
@@ -5672,7 +5692,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
       // Compile the digits argument (default 0)
       if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToInteger(fractionDigits) begins with ToNumber (§21.1.3.3 step 4).
+        // A non-f64 argument (externref/ref, e.g. a Symbol) must funnel through
+        // ToNumber, which throws TypeError on Symbol; coerce to f64 here so the
+        // subsequent f64 local.tee is type-correct and Symbols throw (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         // RangeError: fractionDigits must be 0-100
         const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -5721,7 +5745,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // throw RangeError.
         const recvLocalP = allocLocal(fctx, `__toPrecision_recv_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: recvLocalP });
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToNumber(precision) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const precLocal = allocLocal(fctx, `__toPrecision_prec_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: precLocal });
 
@@ -5804,7 +5829,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // `(NaN).toExponential(101)` which spec requires to return "NaN".
         const recvLocalE = allocLocal(fctx, `__toExponential_recv_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: recvLocalE });
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToNumber(fractionDigits) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const digitsLocal = allocLocal(fctx, `__toExponential_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: digitsLocal });
 
@@ -8471,7 +8497,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         if (methodName === "toFixed" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // RangeError: fractionDigits must be 0-100
           const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -8498,7 +8525,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.const", value: 0 });
         }
         if (methodName === "toPrecision" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // (#49) See `number.toPrecision` site above — the precision
           // range check was moved into the runtime helper because per
           // spec §21.1.3.5 step 4, non-finite receivers must return
@@ -8512,7 +8540,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           }
         }
         if (methodName === "toExponential" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // (#49) See `number.toExponential` site above — the
           // fractionDigits range check was moved into the runtime
           // helper because per spec §21.1.3.3 step 3, non-finite
