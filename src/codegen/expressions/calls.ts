@@ -2732,6 +2732,40 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // Check the TypeScript type of the argument at compile time
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
+      // For statically-typed args, fold to a compile-time constant: a ref to a
+      // vec struct is an array; anything else (number/string/object) is not.
+      // (#1678) An `externref` arg (static type `any`/`unknown`) can hold a
+      // native array at runtime — e.g. a rest/array binding default whose value
+      // is `any`-typed materialises a __vec_externref. Folding it to a constant
+      // `false` is wrong, so emit a runtime check: `any.convert_extern` then
+      // `ref.test` against every registered vec struct type. This is pure Wasm
+      // (works in standalone/WASI mode, needs no host import) and matches how
+      // the compiler represents JS arrays.
+      if (argWasmType.kind === "externref") {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") {
+          // Non-externref values (numbers, bools) are never arrays.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
+        if (vecTypeIdxs.length === 0) {
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "local.set", index: anyTmp });
+        // result = ref.test(t0) | ref.test(t1) | ...
+        for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
+          fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
+          if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+        }
+        return { kind: "i32" };
+      }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
       const isArr = argWasmType.kind === "ref" || argWasmType.kind === "ref_null";
       // Still compile the argument for side effects, then drop it
