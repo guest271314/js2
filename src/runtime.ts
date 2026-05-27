@@ -5868,9 +5868,29 @@ assert._isSameValue = isSameValue;
         return (obj: any) => {
           const asyncIter =
             obj[Symbol.asyncIterator] ?? _sidecarGet(obj, Symbol.asyncIterator) ?? _sidecarGet(obj, "@@asyncIterator");
-          if (asyncIter) return asyncIter.call(obj);
+          if (asyncIter != null) {
+            if (typeof asyncIter === "function") return asyncIter.call(obj);
+            // (#1347b) `obj[Symbol.asyncIterator]` was assigned a WasmGC closure
+            // struct in compiled code — it has no JS `[[Call]]`. Dispatch via
+            // __call_fn_0 the same way the sync `__iterator` path does, instead
+            // of letting `.call` throw "is not a function".
+            if (_isWasmStruct(asyncIter)) {
+              const callFn0 = (callbackState?.getExports() as any)?.__call_fn_0;
+              if (typeof callFn0 === "function") {
+                const iter = callFn0(asyncIter);
+                if (iter != null) return iter;
+              }
+            }
+          }
           const syncIter = obj[Symbol.iterator] ?? _sidecarGet(obj, Symbol.iterator) ?? _sidecarGet(obj, "@@iterator");
           if (typeof syncIter === "function") return syncIter.call(obj);
+          if (syncIter != null && _isWasmStruct(syncIter)) {
+            const callFn0 = (callbackState?.getExports() as any)?.__call_fn_0;
+            if (typeof callFn0 === "function") {
+              const iter = callFn0(syncIter);
+              if (iter != null) return iter;
+            }
+          }
           // WasmGC struct fallback: check @@iterator struct field, then vec iteration
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
