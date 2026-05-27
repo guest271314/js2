@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen, type-coercion
 language_feature: Symbol.toPrimitive, type-coercion, object-model
 goal: spec-completeness
-sprint: 50
+sprint: 56
 ---
 # #1319 — `Cannot convert object to primitive` (234 failures)
 

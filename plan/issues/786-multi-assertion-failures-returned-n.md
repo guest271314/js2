@@ -1,14 +1,14 @@
 ---
 id: 786
 title: "- Multi-assertion failures: returned N > 2 (~1,183 tests)"
-status: ready
+status: in-review
 created: 2026-03-25
 updated: 2026-04-28
 priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: core-semantics
-sprint: Backlog
+sprint: 56
 parent: 779
 test262_fail: 2142
 ---

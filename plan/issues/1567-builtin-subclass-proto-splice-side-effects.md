@@ -5,7 +5,7 @@ status: ready
 created: 2026-05-21
 updated: 2026-05-21
 feasibility: hard
-sprint: Backlog
+sprint: 56
 owner: senior-developer
 type: fix
 source: plan/issues/sprints/53/post-wave-regression-investigation.md
