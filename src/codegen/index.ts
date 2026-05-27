@@ -9145,7 +9145,7 @@ export function hoistLetConstWithTdz(
  * Returns false if every access to the symbol is provably after the declaration
  * in straight-line code (same function, no closures, loop-local safe).
  */
-function needsTdzFlag(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
+export function needsTdzFlag(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);
   if (!symbol) return true;
   const declEnd = decl.getEnd();
