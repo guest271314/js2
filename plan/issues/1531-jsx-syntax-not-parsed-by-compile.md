@@ -1,9 +1,10 @@
 ---
 id: 1531
 title: "JSX syntax is not parsed when compiling .tsx/.jsx input"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: low

@@ -1,9 +1,10 @@
 ---
 id: 1526
 title: "spec gap: BigInt + Number mixed arithmetic should throw spec TypeError, not host error"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: low
