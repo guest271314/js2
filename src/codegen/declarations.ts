@@ -416,6 +416,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
+      // Under native strings (standalone/WASI) a `Number(string)` argument is a
+      // WasmGC string ref, not an externref the host `__unbox_number` can read.
+      // Emit the pure-Wasm §7.1.4.1 StringToNumber helper so the call site can
+      // route the string ref through it instead of the no-op host path (#1685).
+      if (ctx.nativeStrings) state.parseNeeded.add("__str_to_number");
     }
   }
   if (

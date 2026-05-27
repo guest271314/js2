@@ -6796,6 +6796,27 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         }
       }
       if (argType?.kind === "ref" || argType?.kind === "ref_null") {
+        // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
+        // StringToNumber. The generic struct ToPrimitive path below has no
+        // string case and silently yields 0 in standalone (#1685), so detect
+        // the string struct type and route to the pure-Wasm __str_to_number.
+        const refTypeIdx = (argType as { typeIdx?: number }).typeIdx;
+        if (
+          ctx.nativeStrings &&
+          refTypeIdx !== undefined &&
+          (refTypeIdx === ctx.anyStrTypeIdx || refTypeIdx === ctx.nativeStrTypeIdx)
+        ) {
+          // Emitted upfront during the parseNeeded finalize (declarations.ts)
+          // when `Number` is referenced under native strings, so no mid-body
+          // function registration (which would shift func indices) happens here.
+          const s2nIdx = ctx.funcMap.get("__str_to_number");
+          if (s2nIdx !== undefined) {
+            // __str_to_number takes an externref; convert the ref first.
+            fctx.body.push({ op: "extern.convert_any" });
+            fctx.body.push({ op: "call", funcIdx: s2nIdx });
+            return { kind: "f64" };
+          }
+        }
         // Object → number: coerce via @@toPrimitive("number") or valueOf
         coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
         return { kind: "f64" };
