@@ -150,3 +150,52 @@ JS/host boundary and the `BigInt()` constructor:
 No code landed — a type-guard-only patch cannot satisfy the ≥75% acceptance
 bar and risks regressing native `type i64` code without the brand decision.
 Baseline recorded: 28/77 pass on b290fe96d.
+
+## Slice A implemented (2026-05-27, sendev-1567)
+
+Implements the ratified i64-bigint-brand ValType (architect spec section, landed
+via PR #731). Slice A = bigint-branded boxing only; Slices B–D (BigInt(string)
+parse / RangeError, asIntN/asUintN, toString(radix)) remain open.
+
+Changes:
+- `src/ir/types.ts` — i64 ValType gains optional `bigint?: boolean` (unset =
+  native i64 number, unchanged Wasm).
+- `src/codegen/expressions.ts` — bigint literal returns `{kind:"i64",bigint:true}`.
+- `src/checker/type-mapper.ts` — `bigint` TS keyword resolves to the branded i64,
+  so `: bigint`-typed locals/params/returns carry the brand (storage round-trip).
+- `src/codegen/binary-ops.ts` — both-bigint i64 arithmetic result is brand-bigint
+  (§2.4 propagation); comparison results (i32) stay unbranded.
+- `src/codegen/expressions/calls.ts` — `BigInt(x)` result is brand-bigint.
+- `src/codegen/type-coercion.ts` — i64→externref branches on `from.bigint`
+  (`__box_bigint` vs legacy `f64.convert_i64_s`+`__box_number`); externref→i64
+  branches on `to.bigint` (`__to_bigint` §7.1.13, full precision, vs legacy
+  unbox+trunc). Unset column byte-identical to before.
+- `src/codegen/index.ts` — declares `__box_bigint (i64)->externref` and
+  `__to_bigint (externref)->i64` in `addUnionImports` + adds both to the
+  late-import index-shift skip set.
+- `src/compiler/import-manifest.ts` — maps the two names to box/unbox intents
+  with `targetType:"bigint"`.
+- `src/runtime.ts` — box `bigint` = identity (JS-BigInt-integration delivers the
+  i64 as a JS bigint); unbox `bigint` = ToBigInt (identity on bigint, parse on
+  string/boolean, TypeError on number/Symbol).
+- `tests/equivalence/helpers.ts` — supplies the two host import bodies for the
+  unit-test path.
+
+Hard invariant verified: the brand never changes which Wasm instruction is
+emitted for arithmetic / locals / params / results / type section — `valTypeKey`
+(locals) and `valTypeEquals` (IR) both ignore the flag, and `stack-balance`
+compares by `.kind` only.
+
+### Slice A test results
+- `tests/issue-1644.test.ts` (added, 5 cases): bigint literal / arithmetic /
+  `BigInt(n)` / 2^53+1-precision all box as JS bigint; native `type i64 =
+  number` still returns a JS number (guard).
+- No regression across `tests/equivalence/{bigint,bigint-ops,bigint-externref,
+  bigint-string-coercion,comparison-coercion,compound-assignment-coercion,
+  typeof-extended,number-statics}.test.ts` — 73/73 pass.
+- `tsc --noEmit` clean.
+
+NB: the root-level `tests/bigint*.test.ts` files import a non-existent
+`./helpers.js` and fail to load on `origin/main` as well — pre-existing, not a
+Slice A regression. The live copies under `tests/equivalence/` are the ones that
+run.
