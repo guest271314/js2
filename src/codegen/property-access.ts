@@ -1397,6 +1397,32 @@ export function compilePropertyAccess(
   // Check for static property access: ClassName.staticProp
   if (ts.isIdentifier(expr.expression)) {
     const objName = expr.expression.text;
+
+    // (#1639) `genFn.prototype` where `genFn` is a `function*` / `async function*`
+    // declaration must return the intrinsic `%GeneratorPrototype%` /
+    // `%AsyncGeneratorPrototype%` (= `%GeneratorFunction.prototype%.prototype`).
+    // The compiled closure backing the generator is opaque to the host, so we
+    // route the member access through a dedicated runtime import — mirroring the
+    // `Object.getPrototypeOf(genFn)` handling in calls.ts. Tests rely on the
+    // resulting chain: `Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))`
+    // === `%(Async)IteratorPrototype%`.
+    if (propName === "prototype" && ctx.generatorFunctions.has(objName)) {
+      let isAsyncGen = false;
+      const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+      const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+      if (decl && (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl))) {
+        isAsyncGen = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      }
+      const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
+      const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (helperIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: helperIdx });
+        return { kind: "externref" };
+      }
+      // Standalone mode (no host import): fall through to legacy handling.
+    }
+
     // Resolve class expressions (var C = class {}) through the expr-name map
     const resolvedClass = ctx.classExprNameMap.get(objName) ?? objName;
     if (ctx.classSet.has(resolvedClass)) {

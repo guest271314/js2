@@ -75,6 +75,12 @@ let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
 let _AsyncGeneratorPrototypeCache: any = null;
 let _AsyncGeneratorFunctionPrototypeCache: any = null;
+// (#1639) `genFn.prototype` — the per-function instance prototype. Per spec
+// §27.3.4 / §27.4.4 it is `OrdinaryObjectCreate(%(Async)GeneratorPrototype%)`,
+// one level below the shared `%(Async)GeneratorPrototype%`. Generator instances
+// inherit from this object, so `Object.getPrototypeOf(instance) === genFn.prototype`.
+let _GeneratorInstancePrototypeCache: any = null;
+let _AsyncGeneratorInstancePrototypeCache: any = null;
 let _IteratorPrototypeCache: any = null;
 let _AsyncIteratorPrototypeCache: any = null;
 
@@ -254,6 +260,18 @@ function _getGeneratorPrototype(): any {
   return proto;
 }
 
+/**
+ * (#1639) Build the per-`function*` instance prototype `genFn.prototype`
+ * (spec §27.3.4): `OrdinaryObjectCreate(%GeneratorPrototype%)`. Generator
+ * instances inherit from this object so the spec chain holds:
+ *   instance → genFn.prototype → %GeneratorPrototype% → %IteratorPrototype%.
+ */
+function _getGeneratorInstancePrototype(): any {
+  if (_GeneratorInstancePrototypeCache) return _GeneratorInstancePrototypeCache;
+  _GeneratorInstancePrototypeCache = Object.create(_getGeneratorPrototype());
+  return _GeneratorInstancePrototypeCache;
+}
+
 /** Build `%GeneratorFunction.prototype%` (= `%Generator%`, spec §27.3.3). */
 function _getGeneratorFunctionPrototype(): any {
   if (_GeneratorFunctionPrototypeCache) return _GeneratorFunctionPrototypeCache;
@@ -369,6 +387,17 @@ function _getAsyncGeneratorPrototype(): any {
   });
 
   return proto;
+}
+
+/**
+ * (#1639) Build the per-`async function*` instance prototype `genFn.prototype`
+ * (spec §27.4.4): `OrdinaryObjectCreate(%AsyncGeneratorPrototype%)`. The chain
+ * is: instance → genFn.prototype → %AsyncGeneratorPrototype% → %AsyncIteratorPrototype%.
+ */
+function _getAsyncGeneratorInstancePrototype(): any {
+  if (_AsyncGeneratorInstancePrototypeCache) return _AsyncGeneratorInstancePrototypeCache;
+  _AsyncGeneratorInstancePrototypeCache = Object.create(_getAsyncGeneratorPrototype());
+  return _AsyncGeneratorInstancePrototypeCache;
 }
 
 /** Build `%AsyncGeneratorFunction.prototype%` (= `%AsyncGenerator%`, spec §27.4.3). */
@@ -4811,10 +4840,12 @@ assert._isSameValue = isSameValue;
       // — NOT the shared prototype itself. So tests walk:
       //   getPrototypeOf(g.prototype)              → %(Async)GeneratorPrototype%
       //   getPrototypeOf(getPrototypeOf(g.prototype)) → %(Async)IteratorPrototype%
-      // The compiled closure is opaque to the host, so codegen routes the
-      // member access `g.prototype` (where `g ∈ ctx.generatorFunctions`) here.
-      if (name === "__get_generator_prototype") return () => Object.create(_getGeneratorPrototype());
-      if (name === "__get_async_generator_prototype") return () => Object.create(_getAsyncGeneratorPrototype());
+      // The per-function object is cached so repeated reads of `g.prototype`
+      // return the same identity. The compiled closure is opaque to the host,
+      // so codegen routes the member access `g.prototype`
+      // (g ∈ ctx.generatorFunctions) through this import.
+      if (name === "__get_generator_prototype") return () => _getGeneratorInstancePrototype();
+      if (name === "__get_async_generator_prototype") return () => _getAsyncGeneratorInstancePrototype();
       // __create_descriptor(value, flags) → {value, writable, enumerable, configurable}
       // flags: bit 0 = writable, bit 1 = enumerable, bit 2 = configurable
       if (name === "__create_descriptor")
@@ -6204,17 +6235,13 @@ assert._isSameValue = isSameValue;
           // %GeneratorPrototype% inherits from %IteratorPrototype% so
           // .map/.filter/.drop/.take/... (#1367) still resolve through the
           // chain.
-          // Spec §27.5 prototype chain has a per-function `g.prototype` level
-          // *between* the instance and `%GeneratorPrototype%`:
-          //   instance → g.prototype → %GeneratorPrototype% → %IteratorPrototype%
-          // Codegen does not thread the function's own `.prototype` into this
-          // helper, so re-create the missing level with a fresh ordinary object
-          // inheriting from `%GeneratorPrototype%`. This makes the two-hop
-          // `Object.getPrototypeOf(Object.getPrototypeOf(g()))` land on
-          // `%GeneratorPrototype%` (toStringTag = "Generator") as the spec
-          // requires. State lives on the instance, not the prototype, so the
-          // brand check (`_GeneratorState.get(this)`) is unaffected.
-          const proto = Object.create(_getGeneratorPrototype());
+          // (#1639) Instances inherit from the per-function instance prototype
+          // (`genFn.prototype`), which in turn inherits from %GeneratorPrototype%,
+          // so `Object.getPrototypeOf(instance) === genFn.prototype` per spec and
+          // `next`/`return`/`throw` still resolve up the chain. State lives on the
+          // instance, not the prototype, so the brand check
+          // (`_GeneratorState.get(this)`) is unaffected.
+          const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -6225,10 +6252,9 @@ assert._isSameValue = isSameValue;
           // matching comment on `__create_generator`. The instance is just a
           // plain object whose [[Prototype]] is the singleton — state lives in
           // `_AsyncGeneratorState`.
-          // Mirror __create_generator: insert the missing per-function
-          // `g.prototype` level so the two-hop chain reaches
-          // `%AsyncGeneratorPrototype%` (toStringTag = "AsyncGenerator").
-          const proto = Object.create(_getAsyncGeneratorPrototype());
+          // (#1639) See __create_generator — inherit from the instance prototype
+          // so `Object.getPrototypeOf(instance) === asyncGenFn.prototype`.
+          const proto = _getAsyncGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
