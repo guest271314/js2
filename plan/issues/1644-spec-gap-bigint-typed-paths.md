@@ -1,7 +1,7 @@
 ---
 id: 1644
 title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)"
-status: needs-spec
+status: ready
 created: 2026-05-08
 updated: 2026-05-27
 priority: medium
@@ -150,3 +150,120 @@ JS/host boundary and the `BigInt()` constructor:
 No code landed — a type-guard-only patch cannot satisfy the ≥75% acceptance
 bar and risks regressing native `type i64` code without the brand decision.
 Baseline recorded: 28/77 pass on b290fe96d.
+
+## Architect Decision — i64-bigint-brand ValType representation (RATIFIED 2026-05-27)
+
+This section answers the open representation question the developer flagged
+(option (a) vs (b) above). **Decision: option (a) — a `bigint`-branded
+ValType.** It is the only choice that keeps the `coerceType` frontier
+self-describing (it already receives `from: ValType` everywhere; it does NOT
+reliably have a TS `ts.Node`/`ctx.checker` view at every late coercion site —
+e.g. stack-balance fixups and trampoline coercions run post-AST). Threading the
+brand on the value type is therefore both sufficient and the smaller blast
+radius. The slices A–D above stand; this section is the spec they implement
+against. **Slice A is load-bearing and must merge first.**
+
+### 1. The brand
+
+In `src/ir/types.ts` change the i64 ValType variant from `{ kind: "i64" }` to:
+
+```ts
+| { kind: "i64"; bigint?: boolean }
+```
+
+**Why an optional flag on the existing variant, not a new `kind: "bigint"`:**
+the flag is compile-time-only metadata. Both brands emit the *identical* Wasm
+i64 local/param/result and the *identical* i64 arithmetic. The binary encoder,
+the type-section writer, and the structural checks in `stack-balance.ts` already
+treat `kind === "i64"` uniformly and must keep doing so — a new `kind` would
+force churning every `case "i64"` / `=== "i64"` site (30+ in `type-coercion.ts`
++ `stack-balance.ts`) only to re-unify them for encoding. Omitting the flag
+defaults to *native i64 number*, so every existing `{ kind: "i64" }` literal in
+the tree keeps its current meaning with zero edits.
+
+**Hard invariant (CI-guarded by `tests/issue-1644.test.ts`):** the `bigint` flag
+NEVER changes which Wasm instruction is emitted for arithmetic / locals / params
+/ results / the type section. It changes exactly two things:
+(a) the **boxing/unboxing** instruction at the i64↔externref frontier, and
+(b) the **mixed-operand TypeError gate** in binary-op dispatch.
+
+### 2. Producers that set `bigint: true`
+
+1. **BigInt literal** — `expressions.ts:707-711` returns
+   `{ kind: "i64", bigint: true }`.
+2. **`BigInt(x)` / `BigInt.asIntN` / `BigInt.asUintN` results** (Slices B/C) —
+   `InnerResult` is `{ kind: "i64", bigint: true }`.
+3. **`: bigint` TS annotation + `typeof x === "bigint"` narrowing** — the
+   TypeMap resolver maps the `bigint` keyword type to
+   `{ kind: "i64", bigint: true }` (today it falls through to f64/externref).
+   One site in the type resolver.
+4. **Arithmetic propagation** — an i64 op whose operands are branded bigint is
+   itself branded bigint. This rides on the `InnerResult` already returned up
+   the expression tree (local dataflow in `binary-ops.ts` / the unary path); no
+   whole-program pass.
+
+### 3. Storage round-trip (resolution (a))
+
+When a `: bigint`-annotated or bigint-initialised local/global/struct-field is
+typed, its declared `ValType` carries `bigint: true`, so reads re-emit the flag.
+This is required for `let x: bigint = 10n; return x` to box correctly. Cost:
+~1 site in the decl-typing path. (Tagging every store/load instead — rejected:
+more sites, identical effect.)
+
+### 4. Coercion-site dispatch (`src/codegen/type-coercion.ts`)
+
+Every i64 branch keys off `from.bigint`. The unset (numeric) column is
+byte-identical to today's output, which is what makes native i64 provably
+unaffected:
+
+| Site | numeric i64 (`bigint` unset) | bigint i64 (`bigint: true`) |
+|------|------------------------------|------------------------------|
+| `i64 → externref` (`:1408`) | `f64.convert_i64_s` + `__box_number` (unchanged) | `call __box_bigint` (NEW) |
+| `externref → i64` (`:1320`) | existing `__unbox_number`→f64 path | `call __to_bigint` (NEW) — §7.1.13 ToBigInt; throws TypeError on number |
+| `i64 ↔ f64`, `i64 ↔ i32` | unchanged | **forbidden** — emit the Slice-A TypeError gate (no implicit bigint↔number) |
+
+### 5. Runtime helpers (`src/runtime.ts`)
+
+Mirror `__box_number`. JS-BigInt-integration makes an i64 crossing the boundary
+*already* a JS `BigInt`, so:
+
+```js
+// (i64) -> externref
+__box_bigint: (v /* JS bigint */) => v,
+// (externref) -> i64
+__to_bigint:  (v) => (typeof v === "bigint" ? v : BigInt(v)), // §7.1.13: number→TypeError; string→parse/SyntaxError
+```
+
+Register both via the existing `addUnionImports(ctx)` path so the late
+function-index shift in `index.ts` already covers them (funcMap keys
+`__box_bigint` / `__to_bigint`).
+
+**Standalone (no-JS-host) mode** cannot use the boundary auto-conversion: an
+externref bigint must be a wasmGC `(struct (field $v i64))` brand, and the two
+helpers become struct alloc / field-read + `ref.test`. The **ValType brand is
+identical in both modes** (that's the whole point of ratifying it once). Slice A
+MAY land JS-host-first and defer the standalone struct to a follow-up
+(`#1644-standalone`); the brand does not change.
+
+### 6. Binary-op TypeError gate (Slice A)
+
+In `compileBinaryOp` (`src/codegen/binary-ops.ts`), from the operand
+`InnerResult`s compute `(leftBig, rightBig)`:
+
+- both bigint → i64 op, result branded bigint (`1n + 2n`).
+- exactly one bigint → **TypeError** (`1n + 1`) via the standalone
+  `__throw_type_error` path (the mechanism #1526 already added for mixed
+  arithmetic — make the brand the single source of truth, retiring #1526's
+  parallel ad-hoc check).
+- `**` bigint base + negative bigint exp → **RangeError**.
+- neither bigint → unchanged numeric dispatch.
+
+### 7. Regression surface & guard
+
+The ONLY regression path is accidentally branding a native i64, or a coercion
+site reading `from.bigint` without defaulting `undefined → numeric`. Mitigation:
+the flag is optional (defaults to current behavior) and Slice A ships
+`tests/issue-1644.test.ts` asserting (1) `type i64 = number` arithmetic + boxing
+is byte-identical pre/post, and (2) a bigint literal round-trips as a JS bigint
+(`BigInt("10") === 10n`). Run `playground/examples/*i64*` as an additional
+native-i64 guard. Brand is dev-claimable now (Slice A first).
