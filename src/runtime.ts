@@ -1043,6 +1043,86 @@ const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
  * iterable instead of an opaque WasmGC struct ref. Same machinery the
  * Promise combinators use (#1368).
  */
+/**
+ * (#1320/#1684) Read a field off an iterator-result value that may be an
+ * opaque WasmGC struct. For an object-literal `{ value, done }` returned from
+ * a compiled closure, the field lives in the struct slot and is reachable only
+ * via the exported `__sget_<field>` getter — plain `result[field]` on an
+ * opaque struct returns the zero-initialised default (value=0, done never
+ * truthy). For real JS objects (plain-object-literal returns built via
+ * `__new_plain_object`, or host-supplied iterators) `_safeGet` reads directly.
+ */
+function _readIterResultField(result: any, field: string, exports: Record<string, Function> | undefined): any {
+  if (result != null && typeof result === "object" && _isWasmStruct(result)) {
+    const getter = exports?.[`__sget_${field}`];
+    if (typeof getter === "function") {
+      try {
+        return getter(result);
+      } catch {
+        /* not a struct field — fall through to _safeGet */
+      }
+    }
+  }
+  return _safeGet(result, field);
+}
+
+/**
+ * (#1320/#1684) Drain a closure-backed iterable into a real JS array.
+ *
+ * When compiled code does `obj[Symbol.iterator] = function () { … }`, the
+ * value stored on the plain JS object is an opaque WasmGC closure struct, not
+ * a JS function. Native `Array.from` reads `obj[Symbol.iterator]`, sees a
+ * non-function, and throws "items[Symbol.iterator] … be a function" (#1320
+ * Layer 1). The iterator object the closure returns — and each `{ value, done }`
+ * result — may themselves be WasmGC structs whose fields only read back through
+ * `__sget_*` (#1320 Layer 2 / #1684).
+ *
+ * This drives the iterator protocol entirely through `__call_fn_0` + the
+ * struct-aware field reader, collecting yielded values into a plain array that
+ * native `Array.from` / `Iterator.from` can consume. Mirrors the closure
+ * dispatch already done by the `__iterator` host import.
+ *
+ * Returns null when the object is not a closure-backed iterable (caller keeps
+ * the original value).
+ */
+function _drainClosureIterableToArray(obj: any, exports: Record<string, Function> | undefined): any[] | null {
+  const callFn0 = exports?.__call_fn_0;
+  if (typeof callFn0 !== "function") return null;
+  const iterFn = _safeGet(obj, Symbol.iterator) ?? _safeGet(obj, "@@iterator");
+  if (iterFn == null || typeof iterFn !== "object" || !_isWasmStruct(iterFn)) return null;
+  const iterator = callFn0(iterFn);
+  if (iterator == null) return null;
+  // The iterator object may itself be an opaque WasmGC struct — read its
+  // `next` member through the struct getter, not native property access.
+  const sgetNext = exports?.__sget_next;
+  const out: any[] = [];
+  // Guard against a runaway iterator (bug in compiled next()): the test262
+  // cases that reach here yield a single value, so a generous cap is safe.
+  for (let guard = 0; guard < 1_000_000; guard++) {
+    let nextFn = _safeGet(iterator, "next");
+    if (nextFn == null && typeof sgetNext === "function" && _isWasmStruct(iterator)) {
+      try {
+        nextFn = sgetNext(iterator);
+      } catch {
+        /* not a struct field */
+      }
+    }
+    let result: any;
+    if (typeof nextFn === "function") {
+      result = nextFn.call(iterator);
+    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      result = callFn0(nextFn);
+    } else {
+      return null; // no usable next() — not a well-formed iterator
+    }
+    if (result == null) break;
+    const done = _readIterResultField(result, "done", exports);
+    if (done) break;
+    out.push(_readIterResultField(result, "value", exports));
+  }
+  return out;
+}
+
 function _materializeIterable(
   iter: any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
@@ -1068,8 +1148,16 @@ function _materializeIterable(
     }
     return result;
   }
-  // Plain JS object — pass through if it has Symbol.iterator, else as-is.
-  if (Symbol.iterator in iter) return iter;
+  // Plain JS object. If its `[Symbol.iterator]` is a Wasm closure struct
+  // (compiled `obj[Symbol.iterator] = function(){…}`), native Array.from would
+  // see a non-function and throw — drain it through __call_fn_0 instead
+  // (#1320/#1684). Otherwise pass through (real JS iterables: Maps, Sets,
+  // generators, host objects).
+  const symIter = _safeGet(iter, Symbol.iterator) ?? _safeGet(iter, "@@iterator");
+  if (symIter != null && typeof symIter === "object" && _isWasmStruct(symIter)) {
+    const drained = _drainClosureIterableToArray(iter, callbackState?.getExports());
+    if (drained != null) return drained;
+  }
   return iter;
 }
 
