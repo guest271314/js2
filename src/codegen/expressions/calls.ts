@@ -7345,12 +7345,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     const inlineInfo = ctx.inlinableFunctions.get(funcName);
     if (inlineInfo && !expr.arguments.some((a: any) => ts.isSpreadElement(a))) {
       // Inline the function body: compile arguments into temp locals, then emit body
+      const inlineOptInfo = ctx.funcOptionalParams.get(funcName);
       const argLocals: number[] = [];
       for (let i = 0; i < inlineInfo.paramCount; i++) {
         if (i < expr.arguments.length) {
           compileExpression(ctx, fctx, expr.arguments[i]!, inlineInfo.paramTypes[i]);
         } else {
-          pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          // #1658: a missing optional param must receive its default — either the
+          // inlined constant (callee prologue is skipped for constant defaults) or
+          // the sNaN sentinel that the inlined prologue checks for expression
+          // defaults. pushDefaultValue alone emits 0/ref.null and silently drops
+          // the default.
+          const opt = inlineOptInfo?.find((o) => o.index === i);
+          if (opt) {
+            pushParamSentinel(fctx, inlineInfo.paramTypes[i]!, ctx, opt);
+          } else {
+            pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          }
         }
         const tmpLocal = allocLocal(
           fctx,
