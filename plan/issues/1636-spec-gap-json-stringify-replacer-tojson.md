@@ -1,9 +1,9 @@
 ---
 id: 1636
 title: "spec gap: JSON.stringify replacer/toJSON/property-list (49 of 66 test262 fails)"
-status: ready
+status: blocked
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -83,3 +83,52 @@ are not directly JS-callable (issue #1308) — they need an externref-callable t
 - `test262/test/built-ins/JSON/stringify/replacer-function-arguments.js`
 - `test262/test/built-ins/JSON/stringify/value-tojson-object.js`
 - `test262/test/built-ins/JSON/stringify/replacer-array-normal.js`
+
+## Investigation 2026-05-27 (dev-1611) — ESCALATE, needs architect respec
+
+Measured against `origin/main` 6d5a806d via `runTest262File`:
+`built-ins/JSON/stringify` = **18 / 66 pass, 48 fail** (no `skip`).
+
+The 48 failures bucket into distinct root causes — this is NOT a single
+localized `runtime.ts` patch:
+
+| count | bucket | scope |
+|------|--------|-------|
+| 6 | Proxy targets/replacers (revoked + live) | OUT OF SCOPE — needs Proxy (deferred) |
+| 2 | cross-realm `$262.createRealm` | OUT OF SCOPE — no realm harness |
+| 6 | cycle detection → must throw `TypeError` | host `JSON.stringify` never sees the cycle (we eager-flatten) or stack-overflows |
+| 5 | `toJSON` honoured | dynamic `.toJSON =` on arrays/wrappers + closure invocation |
+| 6 | wrapper-object → primitive (`new Number`/`new String`/`new Boolean`) + space/order | `_toPrimitive` throws "Cannot convert object to primitive" |
+| 5 | BigInt: `JSON.stringify(0n)` must throw TypeError; `value-bigint-tojson` | overlaps BigInt semantics |
+| 9 | replacer array (property-list) + replacer function | Wasm-closure ↔ host-value marshaling (#1308) |
+| ~9 | misc: string escaping, function/symbol → undefined, abrupt completions | mixed |
+
+### Why the obvious fix (toJSON + cycle in the struct converter) is a no-op
+
+I prototyped a JSON-specific `_jsonToPlain` that (a) invokes a callable
+`toJSON` field via `__sget_toJSON` + `__call_fn_1`, and (b) threads a
+visited-`Set` to throw `TypeError` on cyclic WasmGC structs. **Pass count
+unchanged at 18/66, zero regressions** — reverted (a no-op should not ship).
+Reason: these test262 inputs are object literals / `new String()` /
+`new Number()` wrapper objects with *dynamically-added* `.toJSON =`, which in
+our pipeline are **host JS objects (externref)**, not WasmGC structs — so
+`_isWasmStruct(val)` is false and the struct-guarded helper never fires. The
+values reach host `JSON.stringify` directly, where the failures are really:
+1. **replacer/toJSON are Wasm closures** that cannot consume the host JS
+   values `JSON.stringify` hands them (`value + '|replacer'` runs Wasm string
+   ops on an externref). This is the #1308 "Wasm fn refs are not JS-callable"
+   gap — the `__call_fn_2` bridge passes values through untranslated.
+2. **wrapper objects** (`new Number(2)`) hit `_toPrimitive` → throws instead
+   of serialising to their primitive.
+3. **BigInt** must throw `TypeError` from stringify, not silently stringify.
+
+### Recommendation
+
+Needs an **architect spec** for the JS↔Wasm closure-value marshaling boundary
+(shared with #1308) before a dev can land this. The correct shape is a
+`SerializeJSONProperty` reimplementation in `runtime.ts` that drives the walk
+itself (so it can marshal values into/out of the replacer/toJSON closures,
+look up dynamically-added `toJSON`, ToPrimitive wrapper objects, and
+cycle-check) rather than delegating the whole tree to host `JSON.stringify`.
+Proxy + cross-realm (8 tests) stay out of scope. Realistic in-scope ceiling
+after the marshaling boundary exists: ~34 of 48 (Proxy/cross-realm excluded).
