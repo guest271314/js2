@@ -1,8 +1,9 @@
 ---
 id: 1677
 title: "Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi)"
-status: ready
+status: in-progress
 created: 2026-05-27
+updated: 2026-05-27
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -149,3 +150,61 @@ and `addImport` and choose the one that does not introduce a re-shift hazard.
 - Residual host-import leak elimination — #1664.
 - Native generators shared `$Iterator` design — #1665.
 - Pure-Wasm number→string lowering — #1335.
+
+## Resolution (2026-05-27, senior-developer) — partial, PR open
+
+**Fixed 3 of 6 Signature A probes: `class` (extends/super), `closure`
+(captured local), `generator` (for-of).** The func-index shift unification is
+implemented as `reconcileNativeStrFinalizeShift`
+(`src/codegen/expressions/late-imports.ts`), called at two points in
+`generateModule` / `generateMultiModule` finalize.
+
+Root cause confirmed by instrumentation: the native-string helpers AND their
+dependency helpers (`__box_number`, `__unbox_number`, … emitted via
+`addUnionImportsAsNativeFuncs`) are eagerly emitted during finalize while
+`numImportFuncs == base`. Finalize then adds more imports (string methods,
+parseInt, Promise statics) which bump every defined function's absolute Wasm
+index by `added`, but the baked sibling-call targets, the `funcMap` entries, and
+the export descriptors were left stale-low. `__vec_get` (emitted later) read a
+stale-low `funcMap.get("__box_number")` and called the wrong function
+(`call[k] not enough arguments on the stack`).
+
+The fix applies ONE **uniform** `+added` shift to all eagerly-emitted defined
+functions' bodies, their `funcMap` entries (gated on the name being a defined
+function so the freshly-added imports in `[base, base+added)` are not
+double-shifted), `nativeStrHelpers`, and func exports — for `funcIdx >= base`
+only. An earlier version restricted the shift to `nativeStrHelpers`-named
+functions, which left `__box_number` stale and produced the `__vec_get`
+over-/under-shift; the uniform shift is the correct generalization (it mirrors
+the JS-host path's late-import fixup at `addUnionImports`).
+
+**#618 safety verified:** `base` is set only inside `ensureNativeStringHelpers`
+(native-strings path). On the default JS-host GC path it stays -1 and the
+reconcile is a hard no-op. Confirmed: a default-mode `Math.abs` + string-concat
+snippet still validates (covered by `tests/issue-1677.test.ts`).
+
+**Tests:** `tests/issue-1677.test.ts` — 4/4 (class/closure/generator valid under
+wasi + the #618 default-GC guard). `tests/wasi.test.ts` green.
+
+### Out of scope — carve to follow-up (still failing, distinct root causes)
+
+Not func-index shift bugs; left for a follow-up:
+
+- **`str-template`** (`` `${x}` ``) — `__str_to_extern call[0] expected f64,
+  found i32`. Instrumented: at emit time `numImportFuncs==1`, `__str_flatten` is
+  at index 2 and the baked `flattenIdx==2` is *correct*; no shift occurs
+  (`added==0` at every reconcile). The mismatch is a **type/codegen** problem in
+  the `ensureNativeStringExternBridge` body, not an index shift.
+- **`array-map`** (`.map().filter().reduce()`) — `__module_init call[1]
+  expected (ref null 5), found global.get f64`. The same signature reproduces
+  with a minimal `Math.abs(-5)` + `"x"+a` snippet under `--target wasi`, so it is
+  a **string-constant-global materialized as f64** problem
+  (Signature-B-adjacent), independent of the helper func-index regime.
+
+Recommend a follow-up issue for these two.
+
+### Pre-existing (NOT this change)
+
+`tests/imported-string-constants.test.ts` has 10 failing e2e cases on main
+(`LinkError: env __box_number requires a callable`). Verified identical failure
+count with the reconcile gated off — pre-existing, unrelated to this fix.

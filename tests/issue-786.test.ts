@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.ts";
 import { buildImports } from "../src/runtime.ts";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 async function run(src: string): Promise<number> {
   const r = compile(src, { fileName: "test.ts" });
@@ -182,5 +183,84 @@ describe("Issue #786: method closure captures", () => {
       }
     `);
     expect(result).toBe(1);
+  });
+});
+
+// #786 — Array.prototype.{indexOf,lastIndexOf,includes} on an externref-element
+// vec used the wasm:js-string `equals` builtin, which coerces both operands to
+// strings. That mis-matched object identity, cross-type (e.g. boolean vs
+// number), and other non-string elements. The fix routes externref comparison
+// through __host_eq (Strict Equality, §7.2.16) for indexOf/lastIndexOf and
+// __same_value_zero (§7.2.11) for includes.
+describe("Issue #786: Array search methods use spec equality for externref elements", () => {
+  async function runExtern(src: string): Promise<number | boolean> {
+    const ex = await compileToWasm(src);
+    return ex.test() as number | boolean;
+  }
+
+  it("indexOf finds an object element by reference", async () => {
+    expect(
+      await runExtern(`export function test(): number { const o={}; const a:any[]=[o]; return a.indexOf(o); }`),
+    ).toBe(0);
+  });
+
+  it("indexOf finds an object among other objects", async () => {
+    expect(
+      await runExtern(
+        `export function test(): number { const o={}; const p={}; const a:any[]=[p,o]; return a.indexOf(o); }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("indexOf honours fromIndex for object elements", async () => {
+    expect(
+      await runExtern(
+        `export function test(): number { const o={}; const a:any[]=["x","y",o]; return a.indexOf(o,2); }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("indexOf returns -1 when fromIndex skips the match", async () => {
+    expect(
+      await runExtern(
+        `export function test(): number { const o={}; const a:any[]=[o,"x","y"]; return a.indexOf(o,1); }`,
+      ),
+    ).toBe(-1);
+  });
+
+  it('indexOf does not coerce "0" to number 0 (strict equality)', async () => {
+    expect(await runExtern(`export function test(): number { const a:any[]=["0"]; return a.indexOf(0); }`)).toBe(-1);
+  });
+
+  it("indexOf matches a string element", async () => {
+    expect(
+      await runExtern(`export function test(): number { const a:string[]=["x","y","z"]; return a.indexOf("y"); }`),
+    ).toBe(1);
+  });
+
+  it("lastIndexOf finds the last matching object", async () => {
+    expect(
+      await runExtern(
+        `export function test(): number { const o={}; const a:any[]=[o,"x",o]; return a.lastIndexOf(o); }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("includes finds an object by reference (SameValueZero)", async () => {
+    expect(
+      await runExtern(`export function test(): boolean { const o={}; const a:any[]=["x",o]; return a.includes(o); }`),
+    ).toBe(1);
+  });
+
+  it('includes does not coerce "0" to number 0', async () => {
+    expect(
+      await runExtern(`export function test(): boolean { const a:any[]=["0"]; return a.includes(0 as any); }`),
+    ).toBe(0);
+  });
+
+  it("includes finds a matching string", async () => {
+    expect(
+      await runExtern(`export function test(): boolean { const a:string[]=["a","b"]; return a.includes("b"); }`),
+    ).toBe(1);
   });
 });
