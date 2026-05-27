@@ -3,6 +3,7 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 /**
  * new/super/class expression compilation.
  */
+import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
 import { reportError } from "../context/errors.js";
@@ -1591,6 +1592,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Number(x) → create real JS Number wrapper object via __new_Number host import
         // (typeof new Number(0) === "object", not "number")
         if (args.length >= 1) {
+          // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
+          // ToNumber on its argument before boxing. Mirror the `Number(sym)`
+          // call-path guard so `new Number(Symbol())` throws too (#1564).
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+            return { kind: "externref" };
+          }
           compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
@@ -1624,7 +1634,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Boolean(x) → create real JS Boolean wrapper object via __new_Boolean host import
         // (typeof new Boolean(false) === "object", not "boolean")
         if (args.length >= 1) {
-          compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
+          // coerces the arg to f64 first, which would silently lose the Symbol.
+          // A Symbol arg should produce a truthy wrapper: box 1.0.
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "f64.const", value: 1 });
+          } else {
+            compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          }
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
         }
