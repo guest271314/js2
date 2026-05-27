@@ -8111,13 +8111,26 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         };
         const protocolId = REGEX_SYMBOL_METHODS[methodName];
         if (protocolId !== undefined) {
-          // Receiver must be RegExp (or `any` when types aren't resolved).
-          // Keep the dispatch narrow to RegExp to avoid catching unrelated
-          // `obj[Symbol.iterator]`-style calls (already handled above) or
-          // user classes that define their own @@match etc.
+          // Receiver is RegExp, or its static type is unresolvable (`any` /
+          // `unknown`) so we cannot prove it is *not* a RegExp. The latter
+          // covers `(re as any)[Symbol.split](str)`, a RegExp stored in an
+          // `any`/parameter slot, and `RegExp.prototype[Symbol.split]`
+          // accessed off a base that loses its type (#1331). In all these
+          // cases the host helper `__regex_symbol_call` does a fully dynamic
+          // `recv[Symbol.X](args)` lookup, so routing here is correct for any
+          // object that implements the well-known symbol method — not just
+          // RegExp. We must NOT catch receivers that resolve to a user-defined
+          // wasm class (handled by the ClassName_method dispatch below) or the
+          // `@@iterator`/`@@asyncIterator` cases (already handled above).
           const recvSym = receiverType.getSymbol()?.name;
           const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
-          if (isRegExpRecv) {
+          let resolvedClassName = receiverType.getSymbol()?.name;
+          if (resolvedClassName && !ctx.classSet.has(resolvedClassName)) {
+            resolvedClassName = ctx.classExprNameMap.get(resolvedClassName) ?? resolvedClassName;
+          }
+          const recvIsUserClass = !!resolvedClassName && ctx.classSet.has(resolvedClassName);
+          const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+          if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
             // Push receiver as externref (already a RegExp host object)
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {

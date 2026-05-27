@@ -4759,7 +4759,10 @@ assert._isSameValue = isSameValue;
             // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
             // would coerce null to 0 and return [] — wrong.
             if (arg1 == null) return fn.call(regex, wrappedArg0);
-            return fn.call(regex, wrappedArg0, arg1);
+            // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
+            // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
+            // host proxy exposes the struct's valueOf/toString closure (#1331).
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
           }
           // Generic fallback
           if (arg1 == null) return fn.call(regex, wrappedArg0);
