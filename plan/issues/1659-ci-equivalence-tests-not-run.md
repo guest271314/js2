@@ -1,10 +1,11 @@
 ---
 id: 1659
 title: "CI does not run tests/equivalence/ (OOM) — genuine equivalence regressions land silently"
-status: ready
+status: done
 sprint: Backlog
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -64,3 +65,36 @@ return the struct-backed value so the harness matches real-runtime behavior.
 - This is the gating dependency for **#1658**: #1658 is a real bug that is only
   currently catchable by running `tests/equivalence/` locally. Landing #1659
   makes that whole regression class CI-visible.
+
+## Resolution (2026-05-27)
+
+**Root cause of the OOM**: not the workload — it was vitest's default
+`fileParallelism` spawning many forks at once. Running single-fork
+(`--pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism`)
+a 1/8 shard peaks ~1.06 GB RAM in ~62 s. The full suite across 8 sharded
+runners is well within a 16 GB ubuntu runner.
+
+**Mechanism chosen** (per acceptance criteria "gated or at least reported"):
+- `.github/workflows/ci.yml` gains two jobs:
+  - `equivalence-shard` — 8-way matrix, each runs `scripts/equivalence-gate.mjs`
+    single-fork on its `--shard i/8`, uploads a partial failure list artifact.
+  - `equivalence-gate` — downloads all partials, merges them, and gates against
+    `scripts/equivalence-baseline.json` (committed known-failures list).
+- The gate fails CI **only on NEW failures** (not present in the baseline) — a
+  genuine regression. The existing failure backlog (tagged-template literals,
+  for-await-of, generator-expressions, Object.isFrozen stubs, …) does not block
+  every PR. Tests that the baseline lists but now PASS are reported as "newly
+  fixed" so the baseline can be ratcheted down with
+  `node scripts/equivalence-gate.mjs --update`. This mirrors the test262
+  baseline-gate philosophy.
+
+**Harness-fidelity sub-item (fixed)**: the naive `__extern_get` stub in
+`tests/equivalence/helpers.ts` returned `undefined` for opaque WasmGC structs
+because `obj[key]` cannot read struct fields by JS key, and direct
+`buildImports` callers never call the runtime's `setExports` (so the
+`__sget_<field>` struct-getter fallback was unavailable). Added
+`instantiateWithRuntime(result)` to helpers — it overlays the runtime's real
+host imports AND registers exports via `setExports`. `destructuring-initializer.test.ts`
+now uses it; the previously-failing "nested destructuring with defaults" case
+(expected 42, got 1) passes. The codegen was always correct — this was purely
+a harness gap.

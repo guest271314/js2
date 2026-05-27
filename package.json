@@ -65,6 +65,7 @@
     "test": "node node_modules/vitest/dist/cli.js run",
     "test:watch": "node node_modules/vitest/dist/cli.js",
     "test:ir:alloc": "IR_VERIFY_ALLOC=1 node node_modules/vitest/dist/cli.js run tests/ir/alloc-registry.test.ts tests/ir/alloc-provenance.test.ts",
+    "test:equivalence:gate": "node scripts/equivalence-gate.mjs",
     "test:262": "bash scripts/run-test262-vitest.sh",
     "test:262:validate-baseline": "npx tsx scripts/validate-test262-baseline.ts",
     "baseline:fetch": "node scripts/fetch-baseline-jsonl.mjs",
