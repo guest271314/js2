@@ -151,17 +151,42 @@ FAIL). Covered by `tests/issue-1320.test.ts` (2 cases: no spurious TypeError;
    prototype) and `Array.from(5)` (primitive → ToObject). Different facets:
    prototype-level @@iterator + primitive coercion + `function*` lowering.
 
-**Separate lurking codegen bug (carve candidate):** an iterator-result object
-literal `{ value: 42, done }` returned from a *nested closure* compiles to a
-Wasm struct whose `__sget_value` reads **0** (not 42) and whose `done` field
-never flips truthy — so a *non-empty* closure-backed iterator won't round-trip
-its values even after the "not a function" error is cleared. The 4 listed tests
-use empty/trivial iterators so they dodge this. This overlaps the iterator
-bridge family (#1620 / #1633) and the live-mirror struct-field readback (#983d).
+**Separate lurking codegen bug (carved to #1684):** an iterator-result object
+literal returned from a *nested closure* does not round-trip across the
+Wasm→host boundary. The 4 listed tests use empty/trivial iterators so they
+dodge this. This overlaps the iterator bridge family (#1620 / #1633) and the
+live-mirror struct-field readback (#983d).
 
-**Recommendation:** land the `__array_from` improvement (regression-free,
-banks 1 test + the focused unit tests), and fold the remaining `.call` /
-`Iterator.from` / primitive-coercion paths + the result-struct field-readback
-bug into the iterator-bridge family (#1620/#1633) rather than patching each
-host-import path piecemeal here. Status set to `in-review` for the partial
-PR; residual tracked in the iterator-bridge family.
+## `.call` / `Iterator.from` blocker confirmed (2026-05-27, dev-1605)
+
+The `.call`-path drain is correctly wired (`__extern_method_call`,
+`wrappedArgs[1]`), and `_drainWasmClosureIterable` is reached for
+`Array.from.call(C, items)`. Traced through the real `runTest262File`
+harness with `iter-cstm-ctor.js`:
+
+- `items` arrives as a **plain JS object** (`var items = {}`, not a wasm
+  struct), passed through unwrapped — correct.
+- its own `[Symbol.iterator]` IS a wasm closure struct — drain guard passes.
+- `__call_fn_0` is present; the drain invokes `callFn0(iterFn)` to run the
+  `@@iterator()` closure.
+- **`callFn0(iterFn)` returns `null`** instead of the iterator object
+  `{ next: … }`. The closure's object-literal return value does not
+  materialize to the host. The drain then bails at the `iteratorObj == null`
+  guard and returns `null`, so the native `Array.from.call(C, items)` runs
+  with the un-drained object and throws the "items[Symbol.iterator] … must be
+  a function" error.
+
+So the residual `.call` / `Iterator.from` failures are **NOT a host-bridge
+gap** — the bridge is wired and reached. They are blocked on the
+**closure object-literal return readback** carved to **#1684** (a codegen-layer
+bug, not a runtime-bridge one). `iter-set-length.js` PASSES because its
+iterator round-trips via the already-working `__array_from` path with a
+structure that does materialize.
+
+**Recommendation:** land the `__array_from` + `.call`/`.apply` drain wiring
+(regression-free, banks 1 test + focused unit tests). The remaining 3 tests
+(`iter-cstm-ctor`, `Iterator/from/iterable-primitives`,
+`flatMap/iterable-primitives-are-not-flattened`) are gated on **#1684**
+(closure-return struct readback) — they cannot go green at the host-bridge
+layer. Status `in-review` for the partial PR; residual tracked in #1684 +
+the iterator-bridge family (#1620/#1633).
