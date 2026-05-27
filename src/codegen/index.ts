@@ -6002,6 +6002,7 @@ export const FUNCTIONAL_ARRAY_METHODS = new Set([
   "filter",
   "map",
   "reduce",
+  "reduceRight",
   "forEach",
   "find",
   "findIndex",
@@ -6018,7 +6019,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name.text;
       if (FUNCTIONAL_ARRAY_METHODS.has(method)) {
-        if (method === "reduce") {
+        if (method === "reduce" || method === "reduceRight") {
           need2 = true;
         } else {
           need1 = true;
@@ -6028,7 +6029,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
       if (method === "call" && ts.isPropertyAccessExpression(node.expression.expression)) {
         const innerMethod = node.expression.expression.name.text;
         if (FUNCTIONAL_ARRAY_METHODS.has(innerMethod)) {
-          if (innerMethod === "reduce") {
+          if (innerMethod === "reduce" || innerMethod === "reduceRight") {
             need2 = true;
           } else {
             need1 = true;
