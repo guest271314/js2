@@ -794,8 +794,12 @@ export function compileOptionalPropertyAccess(
   // else branch (non-null path): get the property from the temp
   fctx.body = [];
   fctx.body.push({ op: "local.get", index: tmp });
-  // Compile the property access part without the receiver
-  const tsObjType = ctx.checker.getTypeAtLocation(expr.expression);
+  // Compile the property access part without the receiver. After the
+  // `ref.is_null` short-circuit the receiver is known non-null, so resolve
+  // the property against the non-nullable part of the union — the bare
+  // `C | null` union symbol is anonymous and would fail struct resolution,
+  // leaving the receiver ref stranded on the stack (#1603).
+  const tsObjType = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(expr.expression));
   const propName = expr.name.text;
   let elseResultType: ValType | null = null;
   if (isExternalDeclaredClass(tsObjType, ctx.checker)) {
@@ -867,8 +871,15 @@ export function compileOptionalPropertyAccess(
     }
   }
 
+  if (elseResultType === null) {
+    // Property could not be resolved to a concrete struct field/getter. The
+    // receiver ref is still on the stack from `local.get tmp`; coerce it to
+    // the block result type so the `if` typechecks rather than leaving a
+    // mismatched ref as the else-branch fallthrough (#1603).
+    elseResultType = objType;
+  }
   // Coerce else branch result to match the block result type
-  if (elseResultType && !valTypesMatch(elseResultType, resultType)) {
+  if (!valTypesMatch(elseResultType, resultType)) {
     coerceType(ctx, fctx, elseResultType, resultType);
   }
   const elseInstrs = fctx.body;
@@ -1288,12 +1299,48 @@ export function compilePropertyAccess(
     if (enumStrVal !== undefined) {
       return compileStringLiteral(ctx, fctx, enumStrVal);
     }
+
+    // (#1639) `g.prototype` where `g` is a generator-function declaration must
+    // return `%GeneratorPrototype%` (the object whose `next`/`return`/`throw`
+    // carry the brand check). The compiled closure backing a `function*` is
+    // opaque to the host, so resolve the member access statically here by
+    // routing to a dedicated runtime import. Tests reach
+    // `%AsyncIteratorPrototype%` via `getPrototypeOf(getPrototypeOf(g.prototype))`.
+    if (propName === "prototype" && ctx.generatorFunctions.has(objName)) {
+      const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+      const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+      const isAsyncGen =
+        !!decl &&
+        (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) &&
+        decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
+      const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (helperIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: helperIdx });
+        return { kind: "externref" };
+      }
+      // Standalone mode (no host): fall through to legacy path.
+    }
   }
 
   // Check for static property access via 'this' in a static method context.
   // In a static method, 'this' refers to the class constructor (no local 'this' param).
   // e.g., `this.#m` in `static fieldAccess()` where `#m` is a static private field.
-  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.localMap.get("this") === undefined) {
+  //
+  // (#1681) Also fire inside a closure spawned from a static context: an arrow
+  // function or inner function declared in a static method captures `this` as a
+  // local, so `localMap.get("this")` is defined — but `this` still denotes the
+  // class constructor, not a per-instance struct. Without the static-context
+  // escape hatch the generic struct path below tries to cast the captured
+  // externref `this` to the class struct and emits an invalid
+  // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
+  // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
+  // it identifies exactly this case.
+  if (
+    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
     // Resolve the enclosing class name from context.
     // Try enclosingClassName first (set for closures), then scan the function name
     // for a class name prefix by checking each underscore-delimited prefix against classSet.

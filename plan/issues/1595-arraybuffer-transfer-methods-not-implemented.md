@@ -61,55 +61,47 @@ test/built-ins/DataView/prototype/setInt16/immutable-buffer.js
 - Our runtime has `ArrayBuffer` host interop via `src/runtime.ts`; the new methods likely need to be added there and exported
 - `transferToImmutable` is the only one that creates a new semantics concept (immutable buffers). May need a flag in the host wrapper.
 
-## Investigation (2026-05-27, dev-1603) — ESCALATED, needs architect spec
+## Investigation (2026-05-27, dev-1603) — BLOCKED on #1645
 
 The dispatch note in the issue ("delegate to host transfer like resize()") does
 not hold against current main. There is **no host-backed ArrayBuffer and no
-`resize` implementation** to mimic:
+landed `resize` / detach implementation** to mimic:
 
 - `new ArrayBuffer(n)` compiles to a bare WasmGC vec struct `{ length: i32,
   data: array(i32) }` (`src/codegen/expressions/new-super.ts:2445-2495`). No
   detach flag, no resizable flag, no `maxByteLength` field.
 - A repo-wide grep for `maxByteLength`, `resizable`, `detached`, `isDetached`,
-  `.resize` in `src/` returns **zero** implementation hits — only an unrelated
-  comment. So `resize`, `resizable`, `maxByteLength`, and `detached` are all
-  unimplemented, not just `transfer`.
+  `.resize` in `src/` returns no landed implementation — only construction-site
+  references. So `resize`, `resizable`, `maxByteLength`, and detach state are
+  not yet available on main.
 
-The transfer test262 cases require detach semantics that the current
-representation cannot express. e.g.
-`transfer/from-fixed-to-same.js` asserts after `source.transfer()`:
-`source.byteLength === 0`, `source.slice()` **throws TypeError**,
-`dest.resizable === false`, `dest.maxByteLength === 4`. Detaching must make
-**every** subsequent op on the source (byteLength, slice, TypedArray view
-reads, DataView reads) observe the detached state and throw.
+The transfer test262 cases require detach semantics the current representation
+cannot express. e.g. `transfer/from-fixed-to-same.js` asserts after
+`source.transfer()`: `source.byteLength === 0`, `source.slice()` **throws
+TypeError**, `dest.resizable === false`, `dest.maxByteLength === 4`. Detaching
+must make **every** subsequent op on the source (byteLength, slice, TypedArray
+view reads, DataView reads) observe the detached state and throw.
 
-### Why this is an architect-spec escalation (not a localized dev fix)
+### This is blocked on #1645 (not an independent fix)
 
-Implementing transfer correctly requires a **representation contract change** to
-the shared ArrayBuffer struct (add a `detached`/state field, and for resizable
-interop a `maxByteLength` field), which is read across:
+**#1645** ("ArrayBuffer resizable + TypedArray detached-buffer guards") is
+`status: in-review` and owns exactly the prerequisite representation work:
+the detach-state field on the ArrayBuffer vec struct plus the detached-buffer
+guards threaded across TypedArray/DataView reads. `transfer` is the operation
+that *produces* a detached buffer, so it must build on #1645's detach
+representation rather than inventing a parallel one.
 
-- `src/codegen/expressions/new-super.ts` — ArrayBuffer/DataView/TypedArray construction
-- `src/codegen/property-access.ts` — `.byteLength` / vec-struct field access (the
-  `isVecStructAccess` check at ~line 3026 keys off exactly `{length,data[,raw]}`;
-  adding fields changes this contract)
-- `src/codegen/array-methods.ts` — `.slice`, `.subarray`, TypedArray ops
-- `src/codegen/dataview-native.ts` — DataView get/set must check detached
-
-Every reader of the vec struct would need a detached-guard, and the
-`isVecStructAccess` shape predicate would have to be widened without breaking
-plain Array/TypedArray vec structs. This is a cross-cutting design decision
-about how detach state is represented and threaded — exactly what an architect
-spec should settle before a dev implements.
+`transfer` / `transferToFixedLength` reduce to: construct a new buffer, copy
+`min(newLen, oldLen)` bytes, then detach the source via #1645's detach
+primitive. `transferToImmutable` additionally sets an immutable flag that write
+ops must honor.
 
 ### Recommended sequencing
 
-1. Architect spec: ArrayBuffer detach-state representation + resizable/maxByteLength
-   model (prereq, likely overlaps #1351 resizable-ArrayBuffer).
-2. Dev: implement `detached` + `resize`/`resizable`/`maxByteLength` on the new
-   representation.
-3. Dev: implement `transfer` / `transferToFixedLength` (copy + detach source).
-4. Dev: `transferToImmutable` (immutable flag; write ops throw).
+1. Land #1645 (resizable + detach-state representation + detached guards).
+2. Dev: implement `transfer` / `transferToFixedLength` (copy + detach source via
+   the #1645 detach primitive; result carries `resizable=false`).
+3. Dev: `transferToImmutable` (immutable flag; write ops throw TypeError).
 
-Marking `status: blocked` pending architect spec. No code changed; worktree
+Marking `status: blocked` (depends on #1645). No source changed; worktree
 `issue-1595-arraybuffer-transfer` left in place (only this doc edit committed).

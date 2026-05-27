@@ -103,7 +103,7 @@ import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
-import { ensureNativeStringExternBridge } from "../native-strings.js";
+import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
@@ -158,6 +158,26 @@ const BUILTIN_CLASS_NAMES = new Set([
   "BigInt64Array",
   "BigUint64Array",
 ]);
+
+/**
+ * Coerce an already-pushed Number.prototype method argument (toFixed /
+ * toPrecision / toExponential digits) to f64. These runtime helpers take an
+ * f64 argument, but the source argument may be i32 (boolean) or externref/ref
+ * (e.g. a Symbol). Per §21.1.3.x the argument runs through ToInteger, which
+ * begins with ToNumber — and ToNumber(Symbol) throws TypeError (§7.1.4).
+ * Routing externref/ref through coerceType funnels Symbols into the throwing
+ * ToNumber path (#1564) and keeps the value stack f64-typed for the
+ * subsequent local.tee/local.set into an f64 local.
+ */
+function coerceNumberMethodArgToF64(ctx: CodegenContext, fctx: FunctionContext, argType: ValType | null): void {
+  if (!argType) return;
+  if (argType.kind === "f64") return;
+  if (argType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return;
+  }
+  coerceType(ctx, fctx, argType, { kind: "f64" });
+}
 
 /**
  * Look up closure info for a variable by checking if its local type
@@ -578,7 +598,7 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
  * inherit a stale extras_argv and produce a wrong arguments.length.
  * (#1511)
  */
-function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
+export function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
   const { globalIdx: extrasGlobalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx } as Instr);
@@ -600,7 +620,7 @@ function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
  * `emitResetArgcExtras` after the call to prevent stale-extras leaking
  * into a subsequent callee that DOES read `arguments`. (#1511)
  */
-function emitClosureCallArgcExtras(
+export function emitClosureCallArgcExtras(
   ctx: CodegenContext,
   fctx: FunctionContext,
   args: readonly ts.Expression[],
@@ -1227,6 +1247,31 @@ function matchProcessStdStreamWrite(
   // Don't hijack a user-shadowed `process` local/capture.
   if (fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false)) return null;
   return { useStderr: streamName === "stderr" };
+}
+
+/**
+ * Statically flatten an array literal's elements into a positional argument
+ * list, expanding spreads of nested array literals (`[...[a, b]]` → `a, b`).
+ * Returns undefined when the literal contains an element we cannot expand at
+ * compile time (a spread of a non-literal, or an elided hole). Used by the
+ * `fn.apply(thisArg, [...])` rewrite (#1596).
+ */
+function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expression[] | undefined {
+  const out: ts.Expression[] = [];
+  for (const el of arr.elements) {
+    if (ts.isOmittedExpression(el)) return undefined;
+    if (ts.isSpreadElement(el)) {
+      let inner: ts.Expression = el.expression;
+      while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+      if (!ts.isArrayLiteralExpression(inner)) return undefined;
+      const nested = flattenStaticArrayElements(inner);
+      if (nested === undefined) return undefined;
+      out.push(...nested);
+    } else {
+      out.push(el);
+    }
+  }
+  return out;
 }
 
 /**
@@ -1955,6 +2000,46 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return { kind: "externref" };
   }
 
+  // (#1634) SuppressedError(error, suppressed, message, options?) — called
+  // WITHOUT `new`. Per ES §20.5.10.1, called as a function it constructs
+  // normally. Mirror the new-super.ts codegen so without-new and with-new
+  // resolve together. Unwrap parenthesized/cast wrappers like the AggregateError
+  // dispatch above.
+  let _suppCallee: ts.Expression = expr.expression;
+  while (
+    ts.isParenthesizedExpression(_suppCallee) ||
+    ts.isAsExpression(_suppCallee) ||
+    ts.isTypeAssertionExpression(_suppCallee) ||
+    ts.isSatisfiesExpression(_suppCallee) ||
+    ts.isNonNullExpression(_suppCallee)
+  ) {
+    _suppCallee = (_suppCallee as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(_suppCallee) && _suppCallee.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
@@ -2006,6 +2091,60 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (propAccess.name.text === "call" || propAccess.name.text === "apply") {
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
+
+      // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
+      // A compiled function is a WasmGC funcref/struct, not a JS Function, so a
+      // host-side `.apply`/`.call` lookup fails ("apply is not a function").
+      // Rewrite statically to a direct invocation of the function expression,
+      // dropping thisArg (standalone functions ignore `this`). This reuses the
+      // IIFE-inlining path, which also binds `arguments` correctly (#1596).
+      {
+        let fnExpr: ts.Expression = innerExpr;
+        while (ts.isParenthesizedExpression(fnExpr)) fnExpr = fnExpr.expression;
+        const isFnLiteral =
+          (ts.isFunctionExpression(fnExpr) && fnExpr.asteriskToken === undefined) || ts.isArrowFunction(fnExpr);
+        if (isFnLiteral) {
+          let directArgs: readonly ts.Expression[] | undefined;
+          if (isCall) {
+            // fn.call(thisArg, a, b, ...) → fn(a, b, ...)
+            directArgs = expr.arguments.slice(1);
+          } else if (expr.arguments.length < 2) {
+            // fn.apply(thisArg) / fn.apply() → fn()
+            directArgs = [];
+          } else {
+            // fn.apply(thisArg, [a, b, ...]) → fn(a, b, ...). Statically flatten
+            // the args-array literal into positional call arguments so the
+            // IIFE-inlining path sees a fixed argument count (it binds
+            // `arguments` from the literal arg list and does not expand spreads
+            // itself). A spread of a nested array literal (`[...[3,4,5]]`, the
+            // common test262 shape) is flattened recursively. Anything we
+            // cannot statically flatten (dynamic spread source, elided holes)
+            // is left to the generic path.
+            const argsExpr = expr.arguments[1]!;
+            if (ts.isArrayLiteralExpression(argsExpr)) {
+              const flattened = flattenStaticArrayElements(argsExpr);
+              if (flattened !== undefined) directArgs = flattened;
+            }
+          }
+          if (directArgs !== undefined) {
+            // Evaluate the receiver-position thisArg for side effects (spec:
+            // arguments are evaluated even though standalone functions ignore
+            // `this`). For .call/.apply the thisArg is expr.arguments[0].
+            if (expr.arguments.length > 0) {
+              const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
+              if (thisType !== null) fctx.body.push({ op: "drop" });
+            }
+            const directCall = ts.factory.createCallExpression(
+              fnExpr as ts.LeftHandSideExpression,
+              undefined,
+              directArgs,
+            );
+            ts.setTextRange(directCall, expr);
+            (directCall as any).parent = expr.parent;
+            return compileCallExpression(ctx, fctx, directCall as ts.CallExpression);
+          }
+        }
+      }
 
       // Case 1: identifier.call(thisArg, args...) — standalone function
       if (ts.isIdentifier(innerExpr)) {
@@ -2732,6 +2871,28 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // Check the TypeScript type of the argument at compile time
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
+      // externref args carry host JS values whose array-ness can't be decided
+      // statically (e.g. a RegExp match result). Defer to the host predicate
+      // (#1328) rather than emitting a wrong compile-time `false`.
+      if (argWasmType.kind === "externref") {
+        const argSideType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argSideType && argSideType.kind !== "externref") {
+          // Non-externref value reaching here is never a host array.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        const isArrIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
+        if (isArrIdx === undefined) {
+          // Host predicate unavailable (e.g. standalone) — drop and fall back.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: isArrIdx });
+        return { kind: "i32" };
+      }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
       const isArr = argWasmType.kind === "ref" || argWasmType.kind === "ref_null";
       // Still compile the argument for side effects, then drop it
@@ -5631,12 +5792,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         {
           const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -5672,7 +5832,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
       // Compile the digits argument (default 0)
       if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToInteger(fractionDigits) begins with ToNumber (§21.1.3.3 step 4).
+        // A non-f64 argument (externref/ref, e.g. a Symbol) must funnel through
+        // ToNumber, which throws TypeError on Symbol; coerce to f64 here so the
+        // subsequent f64 local.tee is type-correct and Symbols throw (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         // RangeError: fractionDigits must be 0-100
         const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -5687,12 +5851,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         {
           const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -5721,7 +5884,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // throw RangeError.
         const recvLocalP = allocLocal(fctx, `__toPrecision_recv_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: recvLocalP });
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToNumber(precision) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const precLocal = allocLocal(fctx, `__toPrecision_prec_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: precLocal });
 
@@ -5749,7 +5913,6 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "local.get", index: isFiniteLocal });
         const rangeErrMsg = "RangeError: toPrecision() argument must be between 1 and 100";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         const rangeCheckBody: Instr[] = [];
         // Build: if (p < 1 || p > 100 || p != p) throw RangeError
@@ -5767,7 +5930,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         rangeCheckBody.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
         fctx.body.push({
@@ -5804,7 +5967,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // `(NaN).toExponential(101)` which spec requires to return "NaN".
         const recvLocalE = allocLocal(fctx, `__toExponential_recv_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: recvLocalE });
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToNumber(fractionDigits) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const digitsLocal = allocLocal(fctx, `__toExponential_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: digitsLocal });
 
@@ -5823,7 +5987,6 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // Range check gate: only when v is finite.
         const rangeErrMsg = "RangeError: toExponential() argument must be between 0 and 100";
         addStringConstantGlobal(ctx, rangeErrMsg);
-        const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
         const tagIdx = ensureExnTag(ctx);
         const rangeCheckBody: Instr[] = [];
         rangeCheckBody.push({ op: "local.get", index: digitsLocal });
@@ -5836,7 +5999,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         rangeCheckBody.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
         fctx.body.push({ op: "local.get", index: isFiniteLocal });
@@ -7287,12 +7450,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     const inlineInfo = ctx.inlinableFunctions.get(funcName);
     if (inlineInfo && !expr.arguments.some((a: any) => ts.isSpreadElement(a))) {
       // Inline the function body: compile arguments into temp locals, then emit body
+      const inlineOptInfo = ctx.funcOptionalParams.get(funcName);
       const argLocals: number[] = [];
       for (let i = 0; i < inlineInfo.paramCount; i++) {
         if (i < expr.arguments.length) {
           compileExpression(ctx, fctx, expr.arguments[i]!, inlineInfo.paramTypes[i]);
         } else {
-          pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          // #1658: a missing optional param must receive its default — either the
+          // inlined constant (callee prologue is skipped for constant defaults) or
+          // the sNaN sentinel that the inlined prologue checks for expression
+          // defaults. pushDefaultValue alone emits 0/ref.null and silently drops
+          // the default.
+          const opt = inlineOptInfo?.find((o) => o.index === i);
+          if (opt) {
+            pushParamSentinel(fctx, inlineInfo.paramTypes[i]!, ctx, opt);
+          } else {
+            pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          }
         }
         const tmpLocal = allocLocal(
           fctx,
@@ -8111,13 +8285,26 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         };
         const protocolId = REGEX_SYMBOL_METHODS[methodName];
         if (protocolId !== undefined) {
-          // Receiver must be RegExp (or `any` when types aren't resolved).
-          // Keep the dispatch narrow to RegExp to avoid catching unrelated
-          // `obj[Symbol.iterator]`-style calls (already handled above) or
-          // user classes that define their own @@match etc.
+          // Receiver is RegExp, or its static type is unresolvable (`any` /
+          // `unknown`) so we cannot prove it is *not* a RegExp. The latter
+          // covers `(re as any)[Symbol.split](str)`, a RegExp stored in an
+          // `any`/parameter slot, and `RegExp.prototype[Symbol.split]`
+          // accessed off a base that loses its type (#1331). In all these
+          // cases the host helper `__regex_symbol_call` does a fully dynamic
+          // `recv[Symbol.X](args)` lookup, so routing here is correct for any
+          // object that implements the well-known symbol method — not just
+          // RegExp. We must NOT catch receivers that resolve to a user-defined
+          // wasm class (handled by the ClassName_method dispatch below) or the
+          // `@@iterator`/`@@asyncIterator` cases (already handled above).
           const recvSym = receiverType.getSymbol()?.name;
           const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
-          if (isRegExpRecv) {
+          let resolvedClassName = receiverType.getSymbol()?.name;
+          if (resolvedClassName && !ctx.classSet.has(resolvedClassName)) {
+            resolvedClassName = ctx.classExprNameMap.get(resolvedClassName) ?? resolvedClassName;
+          }
+          const recvIsUserClass = !!resolvedClassName && ctx.classSet.has(resolvedClassName);
+          const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+          if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
             // Push receiver as externref (already a RegExp host object)
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {
@@ -8471,7 +8658,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         if (methodName === "toFixed" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // RangeError: fractionDigits must be 0-100
           const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -8498,7 +8686,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.const", value: 0 });
         }
         if (methodName === "toPrecision" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // (#49) See `number.toPrecision` site above — the precision
           // range check was moved into the runtime helper because per
           // spec §21.1.3.5 step 4, non-finite receivers must return
@@ -8512,7 +8701,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           }
         }
         if (methodName === "toExponential" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // (#49) See `number.toExponential` site above — the
           // fractionDigits range check was moved into the runtime
           // helper because per spec §21.1.3.3 step 3, non-finite

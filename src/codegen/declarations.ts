@@ -49,6 +49,7 @@ import {
 } from "./index.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
+import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
 import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import {
@@ -851,17 +852,34 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
   }
-  if (state.primitiveNeeded.has("number_toFixed")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toFixed", { kind: "func", typeIdx: t });
-  }
-  if (state.primitiveNeeded.has("number_toPrecision")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toPrecision", { kind: "func", typeIdx: t });
-  }
-  if (state.primitiveNeeded.has("number_toExponential")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toExponential", { kind: "func", typeIdx: t });
+  // #1321 / #1335 Phase 2: in standalone / WASI mode there is no JS host to
+  // satisfy the `number_toFixed` / `number_toPrecision` / `number_toExponential`
+  // imports. Emit WasmGC-native implementations (registered under the same
+  // funcMap names) instead. Emit order matters: number_toPrecision delegates to
+  // the toFixed/toExponential helpers, so emitNativeNumberFormat emits those
+  // first. The defined funcs participate in the late-import index-shift fixup
+  // like emitNativeParseNumber's.
+  if (ctx.wasi || ctx.standalone) {
+    const fmtNative = new Set<string>();
+    for (const n of ["number_toFixed", "number_toExponential", "number_toPrecision"]) {
+      if (state.primitiveNeeded.has(n) && !ctx.funcMap.has(n)) fmtNative.add(n);
+    }
+    if (fmtNative.size > 0) {
+      emitNativeNumberFormat(ctx, fmtNative);
+    }
+  } else {
+    if (state.primitiveNeeded.has("number_toFixed")) {
+      const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "number_toFixed", { kind: "func", typeIdx: t });
+    }
+    if (state.primitiveNeeded.has("number_toPrecision")) {
+      const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "number_toPrecision", { kind: "func", typeIdx: t });
+    }
+    if (state.primitiveNeeded.has("number_toExponential")) {
+      const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "number_toExponential", { kind: "func", typeIdx: t });
+    }
   }
   if (state.primitiveNeeded.has("string_compare") && !ctx.nativeStrings) {
     // In native strings mode, __str_compare Wasm helper handles this — no host import needed
@@ -3324,7 +3342,7 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // `compileExpression(ThisKeyword)`. We toggle these per-entry rather
     // than spawning a fresh fctx because the body must accumulate into
     // a single `__module_init` and globals/locals are shared.
-    for (const { globalIdx, initializer, className } of ctx.staticInitExprs) {
+    for (const { globalIdx, initializer, staticBlock, className } of ctx.staticInitExprs) {
       const savedEnclosing = initFctx.enclosingClassName;
       const savedIsStatic = initFctx.isStaticContext;
       if (className !== undefined) {
@@ -3332,9 +3350,16 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         initFctx.isStaticContext = true;
       }
       try {
-        const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
-        compileExpression(ctx, initFctx, initializer, globalDef?.type);
-        initFctx.body.push({ op: "global.set", index: globalIdx });
+        if (staticBlock) {
+          // `static { ... }` block — execute its statements in source order.
+          for (const s of staticBlock.body.statements) {
+            compileStatement(ctx, initFctx, s);
+          }
+        } else if (initializer && globalIdx !== undefined) {
+          const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+          compileExpression(ctx, initFctx, initializer, globalDef?.type);
+          initFctx.body.push({ op: "global.set", index: globalIdx });
+        }
       } finally {
         initFctx.enclosingClassName = savedEnclosing;
         initFctx.isStaticContext = savedIsStatic;

@@ -1849,18 +1849,37 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // `ReferenceError: __expected_input is not defined`. Extended to handle both
   // quote styles. The `("(?:...)"|'(?:...)')` alternation captures the entire
   // quoted literal so the replacement preserves whichever style the source used.
-  body = body.replace(/__expected\.index\s*=\s*(\d+)\s*;/g, "var __expected_index: number = $1;");
+  let declaredExpectedIndex = false;
+  body = body.replace(/__expected\.index\s*=\s*(\d+)\s*;/g, (_m, n) => {
+    declaredExpectedIndex = true;
+    return `var __expected_index: number = ${n};`;
+  });
   // (#1352b) Match double-quoted, single-quoted, or identifier RHS — many tests
   // assign `__expected.input = __string` where `__string` is a previously-declared
   // local. The identifier branch lets the var-decl carry through any string-typed
   // value, not just literals.
+  let declaredExpectedInput = false;
   body = body.replace(
     /__expected\.input\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[A-Za-z_$][\w$]*)\s*;/g,
-    "var __expected_input: string = $1;",
+    (_m, rhs) => {
+      declaredExpectedInput = true;
+      return `var __expected_input: string = ${rhs};`;
+    },
   );
-  // Replace property accesses with the extracted variables
-  body = body.replace(/__expected\.index\b(?!\s*=)/g, "__expected_index");
-  body = body.replace(/__expected\.input\b(?!\s*=)/g, "__expected_input");
+  // Replace property accesses with the extracted variables — but only when the
+  // corresponding declaration was emitted. The String case-conversion tests
+  // (#1604: toUpperCase/toLowerCase/toLocale*) read `__expected.index` /
+  // `__expected.input` without ever assigning them (both sides are `undefined`
+  // on a plain string), so rewriting the reads to `__expected_index` /
+  // `__expected_input` left a reference to an undeclared variable
+  // (`__expected_index is not defined`). When no declaration was extracted,
+  // leave the property read intact so it compiles to `undefined`.
+  if (declaredExpectedIndex) {
+    body = body.replace(/__expected\.index\b(?!\s*=)/g, "__expected_index");
+  }
+  if (declaredExpectedInput) {
+    body = body.replace(/__expected\.input\b(?!\s*=)/g, "__expected_input");
+  }
 
   // Route comparisons involving _input variables to string assert
   body = body.replace(
@@ -2193,6 +2212,35 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // For onlyStrict tests, add "use strict" so the compiler's strict-mode
   // checks apply (e.g. assignments to arguments/eval, duplicate params).
   const strictDirective = resolvedMeta.flags?.includes("onlyStrict") ? '"use strict";\n' : "";
+
+  // #1612 — top-level-await tests put `await` at module top level, where it is
+  // a keyword. Wrapping the body in a *synchronous* `test()` turns `await`
+  // back into an identifier, so `await [x]` misparses as element access
+  // ("An element access expression should take an argument."). These are
+  // syntax-only tests (no assertions), so emit the body at module top level —
+  // where `await` parses correctly — and leave `test()` as a trivial probe of
+  // `__fail`. The `export function test` already marks the file as a module,
+  // so module-goal top-level await is valid.
+  if (resolvedMeta.features?.includes("top-level-await")) {
+    const tlaPreBody = `${strictDirective}
+${preamble}
+${hoistedDecls}
+${implicitDecls.trim()}
+`;
+    const tlaPostBody = `
+export function test(): number {
+  if (__fail) { return __fail; }
+  return 1;
+}
+`;
+    const tlaBodyLineOffset = tlaPreBody.split("\n").length - 1;
+    const metaBlockTla = source.match(/\/\*---[\s\S]*?---\*\//);
+    const metaLinesTla = metaBlockTla ? metaBlockTla[0].split("\n").length - 1 : 0;
+    return {
+      source: tlaPreBody + bodyForFunc.trim() + "\n" + tlaPostBody,
+      bodyLineOffset: tlaBodyLineOffset - metaLinesTla,
+    };
+  }
 
   const preBody = `${strictDirective}
 ${preamble}

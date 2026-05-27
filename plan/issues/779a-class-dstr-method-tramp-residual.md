@@ -1,9 +1,10 @@
 ---
 id: 779a
 title: "class/dstr method-tramp residual (gen / async-gen / private / static) (~727 fails)"
-status: in-progress
+status: done
 created: 2026-05-21
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -99,6 +100,82 @@ diverges from the function-decl path. Start with the plain instance/static
 `meth-*` shape (simplest, ~109 bucket); the gen/async-gen variants reproduce
 the identical `global.set` type error, suggesting a shared root in the
 class-method param-binding emission rather than per-shell divergence.
+
+## Root cause + fix (2026-05-27, dev-1607)
+
+The documented invalid-Wasm repro is a **global-index drift** bug, NOT a
+trampoline divergence. For a class declared **inside a function**,
+`compileNestedClassDeclaration` calls `promoteAccessorCapturesToGlobals` on the
+enclosing function (emitting `global.set`/`global.get` for captured locals like
+`ok`), then `compileClassBodies` overwrites `ctx.currentFunc` with each
+constructor/method **without** registering the enclosing function on the
+global-index shift-tracking stacks (`funcStack`/`parentBodiesStack`). When a
+binding-pattern destructure adds the `"Cannot destructure 'null' or
+'undefined'"` `string_constants` import, `fixupModuleGlobalIndices` shifts the
+captured-global maps (and the method body) but **not** the enclosing function's
+already-emitted global refs — so its captured-variable `global.set`/`get`
+indices land on the wrong (and wrongly typed) globals, producing the
+`global.set externref ← f64` / immutable-global errors.
+
+**Fix** (`src/codegen/class-bodies.ts`): at the top of `compileClassBodies`,
+push the enclosing `ctx.currentFunc` onto `funcStack` + `parentBodiesStack`
+(and restore in `finally`), mirroring the object-literal method path in
+`literals.ts`. All three documented repro shapes now compile to valid Wasm and
+return 1. Unit tests in `tests/issue-779a.test.ts` (5 cases) pass.
+
+## SCOPE FINDING — the ~727 test262 figure is a DIFFERENT bug
+
+The fix above resolves the issue's *documented invalid-Wasm repro*, but it does
+**not** move the ~727 test262 `assert_fail` failures. The real test262 corpus
+uses **top-level** (module-scope) classes with **untyped** binding patterns —
+e.g. `class C { static method([...x] = values) {...} }` — which do NOT hit the
+nested-class global-drift path. Verified: the issue's 4 named sample files
+(`meth-static-dflt-ary-ptrn-rest-id.js`, `gen-meth-dflt-ary-ptrn-empty.js`,
+etc.) fail **identically** (`ret=2`, first assertion) on both pre-fix main and
+post-fix branch. The first failing assertion is `assert(Array.isArray(x))` — the
+rest binding produces a value the harness's `Array.isArray` rejects. (In
+isolation `Array.isArray(x)` on a rest binding returns true, but
+`Array.isArray` on a plain array param returns false — pointing at an
+`Array.isArray` / iterator-protocol interaction, family of #820 / #1130 /
+#1633, NOT class-method param lowering.) **Recommend: re-scope the residual
+~727 to an Array.isArray / harness-array-identity investigation; the invalid-Wasm
+sub-bug is fixed by this PR.**
+
+### Sharper root cause of the residual (isolated 2026-05-27)
+
+Minimised the real failure to the **`any`-typed default value** of an
+array/rest binding param. The default value's static type — not the binding
+shape — decides it:
+
+```
+// FAILS (ret=2): default value typed `any` (externref)
+let values: any; values = [1,2,3];
+class C { static method([...x] = values) { /* Array.isArray(x) === false */ } }
+
+// PASSES (ret=1): default value typed number[] (vec struct)
+var values = [1,2,3];   // inferred number[]
+class C { static method([...x] = values) { /* Array.isArray(x) === true */ } }
+```
+
+So when the rest/array binding's default value is externref-typed, the bound
+result is an externref that `Array.isArray` rejects (it is not wrapped as a
+native vec/array). The test262 harness declares `let values: any;` then assigns
+`values = [1,2,3]`, so every `*-dflt-*` test takes the failing branch — which is
+why the `meth-dflt-*` / `gen-meth-dflt-*` / `*-dflt-*` buckets dominate the
+~727. The fix belongs in the array/rest binding-default lowering: when the
+default value is externref, materialise/convert it to a native array (vec
+struct) so `Array.isArray` and `.length`/index access behave. This is
+independent of (and larger than) the nested-class global-drift fix in this PR.
+**Split out to #1678** (externref-typed default-value array/rest
+materialisation) — the dominant share of the residual ~727.
+
+## Resolution (2026-05-27)
+
+The invalid-Wasm sub-bug (nested-class global-index drift) is **fixed and merged
+via PR #678**. The behavioural residual (~727 `*-dflt-*` `assert_fail`) is
+re-scoped to **#1678** — externref-typed default values of array/rest binding
+params are not materialised to native arrays, so `Array.isArray` rejects them.
+This issue is closed as `done`; #1678 carries the remaining work.
 
 ## Notes
 

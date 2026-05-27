@@ -76,4 +76,30 @@ describe("#1602 call-site argument coercion emits valid wasm", () => {
       }
     `);
   });
+
+  it("multiple static-async class-method extractions are valid wasm", () => {
+    // Bug D: a class expression used as a value produced a bare `ref.func`
+    // (funcref) for the constructor. funcref is not a subtype of
+    // anyref/externref, so `(class {...}).f` member read fed the raw funcref
+    // into `__extern_get` (externref param) — invalid module
+    // ("call expected externref, found ref.func"). One extraction happened to
+    // dead-code-eliminate clean; two or more left the funcref on the stack.
+    compileValid(`
+      let x = "h";
+      let f = class { static async f() {} }.f;
+      let g = class { static async ["g"]() {} }.g;
+      let h = class { static async [x]() {} }.h;
+      export function test(): number { return 1; }
+    `);
+  });
+
+  it("class-expression value passed directly as a call argument is valid wasm", () => {
+    compileValid(`
+      function use(v: any): void {}
+      export function test(): number {
+        use(class { m() {} });
+        return 1;
+      }
+    `);
+  });
 });
