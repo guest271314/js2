@@ -4079,6 +4079,13 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Symbol") {
       const symMethod = propAccess.name.text;
       if (symMethod === "for" && expr.arguments.length >= 1) {
+        // §20.4.2.2 step 1: stringKey = ? ToString(key). A Symbol key makes
+        // ToString throw TypeError before the registry lookup runs.
+        const keyTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+        if (isSymbolType(keyTsType)) {
+          emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a string");
+          return { kind: "externref" };
+        }
         const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
         if (keyType && keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
         const funcIdx = ensureLateImport(ctx, "__symbol_for", [{ kind: "externref" }], [{ kind: "externref" }]);

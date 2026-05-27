@@ -1,9 +1,10 @@
 ---
 id: 1637
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -98,3 +99,32 @@ For Symbol coercion:
 - `test262/test/built-ins/Boolean/prototype/toString/this-val-non-boolean.js`
 - `test262/test/built-ins/Symbol/prototype/toString/symbol-thisvalue.js`
 - `test262/test/built-ins/Symbol/for/registry.js`
+
+## Test Results (2026-05-27, dev-1606 worktree)
+
+Smoke-tested against current main (`6d5a806d0`) — the architect's referenced
+files (`src/codegen/registry/boolean.ts`, `registry/symbol.ts`) **do not exist**
+on main; the live coercion code is in `src/codegen/string-ops.ts`,
+`src/codegen/expressions/calls.ts`, and `src/runtime.ts`.
+
+**Boolean wrapper coercion already works on main** — `Boolean.prototype.toString.call(0)`
+→ `"false"`, `(new Boolean(0)).toString()` → `"false"`, transferring to a String
+object throws TypeError. No Boolean change needed.
+
+**Symbol implicit string coercion was the real gap.** Fixed in this PR:
+- template-literal substitution `` `${Symbol()}` `` now throws TypeError (§7.1.17 ToString(Symbol)).
+- `str + Symbol` / `Symbol + str` concatenation now throws TypeError.
+- `Symbol.for(symbolKey)` now throws TypeError (ToString of a Symbol key).
+
+Implemented as a static-type guard (`isSymbolType`) at the three implicit-coercion
+sites, mirroring the pre-existing `Number(Symbol)` / numeric-arg TypeError guards.
+
+Out of scope (left for a follow-up — requires routing symbol i32 ids through
+`__box_symbol` + host toString): explicit `String(Symbol("x"))` and
+`Symbol("x").toString()` returning `"Symbol(x)"`; these are correctness gaps but
+not implicit-coercion throws.
+
+New test: `tests/issue-1637.test.ts` (6 cases, all pass). Non-Symbol concat/template
+paths verified unchanged. The 2 `issue-958-concat-chain` WAT-assertion failures and
+`helpers.js`/`__box_number` harness errors reproduce identically on origin/main —
+pre-existing, not caused by this change.

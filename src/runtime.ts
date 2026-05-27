@@ -4971,7 +4971,11 @@ assert._isSameValue = isSameValue;
           return Reflect.construct(wrappedCtor, wrappedArgs ?? [], wrappedNew);
         };
       // Symbol.for(key) — global symbol registry (#965)
-      if (name === "__symbol_for") return (key: any): any => Symbol.for(String(key));
+      // Symbol.for(key) — §20.4.2.2: stringKey = ? ToString(key). Passing a
+      // Symbol makes ToString throw TypeError (not stringify). `Symbol.for`
+      // itself performs ToString, so forwarding a real Symbol primitive
+      // reproduces the spec throw; other values stringify normally.
+      if (name === "__symbol_for") return (key: any): any => Symbol.for(key);
       // Symbol.keyFor(sym) — reverse lookup in global registry (#965, #1342)
       // Spec §20.4.2.6: returns the key string for registered symbols, or
       // `undefined` for any other symbol. Returning `null` (the previous
