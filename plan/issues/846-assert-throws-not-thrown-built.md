@@ -239,3 +239,26 @@ end
 - `src/codegen/expressions/calls.ts` (this-coercion guards)
 - `src/runtime.ts` (host fallbacks)
 - `src/codegen/property-access.ts` (write-to-frozen guard)
+
+## #846h — derived constructor must call super() (dev, 2026-05-27)
+
+A derived class whose explicit constructor never calls `super(...)` never
+initialises `this`; per ES §10.2.2 [[Construct]] and §13.3.7.1 SuperCall,
+constructing it must throw a ReferenceError. Previously such a class
+constructed silently, so `assert.throws(ReferenceError, () => new C())` failed.
+
+**Fix** (`src/codegen/class-bodies.ts`, `compileClassBodies`): added
+`constructorBodyHasSuperCall()` — a lexical walk that detects a `super(...)`
+sharing the constructor's `this` (descends arrow bodies, stops at nested
+function/method/class boundaries). When a class is derived
+(`classParentMap` or `classBuiltinParentMap`) and its explicit ctor body has no
+such call, emit an unconditional `throw ReferenceError(...)` at constructor
+entry, skipping the (now dead) body. The test262 harness's `assert_throws`
+only checks that *something* throws, so the exact error class is not asserted —
+but a faithful ReferenceError message is used.
+
+Covers `test/language/{statements,expressions}/class/subclass/builtin-objects/*/super-must-be-called.js`
+(~24 tests). Tests: `tests/issue-846h.test.ts` (7 cases — user-class parent,
+builtin Array parent, implicit-super no-throw, explicit-super no-throw,
+non-derived no-throw, branch-super no-throw). No regressions in the
+compileToWasm-wired inheritance suites (52/52 pass unchanged).
