@@ -1327,7 +1327,20 @@ export function compilePropertyAccess(
   // Check for static property access via 'this' in a static method context.
   // In a static method, 'this' refers to the class constructor (no local 'this' param).
   // e.g., `this.#m` in `static fieldAccess()` where `#m` is a static private field.
-  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.localMap.get("this") === undefined) {
+  //
+  // (#1681) Also fire inside a closure spawned from a static context: an arrow
+  // function or inner function declared in a static method captures `this` as a
+  // local, so `localMap.get("this")` is defined — but `this` still denotes the
+  // class constructor, not a per-instance struct. Without the static-context
+  // escape hatch the generic struct path below tries to cast the captured
+  // externref `this` to the class struct and emits an invalid
+  // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
+  // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
+  // it identifies exactly this case.
+  if (
+    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
     // Resolve the enclosing class name from context.
     // Try enclosingClassName first (set for closures), then scan the function name
     // for a class name prefix by checking each underscore-delimited prefix against classSet.
