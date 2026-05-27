@@ -6002,6 +6002,7 @@ export const FUNCTIONAL_ARRAY_METHODS = new Set([
   "filter",
   "map",
   "reduce",
+  "reduceRight",
   "forEach",
   "find",
   "findIndex",
@@ -6018,7 +6019,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name.text;
       if (FUNCTIONAL_ARRAY_METHODS.has(method)) {
-        if (method === "reduce") {
+        if (method === "reduce" || method === "reduceRight") {
           need2 = true;
         } else {
           need1 = true;
@@ -6028,7 +6029,7 @@ function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.Sourc
       if (method === "call" && ts.isPropertyAccessExpression(node.expression.expression)) {
         const innerMethod = node.expression.expression.name.text;
         if (FUNCTIONAL_ARRAY_METHODS.has(innerMethod)) {
-          if (innerMethod === "reduce") {
+          if (innerMethod === "reduce" || innerMethod === "reduceRight") {
             need2 = true;
           } else {
             need1 = true;
@@ -7609,6 +7610,32 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
       namespacePath: [],
       className: "WeakSet",
       constructorParams: [{ kind: "externref" }],
+      methods,
+      properties: new Map(),
+    });
+  }
+
+  // FinalizationRegistry (#1600) — host-delegate in JS mode, no-op stub in
+  // standalone. The spec never guarantees cleanup callbacks run, so a registry
+  // that tracks register/unregister but never fires the callback is fully
+  // conformant. The host import builds a real engine FinalizationRegistry;
+  // register/unregister forward to it.
+  if (!ctx.externClasses.has("FinalizationRegistry")) {
+    const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
+    // register(target, heldValue, unregisterToken?) → undefined
+    methods.set("register", {
+      params: [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      results: [{ kind: "externref" }],
+      requiredParams: 2,
+    });
+    // unregister(token) → boolean (externref)
+    methods.set("unregister", externMethod(1));
+
+    ctx.externClasses.set("FinalizationRegistry", {
+      importPrefix: "FinalizationRegistry",
+      namespacePath: [],
+      className: "FinalizationRegistry",
+      constructorParams: [{ kind: "externref" }], // new FinalizationRegistry(cleanupCallback)
       methods,
       properties: new Map(),
     });

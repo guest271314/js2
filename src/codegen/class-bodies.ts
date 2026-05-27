@@ -686,8 +686,15 @@ export function collectClassDeclaration(
     ctx.classStaticMethodNames.set(className, staticMethodNames);
   }
 
-  // Register static properties as module globals
+  // Register static properties as module globals, and queue static `{ ... }`
+  // blocks for execution. Both field initializers and static blocks must run
+  // in source order during class evaluation (§15.7.10), so we iterate members
+  // once and push to the shared `staticInitExprs` queue in declaration order.
   for (const member of decl.members) {
+    if (ts.isClassStaticBlockDeclaration(member)) {
+      ctx.staticInitExprs.push({ staticBlock: member, className });
+      continue;
+    }
     if (ts.isPropertyDeclaration(member) && member.name && hasStaticModifier(member)) {
       const propName = resolveClassMemberName(ctx, member.name);
       if (propName === undefined) continue; // dynamic computed name — skip
@@ -844,6 +851,40 @@ export function compileClassBodies(
     return;
   }
 
+  // (#779a) For nested class declarations, an enclosing function may still be
+  // mid-compilation (its `fctx.body` holds the captured-global copy emitted by
+  // `promoteAccessorCapturesToGlobals`). Compiling constructor/method bodies
+  // below overwrites `ctx.currentFunc`, so a string-constant import added
+  // during a binding-pattern destructure (e.g. the "Cannot destructure ..."
+  // message) would run `fixupModuleGlobalIndices` WITHOUT the enclosing body in
+  // its shift set — leaving its already-emitted `global.set`/`global.get`
+  // indices stale while the captured-global maps shift past them. Register the
+  // enclosing function on the shift-tracking stacks so its body is shifted too
+  // (mirrors the object-literal method path in literals.ts:1663-1666).
+  const enclosingFunc = ctx.currentFunc;
+  if (enclosingFunc) {
+    ctx.funcStack.push(enclosingFunc);
+    ctx.parentBodiesStack.push(enclosingFunc.body);
+  }
+  try {
+    compileClassBodiesInner(ctx, decl, funcByName, className, structTypeIdx, fields);
+  } finally {
+    if (enclosingFunc) {
+      ctx.funcStack.pop();
+      ctx.parentBodiesStack.pop();
+      ctx.currentFunc = enclosingFunc;
+    }
+  }
+}
+
+function compileClassBodiesInner(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  funcByName: Map<string, number>,
+  className: string,
+  structTypeIdx: number,
+  fields: FieldDef[],
+): void {
   // Compile constructor
   const ctor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
   const ctorName = `${className}_new`;

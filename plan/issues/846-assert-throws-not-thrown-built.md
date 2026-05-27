@@ -240,25 +240,42 @@ end
 - `src/runtime.ts` (host fallbacks)
 - `src/codegen/property-access.ts` (write-to-frozen guard)
 
-## #846h — derived constructor must call super() (dev, 2026-05-27)
+## Profiling re-run (2026-05-27, dev)
 
-A derived class whose explicit constructor never calls `super(...)` never
-initialises `this`; per ES §10.2.2 [[Construct]] and §13.3.7.1 SuperCall,
-constructing it must throw a ReferenceError. Previously such a class
-constructed silently, so `assert.throws(ReferenceError, () => new C())` failed.
+Profiled the 2,351 `assert.throws(ErrType, …)`-not-thrown failures from the
+2026-05-21 baseline jsonl. **Conclusion: there is no single unowned,
+localized sub-cluster of ≥200 tests left in #846.** The mass is genuinely
+fragmented and the large clusters are either already owned or need the
+descriptor/object model (escalated under #1630). Breakdown:
 
-**Fix** (`src/codegen/class-bodies.ts`, `compileClassBodies`): added
-`constructorBodyHasSuperCall()` — a lexical walk that detects a `super(...)`
-sharing the constructor's `this` (descends arrow bodies, stops at nested
-function/method/class boundaries). When a class is derived
-(`classParentMap` or `classBuiltinParentMap`) and its explicit ctor body has no
-such call, emit an unconditional `throw ReferenceError(...)` at constructor
-entry, skipping the (now dead) body. The test262 harness's `assert_throws`
-only checks that *something* throws, so the exact error class is not asserted —
-but a faithful ReferenceError message is used.
+| Cluster | Count | Status |
+|---------|-------|--------|
+| AnnexB `ReferenceError "An initialized binding is not created"` (function-code + global-code) | 96 | **owned** by #1594 (task #104) — legacy block-fn hoisting |
+| `language/*/class` (private methods, dstr defaults, proxies) | 408 | heterogeneous — many mechanisms, not one fix; overlaps #820/#1543 |
+| `Object.defineProperty/defineProperties` TypeError (descriptor conflicts, `15.2.3.6-4-*`, `15.2.3.7-6-a-*`) | 108 | **needs descriptor model** — see finding below; overlaps escalated #1630 |
+| compound-assignment strict-mode write to non-writable / setter-less accessor (`11.13.2-*-s.js`) | 42 | needs accessor-descriptor + strict-write model (same object-model gap) |
+| for-of dstr iterator-close TypeError | 52 | overlaps #1592 (iterator over-consumption, escalated) |
+| assignment/const/let dstr | 31 | overlaps #1553 destructuring residuals (owned) |
+| array `length` RangeError (`defineProperty(arr,"length",…)`) | 28 | array-length descriptor validation; small, isolated |
 
-Covers `test/language/{statements,expressions}/class/subclass/builtin-objects/*/super-must-be-called.js`
-(~24 tests). Tests: `tests/issue-846h.test.ts` (7 cases — user-class parent,
-builtin Array parent, implicit-super no-throw, explicit-super no-throw,
-non-derived no-throw, branch-super no-throw). No regressions in the
-compileToWasm-wired inheritance suites (52/52 pass unchanged).
+**Key root-cause finding (defineProperty descriptor conflicts, 108 tests):**
+The runtime `__defineProperty_value` / `__defineProperty_desc` host imports
+(`src/runtime.ts:4053-4111`) *already* delegate to native
+`Object.defineProperty` for plain JS objects and re-throw spec TypeErrors —
+so the runtime is correct. But for a typed object literal (`var o = {}`),
+codegen **compiles the `Object.defineProperty(o, …)` call away entirely**:
+a probe of `Object.defineProperty(o,"foo",d1)` requested **zero**
+`__defineProperty*` imports (only `__get_undefined`, `__box_number`). The
+typed-struct path in `src/codegen/object-ops.ts` (~1307/1590) folds the
+descriptor into direct struct-field writes and never tracks
+configurable/writable flags, so the non-configurable-redefinition check in
+`_validatePropertyDescriptor` (runtime.ts:705) never runs. Fixing this
+requires the struct path to either emit a real `__defineProperty_*` runtime
+call carrying flags, or carry per-property descriptor state on the struct —
+the same descriptor-model work already escalated under **#1630**. Not a
+localized fix.
+
+**Recommendation:** close #846 as an umbrella; the remaining mergeable slices
+are the already-dispatched child issues (#1594, #1592, #1553, #820 family).
+The only genuinely new, isolated micro-bucket is array-`length` RangeError
+(~28) — too small to be worth a standalone PR under the ≥200 target.

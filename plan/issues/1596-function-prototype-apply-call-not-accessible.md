@@ -1,7 +1,7 @@
 ---
 id: 1596
 title: "Function.prototype.apply / .call not accessible on compiled Wasm functions (~46 fails)"
-status: backlog
+status: ready
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: functions, Function.prototype, spread, apply, call
 goal: spec-completeness
-sprint: Backlog
+sprint: 56
 test262_fail: 46
 test262_category: language/expressions/array, built-ins/Function/prototype/call, built-ins/RegExp
 ---
