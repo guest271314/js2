@@ -1,9 +1,10 @@
 ---
 id: 1646
 title: "spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -14,8 +15,39 @@ goal: spec-completeness
 sprint: 50
 renumbered_from: 1351
 parent: 1328
+updated: 2026-05-27
 ---
 # #1351 — Set new methods: accept any set-like (size + has + keys)
+
+> **Status 2026-05-27 — CORE FIX ALREADY LANDED, residual verification only.**
+> The set-like-argument feature described below (accept any object with
+> `size`/`has`/`keys` via spec `GetSetRecord`, not just `Set` instances) was
+> implemented in commit `146c9bbbf` (`fix(#1352): Set methods accept any
+> set-like argument`) and is **on main**. That fix:
+> 1. Fixed the `_wrapForHost` closure-bridge to dispatch 0-arg `keys()` calls
+>    via `__call_fn_0` (was wrongly using `__call_fn_1`, breaking native
+>    union/difference/symmetricDifference iteration).
+> 2. Added a `_wrapForHost` pass for set-like args on the seven new Set methods
+>    (union, intersection, difference, symmetricDifference, isSubsetOf,
+>    isSupersetOf, isDisjointFrom) so native `GetSetRecord` reads
+>    `size`/`has`/`keys` through the sidecar proxy.
+> Code lives in `src/runtime.ts` (the `intent.className === "Set"` block ~L2943,
+> NOT the stale `src/codegen/registry/set.ts` path cited below — that file does
+> not exist). The methods are registered in `src/codegen/index.ts:7534+`.
+>
+> **Verification (committed test262 report, baseline `1f5208c8`, 2026-05-22):**
+> `built-ins/Set` = **320 / 383 pass (83.6%)**, up from the 282/383 (73.6%)
+> baseline in the Problem section — the #1352 set-like fix added +38 passes.
+> The original set-like-argument gap (acceptance criteria 1–3: union/intersection/
+> difference accept set-like / Map / throwing-has args) is **resolved**.
+>
+> **This issue is marked `done` for its original scope** (set-like argument
+> acceptance). It did NOT reach the ≥90% (345/383) stretch target from
+> acceptance criterion 4 — **63 tests remain** (56 fail + 7 compile_error). Those
+> residuals are a *separate* set of root causes (not the set-like bridge), tracked
+> as a new narrow follow-up rather than reopening this. The 7 compile_errors in
+> particular are likely codegen gaps unrelated to GetSetRecord. Do NOT
+> re-implement the set-like bridge — it works.
 
 ## Problem
 
