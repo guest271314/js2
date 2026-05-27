@@ -181,12 +181,14 @@ function _getGeneratorPrototype(): any {
     configurable: true,
   });
 
-  // The `constructor` slot points at %Generator% (= %GeneratorFunction.prototype%),
-  // installed lazily so circular setup doesn't loop.
+  // The `constructor` slot points at %Generator% (= %GeneratorFunction.prototype%).
+  // Spec §27.5.1.1 requires a *data* property {writable:false, enumerable:false,
+  // configurable:true} — not an accessor. `_getGeneratorFunctionPrototype` set its
+  // own cache before it called us (so this call returns the in-progress object
+  // without recursing), making the data value safe to install here.
   Object.defineProperty(proto, "constructor", {
-    get() {
-      return _getGeneratorFunctionPrototype();
-    },
+    value: _getGeneratorFunctionPrototype(),
+    writable: false,
     enumerable: false,
     configurable: true,
   });
@@ -302,10 +304,11 @@ function _getAsyncGeneratorPrototype(): any {
     configurable: true,
   });
 
+  // Spec §27.6.1.1 — `constructor` is a data property {writable:false,
+  // enumerable:false, configurable:true} pointing at %AsyncGenerator%.
   Object.defineProperty(proto, "constructor", {
-    get() {
-      return _getAsyncGeneratorFunctionPrototype();
-    },
+    value: _getAsyncGeneratorFunctionPrototype(),
+    writable: false,
     enumerable: false,
     configurable: true,
   });
@@ -5697,7 +5700,17 @@ assert._isSameValue = isSameValue;
           // %GeneratorPrototype% inherits from %IteratorPrototype% so
           // .map/.filter/.drop/.take/... (#1367) still resolve through the
           // chain.
-          const proto = _getGeneratorPrototype();
+          // Spec §27.5 prototype chain has a per-function `g.prototype` level
+          // *between* the instance and `%GeneratorPrototype%`:
+          //   instance → g.prototype → %GeneratorPrototype% → %IteratorPrototype%
+          // Codegen does not thread the function's own `.prototype` into this
+          // helper, so re-create the missing level with a fresh ordinary object
+          // inheriting from `%GeneratorPrototype%`. This makes the two-hop
+          // `Object.getPrototypeOf(Object.getPrototypeOf(g()))` land on
+          // `%GeneratorPrototype%` (toStringTag = "Generator") as the spec
+          // requires. State lives on the instance, not the prototype, so the
+          // brand check (`_GeneratorState.get(this)`) is unaffected.
+          const proto = Object.create(_getGeneratorPrototype());
           const obj: any = Object.create(proto);
           _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -5708,7 +5721,10 @@ assert._isSameValue = isSameValue;
           // matching comment on `__create_generator`. The instance is just a
           // plain object whose [[Prototype]] is the singleton — state lives in
           // `_AsyncGeneratorState`.
-          const proto = _getAsyncGeneratorPrototype();
+          // Mirror __create_generator: insert the missing per-function
+          // `g.prototype` level so the two-hop chain reaches
+          // `%AsyncGeneratorPrototype%` (toStringTag = "AsyncGenerator").
+          const proto = Object.create(_getAsyncGeneratorPrototype());
           const obj: any = Object.create(proto);
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
