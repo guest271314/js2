@@ -142,3 +142,37 @@ shared with #1620 (iterator-result struct), #983d (struct-field readback) and
 `any`-typed object literals get a stable, field-readable struct identity across
 the closure-return / Wasm→host boundary. Branch `issue-1684-iter-readback` holds
 the Half-A runtime drain.
+
+## Re-verification 2026-05-27 (dev, resumed)
+
+Re-checked on branch `issue-1684-iter-readback` (commit `fcc87b69d`). Two
+precise findings that re-scope the remaining work to the architect:
+
+1. **The live `Array.from` path already has a complete closure drain.**
+   `Array.from(x)` lowers via `src/codegen/type-coercion.ts:206/356` to the
+   `__array_from_iter` late import, bound at `src/runtime.ts:4115` to
+   `_arrayFromIter` (line 4131). That function (lines 4163-4307) ALREADY drives
+   a Wasm-closure `@@iterator` through `__call_fn_0` and reads each result's
+   `value`/`done` via a `resolveProp` helper that falls back to `__sget_<field>`
+   (lines 4209-4227). So the Half-A drain added to `_materializeIterable`
+   (line 1097) is **not on the `Array.from` hot path** — it is a safe but
+   currently-unreached addition (`_materializeIterable` serves the
+   `Array.from(wasmVec, mapFn)` mapFn-wrapping path, not the plain-object case).
+
+2. **The repro throws the native V8 error, not a drain failure.** Compiling the
+   issue's repro and running it through the standard `compile()` importObject
+   throws `%Array%.from requires that the property of the first argument,
+   items[Symbol.iterator], when exists, be a function`. That message comes from
+   **native `Array.from`**, which means the compiled `Array.from(items)` on a
+   plain `any`-typed object is **not being lowered to `__array_from_iter` at
+   all** in this path — it reaches native `Array.from`. This is the #1320
+   **Layer-3 start-fn / exports-timing / call-routing** blocker (task #158), not
+   a runtime drain gap.
+
+**Net:** #1684 cannot be moved by a localized runtime change. The load-bearing
+work is (a) routing `Array.from(anyObject)` through `__array_from_iter` instead
+of native `Array.from` (the #1320 Layer-3 lowering decision), and (b) the
+`any`-typed object-literal struct-identity decision (Half B, shared with
+#1620/#983d/#1630). The Half-A branch is safe to keep as a no-op-until-reached
+addition but is **not worth a standalone PR** — it does not move the repro.
+Recommend folding #1684 into the #1320 Layer-3 architect spec.
