@@ -1,9 +1,9 @@
 ---
 id: 779a
 title: "class/dstr method-tramp residual (gen / async-gen / private / static) (~727 fails)"
-status: ready
+status: in-progress
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -81,6 +81,24 @@ helper applied through the (async-)generator shell.
 - [ ] Fix covers all four shell variants: plain method, generator method,
       async method, async-gen method, both instance and static, both public
       and private.
+
+## Reproduction (verified on main, 2026-05-27)
+
+All three class-method dstr-param shapes emit **invalid Wasm** (compile
+succeeds, `WebAssembly.instantiate` rejects the binary):
+
+- `static method([...x] = values)` → `immutable global #6 cannot be assigned`
+- `method([a, b])` (instance) → `global.set[0] expected type externref, found local.get of type f64`
+- `*gen([a, b])` (generator) → same `global.set` f64→externref type mismatch
+
+So the residual is NOT (only) a binding-init logic gap — the class-method
+destructuring-param path is emitting a `global.set` against a global that is
+(a) immutable and (b) the wrong type (f64 local stored into an externref
+global). The trampoline/binding-pattern lowering for class-method formals
+diverges from the function-decl path. Start with the plain instance/static
+`meth-*` shape (simplest, ~109 bucket); the gen/async-gen variants reproduce
+the identical `global.set` type error, suggesting a shared root in the
+class-method param-binding emission rather than per-shell divergence.
 
 ## Notes
 
