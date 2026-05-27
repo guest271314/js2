@@ -578,7 +578,7 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
  * inherit a stale extras_argv and produce a wrong arguments.length.
  * (#1511)
  */
-function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
+export function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
   const { globalIdx: extrasGlobalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx } as Instr);
@@ -600,7 +600,7 @@ function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
  * `emitResetArgcExtras` after the call to prevent stale-extras leaking
  * into a subsequent callee that DOES read `arguments`. (#1511)
  */
-function emitClosureCallArgcExtras(
+export function emitClosureCallArgcExtras(
   ctx: CodegenContext,
   fctx: FunctionContext,
   args: readonly ts.Expression[],
