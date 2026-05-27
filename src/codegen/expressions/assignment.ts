@@ -766,7 +766,24 @@ function compileDestructuringAssignment(
         if (fieldType.kind === "externref") {
           const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
           fctx.body.push({ op: "local.tee", index: tmpField });
-          fctx.body.push({ op: "ref.is_null" } as Instr);
+          // Per ECMA-262 §13.15.5.5 (DestructuringAssignmentEvaluation,
+          // AssignmentElement), the default initializer fires ONLY when the
+          // read value is `undefined`, NOT for JS `null`. In the WebAssembly JS
+          // API, JS `null` maps to `ref.null extern` (ref.is_null === 1), so the
+          // bare `ref.is_null` guard wrongly fired the default for `{ a } = { a: null }`.
+          // Use __extern_is_undefined so JS null falls through to the value branch,
+          // while a missing/undefined field (also non-null externref wrapping the
+          // JS undefined sentinel, or a wasm-null uninitialized slot) still fires it.
+          const undefIdxDA = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+          if (undefIdxDA !== undefined) {
+            flushLateImportShifts(ctx, fctx);
+            // value === undefined ?  (does not fire for JS null)
+            fctx.body.push({ op: "call", funcIdx: undefIdxDA });
+          } else {
+            // Fallback: imprecise (treats null as undefined) when the import
+            // could not be registered (e.g. standalone mode).
+            fctx.body.push({ op: "ref.is_null" } as Instr);
+          }
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
@@ -1240,8 +1257,31 @@ function compileArrayDestructuringAssignment(
         emitElementGet(i);
         if (elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null") {
           const tmpElem = allocLocal(fctx, `__dflt_${fctx.locals.length}`, elemType);
-          fctx.body.push({ op: "local.tee", index: tmpElem });
-          fctx.body.push({ op: "ref.is_null" } as Instr);
+          // Per ECMA-262 §13.15.5.5 (AssignmentElement) the default initializer
+          // fires ONLY when the read value is `undefined`, never for JS `null`.
+          // JS `null` maps to `ref.null extern` in the WebAssembly JS API, so a
+          // bare `ref.is_null` guard wrongly fired the default for `[a=1] = [null]`.
+          // For externref elements, use __extern_is_undefined (strict === undefined);
+          // for plain wasm ref/ref_null elements (no JS-undefined sentinel) keep
+          // ref.is_null — a wasm-null slot there means "missing", which fires.
+          if (elemType.kind === "externref") {
+            const undefIdxTuple = ensureLateImport(
+              ctx,
+              "__extern_is_undefined",
+              [{ kind: "externref" }],
+              [{ kind: "i32" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            fctx.body.push({ op: "local.tee", index: tmpElem });
+            if (undefIdxTuple !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: undefIdxTuple });
+            } else {
+              fctx.body.push({ op: "ref.is_null" } as Instr);
+            }
+          } else {
+            fctx.body.push({ op: "local.tee", index: tmpElem });
+            fctx.body.push({ op: "ref.is_null" } as Instr);
+          }
           const localType = getLocalType(fctx, localIdx);
           fctx.body.push({
             op: "if",

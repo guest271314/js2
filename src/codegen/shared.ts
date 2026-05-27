@@ -403,6 +403,7 @@ type EmitDefaultValueCheckFn = (
   localIdx: number,
   initializer: ts.Expression,
   targetType?: ValType,
+  objectPropertySemantics?: boolean,
 ) => void;
 
 let _emitDefaultValueCheck: EmitDefaultValueCheckFn = () => {
@@ -420,8 +421,9 @@ export function emitDefaultValueCheck(
   localIdx: number,
   initializer: ts.Expression,
   targetType?: ValType,
+  objectPropertySemantics?: boolean,
 ): void {
-  _emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, initializer, targetType);
+  _emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, initializer, targetType, objectPropertySemantics);
 }
 
 // ── emitArgumentsObject ───────────────────────────────────────────────
