@@ -7614,6 +7614,32 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
+  // FinalizationRegistry (#1600) — host-delegate in JS mode, no-op stub in
+  // standalone. The spec never guarantees cleanup callbacks run, so a registry
+  // that tracks register/unregister but never fires the callback is fully
+  // conformant. The host import builds a real engine FinalizationRegistry;
+  // register/unregister forward to it.
+  if (!ctx.externClasses.has("FinalizationRegistry")) {
+    const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
+    // register(target, heldValue, unregisterToken?) → undefined
+    methods.set("register", {
+      params: [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      results: [{ kind: "externref" }],
+      requiredParams: 2,
+    });
+    // unregister(token) → boolean (externref)
+    methods.set("unregister", externMethod(1));
+
+    ctx.externClasses.set("FinalizationRegistry", {
+      importPrefix: "FinalizationRegistry",
+      namespacePath: [],
+      className: "FinalizationRegistry",
+      constructorParams: [{ kind: "externref" }], // new FinalizationRegistry(cleanupCallback)
+      methods,
+      properties: new Map(),
+    });
+  }
+
   // DisposableStack / AsyncDisposableStack — TC39 Explicit Resource Management (#830)
   if (!ctx.externClasses.has("DisposableStack")) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
