@@ -1,9 +1,10 @@
 ---
 id: 820k
 title: "Object.* receiver TypeError on null/undefined (ToObject step) (~39 fails)"
-status: ready
+status: done
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -57,3 +58,28 @@ residual.
 
 - Likely a small, mechanical fix once #1129 lands. Consider sequencing
   after #1129.
+
+## Resolution 2026-05-27 (dev-1606)
+
+#1129 (auto-boxing) already landed. The residual was in `src/runtime.ts`: the
+host-import handlers `__object_keys`, `__object_values`, `__object_entries`, and
+`__getOwnPropertyNames` started with `if (obj == null) return [];` — silently
+returning an empty array instead of throwing TypeError. Per ES §20.1.2.{5,10,18,22}
+these perform ToObject (§7.1.18) which throws on null/undefined.
+
+**Fix:** replaced the four `return [];` early-returns with
+`throw new TypeError("Cannot convert null/undefined to object")`.
+
+Verified safe (no regressions):
+- `Object.assign(null)` already threw (delegates to native Object.assign).
+- `Object.getOwnPropertySymbols(null)` already threw (delegates to native fn).
+- `Object.freeze/seal/preventExtensions(undefined)` correctly pass through the
+  arg unchanged (ES2015+ non-object passthrough) — left untouched.
+- Object spread `{...null}` routes through `__object_assign` (null-tolerant),
+  NOT the keys/getOwnPropertyNames handlers — unaffected.
+- `__getOwnPropertyNames` has a single codegen caller (`Object.getOwnPropertyNames`),
+  so the throw can't break internal enumeration.
+
+Tests: `tests/issue-820k.test.ts` (12 cases, all pass) — keys/values/entries/
+getOwnPropertyNames × null/undefined throw TypeError, plus positive cases
+(real object enumeration, string auto-box, freeze passthrough).

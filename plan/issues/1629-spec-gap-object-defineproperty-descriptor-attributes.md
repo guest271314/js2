@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: 50
+sprint: 56
 renumbered_from: 1335
 parent: 1328
 ---
@@ -90,3 +90,71 @@ When `Object.defineProperty` is called:
 - `test262/test/built-ins/Object/defineProperty/15.2.3.6-1-1.js` (undefined → TypeError)
 - `test262/test/built-ins/Object/defineProperty/15.2.3.6-3-1.js` (default attribute coalescing)
 - `test262/test/built-ins/Object/defineProperty/15.2.3.6-4-82.js` (non-configurable invariants)
+
+## Investigation (2026-05-27, dev-1607)
+
+Authoritative baseline (`.test262-cache/test262-current.jsonl`, HEAD 1f9ada252):
+**502 pass / 624 fail / 5 compile_error** in `built-ins/Object/defineProperty`.
+
+Fail clusters by filename prefix:
+
+| cluster        | fails | notes |
+|----------------|-------|-------|
+| `15.2.3.6-4-*` | 436   | step-4 [[DefineOwnProperty]] semantics |
+| `15.2.3.6-3-*` | 173   | ToPropertyDescriptor / coalescing |
+| `15.2.3.6-2-*` | 8     | property-key coercion |
+| misc           | ~7    | symbol/typedarray/coerced-P/etc. |
+
+Within c4 (431 sampled): **188 function-involving, 133 array-involving, 83 plain-object**.
+The bulk target **Array / bound-Function exotic objects** (length/index semantics,
+accessor-on-array), which are host-backed externrefs — a separate problem from the
+issue's stated "typed-struct attribute table" plan.
+
+### Root cause confirmed for the plain-object + dynamic-descriptor subset
+
+`Object.defineProperty` is **compile-time inlined** in `src/codegen/object-ops.ts`
+(`compileObjectDefineProperty`); no `__defineProperty_*` import is emitted for the
+common cases. All descriptor analysis (value / get / set / writable / enumerable /
+configurable extraction, the data+accessor-mix TypeError at line 736, struct-field
+attribute storage) is guarded by `if (ts.isObjectLiteralExpression(descArg))`.
+
+When the descriptor is passed as a **variable** (e.g. `var desc = {get, value};
+Object.defineProperty(o, "foo", desc)` — the dominant c3 shape), NONE of that fires:
+- `valueExpr`/`getNode`/`descWritable`/… are all `undefined`,
+- the data+accessor-mix check sees `hasData=false, hasAccessor=false` → no throw,
+- it falls to the `else` branch → `emitExternDefinePropertyNoValue`, which emits
+  `__defineProperty_value(obj, prop, null, flags)` with statically-empty flags and
+  **never passes the real descriptor's value/get/set to the runtime**. No validation,
+  no storage. Reproduced: variable-descriptor `{get,value}` mix returns 0 (no throw);
+  test262 expects TypeError.
+
+Separately, even for the inline-literal plain-object path,
+`Object.getOwnPropertyDescriptor(o,"foo").writable` returns the default `true` for a
+brand-new (non-struct-field) property defined via `defineProperty({value:101})` — the
+flags are stored in `ctx.definedPropertyFlags` / sidecar but `shapePropFlags` is only
+updated when the prop is an existing struct field (`userIdx >= 0`), so descriptor
+read-back misses them. (4-17 family.)
+
+### Why there is no small fix
+
+Routing the dynamic-descriptor case to the existing-but-dead runtime
+`__defineProperty_desc(obj, prop, desc)` (runtime.ts:4045) does NOT work as-is: the
+descriptor object is itself a WasmGC struct, and that helper's `getField` reads struct
+descriptors via `_sidecarGet`, which returns `undefined` for real struct fields (`get`/
+`value` live as `__sget_*` exports, not sidecar). So the runtime cannot read an opaque
+struct descriptor's fields. A correct fix needs either (a) materializing the descriptor
+struct into a JS object before the runtime call, or (b) teaching `getField` to read
+struct fields through the exported getters. Both are non-trivial.
+
+**Conclusion:** the 624 fails do not reduce to one localized patch. The biggest sub-clusters
+(Array/Function exotic defineProperty) are a distinct workstream; the plain-object subset
+needs the attribute-table + struct-descriptor-read design in the Implementation Plan above.
+Recommend splitting into sub-issues:
+- **#1629a** — dynamic (non-literal) descriptor: materialize struct descriptor → route to
+  runtime `__defineProperty_desc` with working field reads (covers most of c3, ~150).
+- **#1629b** — `getOwnPropertyDescriptor` attribute read-back for non-struct-field
+  defined props on plain objects (4-17 family).
+- **#1629c** — Array/Function exotic defineProperty semantics (the 321 array/function c4
+  fails) — likely overlaps #1130.
+
+No code change landed under this task; needs architect spec before implementation.
