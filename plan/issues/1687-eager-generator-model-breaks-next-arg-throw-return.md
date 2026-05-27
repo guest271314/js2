@@ -1,8 +1,10 @@
 ---
 id: 1687
 title: "spec gap: eager generator model can't thread .next(arg) / .throw() / .return() into yield (44/63 yield fails)"
-status: ready
+status: blocked
 created: 2026-05-27
+blocked_on: 1665
+escalation: ESCALATED-NEEDS-SPEC — requires #1665 state-machine coroutine lowering (sendev-1687, 2026-05-27)
 priority: high
 feasibility: hard
 reasoning_effort: high
