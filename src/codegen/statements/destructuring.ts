@@ -17,6 +17,7 @@ import {
   nativeStringType,
   resolveWasmType,
 } from "../index.js";
+import { resolveBindingElementType } from "../../checker/type-mapper.js";
 import {
   type BindingKind,
   buildDestructureNullThrow,
@@ -50,7 +51,7 @@ export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, 
       // Without a local, nested binding pattern destructuring silently skips the
       // assignment because fctx.localMap.get(name) returns undefined (#794).
       const elemType = ctx.checker.getTypeAtLocation(element);
-      const wasmType = resolveWasmType(ctx, elemType);
+      const wasmType = resolveBindingElementType(element, elemType, (t) => resolveWasmType(ctx, t));
       allocLocal(fctx, name, wasmType);
     } else if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
       ensureBindingLocals(ctx, fctx, element.name);
