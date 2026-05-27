@@ -1230,6 +1230,31 @@ function matchProcessStdStreamWrite(
 }
 
 /**
+ * Statically flatten an array literal's elements into a positional argument
+ * list, expanding spreads of nested array literals (`[...[a, b]]` → `a, b`).
+ * Returns undefined when the literal contains an element we cannot expand at
+ * compile time (a spread of a non-literal, or an elided hole). Used by the
+ * `fn.apply(thisArg, [...])` rewrite (#1596).
+ */
+function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expression[] | undefined {
+  const out: ts.Expression[] = [];
+  for (const el of arr.elements) {
+    if (ts.isOmittedExpression(el)) return undefined;
+    if (ts.isSpreadElement(el)) {
+      let inner: ts.Expression = el.expression;
+      while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+      if (!ts.isArrayLiteralExpression(inner)) return undefined;
+      const nested = flattenStaticArrayElements(inner);
+      if (nested === undefined) return undefined;
+      out.push(...nested);
+    } else {
+      out.push(el);
+    }
+  }
+  return out;
+}
+
+/**
  * #1653 — match `process.stdin.read(buf, offset?)` under --target wasi: the
  * binary, incremental stdin read (the Node-API replacement for readStdin()).
  * Returns true when matched. Mirrors `matchProcessStdStreamWrite`.
@@ -1994,6 +2019,60 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (propAccess.name.text === "call" || propAccess.name.text === "apply") {
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
+
+      // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
+      // A compiled function is a WasmGC funcref/struct, not a JS Function, so a
+      // host-side `.apply`/`.call` lookup fails ("apply is not a function").
+      // Rewrite statically to a direct invocation of the function expression,
+      // dropping thisArg (standalone functions ignore `this`). This reuses the
+      // IIFE-inlining path, which also binds `arguments` correctly (#1596).
+      {
+        let fnExpr: ts.Expression = innerExpr;
+        while (ts.isParenthesizedExpression(fnExpr)) fnExpr = fnExpr.expression;
+        const isFnLiteral =
+          (ts.isFunctionExpression(fnExpr) && fnExpr.asteriskToken === undefined) || ts.isArrowFunction(fnExpr);
+        if (isFnLiteral) {
+          let directArgs: readonly ts.Expression[] | undefined;
+          if (isCall) {
+            // fn.call(thisArg, a, b, ...) → fn(a, b, ...)
+            directArgs = expr.arguments.slice(1);
+          } else if (expr.arguments.length < 2) {
+            // fn.apply(thisArg) / fn.apply() → fn()
+            directArgs = [];
+          } else {
+            // fn.apply(thisArg, [a, b, ...]) → fn(a, b, ...). Statically flatten
+            // the args-array literal into positional call arguments so the
+            // IIFE-inlining path sees a fixed argument count (it binds
+            // `arguments` from the literal arg list and does not expand spreads
+            // itself). A spread of a nested array literal (`[...[3,4,5]]`, the
+            // common test262 shape) is flattened recursively. Anything we
+            // cannot statically flatten (dynamic spread source, elided holes)
+            // is left to the generic path.
+            const argsExpr = expr.arguments[1]!;
+            if (ts.isArrayLiteralExpression(argsExpr)) {
+              const flattened = flattenStaticArrayElements(argsExpr);
+              if (flattened !== undefined) directArgs = flattened;
+            }
+          }
+          if (directArgs !== undefined) {
+            // Evaluate the receiver-position thisArg for side effects (spec:
+            // arguments are evaluated even though standalone functions ignore
+            // `this`). For .call/.apply the thisArg is expr.arguments[0].
+            if (expr.arguments.length > 0) {
+              const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
+              if (thisType !== null) fctx.body.push({ op: "drop" });
+            }
+            const directCall = ts.factory.createCallExpression(
+              fnExpr as ts.LeftHandSideExpression,
+              undefined,
+              directArgs,
+            );
+            ts.setTextRange(directCall, expr);
+            (directCall as any).parent = expr.parent;
+            return compileCallExpression(ctx, fctx, directCall as ts.CallExpression);
+          }
+        }
+      }
 
       // Case 1: identifier.call(thisArg, args...) — standalone function
       if (ts.isIdentifier(innerExpr)) {
