@@ -1,7 +1,7 @@
 ---
 id: 1644
 title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium

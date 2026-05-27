@@ -4,7 +4,8 @@ title: "Array pattern elision holes and rest-array in destructuring consume wron
 status: in-review
 created: 2026-05-24
 updated: 2026-05-27
-related: 1555
+blocked_on: 1555
+duplicate_of: 1555
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -109,61 +110,225 @@ The streaming-iterator refactor is the correct, single fix for the whole
 ~305-test bucket. Escalation tag on the task was correct — this needs the
 architect's #1555 streaming design, not a dev hotfix.
 
-## Implementation (dev, 2026-05-27) — bounded-helper Phase 1
+## Implementation Plan (architect, 2026-05-27)
 
-Implemented the incremental bounded-materialization fix (architect's Phase-1
-plan), NOT the full #1555 streaming rewrite.
+### Relationship to #1555 — why a bounded helper, not the full streaming rewrite
 
-### Changes
-- **`src/runtime.ts`**: refactored the `__array_from_iter` closure body into a
-  shared `_arrayFromIter(obj, limit)` and added `__array_from_iter_n(obj, n)`
-  (n<0 ⇒ `limit = Infinity`, byte-identical to the old unbounded drain; n≥0 ⇒
-  consume at most `n` IteratorStep calls). Default-array slice fast path, a new
-  bounded `_drainIterable` (replaces `Array.from` so a finite bound stops
-  early), and a bounded break in the wasm-closure manual walk.
-- **`src/codegen/destructuring-params.ts`**: exported
-  `patternIteratorStepCount(elements)` (elisions count, rest ⇒ -1); the
-  externref param/decl fallback now imports `__array_from_iter_n` and pushes
-  `f64.const stepCount` before the call.
-- **`src/codegen/expressions/assignment.ts`**: array-assignment-pattern
-  materialization swapped to `__array_from_iter_n` with the same step count.
+The dev rec above proposes folding into #1555 (a full
+`destructureParamArray` → streaming-IteratorStep-per-element rewrite,
+`feasibility: hard`). That rewrite is the *eventual* correct shape, but it is a
+large, regression-prone refactor that fights the carefully-tuned
+#1432/#1450/#1550 empty/elision/default paths.
 
-### IteratorClose correction (vs the architect note)
-The architect plan said a bounded stop must NOT close. That is wrong for a
-**no-rest** pattern: §8.5.3 calls IteratorClose after the last element because
-`iteratorRecord.[[Done]]` is still false. Verified against native V8 and against
-test262 `*-ary-init-iter-close.js` (next×2 → return×1 for `[a,b]`; `[x]` over a
-never-done iterator → return×1). So the bounded break sets `cappedOut = true`
-→ closes. Natural `done:true` before the bound still does NOT close (matches
-`*-ary-init-iter-no-close.js`); rest patterns drain unbounded and never close.
-This made the existing #1219 unit test #2's `doneCallCount === 0` assertion
-(tuned to the old eager over-read) spec-incorrect — updated to `=== 1`.
+This plan is the **incremental, low-blast-radius fix**: it does **not** rewrite
+the per-element binding loop and does **not** make iteration truly streaming.
+It changes only **how many iterator steps the materialization consumes**, by
+adding a bounded variant of `__array_from_iter`. The per-element loop, elision
+`continue`, rest slice, defaults, and IteratorClose tuning all stay exactly as
+they are. This recovers spec-correct step counts for the fixed-prefix (no-rest)
+patterns that dominate the ~305 bucket, at a fraction of #1555's risk.
 
-### Scope / residual
-The two patched sites (function/class-method params, decl-var, array
-assignment) are fixed: plain-object iterators consume exactly the
-pattern-length steps and close per spec (verified). One residual remains, OUT
-OF SCOPE for this fix: **compiled `function*` generators eagerly advance past a
-yield** — `_arrayFromIter`/`_drainIterable` correctly request only N steps
-(traced: one `.next()` call), but the generator host-bridge runs the body to
-the *next* yield, so a `[,]` over `function* g(){first++; yield; second++}`
-still observes `second === 1`. That is a generator-suspension codegen bug
-(separate from iterator-step accounting) and belongs with the deeper
-generator/lazy-default work (#1555 / generator codegen), as the architect noted
-for the lazy-default-interleaving sub-case. The for-of-loop-LHS destructuring
-(`for (let [x] of [iter])`) is a third codegen path not touched here and
-remains as-is (pre-existing).
+The one semantic gap vs. full streaming: an iterator whose side effects occur
+*between* a binding element and its default-evaluation (`[a = sideEffect()]`)
+is still materialized in one shot, so default-evaluation interleaving is not
+made lazy. That sub-case stays with #1555. **Recommend: keep #1592 as the
+bounded-helper fix targeting the step-count bucket; leave #1555 open for the
+residual lazy-default interleaving.** If the team prefers a single fix, this
+plan can be the Phase 1 of #1555.
 
-## Test Results
-- New `tests/issue-1592.test.ts` — 8 cases (single/gap/trailing elision, rest,
-  short source, assignment pattern, IteratorClose-on-non-done, rest no-close):
-  all pass.
-- `tests/issue-1219.test.ts` updated (test #2 → spec-correct `doneCallCount===1`)
-  — all pass.
-- Regression suite (1432, 1450, 1158, test262-dstr-patterns, basic/array-rest/
-  generator-method destructuring, iterators, symbol-iterator-protocol,
-  null-destructuring, 43-assign-dstr, 1372-ir): 82 tests pass, 0 failures.
-- test262 spot-check (sync): `*-iter-no-close` pass; `*-iter-step-err` /
-  `*-iter-val-err` pass; plain-object elision/close cases corrected. Async
-  (`for-await-of`) and generator-source variants still fail on the residual
-  above (pre-existing, not regressed). CI measures the net bucket delta.
+### Root cause (refined)
+
+The per-element loop already skips elisions correctly
+(`if (ts.isOmittedExpression(element)) continue;` —
+`destructuring-params.ts:1196/1339`, `assignment.ts:1377`). The bug is one
+level up: **materialization is eager**. Every array-destructuring path that
+sees an `externref` source calls `__array_from_iter(obj)`
+(`src/runtime.ts:3820`), which drains the **entire** iterator —
+`Array.from(obj)` for plain iterables, or the manual `while (true)` walk
+(runtime.ts:3924–3956, capped at `MAX_ITER = 1<<16`) for wasm-closure
+iterators. For a lazy generator, the spec requires exactly **N IteratorStep
+calls** for an N-slot pattern (elisions and a trailing rest each count toward
+N — §8.5.3 IteratorBindingInitialization), **not** a full drain.
+
+The `Cannot destructure 'null' or 'undefined'` L8:5 class-method fails are a
+**secondary symptom**: when the eager drain over-runs a generator default and
+it returns/throws early, the materialized array comes back short (or stale
+null) and a later binding element reads `undefined`, tripping the destructure
+guard.
+
+### Fix: bounded materialization helper `__array_from_iter_n`
+
+Add a host import that materializes **at most `n`** iterator steps.
+
+**Signature (JS host):** `(obj: externref, n: f64) -> externref`
+- `n >= 0`: consume **exactly** `n` iterator steps (call `.next()` up to `n`
+  times); stop early if the iterator reports `done` first. Returned array has
+  `length <= n`.
+- `n < 0` (sentinel `-1`): unbounded — behaves **identically** to today's
+  `__array_from_iter` (full drain). Used when the pattern ends in a rest
+  element, so it shares the exact existing drain + IteratorClose code.
+
+Wasm import type:
+`[{kind:"externref"},{kind:"f64"}] -> [{kind:"externref"}]`. f64 (not i32) for
+the count matches the project's host-import numeric convention
+(`__extern_get_idx`, `__extern_length`).
+
+**Why exactly-N suffices:** a pattern with a rest element always wants the full
+remainder → `n = -1`. A pattern WITHOUT a rest performs `IteratorStep` for
+every slot including trailing elisions → `n = elements.length` is exact, and
+the returned (possibly short) array drives the unchanged per-element loop,
+whose elision `continue` and out-of-range reads already yield correct
+`undefined` bindings.
+
+#### Runtime change — `src/runtime.ts`
+
+Refactor to reuse the existing body:
+
+1. Extract the current `__array_from_iter` closure body (runtime.ts:3827–3984)
+   into a private helper `const _arrayFromIter = (obj: any, limit: number) => …`
+   (`limit` defaults to `Infinity`):
+   - `Array.isArray(obj)` fast path: when `limit` is finite and `< obj.length`,
+     return `obj.slice(0, limit)` — but only AFTER the existing
+     overridden-`@@iterator` check; if the array has a non-default
+     `@@iterator`, go through the protocol so a custom iterator is stepped at
+     most `limit` times (do not whole-materialize-then-slice a custom iterator).
+   - Plain-iterable `Array.from(obj)` branches: replace with a manual loop —
+     `const it = obj[Symbol.iterator](); ` then call `it.next()` up to `limit`
+     times, pushing `value` while `!done`. `Array.from` can't be bounded.
+     Preserve throw propagation from a throwing `@@iterator`/`.next()`/`.value`.
+   - Wasm-closure manual walk (runtime.ts:3924): add
+     `if (out.length >= limit) break;` at the **top** of the `while (true)`
+     loop, **before** the `iterCount++ >= MAX_ITER` check, and ensure this
+     bounded break does **NOT** set `cappedOut`.
+
+2. Keep `__array_from_iter` as a thin wrapper and register the new name:
+   ```ts
+   if (name === "__array_from_iter")
+     return (obj: any) => _arrayFromIter(obj, Infinity);
+   if (name === "__array_from_iter_n")
+     return (obj: any, n: number) =>
+       _arrayFromIter(obj, n < 0 ? Infinity : (n >>> 0));
+   ```
+   `n = -1` is byte-for-byte the old behavior → rest path + IteratorClose tuning
+   unchanged.
+
+3. If host imports are gated, add `"__array_from_iter_n"` next to
+   `__array_from_iter` in `src/codegen/host-import-allowlist.ts`.
+
+#### Codegen wiring
+
+Add a step-count helper near `isPatternEmptyOnly`
+(`destructuring-params.ts:63`):
+```ts
+/**
+ * Iterator steps an array binding/assignment pattern consumes (§8.5.3).
+ * Each element — INCLUDING elision holes (OmittedExpression) — costs one
+ * IteratorStep. A rest element drains the remainder → unbounded → -1.
+ * Binding patterns use BindingElement.dotDotDotToken; assignment patterns
+ * use SpreadElement.
+ */
+function patternIteratorStepCount(
+  elements: readonly (ts.ArrayBindingElement | ts.Expression)[],
+): number {
+  for (const el of elements) {
+    if (el && (ts.isSpreadElement(el) ||
+        (ts.isBindingElement(el) && !!el.dotDotDotToken))) return -1;
+  }
+  return elements.length;
+}
+```
+
+**Site 1 — `src/codegen/destructuring-params.ts:944`** (param/decl externref
+fallback materialization):
+- Swap `ensureLateImport(ctx, "__array_from_iter", [externref], [externref])`
+  → `ensureLateImport(ctx, "__array_from_iter_n", [externref, f64], [externref])`.
+  Keep the surrounding `flushLateImportShifts` ordering.
+- At the IR call site (lines 1041–1044), compute
+  `const n = patternIteratorStepCount(pattern.elements)` at codegen time and
+  emit, after `local.get paramIdx`:
+  `{ op: "f64.const", value: n }` then `call __array_from_iter_n`.
+- Leave the `isPatternEmptyOnly` short-circuit (line 806) untouched.
+
+**Site 2 — `src/codegen/expressions/assignment.ts:1342`** (`[a,,b] = expr`):
+- Same import swap; push `f64.const patternIteratorStepCount(target.elements)`
+  before the call (lines 1345–1346).
+
+**Do NOT touch** the `type-coercion.ts` uses (lines 206/356/362) — spread /
+tuple-coercion paths (`[...iter]`) that genuinely want the full drain.
+`class-bodies.ts:1331` and `statements/exceptions.ts:80` are comments only.
+
+The WasmGC-native vec loop (destructuring-params.ts:949) and tuple-struct fast
+path (line 834) read a concrete struct/array of known static length and never
+step an iterator — elision/rest already correct there; no change.
+
+### Standalone / WASI equivalent
+
+`__array_from_iter` is **JS-host-only**; there is no WasmGC-native iterator
+drain in `src/codegen-linear/` (confirmed: no `array_from_iter` reference under
+that dir). Destructuring an arbitrary externref *iterable* in pure-standalone
+mode is already unsupported and this fix does not regress it. The WasmGC vec /
+tuple paths use static-length indexed reads (elisions honored, no iterator) so
+standalone mode is already correct for those. **No new standalone host import
+is required by this issue.** If a future issue adds a Wasm-native
+generator-drain for standalone mode, it should accept the same `n` bound — note
+here, do not build it now.
+
+### IteratorClose handling (MUST preserve verbatim)
+
+`__array_from_iter` calls `iterator.return()` ONLY on the `cappedOut`
+(`MAX_ITER` defensive cap) path (runtime.ts:3963–3972), and deliberately does
+**not** close on natural `done`, `result == null`, or missing `.next`
+(tuned against `dstr/*-ary-init-iter-no-close.js`, #1219).
+`__array_from_iter_n` inherits this because it shares `_arrayFromIter`:
+- `n = -1` → `limit = Infinity` → identical control flow → identical close.
+- `n >= 0` reaching the bound → **NormalCompletion**, do **NOT** call
+  `return()`; the bounded break must not set `cappedOut`. Closing here would
+  regress `dstr/*-ary-init-iter-no-close.js`.
+- Keep `MAX_ITER` + its `cappedOut → return()` exactly as-is for the unbounded
+  (rest) case.
+
+### Edge cases
+
+- **Rest** `[a, ...rest]` → `patternIteratorStepCount` = -1 → unbounded →
+  byte-identical to today; downstream `__extern_slice` (assignment.ts:1379) /
+  vec slice unchanged.
+- **Elision counts**: `[, x]`→n=2, `[a,,b]`→n=3, `[a,,]`→n=2 (trailing elision
+  still steps). TS keeps `OmittedExpression` nodes in `elements`, so
+  `elements.length` is automatically right.
+- **`[...rest,]`** (rest + trailing comma) → has rest → n=-1.
+- **Nested** `[[a],,b]` → each top-level slot = one step; n = top-level
+  `elements.length`; nested destructure runs on the materialized element.
+- **Empty `[]`** → handled earlier by `isPatternEmptyOnly`; never reaches the
+  helper.
+- **Short source** `[a,b,c] = [1]` (n=3, yields 1) → helper returns `[1]`;
+  out-of-range reads → `undefined` bindings (matches eager behavior, fewer
+  `.next()` calls).
+- **n=0 reaching helper** → `limit=0` → no `.next()`, returns `[]`. Safe.
+
+### Test files to verify
+
+```
+test/language/statements/class/dstr/meth-dflt-ary-ptrn-rest-ary-elision.js
+test/language/statements/class/dstr/private-gen-meth-static-dflt-ary-ptrn-elision.js
+test/language/statements/for-await-of/async-func-dstr-const-async-ary-ptrn-rest-ary-elision.js
+test/language/statements/for-await-of/async-func-dstr-const-ary-ptrn-rest-ary-empty.js
+test/language/statements/for-of/*-ary-ptrn-elision*.js
+test/language/expressions/assignment/dstr/array-elision-*.js
+```
+
+### Regression risks & categories to run
+
+- **Highest risk: IteratorClose.** Route the rest case through unchanged
+  `limit=Infinity`; never `return()` on the new bounded break.
+- **`Array.from` → manual loop swap** must preserve throw propagation
+  (#1150, #1454): run `dstr/*-iter-get-err*`, `*-iter-step-err*`,
+  `*-iter-val-err*`.
+- **Late-import shifts**: `__array_from_iter_n` has 2 args; preserve the
+  `ensureLateImport` + `flushLateImportShifts` ordering at the two sites so
+  funcIdx shifts propagate (`body: []` / savedBodies pattern — see CLAUDE.md
+  addUnionImports note).
+- **Run:** `language/statements/class` + `language/expressions/class` (dstr);
+  `for-of`, `for-await-of`; `language/expressions/assignment/dstr`;
+  `language/statements/function`; `language/expressions/async-generator`;
+  full `tests/equivalence.test.ts`; any `issue-1158`/`issue-1159`/`iter-close`
+  equivalence tests to confirm no IteratorClose regression.

@@ -2834,6 +2834,9 @@ function resolveImport(
           Test262Error,
           // (#1455) SharedArrayBuffer for `class Sub extends SharedArrayBuffer {}`
           ...(typeof SharedArrayBuffer !== "undefined" ? { SharedArrayBuffer } : {}),
+          // (#1600) FinalizationRegistry — host-delegate `new FinalizationRegistry(cb)`
+          // and register/unregister to the real engine registry.
+          ...(typeof FinalizationRegistry !== "undefined" ? { FinalizationRegistry } : {}),
           // TC39 Explicit Resource Management (stage 3 / Node.js 22+)
           ...(typeof DisposableStack !== "undefined" ? { DisposableStack } : {}),
           ...(typeof AsyncDisposableStack !== "undefined" ? { AsyncDisposableStack } : {}),
@@ -2903,6 +2906,14 @@ function resolveImport(
             // converted entries. For Map/WeakMap each entry must itself be
             // an iterable (tuple → [k, v] array).
             args[0] = _convertIterableForHost(args[0], exports);
+          } else if (intent.className === "FinalizationRegistry") {
+            // (#1600) The cleanup callback is a wasm closure externref, not a
+            // real callable JS function, so the engine's
+            // `new FinalizationRegistry(cb)` would throw "cleanup must be
+            // callable". The spec never guarantees cleanup callbacks run, so
+            // substitute a no-op function — register/unregister still work and
+            // the (never-fired) callback is spec-permissibly inert.
+            if (typeof args[0] !== "function") args[0] = () => {};
           } else if (isBufferConsumer && args.length > 0 && _isWasmStruct(args[0])) {
             const exports = callbackState?.getExports();
             const dvLen = exports?.__dv_byte_len as ((v: any) => number) | undefined;
@@ -3765,7 +3776,8 @@ assert._isSameValue = isSameValue;
       // exported getters so opaque struct fields are visible at runtime.
       if (name === "__object_keys")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.18 Object.keys → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3782,7 +3794,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_values")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.22 Object.values → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -3804,7 +3817,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__object_entries")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.5 Object.entries → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
@@ -4418,7 +4432,8 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__getOwnPropertyNames")
         return (obj: any) => {
-          if (obj == null) return [];
+          // ES §20.1.2.10 Object.getOwnPropertyNames → ToObject (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
           if (!_isWasmStruct(obj)) return Object.getOwnPropertyNames(obj);
           const exports = callbackState?.getExports();
           // #1047 — registered class prototype: return only the allowlist
