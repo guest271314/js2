@@ -3,7 +3,7 @@ id: 820h
 title: "DisposableStack / AsyncDisposableStack brand-check and protocol stubs (~74 fails)"
 status: in-review
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,7 +11,7 @@ task_type: bugfix
 area: builtins
 language_feature: explicit-resource-management
 goal: async-model
-sprint: Backlog
+sprint: 56
 parent: 820
 es_edition: ES2025
 test262_fail: 74
@@ -67,3 +67,44 @@ delegation are not.
 - ES2025 feature; consider whether this is in scope before the rest of the
   ES2025 surface is built out. May be a candidate for `goal: deferred`
   re-classification if the team isn't pursuing ES2025 coverage yet.
+
+## Root cause
+
+The suspected source (`prototype-from-newtarget` chain wiring / missing
+brand checks) was a red herring. The constructors *are* host-delegated and
+`new DisposableStack().dispose()` already works. The real defect: bare
+identifiers `DisposableStack` / `AsyncDisposableStack` / `SuppressedError`
+used as **values** (not in `new X()` / `x.method()` position) fell through
+`compileIdentifier`'s "graceful fallback for known-but-unimplemented globals"
+and emitted `ref.null.extern`. So every reflective test —
+`DisposableStack.prototype`, `Object.getOwnPropertyDescriptor(DisposableStack.prototype, …)`,
+`Reflect.construct(DisposableStack, …)` — saw `null` and threw a
+WebAssembly.Exception or "null is not a constructor".
+
+## Fix
+
+`src/codegen/expressions/identifiers.ts` — added a handler (mirroring the
+existing `globalThis` handler) that resolves these three ERM globals to the
+real host constructor via `__extern_get(__get_globalThis(), name)` when the
+name is not shadowed by a local/captured binding or a user class. With the
+host constructor object visible, its `.prototype`, accessor descriptors, and
+`[[Construct]]` all work through the existing extern machinery.
+
+## Test Results (against /workspace/test262, via real harness)
+
+DisposableStack + AsyncDisposableStack suite (143 tests, runnable subset):
+- **before**: 72 pass / 71 fail
+- **after**:  121 pass / 22 fail  (**+49 flips**)
+
+The `[object WebAssembly.Exception]` brand/descriptor failure class is fully
+eliminated. Unit coverage: `tests/issue-820h.test.ts` (7 tests, incl.
+shadowing + normal-use regression guards).
+
+### Remaining 22 (out of scope for this fix)
+- `$262 is not defined` (2) — cross-realm harness, not implementable here.
+- `[Symbol.dispose] is not a function` / `[object Object] is not a function`
+  (~7) — disposer callbacks/objects are WasmGC values the host can't invoke
+  as JS functions; needs a broader compiled-object→host-protocol bridge.
+- `is-a-constructor` / `undefined-newtarget` / `newtarget-prototype-is-not-object`
+  / `prototype-from-newtarget-*` (~13) — `Reflect.construct` with bound-fn
+  newTarget and `new stack.method()` edge cases; deeper host bridging.

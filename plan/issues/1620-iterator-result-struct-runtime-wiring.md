@@ -3,7 +3,7 @@ id: 1620
 title: "$IteratorResult struct: eliminate __iterator_done/__iterator_value host imports (runtime wiring gap)"
 status: ready
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -278,3 +278,356 @@ change), keeps the import surface reduced, and removes the latent trap.
   iterator is consumed via a *different* `next` import, that import needs the same
   struct-construction treatment, or its for-of read must keep a separate path.
   Check `ensureAsyncIterator` and async-iterator tests before assuming parity.
+
+## BLOCKED — Option C is not viable as specced (verified 2026-05-27, dev-1593)
+
+Option C assumes the `$__IteratorResult` struct can be built in Wasm
+(`__make_iterator_result`, exported), returned to the JS `__iterator_next`
+bridge, and then flow back into Wasm as the import's `externref` result, where
+the for-of read recovers it via `any.convert_extern` + `ref.cast`. **This
+round-trip does not work in V8 (Node 25).**
+
+Verified empirically (probes in `.tmp/`, branch `issue-1620-iterator-result-struct`):
+
+- `__make_iterator_result` is exported and reachable (`setExports` wired).
+- Calling it directly from JS — `instance.exports.__make_iterator_result(0, 7)`
+  — returns **`undefined`** (`=== undefined` is `true`), whether the helper
+  returns `(ref null $IteratorResult)` *or* externalizes via
+  `extern.convert_any` to return `externref`. WAT confirms `struct.new 11`
+  + `extern.convert_any` are emitted and the export signature is
+  `(param i32 externref) (result externref)`.
+- So the runtime's `return make(done?1:0, value)` hands `undefined` back as the
+  `__iterator_next` import result. Wasm sees a null externref, the for-of
+  `ref.test (ref $__IteratorResult)` guard is **false**, and the hardened
+  else-branch throws `TypeError` (the `Exception` the failing test observes).
+- The 5 string-for-of cases in `tests/iterators.test.ts` pass **only because
+  strings never call `__iterator_next`** — they use the in-codegen array
+  fast-path. Confirmed: wrapping `__iterator_next` shows it is never invoked
+  for string for-of. So those green tests do **not** exercise the struct path;
+  the **custom-iterable** case in `symbol-iterator-protocol.test.ts` is the
+  only one that does, and it fails.
+
+**Root cause:** a freshly-constructed internal WasmGC struct, externalized and
+returned through a *plain JS import boundary*, is surfaced to JS as `undefined`
+and cannot be re-internalized by the consumer. The struct cannot survive the
+JS hop that `__iterator_next` (a JS host import) forces. This is the real
+"runtime wiring gap" the issue warned about — it is a design constraint, not a
+localized bug.
+
+**Why the obvious fixes don't apply:**
+- Externalizing in `__make_iterator_result` (the change tried) does not help —
+  the externref still surfaces as `undefined`.
+- Reverting to read `done`/`value` from the raw JS result object in Wasm would
+  require `__iterator_done` / `__iterator_value` host imports — the very imports
+  this issue exists to remove (Option B, already rejected in the spec).
+
+**Needs architect respec.** Candidate directions (need a decision):
+1. Build the `$__IteratorResult` struct **at the for-of call site in Wasm**,
+   after `__iterator_next` returns the *raw JS result object* (which survives
+   as externref). Reading `done`/`value` from a JS object in pure Wasm without
+   host imports is the open problem — possibly via a single combined
+   `__iterator_next_done_value` import that returns the two primitives packed,
+   or via a Wasm-native iterator representation for compiler-emitted iterators
+   (relates to #1665 native generators / shared `$Iterator` design).
+2. Accept a narrowed scope: keep the host imports for the *JS-host* mode and
+   only use the struct path in *standalone* mode where iterators are
+   Wasm-native end to end (no JS hop). This satisfies `goal: host-independence`
+   for standalone without breaking JS-host custom iterables.
+
+WIP (this investigation + the externref attempt) is committed on branch
+`issue-1620-iterator-result-struct` for the architect to build on.
+
+## Implementation Plan (v2)
+
+### Direction chosen — **Direction 1: multi-value import** (struct eliminated entirely)
+
+The v1 (Option C) struct round-trip is dead: a WasmGC struct externalized and
+returned through the `__iterator_next` JS import boundary surfaces as
+`undefined` in V8/Node 25 (proven by dev-1593, see BLOCKED section). The struct
+cannot survive the JS hop a host import forces.
+
+Direction 1 sidesteps the struct completely. Change `__iterator_next` from
+`(externref) → externref` to `(externref) → (i32 done, externref value)` — a
+**Wasm multi-value result**. The runtime reads `done`/`value` off the raw JS
+result object and returns them as a two-element JS array `[done ? 1 : 0, value]`.
+V8/Node implement the JS↔Wasm multi-value ABI: a JS import declared with N
+results must return an iterable of length N, which V8 destructures onto the Wasm
+stack. Both values are **primitives** (i32 + externref), not a GC object, so
+there is no struct, no `any.convert_extern`, no `ref.cast`, and no JS-hop
+`undefined` problem. This deletes the `__iterator_done` and `__iterator_value`
+imports outright — exactly the issue's primary acceptance criterion — with no
+fallback host imports (so it also satisfies `goal: host-independence`).
+
+**Feasibility confirmed** by source inspection (no probe needed — the encoders
+already handle arbitrary result vectors):
+- `addFuncType(ctx, params, results, name?)` (`src/codegen/registry/types.ts:30`)
+  takes `results: ValType[]` of any length; the cache key
+  (`funcTypeKey`, L12-28) already serialises the full results list.
+- Binary type-section emitter writes the full results vector:
+  `enc.vector(t.results, …)` (`src/emit/binary.ts:401`). No single-result
+  assumption anywhere.
+- WAT emitter maps all results (`src/emit/wat.ts:212,290`).
+- A `call` to a `(result i32 externref)` import leaves two values on the stack
+  (results pushed left-to-right ⇒ **`value` (externref) is on top, `done` (i32)
+  below it**). The loop just does two `local.set`s in that order. No new opcode,
+  no block-type machinery — the existing per-iteration code already runs inside
+  the `loop` body where a bare `call` + `local.set` is legal.
+
+### Changes
+
+**File: `src/codegen/index.ts` — `addIteratorImports` (current ~L6741-6781)**
+
+- Change the `__iterator_next` registration to use a **multi-value** func type
+  instead of reusing `extToExt`:
+  ```ts
+  // __iterator_next: (externref) → (i32 done, externref value)
+  // Multi-value result avoids the $IteratorResult struct (a GC struct cannot
+  // survive the JS import hop — it surfaces as undefined in V8; see #1620).
+  const extToDoneValue = addFuncType(
+    ctx,
+    [{ kind: "externref" }],
+    [{ kind: "i32" }, { kind: "externref" }],
+  );
+  addImport(ctx, "env", "__iterator_next", { kind: "func", typeIdx: extToDoneValue });
+  ```
+  Leave the `__iterator` registration (and its `extToExt` type) exactly as is.
+- **Delete** the `__iterator_done` import + its `extToI32` func-type
+  registration (current L6755-6760) and the `__iterator_value` import (current
+  L6762-6766). `extToI32` is now unused — remove the line so there's no dead
+  type registration.
+- **Keep** `__iterator`, `__iterator_return` (`extToVoid`), and `__iterator_rest`
+  (`extToExt`) unchanged. Do NOT touch the `__make_iterator_result` /
+  `$IteratorResult` machinery from PR #347 — it is not on current main (v1 was
+  never merged), so there is nothing to port or remove here. The index math
+  (`makeFuncIdx`) concerns in v1 do not apply: we add no defined+exported helper.
+- **No `ctx.iteratorResultTypeIdx`** field is needed (that was v1-only). Do not
+  add it.
+
+**File: `src/codegen/statements/loops.ts` — `compileForOfIterator`
+(current ~L3330-3465)**
+
+- Update the lookup block (current L3330-3337): drop `doneIdx`/`valueIdx`; only
+  `nextIdx` and `returnIdx` remain relevant from this set:
+  ```ts
+  const nextIdx = ctx.funcMap.get("__iterator_next");
+  const returnIdx = ctx.funcMap.get("__iterator_return");
+  if (nextIdx === undefined) {
+    reportError(ctx, stmt, "for-of on non-array type requires iterator imports");
+    return;
+  }
+  ```
+- Allocate a **done** local alongside the existing `resultLocal`. `resultLocal`
+  (externref) is now repurposed to hold the **value**; rename for clarity or keep
+  it as the value slot. Add an i32 local for done:
+  ```ts
+  const nextDoneLocal = allocLocal(fctx, `__forof_done_raw_${fctx.locals.length}`, { kind: "i32" });
+  ```
+  (Distinct from the existing `doneFlag` at L3393, which is the iterator-close
+  bookkeeping flag — keep that.)
+- Replace the per-iteration `__iterator_next` + `__iterator_done` +
+  `__iterator_value` sequence (current L3442-3465) with a single multi-value
+  call. **Order matters** — value (externref) is on top of the stack, done (i32)
+  below, so pop value first:
+  ```wasm
+  ;; result = __iterator_next(iter)  →  pushes  done(i32), value(externref)
+  local.get $iter
+  call $__iterator_next
+  local.set $value        ;; top-of-stack = externref value  → resultLocal/value slot
+  local.set $doneRaw      ;; next = i32 done                   → nextDoneLocal
+  ```
+  i.e. in instr terms:
+  ```ts
+  fctx.body.push({ op: "local.get", index: iterLocal });
+  fctx.body.push({ op: "call", funcIdx: nextIdx });
+  fctx.body.push({ op: "local.set", index: resultLocal });   // externref value (top)
+  fctx.body.push({ op: "local.set", index: nextDoneLocal }); // i32 done (below)
+  ```
+- Replace the done-check (current L3448-3460) — no more `call doneIdx`; read the
+  i32 local directly:
+  ```ts
+  fctx.body.push({ op: "local.get", index: nextDoneLocal });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "local.set", index: doneFlag } as Instr,
+      { op: "br", depth: 2 } as Instr, // break: if + loop = depth 2
+    ],
+    else: [],
+  });
+  ```
+- Replace the value read (current L3462-3465) — no more `call valueIdx`; the
+  value is already in `resultLocal`. Just move it into `elemLocal`:
+  ```ts
+  fctx.body.push({ op: "local.get", index: resultLocal });
+  fctx.body.push({ op: "local.set", index: elemLocal });
+  ```
+  (Or, micro-optimisation: `local.set` directly into `elemLocal` at the call
+  site instead of `resultLocal`, dropping one local + one copy. Keep `resultLocal`
+  only if it's referenced elsewhere — it is not, after this change, so collapsing
+  is safe. Either is acceptable; prefer the explicit two-local version above for
+  reviewability.)
+- Update the doc-comment pseudo-code (current L3231-3238): replace the
+  `__iterator_done` / `__iterator_value` lines with:
+  ```
+  *     (done, value) = __iterator_next(iter)   // multi-value result
+  *     if done → break
+  *     elem = value
+  ```
+- **Leave everything else untouched**: the null-check (L3279-3312), the
+  break/continue depth `+3` math (L3384-3389 / L3500-3503), the `doneFlag`
+  iterator-close bookkeeping, the `finallyStack` entry, the 1M-iteration guard,
+  the try/catch_all iterator-close wrapper (L3521-3570), and all destructuring
+  branches. None of these depend on how `done`/`value` are obtained.
+
+**File: `src/runtime.ts` — `__iterator_next` (current ~L5877-5905)**
+
+- Change the returned import function to compute `done`/`value` itself (folding
+  in the logic currently split across `__iterator_done` / `__iterator_value`) and
+  return a **two-element array** `[done ? 1 : 0, value]`:
+  ```ts
+  if (name === "__iterator_next")
+    return (iter: any): [number, any] => {
+      // Resolve iter.next (own / sidecar / __sget_next / WasmGC closure / __call_next)
+      let raw: any;
+      let next = iter.next ?? _sidecarGet(iter, "next");
+      if (next === undefined) {
+        const exports = callbackState?.getExports();
+        next = exports?.__sget_next?.(iter);
+      }
+      if (typeof next === "function") {
+        raw = next.call(iter);
+      } else if (next != null && _isWasmStruct(next)) {
+        const exports = callbackState?.getExports();
+        const callFn0 = (exports as any)?.__call_fn_0;
+        if (typeof callFn0 === "function") raw = callFn0(next);
+      }
+      if (raw === undefined) {
+        const exports = callbackState?.getExports();
+        const callNext = (exports as any)?.["__call_next"];
+        if (typeof callNext === "function") raw = callNext(iter);
+      }
+      if (raw === undefined) throw new TypeError("iterator.next is not a function");
+
+      // Extract done (own / sidecar / __sget_done)
+      let done = raw.done ?? _sidecarGet(raw, "done");
+      if (done === undefined) {
+        const exports = callbackState?.getExports();
+        done = exports?.__sget_done?.(raw);
+      }
+      // Extract value (own / sidecar / __sget_value)
+      let value = raw.value;
+      if (value === undefined) {
+        value = _sidecarGet(raw, "value");
+        if (value === undefined) {
+          const exports = callbackState?.getExports();
+          value = exports?.__sget_value?.(raw);
+        }
+      }
+      // Wasm multi-value ABI: return an iterable of [i32 done, externref value].
+      return [done ? 1 : 0, value];
+    };
+  ```
+  Note the subtle change vs the old split path: the old `__iterator_next` could
+  fall through `__call_fn_0` / `__call_next` returning `result != null` and
+  return that struct directly; here `raw` is the result object and we always
+  extract from it. Preserve the same resolution *order* (own next → sidecar →
+  `__sget_next` → `__call_fn_0` closure → `__call_next`) so existing WasmGC
+  iterator shapes keep working — only the final return shape changes.
+- **Delete** the `__iterator_done` (L5906-5915) and `__iterator_value`
+  (L5916-5925) import branches entirely — they are no longer registered by
+  `addIteratorImports`, so they would be dead. Removing them keeps the import
+  table honest.
+- `__iterator_rest` and `__iterator_return` are **unchanged** — they read the raw
+  iterator directly and never went through the result-struct path.
+
+### Tests to update
+
+- **`tests/iterators.test.ts` L88-91** — the stale assertions assert the WAT
+  contains `__iterator_done` / `__iterator_value`. Those imports are gone. Update:
+  ```ts
+  expect(result.wat).toContain("__iterator");        // keep — still imported
+  expect(result.wat).toContain("__iterator_next");   // keep — still imported
+  // removed: __iterator_done / __iterator_value
+  // The next import now has a 2-result type; optionally assert the multi-value
+  // signature surfaced in the WAT, e.g.:
+  // expect(result.wat).toMatch(/__iterator_next.*\(result i32 externref\)|\(result i32 externref\)/);
+  ```
+  Keep the assertion permissive — the exact WAT spelling of the import's result
+  list depends on the formatter; asserting the two import *names* are gone +
+  `__iterator_next` present is sufficient.
+- **`tests/iterators.test.ts` L12 (harness)** — v1 required a `setExports` call
+  because the struct path needed the exported `__make_iterator_result`. **v2 needs
+  no exported helper**, so the existing hand-rolled `WebAssembly.instantiate`
+  without `setExports` is fine for `__iterator_next` — the import is pure JS.
+  However, the resolution chain still references `callbackState?.getExports()` for
+  the `__sget_*` / `__call_*` fallbacks (only used by WasmGC struct iterators). The
+  5 string for-of cases use the in-codegen array fast-path and never call
+  `__iterator_next` at all, so they pass regardless. **No harness change required**
+  for v2 — but add the `setExports` call anyway if you want the WasmGC-struct
+  fallbacks exercisable in that harness (low priority).
+- **`tests/symbol-iterator-protocol.test.ts`** — the custom-iterable case is the
+  real exerciser of `__iterator_next`. It must pass (it currently fails on the
+  v1 branch with the `undefined`-struct `TypeError`). With v2 it gets a real
+  `[done, value]` array — verify it passes.
+- **Audit**: `grep -rn "__iterator_done\|__iterator_value" tests/ src/` and
+  remove/update every hit. None expected outside `iterators.test.ts` and the
+  runtime branches being deleted, but verify before pushing.
+
+### Edge cases
+
+- **Async iterator path** (`for await…of`, `stmt.awaitModifier` →
+  `ensureAsyncIterator`, L3316-3318): `ensureAsyncIterator` only swaps the
+  `__iterator` call for an async-iterator acquisition; the per-step `next` still
+  flows through `ctx.funcMap.get("__iterator_next")`. So the multi-value change
+  covers the async path **for free** — but the runtime's `next.call(iter)` may
+  return a **Promise** for async iterators (`{value, done}` wrapped in a Promise).
+  The current code does not `await` (the async lowering handles suspension
+  elsewhere). **Verify**: check whether `ensureAsyncIterator` registers a
+  *separate* next import or reuses `__iterator_next`. If async iteration resolves
+  the promise before reaching the result read (likely via the generator/async
+  state machine), the `[done, value]` extraction sees a settled object and works.
+  If async uses a distinct next import, that import needs the same multi-value
+  treatment. Confirm against the async-iterator tests before assuming parity — do
+  not block v2 on this; the sync custom-iterable case is the acceptance gate.
+- **`__iterator_return`** is orthogonal and unchanged (separate import, reads the
+  raw iterator, no result object). The iterator-close protocol (try/catch_all,
+  finallyStack, post-loop break check) is untouched.
+- **`raw` is null/undefined** (malformed iterator): the runtime throws
+  `TypeError("iterator.next is not a function")` (preserved). Reading `.done`/
+  `.value` off a non-null non-object `raw` returns `undefined` → `done=0`,
+  `value=undefined` → externref null in Wasm, which the loop treats as a normal
+  (non-done) element. This matches the old behaviour (old `__iterator_done`
+  returned 0 for missing `done`). Acceptable.
+- **`done` truthiness**: spec says `IteratorComplete` does `ToBoolean(result.done)`.
+  `done ? 1 : 0` matches (preserved from old `__iterator_done`).
+- **value is a JS number / boolean / string**: returned inside the array as-is;
+  V8 boxes it to externref at the ABI boundary exactly as the old
+  `__iterator_value` import return did. No behaviour change.
+- **Multi-value JS-import ABI requirement**: the import MUST return an *iterable*
+  of exactly length 2. A plain array literal `[d, v]` is iterable — correct. Do
+  **not** return an object `{done, value}` (not the multi-value shape) or a bare
+  scalar.
+
+### Estimated impact
+
+- Host calls per iteration step: **3 → 1** (`next`+`done`+`value` collapse into a
+  single `__iterator_next`). Net-positive for perf and host-independence.
+- Imports eliminated: `__iterator_done`, `__iterator_value`. Acceptance met.
+- No GC-struct round-trip ⇒ no V8 `undefined` hazard ⇒ the BLOCKED failure mode
+  is structurally impossible.
+- test262: neutral-to-positive; string for-of unaffected (array fast-path),
+  custom-iterable for-of fixed.
+
+### Risks / coordination
+
+- **Result stack order** is the one easy-to-get-wrong detail: with
+  `(result i32 externref)`, externref `value` is on top. `local.set` value
+  **first**, then done. Getting this backwards is a type mismatch the WAT/binary
+  validator will catch immediately, but call it out in the PR.
+- **No index-shift risk**: we add/remove only *imports* and change one import's
+  type — `addUnionImports` shifting concerns from v1 do not apply (no new
+  defined+exported helper).
+- **No `context/types.ts` change**: `iteratorResultTypeIdx` is not introduced.
+- Coexists cleanly with `__iterator_rest` (#1052) — untouched.
