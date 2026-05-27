@@ -710,7 +710,9 @@ export function destructureParamObject(
     // When the struct field holds the "undefined" sentinel (NaN for f64,
     // ref.null for refs), evaluate the initializer instead. (#823)
     if (element.initializer) {
-      emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, element.initializer);
+      // Object-property semantics (§13.3.3.7): JS `null` here must NOT fire the
+      // default — only `undefined` does. (#1550)
+      emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, element.initializer, undefined, true);
       if (isDecl) emitLocalTdzInit(fctx, localName);
     } else {
       // Coerce struct field type to local's declared type if they differ (#658)
