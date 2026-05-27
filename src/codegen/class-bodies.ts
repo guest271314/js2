@@ -1626,6 +1626,13 @@ function compileClassBodiesInner(
         { name: "this", type: { kind: "ref", typeIdx: structTypeIdx } },
       ];
 
+      // (#1681) Static accessor bodies reach `this` as the class-constructor
+      // global (externref), not a per-instance struct. Mark the fctx static +
+      // tag the enclosing class so `this.<prop>` routing in member-access /
+      // assignment resolves through the static-global path instead of casting
+      // the externref to the class struct (invalid `extern.convert_any`).
+      const getterIsStatic = hasStaticModifier(member);
+
       const fctx: FunctionContext = {
         name: getterName,
         params,
@@ -1638,6 +1645,8 @@ function compileClassBodiesInner(
         continueStack: [],
         labelMap: new Map(),
         savedBodies: [],
+        enclosingClassName: className,
+        isStaticContext: getterIsStatic ? true : undefined,
       };
 
       // Re-resolve getter function type (see method type re-resolution above)
@@ -1715,6 +1724,10 @@ function compileClassBodiesInner(
         params.push({ name: paramName, type: wasmType });
       }
 
+      // (#1681) See the getter site above — static setter bodies reach `this`
+      // as the class-constructor global, so mark the fctx static.
+      const setterIsStatic = hasStaticModifier(member);
+
       const fctx: FunctionContext = {
         name: setterName,
         params,
@@ -1727,6 +1740,8 @@ function compileClassBodiesInner(
         continueStack: [],
         labelMap: new Map(),
         savedBodies: [],
+        enclosingClassName: className,
+        isStaticContext: setterIsStatic ? true : undefined,
       };
 
       // Re-resolve setter function type (see method type re-resolution above)
