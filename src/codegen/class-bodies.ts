@@ -1456,7 +1456,8 @@ function compileClassBodiesInner(
       if (member.body && bodyUsesArguments(member.body)) {
         const methodParamTypes = params.slice(isStatic ? 0 : 1).map((p) => p.type);
         const paramOffset = isStatic ? 0 : 1; // skip 'this' param for instance methods
-        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset);
+        // Class bodies are always strict code → unmapped arguments (#779e).
+        emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true);
       }
 
       if (isGeneratorMethod && member.body) {

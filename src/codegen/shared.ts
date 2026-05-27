@@ -433,6 +433,7 @@ type EmitArgumentsObjectFn = (
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped?: boolean,
 ) => void;
 
 let _emitArgumentsObject: EmitArgumentsObjectFn = () => {
@@ -443,13 +444,19 @@ export function registerEmitArgumentsObject(fn: EmitArgumentsObjectFn): void {
   _emitArgumentsObject = fn;
 }
 
+/**
+ * `unmapped`: when true (strict-mode functions, §10.4.4) the param↔arguments
+ * sync is suppressed so writes to `arguments[i]` do not flow back into the
+ * named parameter (#779e). Defaults to false (sloppy, mapped).
+ */
 export function emitArgumentsObject(
   ctx: CodegenContext,
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped = false,
 ): void {
-  _emitArgumentsObject(ctx, fctx, paramTypes, paramOffset);
+  _emitArgumentsObject(ctx, fctx, paramTypes, paramOffset, unmapped);
 }
 
 // ── compileStringLiteral ──────────────────────────────────────────────
