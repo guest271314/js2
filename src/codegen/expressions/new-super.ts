@@ -1802,14 +1802,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // expecting a real object, e.g. `Boolean(new Object())` returned `false`
   // because `__to_boolean(null) === 0`.
   //
-  // Use `__object_create(null)` host import to produce a fresh empty
-  // object. Falls back to `ref.null.extern` only if the import can't be
-  // registered (preserving the legacy shape so we never regress further).
+  // Use `__new_plain_object` host import to produce a fresh empty object
+  // with the ordinary `Object.prototype` prototype (#1525). `new Object()`
+  // per §20.1.1.1 must inherit `Object.prototype` — using `__object_create(null)`
+  // gave it a null prototype, so it had no `toString`/`valueOf` and any
+  // ToPrimitive coercion (`==`, arithmetic, `String(...)`) threw
+  // "Cannot convert object to primitive value" instead of producing
+  // "[object Object]". Falls back to `ref.null.extern` only if the import
+  // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (createIdx !== undefined) {
-      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "call", funcIdx: createIdx });
       return { kind: "externref" };
     }

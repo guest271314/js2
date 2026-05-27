@@ -1629,8 +1629,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     const args = expr.arguments ?? [];
 
     // Object() / Object(null) / Object(undefined) → fresh empty object via
-    // `__object_create(null)`. Mirrors the `new Object()` path in new-super.ts
-    // so the result is a real object (Boolean(...) === true, etc.).
+    // `__new_plain_object`. Mirrors the `new Object()` path in new-super.ts
+    // so the result is a real object with the ordinary `Object.prototype`
+    // (Boolean(...) === true, and ToPrimitive finds toString/valueOf so
+    // `Object() == 0` etc. don't throw — #1525).
     const isNullOrUndefinedArg = (a: ts.Expression): boolean => {
       if (a.kind === ts.SyntaxKind.NullKeyword) return true;
       if (ts.isIdentifier(a) && a.text === "undefined") return true;
@@ -1643,11 +1645,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     };
 
     if (args.length === 0 || isNullOrUndefinedArg(args[0]!)) {
-      const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+      const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      const finalCreateIdx = ctx.funcMap.get("__object_create") ?? createIdx;
+      const finalCreateIdx = ctx.funcMap.get("__new_plain_object") ?? createIdx;
       if (finalCreateIdx !== undefined) {
-        fctx.body.push({ op: "ref.null.extern" });
         fctx.body.push({ op: "call", funcIdx: finalCreateIdx });
         return { kind: "externref" };
       }
