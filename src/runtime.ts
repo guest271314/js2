@@ -4067,14 +4067,40 @@ assert._isSameValue = isSameValue;
             throw new TypeError("Object.defineProperty called on non-object");
           }
           const key = prop != null ? String(prop) : "";
-          // For plain JS objects and descriptors, use native Object.defineProperty which
-          // follows the prototype chain for descriptor flags per ToPropertyDescriptor.
-          if (!_isWasmStruct(obj)) {
+          // Field reader that round-trips both plain JS objects (native `o[f]`,
+          // which fires accessors / walks the prototype chain per
+          // ToPropertyDescriptor) and WasmGC structs (sidecar + the compiled
+          // module's `__sget_<field>` exports for typed struct fields that
+          // never reach the sidecar). Mirrors the reader in __defineProperties.
+          const getField = (o: any, f: string): any => {
+            if (!_isWasmStruct(o)) return o[f];
+            // _safeGet fires struct accessor getters (__get_<f>) and the
+            // sidecar; fall back to the compiled module's __sget_<field>
+            // export for typed struct fields that never reach the sidecar.
+            let v = _safeGet(o, f);
+            if (v === undefined) {
+              const g = callbackState?.getExports()?.[`__sget_${f}`];
+              if (typeof g === "function") v = g(o);
+            }
+            return v;
+          };
+          // For a plain JS object whose descriptor is also a plain JS object,
+          // native Object.defineProperty follows the descriptor's prototype
+          // chain and accessor getters correctly — use it directly.
+          if (!_isWasmStruct(obj) && !_isWasmStruct(desc)) {
             Object.defineProperty(obj, key, desc);
             return obj;
           }
+          // The descriptor is a WasmGC struct (e.g. an object-literal-valued
+          // descriptor in `Object.create(p, { k: descStruct })`). Native
+          // Object.defineProperty sees it as null-proto/no-keys and drops every
+          // attribute. Materialize a plain descriptor via getField first.
+          if (!_isWasmStruct(obj)) {
+            const d2 = _toPropertyDescriptorValidate(desc, getField);
+            Object.defineProperty(obj, key, d2);
+            return obj;
+          }
           // WasmGC struct obj: apply via sidecar
-          const getField = (o: any, f: string): any => (!_isWasmStruct(o) ? o[f] : _sidecarGet(o, f));
           const d = _toPropertyDescriptorValidate(desc, getField);
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
