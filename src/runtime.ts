@@ -1610,6 +1610,47 @@ function _structToPlainObject(
 }
 
 /**
+ * (#1634) Spec InstallErrorCause(O, options) — §20.5.8.1. If `options` is an
+ * object and HasProperty(options, "cause") is true, set a non-enumerable own
+ * data property `cause` on `O` with the value Get(options, "cause").
+ *
+ * `options` may arrive as an opaque WasmGC struct (object literal compiled
+ * inline, e.g. `new AggregateError([], "m", { cause })`). We read the raw
+ * `cause` field via the `__sget_cause` export — NOT `_structToPlainObject`,
+ * which recursively converts nested structs and would break reference identity
+ * (test262 checks `error.cause === cause`). Plain JS objects use native
+ * `in` / property access.
+ */
+function _installErrorCause(inst: any, options: any, exports: Record<string, Function> | undefined): void {
+  if (options == null || typeof options !== "object") return;
+  let hasCause = false;
+  let causeVal: any;
+  if (_isWasmStruct(options)) {
+    const fieldNames = _getStructFieldNames(options, exports);
+    const sidecar = _wasmStructProps.get(options);
+    if (fieldNames && fieldNames.includes("cause")) {
+      hasCause = true;
+      const getter = exports?.__sget_cause;
+      if (typeof getter === "function") causeVal = getter(options);
+    } else if (sidecar && "cause" in sidecar) {
+      hasCause = true;
+      causeVal = sidecar.cause;
+    }
+  } else if ("cause" in options) {
+    hasCause = true;
+    causeVal = options.cause;
+  }
+  if (hasCause) {
+    Object.defineProperty(inst, "cause", {
+      value: causeVal,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+/**
  * Recursively convert a WasmGC value (struct, vec/array, or primitive) to a
  * plain JS value suitable for JSON.stringify.  Handles:
  *   - WasmGC structs  -> plain objects (via _structToPlainObject)
@@ -5235,34 +5276,63 @@ assert._isSameValue = isSameValue;
             throw new TypeError("Cannot convert undefined or null to object");
           }
           // (#1467) The compiler wraps Wasm vec arguments via `__make_iterable`
-          // before they reach this import, so `errors` is already a plain JS
-          // array when called from compiled code. We DELIBERATELY do NOT call
-          // `__make_iterable` recursively on each element — its vec-shape
-          // detection misfires on host Error instances and converts them into
-          // empty arrays. For values that arrive from user JS (rare in
-          // compiled code, but possible via interop) `Array.isArray` is false
-          // and we walk the iterator protocol directly.
+          // before they reach this import, so `errors` is usually already a plain
+          // JS array (or wrapped iterable) when called from compiled code. We
+          // DELIBERATELY do NOT call `__make_iterable` recursively on each element
+          // — its vec-shape detection misfires on host Error instances and
+          // converts them into empty arrays. For values that arrive from user JS
+          // `Array.isArray` is false and we walk the iterator protocol directly;
+          // abrupt completions there must propagate (test262
+          // errors-iterabletolist-failures).
           let errorsList: any[];
           if (Array.isArray(errors)) {
             errorsList = errors.slice();
           } else {
-            const iter = (errors as any)[Symbol.iterator];
-            if (typeof iter !== "function") {
-              throw new TypeError(String(errors) + " is not iterable");
+            let iter: any;
+            try {
+              iter = (errors as any)[Symbol.iterator];
+            } catch {
+              // Opaque WasmGC struct — `Symbol.iterator` access traps.
+              iter = undefined;
             }
-            errorsList = [];
-            const it = iter.call(errors);
-            while (true) {
-              const r = it.next();
-              if (r == null || r.done) break;
-              errorsList.push(r.value);
+            if (typeof iter !== "function") {
+              // (#1634) A bare opaque WasmGC *vec* struct (array literal `[1,2,3]`
+              // that wasn't pre-wrapped) has no JS `Symbol.iterator`. Materialize
+              // it via `__vec_len`/`__vec_get` (same machinery `__array_from`
+              // uses) — but ONLY when it is genuinely vec-shaped (no named struct
+              // fields). A non-vec object-literal struct (e.g. a user iterable
+              // whose `@@iterator` lives in the sidecar) must NOT be silently
+              // turned into an empty array; fall through to the TypeError so
+              // abrupt/protocol-violation cases still throw (test262
+              // errors-iterabletolist-failures).
+              const exports = callbackState?.getExports();
+              const looksLikeVec = _isWasmStruct(errors) && _getStructFieldNames(errors, exports) === null;
+              if (looksLikeVec) {
+                const materialized = _materializeIterable(errors, callbackState);
+                if (Array.isArray(materialized)) {
+                  errorsList = materialized.slice();
+                } else {
+                  throw new TypeError("AggregateError: errors argument is not iterable");
+                }
+              } else {
+                throw new TypeError("AggregateError: errors argument is not iterable");
+              }
+            } else {
+              errorsList = [];
+              const it = iter.call(errors);
+              while (true) {
+                const r = it.next();
+                if (r == null || r.done) break;
+                errorsList.push(r.value);
+              }
             }
           }
           // Spec step 3: if message !== undefined, ToString(message); then
           // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
-          // Construct without message first to leave the slot empty (per spec
-          // when message is undefined, no own message property is set).
-          const inst = options === undefined ? new AggregateError([]) : new AggregateError([], undefined, options);
+          // Construct without message/options first; the engine's native
+          // InstallErrorCause cannot read an opaque WasmGC `options` struct, so
+          // we install `cause` ourselves below (#1634).
+          const inst = new AggregateError([]);
           if (message !== undefined) {
             const msgStr = typeof message === "string" ? message : String(message);
             Object.defineProperty(inst, "message", {
@@ -5282,6 +5352,58 @@ assert._isSameValue = isSameValue;
             enumerable: false,
             configurable: true,
           });
+          // Spec step (InstallErrorCause): set own non-enumerable `cause` if
+          // options has the property (HasProperty, not truthiness) (#1634).
+          _installErrorCause(inst, options, callbackState?.getExports());
+          return inst;
+        };
+      // new SuppressedError(error, suppressed, message, options?) — spec §20.5.10.1
+      // (#1634). Mirrors __new_AggregateError: the generic 3-param extern-class
+      // path dropped the `options` argument (no `cause` support) and could not
+      // coerce `message` correctly. This dedicated import implements the spec
+      // construction sequence:
+      //   • error / suppressed stored as non-enumerable own data properties,
+      //   • message coerced via ToString only if defined (no own prop otherwise),
+      //   • InstallErrorCause(O, options): if options is an object and
+      //     HasProperty(options, "cause"), set a non-enumerable `cause`.
+      if (name === "__new_SuppressedError")
+        return (error: any, suppressed: any, message: any, options: any): any => {
+          if (typeof SuppressedError === "undefined") {
+            throw new TypeError("SuppressedError is not supported by the host");
+          }
+          // Construct via the native engine so the prototype chain and brand
+          // (`SuppressedError.prototype`, name "SuppressedError") are correct.
+          // The engine cannot read an opaque WasmGC `options` struct, so we
+          // install `cause` ourselves below (#1634).
+          const inst = new (SuppressedError as unknown as new () => Error)();
+          // Spec steps 4: CreateNonEnumerableDataPropertyOrThrow(O, "error", error).
+          Object.defineProperty(inst, "error", {
+            value: error,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          // Spec step 3: CreateNonEnumerableDataPropertyOrThrow(O, "suppressed", suppressed).
+          Object.defineProperty(inst, "suppressed", {
+            value: suppressed,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          // Spec step 5: if message is not undefined, msg = ToString(message);
+          // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
+          if (message !== undefined) {
+            const msgStr = typeof message === "string" ? message : String(message);
+            Object.defineProperty(inst, "message", {
+              value: msgStr,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+          // Spec step 6 (InstallErrorCause): set own non-enumerable `cause` if
+          // options has the property (HasProperty, not truthiness) (#1634).
+          _installErrorCause(inst, options, callbackState?.getExports());
           return inst;
         };
       // ArrayBuffer.isView(arg) — checks if arg is a TypedArray or DataView (#965)

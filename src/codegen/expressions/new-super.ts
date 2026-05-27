@@ -1706,6 +1706,36 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
+  // Handle `new SuppressedError(error, suppressed, message, options?)` (#1634).
+  // Spec §20.5.10.1: all four arguments are externref; `options.cause` is
+  // installed via the dedicated `__new_SuppressedError` host import. The generic
+  // 3-param extern-class path dropped `options` (no `cause`) and mishandled the
+  // message coercion, so route through the dedicated import like AggregateError.
+  if (ts.isIdentifier(expr.expression) && expr.expression.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
   // Handle `new Object()` — create an empty object (equivalent to `{}`).
   // (#1343) Previously this emitted `ref.null.extern`, but JS spec treats
   // `new Object()` as a real object: `Boolean(new Object()) === true`,
