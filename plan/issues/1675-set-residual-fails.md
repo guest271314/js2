@@ -1,5 +1,5 @@
 ---
-id: 1659
+id: 1675
 title: "built-ins/Set residual fails — 63 non-passing after set-like fix (split from #1646)"
 status: done
 created: 2026-05-27
@@ -15,7 +15,7 @@ goal: spec-completeness
 sprint: Backlog
 parent: 1646
 ---
-# #1659 — built-ins/Set residual fails (post set-like fix)
+# #1675 — built-ins/Set residual fails (post set-like fix)
 
 Split from #1646. The set-like-argument feature (#1352 / #1646) landed and
 lifted `built-ins/Set` from 73.6% → **83.6% (320/383)** as of the committed
@@ -64,7 +64,7 @@ failures; the committed baseline JSONL lists those same files as ordinary
 `fail`/`compile_error` with real Set messages. Run those files one-per-process
 to see their true status.
 
-### Compile-error bucket (7) — DIAGNOSED → sub-issue #1670
+### Compile-error bucket (7) — DIAGNOSED → sub-issue #1673
 
 All 7 are identical: `Cannot find method 'size' on parent class 'Set'` from
 `prototype/{union,intersection,difference,symmetricDifference,isSubsetOf,
@@ -106,6 +106,6 @@ This investigation task is complete: 63 (now measured as 60 real:
 7 CE + 53 fail) bucketed, the compile_errors diagnosed, and two scoped
 sub-issues filed (#1673 super→builtin-method dispatch; #1674 GetSetRecord
 set-like consumption). Neither fix is a "small inline cluster"; both are
-deferred to their own issues. No code change made under #1659.
+deferred to their own issues. No code change made under #1675.
 
 status moved to `done` (investigation deliverable met).

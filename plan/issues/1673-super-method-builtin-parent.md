@@ -12,11 +12,11 @@ area: codegen
 language_feature: class
 goal: spec-completeness
 sprint: Backlog
-parent: 1659
+parent: 1675
 ---
 # #1673 — super.<method>() on a built-in parent class fails to compile
 
-Split from #1659 (built-ins/Set investigation).
+Split from #1675 (built-ins/Set investigation).
 
 ## Problem
 

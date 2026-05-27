@@ -12,11 +12,11 @@ area: runtime
 language_feature: set
 goal: spec-completeness
 sprint: Backlog
-parent: 1659
+parent: 1675
 ---
 # #1674 — GetSetRecord set-like consumption residuals
 
-Split from #1659 (built-ins/Set investigation). ~53 fails in `built-ins/Set`,
+Split from #1675 (built-ins/Set investigation). ~53 fails in `built-ins/Set`,
 all in the new Set methods' handling of an arbitrary **set-like argument**
 (ES2025 §24.2.5.x `GetSetRecord`).
 
