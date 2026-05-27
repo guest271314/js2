@@ -52,6 +52,81 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
 }
 
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */
+/**
+ * (#1614) Dispatch `super.method(args)` where the parent is a builtin extern
+ * class (Set/Map/Array/...) whose methods are host-backed and therefore not
+ * present in `funcMap`. Emits __extern_method_call(this, methodName, argsArray)
+ * and returns externref. Returns null when the parent is not a known extern
+ * class or the required host imports cannot be registered (caller then reports
+ * the original "Cannot find method" error).
+ */
+function emitSuperExternMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  methodName: string,
+  parentClassName: string,
+): ValType | null {
+  // Only applies when the parent (or an ancestor) is a registered extern class.
+  let externAncestor: string | undefined = parentClassName;
+  while (externAncestor && !ctx.externClasses.has(externAncestor)) {
+    externAncestor = ctx.classParentMap.get(externAncestor);
+  }
+  if (!externAncestor) return null;
+
+  const selfIdx = fctx.localMap.get("this");
+  if (selfIdx === undefined) return null;
+
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+  const methodCallIdx = ensureLateImport(
+    ctx,
+    "__extern_method_call",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (arrNewIdx === undefined || arrPushIdx === undefined || methodCallIdx === undefined) return null;
+
+  // Receiver = `this`, coerced to externref.
+  fctx.body.push({ op: "local.get", index: selfIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  const recvLocal = allocLocal(fctx, `__super_emc_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal });
+
+  // Build args array.
+  fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+  const argsLocal = allocLocal(fctx, `__super_emc_args_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: argsLocal });
+
+  for (const arg of expr.arguments) {
+    const valueExpr = ts.isSpreadElement(arg) ? arg.expression : arg;
+    fctx.body.push({ op: "local.get", index: argsLocal });
+    const argType = compileExpression(ctx, fctx, valueExpr, { kind: "externref" });
+    if (argType && argType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" });
+    } else if (argType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const finalPushIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+    fctx.body.push({ op: "call", funcIdx: finalPushIdx });
+  }
+
+  // __extern_method_call(receiver, methodName, args)
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  addStringConstantGlobal(ctx, methodName);
+  const strIdx = ctx.stringGlobalMap.get(methodName);
+  if (strIdx !== undefined) {
+    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+  } else {
+    compileStringLiteral(ctx, fctx, methodName);
+  }
+  fctx.body.push({ op: "local.get", index: argsLocal });
+  const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
+  fctx.body.push({ op: "call", funcIdx: finalMcIdx });
+  return { kind: "externref" };
+}
+
 function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
   const propAccess = expr.expression as ts.PropertyAccessExpression;
   const methodName = propAccess.name.text;
@@ -115,6 +190,11 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (funcIdx === undefined) {
+    // (#1614) The parent may be a builtin extern class (Set/Map/Array/...)
+    // whose methods are host-backed, not compiled into funcMap. Dispatch
+    // `super.method(args)` dynamically via __extern_method_call(this, name, args).
+    const externResult = emitSuperExternMethodCall(ctx, fctx, expr, methodName, parentClassName);
+    if (externResult !== null) return externResult;
     reportError(ctx, expr, `Cannot find method '${methodName}' on parent class '${parentClassName}'`);
     return null;
   }
@@ -205,6 +285,9 @@ function compileSuperElementMethodCall(
   }
 
   if (funcIdx === undefined) {
+    // (#1614) Builtin extern-class parent — dispatch dynamically.
+    const externResult = emitSuperExternMethodCall(ctx, fctx, expr, methodName, parentClassName);
+    if (externResult !== null) return externResult;
     reportError(ctx, expr, `Cannot find method '${methodName}' on parent class '${parentClassName}'`);
     return null;
   }
