@@ -129,3 +129,27 @@ patch that moves the needle. Re-validate the Reflect suite after #1630 +
 #1631 (Cluster A) land — that should recover ~30 of the 47. File a separate
 issue for Cluster B (compiled-function host-callable bridging) if one does
 not already exist; it is orthogonal to the descriptor model and to Reflect.
+
+## Re-verification (2026-05-27, dev-1608, task #67)
+
+Confirmed the prior finding on current main without re-running the full
+suite (test262 submodule not initialized in this worktree; the recorded
+106/153 count stands):
+
+- All 13 `__reflect_*` host bridges are present in `src/runtime.ts`
+  (`__reflect_get/set/has/deleteProperty/defineProperty/getOwnPropertyDescriptor/
+  getPrototypeOf/setPrototypeOf/ownKeys/isExtensible/preventExtensions/apply/
+  construct`), each delegating to the host `Reflect.X`. **Nothing is missing
+  to implement** — there is no absent Reflect method and no incorrect
+  invariant wrapper.
+- Both downstream clusters are already tracked, so no new issue is needed:
+  - **Cluster A** (accessor-descriptor model on struct objects, ~30 fails)
+    → #1630 (descriptor-model writeback) + #1631 (Object.create descriptor map).
+  - **Cluster B** (compiled-function as host-callable, ~8 fails) → **#1596**
+    (`Function.prototype.apply/.call not accessible on compiled Wasm
+    functions`); related #1632 (bind/toString).
+
+**Verdict:** #1640 stays `status: blocked` on #1630/#1631. No developer-lane
+implementation work exists here; it resolves for free when Cluster A lands.
+Task #67 closed as *verified — no action* (not implemented, because there is
+nothing at the Reflect layer to fix).

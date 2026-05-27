@@ -232,7 +232,7 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   shiftMap(ctx.tdzGlobals);
 
   for (const entry of ctx.staticInitExprs) {
-    if (entry.globalIdx >= threshold) {
+    if (entry.globalIdx !== undefined && entry.globalIdx >= threshold) {
       entry.globalIdx += delta;
     }
   }
