@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-// #1685 — Number(string) must perform §7.1.4.1 StringToNumber under
+// #1688 — Number(string) must perform §7.1.4.1 StringToNumber under
 // --target wasi / standalone (native strings). Before the fix the WasmGC
 // string ref fell through the generic struct ToPrimitive path and yielded 0.
 
@@ -13,7 +13,7 @@ async function runWasi(body: string): Promise<number> {
   return (instance.exports as { test: () => number }).test();
 }
 
-describe("#1685 Number(string) native ToNumber under --target wasi", () => {
+describe("#1688 Number(string) native ToNumber under --target wasi", () => {
   it("parses a plain integer string", async () => {
     expect(await runWasi(`const s: string = "7"; return Number(s);`)).toBe(7);
   });

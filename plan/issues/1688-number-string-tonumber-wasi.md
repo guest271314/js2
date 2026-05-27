@@ -1,5 +1,5 @@
 ---
-id: 1685
+id: 1688
 title: "Number(string) returns 0 under --target wasi — missing native StringToNumber"
 status: done
 created: 2026-05-27
@@ -14,7 +14,11 @@ goal: standalone-mode
 sprint: Backlog
 related: [1663, 1471, 1335]
 ---
-# #1685 — `Number(string)` returns 0 under `--target wasi`
+# #1688 — `Number(string)` returns 0 under `--target wasi`
+
+> Renumbered from #1685 (ID collision with the wont-fix Symbol→string
+> coercion issue, which already owns #1685). Task tracking still references
+> the original "#1685" task; the on-disk issue is #1688.
 
 ## Problem
 

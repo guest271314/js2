@@ -6798,7 +6798,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (argType?.kind === "ref" || argType?.kind === "ref_null") {
         // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
         // StringToNumber. The generic struct ToPrimitive path below has no
-        // string case and silently yields 0 in standalone (#1685), so detect
+        // string case and silently yields 0 in standalone (#1688), so detect
         // the string struct type and route to the pure-Wasm __str_to_number.
         const refTypeIdx = (argType as { typeIdx?: number }).typeIdx;
         if (
