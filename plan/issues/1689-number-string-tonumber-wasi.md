@@ -1,5 +1,5 @@
 ---
-id: 1688
+id: 1689
 title: "Number(string) returns 0 under --target wasi — missing native StringToNumber"
 status: done
 created: 2026-05-27
