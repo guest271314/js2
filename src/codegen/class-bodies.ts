@@ -18,6 +18,7 @@ import {
   destructureParamObject,
   isNullOrUndefinedLiteral,
 } from "./destructuring-params.js";
+import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { cacheStringLiterals, hasAbstractModifier, hasStaticModifier, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
@@ -33,6 +34,42 @@ import {
   resolveComputedKeyExpression,
   valTypesMatch,
 } from "./shared.js";
+
+/**
+ * (#1682) Recursively scan a constructor body for any `super(...)` call,
+ * without descending into nested functions/arrows/classes (which establish
+ * their own `this` / super binding). Used to detect derived constructors that
+ * can never initialize `this`, so we can emit the spec-required ReferenceError
+ * (ECMA-262 §10.2.2 ConstructorEvaluation → GetThisBinding throws when the
+ * `this` binding is still uninitialized at constructor return).
+ */
+function constructorCallsSuper(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    // Do not descend into constructs that rebind `this` / super.
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n)
+    ) {
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  ts.forEachChild(node, visit);
+  return found;
+}
 
 /**
  * (#1455) Emit the call sequence that adjusts an externref-backed subclass
@@ -1188,6 +1225,19 @@ function compileClassBodiesInner(
           continue;
         }
         compileStatement(ctx, fctx, stmt);
+      }
+
+      // (#1682) Derived constructor that statically never calls `super(...)`
+      // leaves `this` uninitialized at every exit. Per ECMA-262 §10.2.2, the
+      // constructor's GetThisBinding throws ReferenceError on return. Emit that
+      // throw after the body so `new Sub()` fails as required (e.g.
+      // `class C extends WeakMap { constructor() {} }`).
+      if (fctx.isDerivedConstructor && !constructorCallsSuper(ctor.body)) {
+        emitThrowReferenceError(
+          ctx,
+          fctx,
+          "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+        );
       }
     }
 
