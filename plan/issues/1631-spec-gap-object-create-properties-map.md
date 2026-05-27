@@ -69,3 +69,51 @@ by completing #1335 first — but additional Object.create-specific bugs remain:
 
 - `test262/test/built-ins/Object/create/15.2.3.5-4-2.js`
 - `test262/test/built-ins/Object/create/proto-from-ctor-realm.js`
+
+## Investigation (2026-05-27, dev)
+
+**The descriptor map is already wired** — not the gap the title implies. Codegen
+(`src/codegen/expressions/calls.ts`, the `Object.create` handler) has four
+descriptor-application paths: (1) static expansion for all-object-literal
+descriptors → `__defineProperty_value`; (2) object-literal-with-non-literal-values
+→ `__defineProperty_desc`; (3) non-literal Properties object → `__defineProperties`;
+(4) standalone fallback. The runtime imports (`src/runtime.ts:4064`,
+`__defineProperty_desc`/`__defineProperties`) delegate to native
+`Object.defineProperty(ies)` for plain JS objects.
+
+**Real failure profile** (full `built-ins/Object/create`, 320 tests, run with the
+runner's `skipSemanticDiagnostics:true`): **PASS 160 / FAIL 160**. The 160
+failures break down (true single-test isolation):
+
+| Bucket | ~count | Root cause |
+|--------|--------|------------|
+| flag-check (configurable/enumerable/writable) | 33 | descriptor object is a WasmGC struct; its fields aren't readable |
+| dynamic-prototype-desc | 28 | `Ctor.prototype = proto` then read inherited descriptor field — prototype-chain read gap (broad, not create-specific) |
+| accessor-desc (get/set) | 23 | struct-descriptor get/set not readable |
+| exotic-host-desc (`new String/Number/...`) | 19 | exotic host receiver field reads |
+| RT: getter/setter must be a function | 16 | `_toPropertyDescriptorValidate` misreads struct descriptors |
+| RT: property description must be an object | 14 | Properties is an exotic object (e.g. `Math`) |
+| other / null-deref | ~27 | mixed |
+
+**Key blocker confirmed by probe:** when the descriptor object is a non-literal
+(e.g. `var d = {}; d.value = 42` or `var d = function(){}; d.value = 42`), it
+compiles to a WasmGC struct whose `value`/`get`/`set`/flags are **not readable**
+by any current runtime helper — `_safeGet`, `_sidecarGet`, and the `__sget_value`
+export all return `undefined` for that field. Native `Object.defineProperty` sees
+the struct as null-proto/no-keys and silently drops the descriptor.
+
+**Attempted fix (reverted):** routing struct descriptors through
+`_toPropertyDescriptorValidate` + a sidecar/`__sget_`-aware `getField` in
+`__defineProperty_desc`. In **true single-test isolation it fixed nothing** — the
+apparent "+12" in a single-process full-suite probe was test-ordering pollution
+(`__defineProperties` mutates real globals; the runner sandboxes per-test, my probe
+did not). The blocker is upstream: struct property reads (`d.value` where `d` is a
+struct) don't round-trip through the helpers the descriptor path can call.
+
+**Conclusion:** #1631 is **not a localized runtime fix**. It depends on (a) making
+WasmGC-struct field reads available to the descriptor-conversion path (a struct
+representation/`_safeGet` gap), and (b) for the dynamic-prototype and exotic-host
+buckets, the broader prototype-chain + descriptor-model work tracked under #1364b /
+#1630. Recommend re-scoping: either split out "struct property read for descriptor
+objects" as a prerequisite, or fold the remaining buckets into the #1630 descriptor
+model. No code shipped.
