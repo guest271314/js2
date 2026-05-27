@@ -8,7 +8,7 @@ priority: high
 feasibility: hard
 reasoning_effort: high
 goal: async-model
-sprint: Backlog
+sprint: 56
 test262_fail: 1087
 note: "Verified 2026-05-21: _wrapForHost already exists at runtime.ts:1284 (issue's 'add' is now 'verify'); host-import line refs drifted significantly (1169→3495, 1159→3391, 1186→3551). FAIL count likely stale — re-baseline before dispatch."
 ---
