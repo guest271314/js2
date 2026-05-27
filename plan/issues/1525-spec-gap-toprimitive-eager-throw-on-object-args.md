@@ -1,7 +1,7 @@
 ---
 id: 1525
 title: "spec gap: built-in coercion paths throw 'Cannot convert object to primitive value' eagerly"
-status: suspended
+status: ready
 created: 2026-05-20
 updated: 2026-05-27
 priority: high
@@ -14,7 +14,7 @@ sprint: 52
 es_edition: ES2024
 test262_category: multiple (Array, String, DataView, Boolean, equality)
 test262_count: 170
-related: [1253, 1129, 1434]
+related: [1253, 1129, 1434, 1525b]
 ---
 # #1525 — `Cannot convert object to primitive value` raised too eagerly
 
@@ -145,3 +145,32 @@ on PATH.
 
 Recommend landing #1 as its own small PR (clean, isolated win), then carving
 #2/#3 into #1525b under an architect spec.
+
+## Resolution (2026-05-27, dev-1608 — root cause #1 landed)
+
+Resumed the suspended branch, merged current `origin/main` (clean, no src
+conflicts), and landed **root cause #1** as this PR:
+
+- `new Object()` and `Object()` / `Object(null|undefined)` now lower to
+  `__new_plain_object` (the same export `{}` literals use,
+  `src/runtime.ts:3821`) instead of `__object_create(null)`. Per §20.1.1.1
+  the result inherits the ordinary `Object.prototype`, so it has
+  `toString`/`valueOf` and ToPrimitive coercion (`==`, arithmetic,
+  `String(...)`) no longer throws "Cannot convert object to primitive value".
+- Files: `src/codegen/expressions/new-super.ts` (`compileNewExpression` Object
+  branch), `src/codegen/expressions/calls.ts` (`Object()` zero/null-arg branch).
+- `tests/issue-1525.test.ts`: 8/8 active cases pass (`NaN != new Object()`,
+  `Boolean(new Object())`, DataView `valueOf` byteOffset, loose-equality
+  `valueOf`, etc.).
+
+**Carved out** to **#1525b** (needs architect spec — do not inline):
+- Root cause #2 (the dominant ~142): object-literal user `toString`/`valueOf`
+  via `String(obj)` → invalid Wasm in `finalizeMethodTrampolines` (double
+  `f64.convert_i32_s`). Overlaps #1602/#1669 + #1130/#983.
+- Root cause #3: §7.1.1.1 step-6 TypeError when both `valueOf`/`toString`
+  return objects.
+The two corresponding `tests/issue-1525.test.ts` cases are `it.skip`-marked
+with a pointer to #1525b.
+
+#1525 stays open (`status: ready`) tracking the full 170-fail cluster; the
+residual is now #1525b.
