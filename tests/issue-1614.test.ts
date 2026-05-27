@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 // #1614 — super.method() where the parent is a builtin extern class (Set/Map/...)
