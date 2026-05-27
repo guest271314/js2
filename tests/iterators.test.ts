@@ -87,8 +87,10 @@ describe("iterators", () => {
       expect(result.success).toBe(true);
       expect(result.wat).toContain("__iterator");
       expect(result.wat).toContain("__iterator_next");
-      expect(result.wat).toContain("__iterator_done");
-      expect(result.wat).toContain("__iterator_value");
+      // #1620 v2: __iterator_next returns multi-value (i32 done, externref value);
+      // the separate __iterator_done / __iterator_value imports are eliminated.
+      expect(result.wat).not.toContain("__iterator_done");
+      expect(result.wat).not.toContain("__iterator_value");
     });
 
     it("does NOT generate iterator imports for array for...of", () => {
