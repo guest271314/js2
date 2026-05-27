@@ -1,7 +1,7 @@
 ---
 id: 1637
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-08
 updated: 2026-05-27
 priority: medium
@@ -17,6 +17,26 @@ parent: 1328
 related: 1319
 ---
 # #1343 — Boolean wrapper coercion + Symbol primitive coercion
+
+> **Status 2026-05-27 — BOTH halves fixed (two branches, consolidating into one PR):**
+> - **Boolean half** (~24 fails): `Boolean.prototype.toString/valueOf.call(prim)`
+>   now coerce numeric receivers via `thisBooleanValue` in `__extern_method_call`
+>   (`src/runtime.ts`). Branch `issue-1637-bool-symbol-coercion`, commit
+>   `8d70a45e6`, PR #659.
+> - **Symbol→string half** (~45 fails): implicit Symbol→string coercion now
+>   throws `TypeError` via a static `isSymbolType` guard in
+>   `src/codegen/string-ops.ts` (concat/template) and
+>   `src/codegen/expressions/calls.ts` (`Symbol.for`). Branch
+>   `issue-1637-boolean-symbol-coercion`, commit `9aadfafc3`.
+>
+> The earlier plan to defer the Symbol half to a separate architect-spec issue
+> (#1658) was **dropped** — the static guard fixes it at compile time, no
+> value-representation change needed. #1658 is closed wont-fix.
+>
+> The "Files to modify" paths below were **stale** — `registry/boolean.ts` /
+> `registry/symbol.ts` do not exist; the real sites are `src/runtime.ts`
+> (`__extern_method_call`), `src/codegen/string-ops.ts`
+> (`compileStringBinaryOp`), and `src/codegen/expressions/calls.ts`.
 
 ## Problem
 
@@ -98,46 +118,3 @@ For Symbol coercion:
 - `test262/test/built-ins/Boolean/prototype/toString/this-val-non-boolean.js`
 - `test262/test/built-ins/Symbol/prototype/toString/symbol-thisvalue.js`
 - `test262/test/built-ins/Symbol/for/registry.js`
-
-## Resolution 2026-05-27 (dev-1606) — Boolean half fixed, Symbol half deferred
-
-The architect's file paths (`src/codegen/registry/boolean.ts`,
-`src/codegen/registry/symbol.ts`) are **stale** — those files do not exist on
-main. The real code is `src/runtime.ts` (host imports) +
-`src/codegen/string-ops.ts` / `binary-ops.ts` (concat lowering).
-
-### Fixed: Boolean.prototype.toString/valueOf receiver coercion (~24 fails)
-
-`Boolean.prototype.toString.call(0)` and `.valueOf.call(true)` previously threw
-`TypeError: requires that 'this' be a Boolean`. `.call`/`.apply` on a
-Boolean.prototype method routes through `__extern_method_call` (runtime.ts:4521),
-which — unlike `__proto_method_call` (4785, #1342) — did not apply the
-§20.3.3.{2,3} thisBooleanValue coercion. Boolean primitives arrive as numbers
-(i32→externref via `__box_number`), so V8's native method rejected them.
-
-**Fix** (runtime.ts, `__extern_method_call`): when `method` is `call`/`apply`
-and the receiver function is `Boolean.prototype.{toString,valueOf}`, coerce a
-numeric/bigint receiver arg back to a boolean primitive before dispatch.
-
-Verified: `tests/issue-1637.test.ts` (5 cases) — toString.call(0)→"false",
-.call(1)→"true", valueOf.call(true)→true, valueOf.call(false)→false,
-toString.call(true)→"true". All pass.
-
-### Deferred: Symbol→string implicit coercion (~45 fails) — NEEDS ARCHITECT RESPEC
-
-`"v" + sym` returns `"v101"` and `String(sym)` returns `"101"` instead of
-throwing/returning `"Symbol(x)"`. **Root cause is representational, not a
-localized coercion bug**: Symbols are materialized as numeric (f64/i32) handles,
-so binary-`+` concat lowers through `number_toString(handle)` (string-ops.ts
-`compileAndCoerceConcatOperand`, the `valType.kind === "f64"` branch) and never
-reaches the `__concat_*` host helper — which *already* throws on
-`typeof === "symbol"` (#1342). A properly-typed Symbol operand currently even
-emits a CompileError (`expected f64, found externref`), confirming the value
-representation is inconsistent across the concat path.
-
-A correct fix must make Symbol values flow as boxed externref (via
-`__box_symbol`) through ToString sites so the runtime throw fires, OR add a
-static-Symbol-type guard in `compileAndCoerceConcatOperand` that boxes +
-routes through `__concat_*`. This spans concat codegen + Symbol representation
-and is beyond the "easy" label. Recommend a follow-up sub-issue with an
-architect spec on Symbol value representation at ToString boundaries.
