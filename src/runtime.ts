@@ -239,12 +239,14 @@ function _getGeneratorPrototype(): any {
     configurable: true,
   });
 
-  // The `constructor` slot points at %Generator% (= %GeneratorFunction.prototype%),
-  // installed lazily so circular setup doesn't loop.
+  // The `constructor` slot points at %Generator% (= %GeneratorFunction.prototype%).
+  // Spec §27.5.1.1 requires a *data* property {writable:false, enumerable:false,
+  // configurable:true} — not an accessor. `_getGeneratorFunctionPrototype` set its
+  // own cache before it called us (so this call returns the in-progress object
+  // without recursing), making the data value safe to install here.
   Object.defineProperty(proto, "constructor", {
-    get() {
-      return _getGeneratorFunctionPrototype();
-    },
+    value: _getGeneratorFunctionPrototype(),
+    writable: false,
     enumerable: false,
     configurable: true,
   });
@@ -357,10 +359,11 @@ function _getAsyncGeneratorPrototype(): any {
     configurable: true,
   });
 
+  // Spec §27.6.1.1 — `constructor` is a data property {writable:false,
+  // enumerable:false, configurable:true} pointing at %AsyncGenerator%.
   Object.defineProperty(proto, "constructor", {
-    get() {
-      return _getAsyncGeneratorFunctionPrototype();
-    },
+    value: _getAsyncGeneratorFunctionPrototype(),
+    writable: false,
     enumerable: false,
     configurable: true,
   });
@@ -1607,6 +1610,47 @@ function _structToPlainObject(
     }
   }
   return result;
+}
+
+/**
+ * (#1634) Spec InstallErrorCause(O, options) — §20.5.8.1. If `options` is an
+ * object and HasProperty(options, "cause") is true, set a non-enumerable own
+ * data property `cause` on `O` with the value Get(options, "cause").
+ *
+ * `options` may arrive as an opaque WasmGC struct (object literal compiled
+ * inline, e.g. `new AggregateError([], "m", { cause })`). We read the raw
+ * `cause` field via the `__sget_cause` export — NOT `_structToPlainObject`,
+ * which recursively converts nested structs and would break reference identity
+ * (test262 checks `error.cause === cause`). Plain JS objects use native
+ * `in` / property access.
+ */
+function _installErrorCause(inst: any, options: any, exports: Record<string, Function> | undefined): void {
+  if (options == null || typeof options !== "object") return;
+  let hasCause = false;
+  let causeVal: any;
+  if (_isWasmStruct(options)) {
+    const fieldNames = _getStructFieldNames(options, exports);
+    const sidecar = _wasmStructProps.get(options);
+    if (fieldNames && fieldNames.includes("cause")) {
+      hasCause = true;
+      const getter = exports?.__sget_cause;
+      if (typeof getter === "function") causeVal = getter(options);
+    } else if (sidecar && "cause" in sidecar) {
+      hasCause = true;
+      causeVal = sidecar.cause;
+    }
+  } else if ("cause" in options) {
+    hasCause = true;
+    causeVal = options.cause;
+  }
+  if (hasCause) {
+    Object.defineProperty(inst, "cause", {
+      value: causeVal,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }
 
 /**
@@ -3980,19 +4024,26 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter") {
+      if (name === "__array_from_iter" || name === "__array_from_iter_n") {
         // Cache the original Array.prototype[Symbol.iterator] so we can
         // detect when user code (e.g. test262 iter-get-err-array-prototype)
         // has overridden it. When overridden, we must invoke the protocol
         // rather than fast-pathing the array — otherwise a throwing custom
         // @@iterator on Array.prototype is silently swallowed (#1454).
         const _origArrayIter: any = (Array.prototype as any)[Symbol.iterator];
-        return (obj: any): any => {
-          // Materialize an iterable/array-like to a real JS array so downstream
-          // destructuring can walk it via .length + indexed access. For proper
-          // iterators (e.g. generators) this invokes the iterator protocol and
-          // propagates any throws from .next() — needed for spec-compliant
-          // destructuring of throwing iterators (#1150).
+        // Materialize an iterable/array-like to a real JS array, consuming AT
+        // MOST `limit` iterator steps. `limit === Infinity` (the unbounded
+        // case, used by rest patterns and spread) is byte-for-byte the legacy
+        // __array_from_iter behavior. A finite `limit` calls the iterator's
+        // .next() at most `limit` times — required for array binding patterns
+        // without a rest element, where the spec (§8.5.3) consumes exactly one
+        // IteratorStep per slot (INCLUDING elision holes), not a full drain
+        // (#1592). Stopping at the bound is a NormalCompletion: it must NOT
+        // trigger IteratorClose (only the defensive MAX_ITER cap does).
+        const _arrayFromIter = (obj: any, limit: number): any => {
+          // For proper iterators (e.g. generators) this invokes the iterator
+          // protocol and propagates any throws from .next() — needed for
+          // spec-compliant destructuring of throwing iterators (#1150).
           if (obj == null) return [];
           if (Array.isArray(obj)) {
             // #1454: Real arrays normally take a fast path, but if the user has
@@ -4004,10 +4055,13 @@ assert._isSameValue = isSameValue;
             const ownIter = (obj as any)[Symbol.iterator];
             if (ownIter !== _origArrayIter) {
               // Non-default iterator: fall through to the protocol path below
-              // by treating the array as a generic iterable.
-              return Array.from(obj);
+              // by treating the array as a generic iterable (bounded by limit).
+              return _drainIterable(obj, limit);
             }
-            return obj;
+            // Default array iterator: a finite bound just slices the prefix;
+            // the iterator protocol on a default array is side-effect-free so
+            // slicing is observationally identical to stepping `limit` times.
+            return limit < obj.length ? obj.slice(0, limit) : obj;
           }
           // Compiled sources that do `iter[Symbol.iterator] = fn` often land the
           // function under a stringified "Symbol(Symbol.iterator)" key rather
@@ -4085,6 +4139,24 @@ assert._isSameValue = isSameValue;
                       return undefined;
                     };
                     while (true) {
+                      // Bounded materialization (#1592): stop once we've
+                      // collected `limit` values. A no-rest array binding
+                      // pattern consumes EXACTLY `limit` IteratorStep calls;
+                      // §8.5.3 then requires IteratorClose because the iterator
+                      // record's [[Done]] is still false (we stopped while it
+                      // was still yielding). So this counts as an abrupt-from-
+                      // the-iterator's-view termination → set cappedOut to
+                      // trigger iterator.return() below. (This is the SAME
+                      // close path #1219 exercises for the single-element `[x]`
+                      // pattern over an infinite iterator.) Rest patterns pass
+                      // limit === Infinity and never take this branch, so they
+                      // drain to natural done and do NOT close — preserving the
+                      // dstr/*-ary-init-iter-no-close.js tuning. Checked before
+                      // MAX_ITER so a finite bound always wins.
+                      if (out.length >= limit) {
+                        cappedOut = true;
+                        break;
+                      }
                       if (iterCount++ >= MAX_ITER) {
                         cappedOut = true;
                         break;
@@ -4138,13 +4210,34 @@ assert._isSameValue = isSameValue;
                 }
               }
               const out: any[] = [];
-              const len = typeof (obj as any).length === "number" ? (obj as any).length >>> 0 : 0;
+              const lenRaw = typeof (obj as any).length === "number" ? (obj as any).length >>> 0 : 0;
+              const len = Math.min(lenRaw, limit);
               for (let i = 0; i < len; i++) out.push((obj as any)[i]);
               return out;
             }
           }
-          return Array.from(obj);
+          return _drainIterable(obj, limit);
         };
+        // Walk a plain iterable's @@iterator protocol, collecting at most
+        // `limit` values. Replaces `Array.from(obj)` so a finite bound can stop
+        // early (Array.from can't be bounded). Throws from @@iterator / .next()
+        // / the .value getter propagate unchanged (#1150/#1454). With
+        // limit === Infinity this matches Array.from's full drain.
+        function _drainIterable(obj: any, limit: number): any[] {
+          if (!(limit < Infinity)) return Array.from(obj);
+          const itFn = (obj as any)?.[Symbol.iterator];
+          if (typeof itFn !== "function") return Array.from(obj);
+          const it = itFn.call(obj);
+          const out: any[] = [];
+          while (out.length < limit) {
+            const r = it.next();
+            if (r == null || r.done) break;
+            out.push(r.value);
+          }
+          return out;
+        }
+        if (name === "__array_from_iter") return (obj: any): any => _arrayFromIter(obj, Infinity);
+        return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0);
       }
       if (name === "__extern_slice")
         return (arr: any, start: number) => {
@@ -4175,13 +4268,25 @@ assert._isSameValue = isSameValue;
           if (obj == null) return {};
           const excluded = new Set(excludedKeysStr ? String(excludedKeysStr).split(",") : []);
           const result: Record<string, any> = {};
+          // ES §14.7.4 CopyDataProperties copies only ENUMERABLE own properties.
+          // Sidecar descriptors (set via Object.defineProperty) may mark a key
+          // non-enumerable; consult the descriptor map to skip those. Plain
+          // struct fields and sidecar entries without an explicit descriptor
+          // default to enumerable. (#1552)
+          const descs = _isWasmStruct(obj) ? _wasmPropDescs.get(obj) : undefined;
+          const isEnumerable = (key: string): boolean => {
+            if (!descs) return true;
+            const flags = descs.get(_normalizeDescKey(key));
+            if (flags === undefined) return true;
+            return !!(flags & _SC_ENUMERABLE);
+          };
           // For WasmGC structs, use exported getters to read fields
           if (_isWasmStruct(obj)) {
             const exports = callbackState?.getExports();
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               for (const key of fieldNames) {
-                if (!excluded.has(key)) {
+                if (!excluded.has(key) && isEnumerable(key)) {
                   const getter = exports?.[`__sget_${key}`];
                   if (typeof getter === "function") result[key] = getter(obj);
                 }
@@ -4196,7 +4301,7 @@ assert._isSameValue = isSameValue;
           const sc = _wasmStructProps.get(obj);
           if (sc) {
             for (const key of Object.keys(sc)) {
-              if (!excluded.has(key) && !(key in result)) result[key] = sc[key];
+              if (!excluded.has(key) && !(key in result) && isEnumerable(key)) result[key] = sc[key];
             }
           }
           return result;
@@ -4956,7 +5061,10 @@ assert._isSameValue = isSameValue;
             // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
             // would coerce null to 0 and return [] — wrong.
             if (arg1 == null) return fn.call(regex, wrappedArg0);
-            return fn.call(regex, wrappedArg0, arg1);
+            // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
+            // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
+            // host proxy exposes the struct's valueOf/toString closure (#1331).
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
           }
           // Generic fallback
           if (arg1 == null) return fn.call(regex, wrappedArg0);
@@ -5235,34 +5343,63 @@ assert._isSameValue = isSameValue;
             throw new TypeError("Cannot convert undefined or null to object");
           }
           // (#1467) The compiler wraps Wasm vec arguments via `__make_iterable`
-          // before they reach this import, so `errors` is already a plain JS
-          // array when called from compiled code. We DELIBERATELY do NOT call
-          // `__make_iterable` recursively on each element — its vec-shape
-          // detection misfires on host Error instances and converts them into
-          // empty arrays. For values that arrive from user JS (rare in
-          // compiled code, but possible via interop) `Array.isArray` is false
-          // and we walk the iterator protocol directly.
+          // before they reach this import, so `errors` is usually already a plain
+          // JS array (or wrapped iterable) when called from compiled code. We
+          // DELIBERATELY do NOT call `__make_iterable` recursively on each element
+          // — its vec-shape detection misfires on host Error instances and
+          // converts them into empty arrays. For values that arrive from user JS
+          // `Array.isArray` is false and we walk the iterator protocol directly;
+          // abrupt completions there must propagate (test262
+          // errors-iterabletolist-failures).
           let errorsList: any[];
           if (Array.isArray(errors)) {
             errorsList = errors.slice();
           } else {
-            const iter = (errors as any)[Symbol.iterator];
-            if (typeof iter !== "function") {
-              throw new TypeError(String(errors) + " is not iterable");
+            let iter: any;
+            try {
+              iter = (errors as any)[Symbol.iterator];
+            } catch {
+              // Opaque WasmGC struct — `Symbol.iterator` access traps.
+              iter = undefined;
             }
-            errorsList = [];
-            const it = iter.call(errors);
-            while (true) {
-              const r = it.next();
-              if (r == null || r.done) break;
-              errorsList.push(r.value);
+            if (typeof iter !== "function") {
+              // (#1634) A bare opaque WasmGC *vec* struct (array literal `[1,2,3]`
+              // that wasn't pre-wrapped) has no JS `Symbol.iterator`. Materialize
+              // it via `__vec_len`/`__vec_get` (same machinery `__array_from`
+              // uses) — but ONLY when it is genuinely vec-shaped (no named struct
+              // fields). A non-vec object-literal struct (e.g. a user iterable
+              // whose `@@iterator` lives in the sidecar) must NOT be silently
+              // turned into an empty array; fall through to the TypeError so
+              // abrupt/protocol-violation cases still throw (test262
+              // errors-iterabletolist-failures).
+              const exports = callbackState?.getExports();
+              const looksLikeVec = _isWasmStruct(errors) && _getStructFieldNames(errors, exports) === null;
+              if (looksLikeVec) {
+                const materialized = _materializeIterable(errors, callbackState);
+                if (Array.isArray(materialized)) {
+                  errorsList = materialized.slice();
+                } else {
+                  throw new TypeError("AggregateError: errors argument is not iterable");
+                }
+              } else {
+                throw new TypeError("AggregateError: errors argument is not iterable");
+              }
+            } else {
+              errorsList = [];
+              const it = iter.call(errors);
+              while (true) {
+                const r = it.next();
+                if (r == null || r.done) break;
+                errorsList.push(r.value);
+              }
             }
           }
           // Spec step 3: if message !== undefined, ToString(message); then
           // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
-          // Construct without message first to leave the slot empty (per spec
-          // when message is undefined, no own message property is set).
-          const inst = options === undefined ? new AggregateError([]) : new AggregateError([], undefined, options);
+          // Construct without message/options first; the engine's native
+          // InstallErrorCause cannot read an opaque WasmGC `options` struct, so
+          // we install `cause` ourselves below (#1634).
+          const inst = new AggregateError([]);
           if (message !== undefined) {
             const msgStr = typeof message === "string" ? message : String(message);
             Object.defineProperty(inst, "message", {
@@ -5282,6 +5419,58 @@ assert._isSameValue = isSameValue;
             enumerable: false,
             configurable: true,
           });
+          // Spec step (InstallErrorCause): set own non-enumerable `cause` if
+          // options has the property (HasProperty, not truthiness) (#1634).
+          _installErrorCause(inst, options, callbackState?.getExports());
+          return inst;
+        };
+      // new SuppressedError(error, suppressed, message, options?) — spec §20.5.10.1
+      // (#1634). Mirrors __new_AggregateError: the generic 3-param extern-class
+      // path dropped the `options` argument (no `cause` support) and could not
+      // coerce `message` correctly. This dedicated import implements the spec
+      // construction sequence:
+      //   • error / suppressed stored as non-enumerable own data properties,
+      //   • message coerced via ToString only if defined (no own prop otherwise),
+      //   • InstallErrorCause(O, options): if options is an object and
+      //     HasProperty(options, "cause"), set a non-enumerable `cause`.
+      if (name === "__new_SuppressedError")
+        return (error: any, suppressed: any, message: any, options: any): any => {
+          if (typeof SuppressedError === "undefined") {
+            throw new TypeError("SuppressedError is not supported by the host");
+          }
+          // Construct via the native engine so the prototype chain and brand
+          // (`SuppressedError.prototype`, name "SuppressedError") are correct.
+          // The engine cannot read an opaque WasmGC `options` struct, so we
+          // install `cause` ourselves below (#1634).
+          const inst = new (SuppressedError as unknown as new () => Error)();
+          // Spec steps 4: CreateNonEnumerableDataPropertyOrThrow(O, "error", error).
+          Object.defineProperty(inst, "error", {
+            value: error,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          // Spec step 3: CreateNonEnumerableDataPropertyOrThrow(O, "suppressed", suppressed).
+          Object.defineProperty(inst, "suppressed", {
+            value: suppressed,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          // Spec step 5: if message is not undefined, msg = ToString(message);
+          // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
+          if (message !== undefined) {
+            const msgStr = typeof message === "string" ? message : String(message);
+            Object.defineProperty(inst, "message", {
+              value: msgStr,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+          // Spec step 6 (InstallErrorCause): set own non-enumerable `cause` if
+          // options has the property (HasProperty, not truthiness) (#1634).
+          _installErrorCause(inst, options, callbackState?.getExports());
           return inst;
         };
       // ArrayBuffer.isView(arg) — checks if arg is a TypedArray or DataView (#965)
@@ -5917,7 +6106,17 @@ assert._isSameValue = isSameValue;
           // %GeneratorPrototype% inherits from %IteratorPrototype% so
           // .map/.filter/.drop/.take/... (#1367) still resolve through the
           // chain.
-          const proto = _getGeneratorPrototype();
+          // Spec §27.5 prototype chain has a per-function `g.prototype` level
+          // *between* the instance and `%GeneratorPrototype%`:
+          //   instance → g.prototype → %GeneratorPrototype% → %IteratorPrototype%
+          // Codegen does not thread the function's own `.prototype` into this
+          // helper, so re-create the missing level with a fresh ordinary object
+          // inheriting from `%GeneratorPrototype%`. This makes the two-hop
+          // `Object.getPrototypeOf(Object.getPrototypeOf(g()))` land on
+          // `%GeneratorPrototype%` (toStringTag = "Generator") as the spec
+          // requires. State lives on the instance, not the prototype, so the
+          // brand check (`_GeneratorState.get(this)`) is unaffected.
+          const proto = Object.create(_getGeneratorPrototype());
           const obj: any = Object.create(proto);
           _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -5928,7 +6127,10 @@ assert._isSameValue = isSameValue;
           // matching comment on `__create_generator`. The instance is just a
           // plain object whose [[Prototype]] is the singleton — state lives in
           // `_AsyncGeneratorState`.
-          const proto = _getAsyncGeneratorPrototype();
+          // Mirror __create_generator: insert the missing per-function
+          // `g.prototype` level so the two-hop chain reaches
+          // `%AsyncGeneratorPrototype%` (toStringTag = "AsyncGenerator").
+          const proto = Object.create(_getAsyncGeneratorPrototype());
           const obj: any = Object.create(proto);
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
