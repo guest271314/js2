@@ -1,9 +1,10 @@
 ---
 id: 821
 title: "BindingElement null guard over-triggering"
-status: ready
+status: done
 created: 2026-03-27
-updated: 2026-04-28
+updated: 2026-05-27
+completed: 2026-05-27
 priority: critical
 feasibility: medium
 reasoning_effort: high
@@ -50,3 +51,37 @@ This issue should be re-scoped or broken into specific sub-issues:
 - Iterator protocol for array destructuring (Symbol.iterator support)
 - Async generator destructured parameters
 - Rest element with nested destructuring
+
+## Resolution (2026-05-27)
+
+The 2026-03-27 note was correct that the null *guard* mechanism is sound. The
+real bug in the `init-skipped` family is a **binding-local type-inference**
+problem, not a guard problem:
+
+For `{ s: t = counter() }` (or `[w = counter()]`) where `counter()` returns
+`void`, TypeScript infers the binding's type as pure `void` — the default
+initializer is its only type evidence. `mapTsTypeToWasm` maps `void` → `i32`
+(type-mapper.ts:51), so when the property is present and non-`undefined`
+(`null`/`0`/`false`/`''`, an externref), the value is coerced into an `i32`
+local and destroyed. The default never actually fires (the guard is correct),
+but the preserved value is mangled → `assert.sameValue(t, null)` fails.
+
+**Fix**: `resolveBindingElementType` (new, in type-mapper.ts) — when a binding
+element has a default initializer AND its resolved type is the void/undefined
+sentinel, type the local as `externref` so the real value survives unchanged.
+Wired into `ensureBindingLocals` (the central pre-allocation for every
+destructuring path: decl, function-param, class-method, catch).
+
+**Measured impact** (init-skipped + init-undef dstr family, 376 tests, via
+the test262 runner): main 209 pass → fix 262 pass (**+53**), compile_errors
+unchanged (14 → 14). No regressions in the destructuring equivalence suite
+(78 pass; the 2 failures in destructuring-extended / destructuring-initializer
+pre-date this change).
+
+**Residual sub-issues (NOT fixed here — separate root causes):**
+- Eager default-evaluation for `[x = counter()] = [literal]` array params
+  nested inside object-literal methods (the param-level default `= [...]`
+  interacts with element defaults — ~49 `initCount != 0` fails).
+- `init-undef` in `for-await-of` async-generator destructuring (default
+  should fire for `undefined` but doesn't — ~27 fails).
+- `illegal cast in __closure_*` for some closure-captured dstr defaults (~4).
