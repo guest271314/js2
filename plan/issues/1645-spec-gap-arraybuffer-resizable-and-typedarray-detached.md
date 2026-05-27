@@ -1,7 +1,7 @@
 ---
 id: 1645
 title: "spec gap: ArrayBuffer resizable + TypedArray detached-buffer guards (100 + 39 test262 fails)"
-status: ready
+status: in-review
 created: 2026-05-08
 updated: 2026-05-24
 priority: medium

@@ -6,7 +6,7 @@ created: 2026-05-21
 updated: 2026-05-27
 completed: 2026-05-27
 feasibility: easy
-sprint: Backlog
+sprint: 56
 depends_on: [1129]
 owner: developer
 type: fix

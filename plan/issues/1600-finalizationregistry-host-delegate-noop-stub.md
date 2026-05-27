@@ -12,7 +12,7 @@ task_type: feature
 area: codegen+runtime
 language_feature: FinalizationRegistry
 goal: npm-library-support
-sprint: Backlog
+sprint: 56
 related: [1101]
 es_edition: ES2021
 ---
