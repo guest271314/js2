@@ -1955,6 +1955,46 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return { kind: "externref" };
   }
 
+  // (#1634) SuppressedError(error, suppressed, message, options?) — called
+  // WITHOUT `new`. Per ES §20.5.10.1, called as a function it constructs
+  // normally. Mirror the new-super.ts codegen so without-new and with-new
+  // resolve together. Unwrap parenthesized/cast wrappers like the AggregateError
+  // dispatch above.
+  let _suppCallee: ts.Expression = expr.expression;
+  while (
+    ts.isParenthesizedExpression(_suppCallee) ||
+    ts.isAsExpression(_suppCallee) ||
+    ts.isTypeAssertionExpression(_suppCallee) ||
+    ts.isSatisfiesExpression(_suppCallee) ||
+    ts.isNonNullExpression(_suppCallee)
+  ) {
+    _suppCallee = (_suppCallee as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(_suppCallee) && _suppCallee.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
