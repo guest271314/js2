@@ -1,9 +1,9 @@
 ---
 id: 1332
 title: "RegExp host-mode: prototype method edge cases (exec, test, flag accessors, RegExpStringIterator)"
-status: ready
+status: in-progress
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-27
 priority: low
 feasibility: medium
 reasoning_effort: medium
