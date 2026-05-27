@@ -1,9 +1,9 @@
 ---
 id: 1634
 title: "spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails)"
-status: done
+status: in-review
 created: 2026-05-08
-updated: 2026-05-27
+updated: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -84,55 +84,3 @@ Mirror for SuppressedError.
 
 - `test262/test/built-ins/AggregateError/errors-iterabletolist.js`
 - `test262/test/built-ins/SuppressedError/cause.js`
-
-## Findings & resolution (2026-05-27)
-
-### What was actually broken (root cause)
-
-1. **`new AggregateError([1,2,3])` trapped at runtime.** The `errors` arg arrives
-   as an opaque WasmGC vec struct — neither `Array.isArray` nor JS-iterable. The
-   old code's fallback `throw new TypeError(String(errors) + ...)` itself trapped
-   with *"Cannot convert object to primitive value"* (ToPrimitive on the opaque
-   struct). Now: when `errors` has no JS `Symbol.iterator` AND is a genuine vec
-   (no named struct fields, via `_getStructFieldNames`), materialize it through
-   `__vec_len`/`__vec_get` (same machinery `__array_from` uses). `Set` / arrays /
-   generators iterate correctly.
-2. **`SuppressedError` had no dedicated constructor** — it went through the generic
-   3-param extern-class path which dropped the 4th `options` arg (no `cause`) and
-   mishandled message coercion. Added `__new_SuppressedError(error, suppressed,
-   message, options)` host import + new-super.ts/calls.ts codegen, mirroring
-   `__new_AggregateError`.
-3. **`cause` from `options` (HasProperty, incl. `cause: undefined`)** is now
-   installed for both via the shared `_installErrorCause` helper. The engine's
-   native `InstallErrorCause` can't read an opaque WasmGC options struct, so we
-   read the field ourselves (raw, no recursive struct→plain conversion that would
-   break `error.cause === cause` reference identity).
-
-### Verified (tests/issue-1634.test.ts, 10/10 pass)
-Array-literal errors, Set errors, `Array.isArray(errors)`, cause object-identity,
-no-cause-when-options-omitted, cause-when-`cause:undefined` (HasProperty),
-`AggregateError(undefined)` throws TypeError, SuppressedError error/suppressed
-reference identity, message coercion, no-cause-when-options-omitted.
-
-### test262 conformance: NET ZERO in the two target dirs (no regression)
-`built-ins/AggregateError` 6/25 and `built-ins/SuppressedError` 7/22 — **same as
-current main** (baseline measured 6/25 + 7/22, not the stale 4/25 + 6/22 in the
-problem statement). The ≥70% acceptance target is **not reachable from this
-issue's scope**: the dominant remaining failures are out-of-scope infrastructure
-gaps, not the iterable/cause behavior this issue targets:
-- `TypeError: Cannot access property on null or undefined` — `AggregateError.prototype`
-  / `Object.getPrototypeOf(...)` returns null on extern classes (prototype-object
-  access gap). Affects ~9 prototype/* tests in each dir.
-- `is-a-constructor.js` / `length.js` — `Reflect.construct` brand + `fn.length`
-  introspection on extern-class constructors.
-- `message-method-prop-cast.js` / `order-of-args-evaluation.js` — ToPrimitive on a
-  Symbol/object `message` (Symbol→string coercion, see #1658).
-- `proto-from-ctor-realm.js` — needs `$262` realm helper (always skipped).
-- The remaining `errors-iterabletolist.js` failure is a **custom JS iterator
-  protocol over a WasmGC-struct object literal** (`{ [Symbol.iterator]() {...} }`)
-  — the shared iterator-bridge gap (#1320 / #1620 / #1633), where the struct's
-  sidecar-stored `@@iterator` method is not invokable through the host boundary.
-
-These improvements are runtime-correctness wins (programs constructing these
-errors with real iterables / cause now behave per spec) even though the test262
-*harness* files still fail on the unrelated introspection asserts above.
