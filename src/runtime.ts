@@ -4538,6 +4538,26 @@ assert._isSameValue = isSameValue;
               wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
             }
           }
+          // #1637 — `Boolean.prototype.toString.call(prim)` / `.valueOf.call(prim)`
+          // route here as obj=Boolean.prototype.method, method="call"/"apply".
+          // Boolean primitives travel i32→externref via __box_number so the
+          // receiver arrives as a number; §20.3.3.{2,3} thisBooleanValue accepts
+          // a Boolean primitive or wrapper, so coerce a numeric/bigint receiver
+          // back to a boolean primitive before the native method runs (V8 would
+          // otherwise throw "requires that 'this' be a Boolean"). Mirrors the
+          // __proto_method_call coercion (#1342) for the .call/.apply path.
+          if (
+            (method === "call" || method === "apply") &&
+            (wrappedObj === Boolean.prototype.toString || wrappedObj === Boolean.prototype.valueOf)
+          ) {
+            const coerceRecv = (r: any) => (typeof r === "number" || typeof r === "bigint" ? Boolean(r) : r);
+            if (method === "call") {
+              if (wrappedArgs.length > 0) wrappedArgs[0] = coerceRecv(wrappedArgs[0]);
+            } else if (method === "apply") {
+              // apply(thisArg, argsArray): the receiver is arg 0.
+              if (wrappedArgs.length > 0) wrappedArgs[0] = coerceRecv(wrappedArgs[0]);
+            }
+          }
           const fn = wrappedObj[method];
           if (typeof fn !== "function") {
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
