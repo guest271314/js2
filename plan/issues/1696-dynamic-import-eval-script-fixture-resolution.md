@@ -1,9 +1,10 @@
 ---
 id: 1696
 title: "dynamic-import eval-script-code fixture resolution + sloppy redecl (18 CE tests)"
-status: in-progress
+status: done
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: low
 feasibility: hard
 reasoning_effort: medium
