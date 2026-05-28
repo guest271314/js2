@@ -1,5 +1,5 @@
 ---
-id: 1680
+id: 1690
 title: "Stress test: compile acorn.mjs — invalid Wasm in isInAstralSet (f64 op reads global array ref)"
 status: ready
 created: 2026-05-27
@@ -15,7 +15,7 @@ sprint: Backlog
 related: [1679, 1677, 1666, 1618, 1314]
 note: "Surfaced behind #1679. With #1679's `new this(...)` blocker gone on current main (e622751f7), acorn.mjs now compiles to success=true with 0 errors but emits INVALID Wasm — the next blocker. Distinct from #1679 (which is codegen-acceptance only)."
 ---
-# #1680 — acorn.mjs compiles but emits invalid Wasm: `f64.lt` reads a global array ref in `isInAstralSet`
+# #1690 — acorn.mjs compiles but emits invalid Wasm: `f64.lt` reads a global array ref in `isInAstralSet`
 
 ## Problem
 
