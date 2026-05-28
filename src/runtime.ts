@@ -5277,6 +5277,17 @@ assert._isSameValue = isSameValue;
           // struct. Tries multiple arities for closures since the user
           // function may declare 1–4 params (replace callback spec passes
           // (match, ...captures, offset, string)).
+          //
+          // (#1329-b3) The wrapping callable also routes the closure's
+          // RETURN value through `_wrapForHost` when it comes back as a
+          // wasmGC struct. V8's @@replace then performs `ToString` on the
+          // returned value (spec §22.2.5.8 step 14.k.vi — `replacement =
+          // ToString(replValue)`); without the host proxy the engine sees
+          // an opaque WebAssembly object and throws "Cannot convert object
+          // to primitive value". The proxy exposes the struct's
+          // `toString`/`valueOf` closure fields as callable, matching the
+          // same `_wrapForHost` treatment we already apply to wasm-struct
+          // args via `wrappedArg0`.
           const wrapCallable = (a: any): any => {
             if (a == null) return a;
             if (!_isWasmStruct(a)) return a;
@@ -5289,7 +5300,19 @@ assert._isSameValue = isSameValue;
                   // wrap — _wrapWasmClosure returns null only when callbacks
                   // are absent, so a non-null return means we can dispatch.
                   const wrapped = _wrapWasmClosure(a, ar, callbackState);
-                  if (wrapped) return wrapped;
+                  if (wrapped) {
+                    return function replacerBridge(...callArgs: any[]): any {
+                      const ret = wrapped(...callArgs);
+                      // Wrap an opaque WasmGC struct return value so the
+                      // host's downstream `ToString` reaches the struct's
+                      // `toString`/`valueOf` closure fields.
+                      if (ret != null && _isWasmStruct(ret)) {
+                        const exps2 = callbackState?.getExports();
+                        return _wrapForHost(ret, exps2);
+                      }
+                      return ret;
+                    };
+                  }
                 }
               }
             }
