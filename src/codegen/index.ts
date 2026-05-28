@@ -1105,6 +1105,7 @@ export function generateModule(
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
     emitStructFieldGetters(ctx);
+    emitStructFieldSetters(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback on WasmGC arrays
     emitVecAccessExports(ctx);
@@ -1376,6 +1377,188 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
   // Returns a comma-separated string of field names for the struct type of the argument.
   // The runtime uses this for Object.keys(), JSON.stringify(), for-in, and spread on opaque structs.
   emitStructFieldNamesExport(ctx, fieldMap);
+}
+
+/**
+ * Emit exported `__sset_<name>(externref obj, externref val) -> ()` setters
+ * symmetric to the existing `__sget_<name>` getters (#1630). The runtime
+ * `_safeSet` calls these so a host `Object.assign(typedStruct, src)` (and
+ * other MOP writes routed through `_wrapForHost` set-trap) reflects back
+ * into the real WasmGC struct field rather than only updating the JS-side
+ * sidecar. Without these setters, struct.field reads via compiled Wasm see
+ * the initial value while sidecar reads via host see the updated value —
+ * the asymmetry that masks `Object.assign` and similar writeback cases.
+ *
+ * Only mutable fields get setters; immutable singleton structs (boxed
+ * number / boolean) are skipped to avoid `struct.set` validation errors.
+ * Field-name buckets that mix kinds (f64 / i32 / ref) across struct types
+ * are skipped so the sidecar still carries the write — homogeneous-kind
+ * buckets cover the object-literal cases in test262.
+ */
+function emitStructFieldSetters(ctx: CodegenContext): void {
+  try {
+    _emitStructFieldSettersInner(ctx);
+  } catch {
+    // Non-fatal: setter emission failure degrades to sidecar-only writeback
+    // (the current pre-fix behaviour), the module still runs.
+  }
+}
+
+function _emitStructFieldSettersInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType}]) mappings, but
+  // ONLY for mutable fields. Mirror the skip rules used by the getter
+  // emitter so the two stay in lockstep.
+  const fieldMap = new Map<string, { typeIdx: number; fieldIdx: number; fieldType: ValType }[]>();
+
+  for (const [structName, fields] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+
+    for (let i = 0; i < fields.length; i++) {
+      const field = fields[i];
+      if (!field || !field.type) continue;
+      if (!field.name || field.name.startsWith("$")) continue;
+      // Only emit setters for mutable fields — `struct.set` on an immutable
+      // field is a Wasm validation error (e.g. boxed-number singletons).
+      if (!field.mutable) continue;
+
+      let entries = fieldMap.get(field.name);
+      if (!entries) {
+        entries = [];
+        fieldMap.set(field.name, entries);
+      }
+      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type });
+    }
+  }
+
+  if (fieldMap.size === 0) return;
+
+  // Setter signatures: 3 variants by val type.
+  // Mixed-kind buckets are skipped — sidecar carries the write instead.
+  const setterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [], "$sset_extern_type");
+  const setterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [], "$sset_f64_type");
+  const setterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [], "$sset_i32_type");
+
+  for (const [fieldName, entries] of fieldMap) {
+    const hasF64 = entries.some((e) => e.fieldType.kind === "f64");
+    const hasI32 = entries.some((e) => e.fieldType.kind === "i32");
+    const hasRef = entries.some((e) => e.fieldType.kind !== "f64" && e.fieldType.kind !== "i32");
+    const allF64 = hasF64 && !hasI32 && !hasRef;
+    const allI32 = hasI32 && !hasF64 && !hasRef;
+    const allRef = hasRef && !hasF64 && !hasI32;
+
+    // Skip mixed-kind buckets — sidecar handles those.
+    if (!allF64 && !allI32 && !allRef) continue;
+
+    let setterTypeIdx: number;
+    let valMode: "extern" | "f64" | "i32";
+    if (allF64) {
+      setterTypeIdx = setterF64TypeIdx;
+      valMode = "f64";
+    } else if (allI32) {
+      setterTypeIdx = setterI32TypeIdx;
+      valMode = "i32";
+    } else {
+      setterTypeIdx = setterExternTypeIdx;
+      valMode = "extern";
+    }
+
+    const funcName = `__sset_${fieldName}`;
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
+
+    const funcBody = buildSetterNestedIfElse(entries, anyLocal, valMode);
+
+    mod.functions.push({
+      name: funcName,
+      typeIdx: setterTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body: funcBody,
+      exported: true,
+    } as WasmFunction);
+
+    mod.exports.push({
+      name: funcName,
+      desc: { kind: "func", index: funcIdx },
+    });
+  }
+}
+
+/** Build nested if/else for struct field setter dispatch. */
+function buildSetterNestedIfElse(
+  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType }[],
+  anyLocal: number,
+  valMode: "extern" | "f64" | "i32",
+): Instr[] {
+  const body: Instr[] = [];
+
+  // Convert obj externref to anyref and store
+  body.push({ op: "local.get", index: 0 } as Instr);
+  body.push({ op: "any.convert_extern" } as Instr);
+  body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // Chain: if (ref.test T1) { cast + struct.set T1 } else if (ref.test T2) { ... }
+  let current: Instr[] = []; // final else: no-op
+
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    const thenBranch = buildSetterStore(entry, anyLocal, valMode);
+
+    const ifInstr: Instr = {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: thenBranch,
+      else: current,
+    };
+
+    current = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+      ifInstr,
+    ];
+  }
+
+  body.push(...current);
+  return body;
+}
+
+/** Build the "then" branch that stores `val` (local 1) into a struct field. */
+function buildSetterStore(
+  entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
+  anyLocal: number,
+  valMode: "extern" | "f64" | "i32",
+): Instr[] {
+  const then: Instr[] = [];
+  const ft = entry.fieldType;
+
+  // Push the cast struct ref onto the stack
+  then.push({ op: "local.get", index: anyLocal } as Instr);
+  then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
+
+  // Push the value (already typed per valMode) — since we only emit setters
+  // for homogeneous-kind buckets, valMode and ft.kind line up.
+  then.push({ op: "local.get", index: 1 } as Instr);
+
+  if (valMode === "extern") {
+    // Field is a ref type — convert externref → anyref so it matches.
+    if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref" || ft.kind === "eqref") {
+      then.push({ op: "any.convert_extern" } as Instr);
+    }
+    // externref / ref_extern: no conversion needed.
+  }
+
+  then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  return then;
 }
 
 /**
@@ -3261,6 +3444,7 @@ export function generateMultiModule(
     // generateModule path — #1308 surfaced that multi-source projects
     // were missing these export emits).
     emitStructFieldGetters(ctx);
+    emitStructFieldSetters(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);
