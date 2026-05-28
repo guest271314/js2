@@ -9562,7 +9562,12 @@ function hoistBindingPattern(ctx: CodegenContext, fctx: FunctionContext, pattern
     if (ts.isIdentifier(element.name)) {
       const name = element.name.text;
       if (fctx.localMap.has(name)) continue;
-      if (ctx.moduleGlobals.has(name)) continue;
+      // #1690b: do NOT skip allocation when the name collides with a module
+      // global. This hoister only runs for nested function bodies; a `var`
+      // declared anywhere inside a function must shadow any module-level
+      // binding with the same name (ECMA-262 §10.2.10). Skipping left the
+      // identifier resolver falling through to `global.get/set $__mod_<name>`,
+      // so the inner destructured var aliased the module global.
       const elemType = ctx.checker.getTypeAtLocation(element);
       const wasmType = resolveWasmType(ctx, elemType);
       const localIdx = allocLocal(fctx, name, wasmType);
@@ -9604,7 +9609,10 @@ export function ensureLetConstBindingPatternTdzFlags(
     if (ts.isOmittedExpression(element)) continue;
     if (ts.isIdentifier(element.name)) {
       const name = element.name.text;
-      if (ctx.moduleGlobals.has(name)) continue;
+      // #1690b: do NOT skip when the name collides with a module global. This
+      // runs only for nested function bodies, where a `let`/`const`
+      // destructuring binding must shadow any module-level binding of the same
+      // name (and carry its own TDZ flag) rather than aliasing the global.
       // Allocate the binding local up front if missing — needed so that when
       // a default initializer for a SIBLING binding compiles its expression,
       // a forward-reference to this binding (e.g. `let { a = b, b } = {}`)
@@ -9633,7 +9641,12 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
   if (ts.isIdentifier(decl.name)) {
     const name = decl.name.text;
     if (fctx.localMap.has(name)) return;
-    if (ctx.moduleGlobals.has(name)) return;
+    // #1690b: do NOT skip allocation when the name collides with a module
+    // global. This hoister only runs for nested function bodies; per JS var
+    // hoisting (ECMA-262 §10.2.10) a `var x` inside a function must allocate a
+    // function-local that shadows any module-level `x`. The previous skip left
+    // the resolver aliasing `global.get/set $__mod_x` for every read/write of
+    // the inner `x`, so the function mutated the module global instead.
     const varType = ctx.checker.getTypeAtLocation(decl);
     // (#1239 / #1433) Object literals carrying get/set accessor declarations,
     // or `[Symbol.dispose]` / `[Symbol.asyncDispose]` computed methods, are
