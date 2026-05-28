@@ -1,9 +1,9 @@
 ---
 id: 1554
 title: "cli: --standalone should reject --allow-fs (logically mutually exclusive flags)"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-21
+updated: 2026-05-28
 priority: low
 feasibility: easy
 reasoning_effort: low
