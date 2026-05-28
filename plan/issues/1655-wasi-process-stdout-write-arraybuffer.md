@@ -2,9 +2,9 @@
 id: 1655
 title: "wasi: process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal"
 status: done
-completed: 2026-05-28
 created: 2026-05-24
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: easy
 reasoning_effort: low

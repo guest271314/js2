@@ -1,5 +1,5 @@
 ---
-id: 1680
+id: 1691
 title: "yield* does not delegate throw()/return() to the inner iterator (eager-generator model gap)"
 status: ready
 created: 2026-05-27
@@ -13,7 +13,7 @@ language_feature: generators
 goal: spec-completeness
 parent: 1665
 ---
-# #1680 — yield* does not delegate throw()/return() to the inner iterator
+# #1691 — yield* does not delegate throw()/return() to the inner iterator
 
 ## Problem
 

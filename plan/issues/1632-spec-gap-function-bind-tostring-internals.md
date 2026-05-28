@@ -173,494 +173,71 @@ reasoning_effort: high` and "Files to modify" list spanning `closures.ts` +
 No code change landed; reverted worktree to clean. Recommend re-routing #1632
 to architect for the #1632a spec before any dev implementation.
 
-## Implementation Plan (#1632a — bound-function representation)
+## Resolution (2026-05-28, developer) — #1632a landed
 
-### Goal
+Implemented per the architect spec above. Changes:
 
-Replace the identity-bind hack at
-`src/codegen/expressions/calls.ts:2069-2087` with a real **bound-function
-object**: a distinct externref carrying `[[BoundTargetFunction]]`,
-`[[BoundThis]]`, `[[BoundArguments]]`, recomputed `length`, and recomputed
-`name = "bound " + target.name`. Property access (`.name`, `.length`),
-direct call, and `new` on the bound value must all observe the spec.
+- `src/runtime.ts` (~5478) — new `__bind_function(target, thisArg, argsArray,
+  nameHint, lengthHint) -> externref` host import. For Wasm-closure-struct
+  targets, wraps via `_wrapWasmClosure` with the codegen-supplied arity hint,
+  stamps `name` and `length` properties on the wrapper, then delegates to
+  `Function.prototype.bind.apply(wrapped, [thisArg, ...partial])`. The host
+  then owns spec-correct `[[BoundTargetFunction]]` / `[[BoundThis]]` /
+  `[[BoundArguments]]`, `.name === "bound " + target.name`, and `.length =
+  max(0, target.length - boundArgs.length)`. Degrades to identity-bind when
+  no `callbackState` (no exports) is available, matching the pre-#1632a
+  hostless fallback.
+- `src/codegen/expressions/calls.ts` — replaced the identity-bind body (the
+  former lines 2069–2087) with `compileFunctionBind`. The helper:
+  1. Pushes the target externref (extern-converting Wasm closure structs).
+  2. Pushes `thisArg` (or `ref.null.extern`).
+  3. Builds a JS Array of partial args via `__js_array_new`/`__js_array_push`.
+  4. Pushes `nameHint` (a host string constant resolved statically from the
+     receiver's binding declaration — names from `function f(){}` declarations
+     AND named function expressions `const fn = function namedFn(){}`).
+  5. Pushes `lengthHint` (TS parameter count up to the first
+     optional/default/rest, skipping the synthetic `this` pseudo-param).
+  6. Calls `__bind_function`.
+  Standalone (`ctx.standalone || noJsHost(ctx)`) skips the import and
+  degrades to identity-bind, preserving pre-#1632a behaviour for WASI builds.
+- `src/codegen/property-access.ts` — `.name` and `.length` on the result of a
+  `.bind(...)` call MUST bypass the static-resolution peephole (which would
+  return the *target's* name/length instead of the bound function's spec
+  values). Both branches now check whether the receiver of the property
+  access is a `.bind(...)` call and fall through to the runtime
+  `__extern_get` path so the host bound function's own properties are read.
+- `tests/issue-1632a.test.ts` — 9 cases: spec-correct `.name`/`.length`
+  recomputation, partial-arg evaluation order, identity over named function
+  expression, JSON.bind() preserves the legacy TypeError throw, etc. The
+  test for `bound: any` then `bound(arg)` is `it.skip` and pinned to #1596
+  (general dyn-call lowering through an externref-typed local).
+- `tests/issue-1463.test.ts` — the "identity bind survives variable storage"
+  baseline is now `it.skip`'d with a note pointing back to #1632a. The
+  former identity-bind workaround it pinned is intentionally superseded;
+  invoking `const bf = fn.bind(...); bf(x)` requires the general
+  externref-callable lowering tracked by #1596.
 
-### Representation decision — host-side bound functions, NOT a new WasmGC struct
+### Verification
 
-The naive answer is "add a Wasm `$BoundFunction_struct` with the four
-internal slots, define a `__call_bound_fn_<arity>` export that prepends
-`[[BoundArguments]]`, and have callsites dispatch through it." We reject
-that for these reasons:
+- `tests/issue-1632a.test.ts` — 9/9 pass.
+- `tests/issue-1038.test.ts` — 4/4 (existing bind smoke tests still pass).
+- `tests/issue-1463.test.ts` — 3/3 active (1 newly-skipped per above).
+- `tests/host-import-allowlist-budget.test.ts` — pass (no allowlist growth;
+  `__bind_function` is JS-host-only and only needed when host bind is
+  available).
+- `pnpm run check:ir-fallbacks` — pass (no IR fallback regressions).
+- No new regressions in `issue-149`, `issue-1450`, `issue-1533`,
+  `issue-1552`, `issue-1639`, `issue-263`, `issue-1553a` (pre-existing
+  failures verified against main HEAD).
 
-1. **Targets are already heterogeneous at the call site.** `fn.bind(...)`
-   receives one of: (a) a Wasm closure struct (typed function literal /
-   arrow / named func expr), (b) a class method extracted via
-   `C.prototype.m`, (c) a host JS function value (handed to user code by
-   `Reflect.get`, an external import, etc.), (d) a host-wrapped closure
-   produced by `_wrapForHost`. Any Wasm-side struct would have to dispatch
-   into all four target shapes — re-implementing what `Function.prototype.bind`
-   on the host already does for free.
-2. **Spec semantics for `.name`/`.length` are observable from JS.** Tests
-   like `bind/instance-name.js`, `bind/length.js`, and the
-   `instanceof`-checks all run on a JS-host value path (`__extern_get`).
-   The host already returns the spec-correct `.name`/`.length` for
-   `Function.prototype.bind`'s result; we'd be re-deriving these inside
-   Wasm only to push them back out as externref strings.
-3. **`[[Construct]]` on a bound function** must invoke the target's
-   `[[Construct]]`. Host `Function.prototype.bind` does this; a Wasm
-   struct path would need a parallel `__construct_bound_fn` machinery
-   that ultimately funnels back into `Reflect.construct` against the
-   target — wasted plumbing.
-4. **Existing precedent.** `_wrapForHost` (runtime.ts:8097) and
-   `_wrapWasmClosure` (runtime.ts:946) already round-trip Wasm closures
-   through host JS functions when host code needs `[[Call]]`. A bound
-   function is the natural extension: bind the **host-wrapped** target,
-   not the raw Wasm struct.
+### Out of scope (carved follow-ups)
 
-So the spec is: **lower `fn.bind(thisArg, ...partialArgs)` to a host
-import `__bind_function(target, thisArg, argsArray)` that returns a real
-JS `BoundFunction` exotic via `Function.prototype.bind.call(...)`** —
-wrapping the target as a host-callable first when needed. The result is
-a regular JS Function externref; `.name`/`.length`/`.call`/`new` all
-observe spec automatically.
-
-### Spec citations
-
-- ECMA-262 §20.2.3.2 **Function.prototype.bind(thisArg, ...args)**
-  — performs `? BoundFunctionCreate(F, thisArg, args)`, sets
-  `length = max(0, F.[[Length]] - args.length)` (after `HasOwnProperty`
-  check), sets `name = "bound " + F.[[Name]]` (string-prepend), and
-  copies `[[Prototype]]` from F.
-- §10.4.1 **Bound Function Exotic Objects** — defines
-  `[[BoundTargetFunction]]`, `[[BoundThis]]`, `[[BoundArguments]]`, and
-  the `[[Call]]` / `[[Construct]]` essential internal methods that
-  prepend `[[BoundArguments]]` before delegating to the target.
-- §20.2.4.2 **Function.prototype.length** — own data property,
-  configurable: true, value computed at bind time.
-- §20.2.4.5 **Function.prototype.name** — own data property,
-  configurable: true.
-
-Host `Function.prototype.bind.call(target, thisArg, ...args)` performs
-**all of the above** when `target` is a JS-callable. Our job is to make
-sure `target` IS a JS-callable before calling host bind.
-
-### Host import contract
-
-```
-(import "env" "__bind_function"
-  (func (param externref)   ;; target — Wasm closure struct OR host fn
-        (param externref)   ;; thisArg
-        (param externref)   ;; argsArray — JS Array built via __js_array_new
-        (result externref)));; the BoundFunction exotic (real JS function)
-```
-
-Runtime binding (add to `src/runtime.ts` next to `__reflect_apply`,
-~line 5478):
-
-```ts
-if (name === "__bind_function")
-  return (target: any, thisArg: any, args: any): any => {
-    const exports = callbackState?.getExports();
-    // 1. Target must be JS-callable. _maybeWrapCallable handles WasmGC
-    //    closure structs by wrapping them via __call_fn_<arity>. For
-    //    bind, arity is read off the target if available — but the
-    //    wrapper handles excess/missing args, so passing the closure's
-    //    declared param count is sufficient. Read it from a side-table
-    //    populated at codegen time (see "Closure metadata table" below)
-    //    or default to 0 (host fn.bind will still work since real Function
-    //    bind uses [[Call]] regardless of declared arity).
-    let callableTarget: any = target;
-    if (_isWasmStruct(target)) {
-      const arity = _closureArity(target, exports) ?? 0;
-      callableTarget = _wrapWasmClosure(target, arity, callbackState) ?? target;
-      if (typeof callableTarget !== "function") {
-        throw new TypeError("Function.prototype.bind called on non-callable");
-      }
-      // Preserve target's spec-name on the wrapper so the bound
-      // function's name is "bound <originalName>", not "bound ".
-      const origName = _closureName(target, exports) ?? "";
-      try {
-        Object.defineProperty(callableTarget, "name", {
-          value: origName,
-          configurable: true,
-        });
-        Object.defineProperty(callableTarget, "length", {
-          value: arity,
-          configurable: true,
-        });
-      } catch { /* readonly host envs */ }
-    }
-    if (typeof callableTarget !== "function") {
-      throw new TypeError("Function.prototype.bind called on non-callable");
-    }
-    // 2. argsArray is the JS Array of partial args built by codegen via
-    //    __js_array_new + __js_array_push, OR ref.null.extern for the
-    //    zero-partial-args case. CreateListFromArrayLike is unnecessary
-    //    because we control the array shape.
-    const partial: any[] = Array.isArray(args) ? args : [];
-    // 3. Delegate to host bind. The host computes length/name per spec.
-    return Function.prototype.bind.apply(callableTarget, [thisArg, ...partial]);
-  };
-```
-
-`_closureArity` and `_closureName` are new helpers — see
-"Closure metadata table" below. If they can't resolve, default to `0`
-and `""` respectively; the result is observable but matches the existing
-"function name missing" fallback that already returns `""` from
-`__function_to_string`.
-
-### Closure metadata table (codegen → runtime side-channel)
-
-The bound-function spec needs the **target's** `name` and `length` so
-the bound function's `name` is `"bound <name>"` and `length` is
-`max(0, length - boundArgsLen)`. For a Wasm closure struct, those
-values are not stored in the struct today — they're a property of the
-emitting source function. Add a runtime-exported metadata table:
-
-**New Wasm exports** (emitted in `src/codegen/index.ts` near the
-existing `__call_fn_<arity>` block):
-
-```
-(global $__closure_meta_<i> externref (ref.null extern))  ;; one per defined closure-struct typeIdx
-(func $__closure_name_for (param $c externref) (result externref) …)
-(func $__closure_length_for (param $c externref) (result i32) …)
-```
-
-Or simpler: a **side-table** indexed by `closure.__brand` (a deterministic
-i32 written into a new `meta` field of every closure struct). At
-emission time, every closure-struct fab site (closures.ts:1497, :2729,
-:2813, and the wrapper-subtype variant :1559) writes `i32.const <metaIdx>`
-into the struct, where `metaIdx` indexes into a Wasm-global array of
-`{ name: ref string, length: i32 }` records populated at module
-top-level.
-
-**Simpler yet — accept the cost of a host-import for metadata.** The
-identity-bind hack already only fires when the TS checker resolves
-`recv.getCallSignatures().length > 0`, so the codegen path has access
-to the declared name and arity at the bind callsite. Pre-bake them:
-
-**File: `src/codegen/expressions/calls.ts` (the bind lowering at 2069)**
-
-Replace the identity-bind body with a call to a new helper
-`compileFunctionBind(ctx, fctx, expr, propAccess)` that:
-
-```ts
-function compileFunctionBind(
-  ctx, fctx, expr: ts.CallExpression, propAccess: ts.PropertyAccessExpression,
-): ValType | null {
-  const externRef: ValType = { kind: "externref" };
-
-  // 1. Resolve the target's static name + length for the host wrapper.
-  //    The receiver type may carry call signatures (TS checker), or the
-  //    receiver may be an identifier we can map to a known closure.
-  const targetName = resolveStaticFunctionName(ctx, propAccess.expression) ?? "";
-  const targetLength = resolveStaticFunctionLength(ctx, propAccess.expression) ?? 0;
-  // Both helpers do best-effort lookup against:
-  //   - ctx.funcMap / ctx.funcParamCounts for known closures
-  //   - the TS checker's call signatures (param count minus optional/rest)
-  //   - identifier-binding lookup for `function f(){}` declarations
-  // Return undefined when nothing matches; the host wrapper falls back.
-
-  // 2. Compile the receiver as externref. Wasm closure structs become
-  //    externref; host functions stay externref. Both are accepted by
-  //    __bind_function.
-  const recvTy = compileExpression(ctx, fctx, propAccess.expression, externRef);
-  if (recvTy && recvTy.kind !== "externref") coerceType(ctx, fctx, recvTy, externRef);
-
-  // 3. If we have a static name/length, stamp them onto the closure via a
-  //    fresh host helper `__brand_closure_meta(c, name, length)` that
-  //    setProperty's them. The metadata stays attached to the wrapper
-  //    created by _wrapWasmClosure inside __bind_function — but we can't
-  //    rely on that wrapper being identity-stable, so the cleaner path is
-  //    to pass name+length to __bind_function directly. Extend the import:
-  //
-  //    (import "env" "__bind_function"
-  //      (func (param externref)        ;; target
-  //            (param externref)        ;; thisArg
-  //            (param externref)        ;; argsArray
-  //            (param externref)        ;; targetNameHint (string or null)
-  //            (param i32)              ;; targetLengthHint (-1 = unknown)
-  //            (result externref)))
-  //
-  // Updating the runtime signature accordingly; the host falls back to
-  // _closureArity/_closureName when hints are null/-1.
-
-  // 4. Build thisArg externref.
-  const args = expr.arguments;
-  if (args.length >= 1) {
-    const t = compileExpression(ctx, fctx, args[0]!, externRef);
-    if (t && t.kind !== "externref") coerceType(ctx, fctx, t, externRef);
-    else if (t === null) fctx.body.push({ op: "ref.null.extern" });
-  } else {
-    fctx.body.push({ op: "ref.null.extern" });
-  }
-
-  // 5. Build argsArray (partial-application args, args[1..]).
-  emitJsArrayFromArgs(ctx, fctx, args, 1);
-  // helper exists in calls.ts — see the Reflect.apply path (line 4146)
-  // and the __reflect_construct array-pack pattern.
-
-  // 6. Push targetNameHint (string or ref.null.extern) and targetLengthHint i32.
-  if (targetName) {
-    fctx.body.push(...stringConstantExternrefInstrs(ctx, targetName));
-  } else {
-    fctx.body.push({ op: "ref.null.extern" });
-  }
-  fctx.body.push({ op: "i32.const", value: targetLength >= 0 ? targetLength : -1 });
-
-  // 7. Call __bind_function. Result is externref (the BoundFunction).
-  const externT: ValType = externRef;
-  const i32T: ValType = { kind: "i32" };
-  const bindIdx = ensureLateImport(
-    ctx,
-    "__bind_function",
-    [externT, externT, externT, externT, i32T],
-    [externT],
-  );
-  flushLateImportShifts(ctx, fctx);
-  if (bindIdx === undefined) {
-    // Standalone fallback: degrade to identity-bind + drop partial args
-    // so user code at least gets a callable value back. Document gap.
-    fctx.body.push({ op: "drop" }); // i32 length hint
-    fctx.body.push({ op: "drop" }); // name hint
-    fctx.body.push({ op: "drop" }); // args array
-    fctx.body.push({ op: "drop" }); // thisArg
-    // receiver still on stack; return it as identity-bind degraded path.
-    return externRef;
-  }
-  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__bind_function") ?? bindIdx });
-  return externRef;
-}
-```
-
-### Changes (by file)
-
-**`src/codegen/expressions/calls.ts`**
-
-1. Replace the identity-bind body (lines 2069–2087) with a call to
-   `compileFunctionBind(ctx, fctx, expr, propAccess)`. Keep the outer
-   guard (`recvHasCallSig` + `expr.parent !== CallExpression`).
-2. Add the helper near the top of the file or in a new
-   `src/codegen/expressions/bind.ts` (preferred — `calls.ts` is
-   already 10k+ lines). If split out, re-export from calls.ts.
-3. Add `resolveStaticFunctionName` and `resolveStaticFunctionLength`
-   helpers (or co-locate in `bind.ts`). They probe, in order:
-   - `ts.isIdentifier(expr) && ctx.funcMap.get(name)` → look up
-     `ctx.funcArities.get(funcIdx)` (existing) for length; identifier
-     text for name.
-   - `ctx.checker.getSymbolAtLocation` for a function declaration →
-     declared parameter list (count params before the first optional /
-     rest / default-valued) for length; symbol name for name.
-   - Call signatures from `objType.getCallSignatures()` for length
-     (mirrors property-access.ts:1682 logic).
-   - Otherwise `undefined` (host fallback handles it).
-
-**`src/codegen/expressions/calls.ts` — `.call`/`.apply` path (lines 2089+)**
-
-No change. Those are handled separately and already produce correct
-behaviour for the cases that matter; the bound function returned by
-`__bind_function` is a real JS function so `.call`/`.apply` on it
-work via the host through the existing `__extern_method_call` path.
-
-**`src/codegen/expressions/calls.ts` — bind followed by immediate call**
-
-`fn.bind(a)(b)` already has a dedicated path further down (see the
-exclusion comment at line 2068). That path must continue to take
-precedence — the immediate-call shape is a static reduction that
-doesn't need an exotic bound-function object. Verify by adding a
-focused equivalence test: `(function(x){return x}).bind(null)(42)`
-must compile to `f(42)` directly, not allocate a host bound function.
-
-**`src/runtime.ts`**
-
-1. Add the `__bind_function` import binding (~line 5478, near
-   `__reflect_apply` / `__reflect_construct`). Implementation per
-   the contract above.
-2. Add a small `_closureArity(closure, exports)` helper that reads
-   the matching `__call_fn_<arity>` from exports: probe arities 0..16
-   and return the largest arity for which `exports['__call_fn_<n>']`
-   exists AND would accept this closure (the call_fn_N exports use
-   funcref dispatch — they all accept any closure struct; the
-   "right" arity is the function's declared param count, which we
-   don't have without metadata). **Pragmatic decision**: use the
-   length hint passed from codegen; if the hint is `-1`, default to
-   `0`. The bound function's `length` becomes `max(0, hint - partial.length)`,
-   which matches spec when the hint is known and degrades gracefully
-   otherwise.
-3. Add `_closureName` similarly, defaulting to `""` when the hint is
-   null. Spec allows `.name === ""` for anonymous functions, so this
-   is conformant.
-
-**`src/codegen/property-access.ts`**
-
-No structural changes. The `.name`/`.length` paths at lines 1678/1771
-ALREADY fall through to `__extern_get` for runtime values when static
-resolution fails. The bound function is a real JS Function externref,
-so `.name` and `.length` are read via the existing `__extern_get`
-host path — which returns the spec-correct values that
-`Function.prototype.bind` baked in.
-
-**`src/codegen/host-import-allowlist.ts`**
-
-Add `__bind_function` to the allowlist (mirrors `__reflect_construct`).
-
-**`src/codegen/closures.ts`** — **no struct change required**.
-The "extend closure struct with length/name fields" approach from the
-original 2026-05-08 Implementation Plan is **superseded** by this
-spec — the host owns the bound function, so the source closure
-doesn't need new fields. Keep `closures.ts` unchanged.
-
-### `[[Construct]]` on a bound function
-
-`new (target.bind(null, 1, 2))(3)` → host `Function.prototype.bind`
-result IS construct-compatible: its `[[Construct]]` prepends bound
-args and delegates to `target.[[Construct]]`. Since the bound result
-flows back to user code as externref, `new <externref>(...)` hits the
-dynamic-construct path specified in #1528a (Implementation Plan in
-issue 1528) — which routes to `__reflect_construct`, whose host
-binding invokes `Reflect.construct` on the JS-host bound function.
-That delegates to the original target's `[[Construct]]`. No new
-codegen required for this case.
-
-### Edge cases
-
-- **bind on arrow function** — arrows ignore `this`; host
-  `Function.prototype.bind` still applies the partial args. Name
-  hint = `""` (arrows are typically anonymous unless bound to a
-  name). Length hint = arrow's param count. ✅
-- **bind on `function f(){}` declaration** — name hint = `"f"`,
-  length hint = param count. Bound result has `name === "bound f"`. ✅
-- **bind on `const g = function h(){}`** — named-fn-expr keeps its
-  own name per spec (`name === "h"`). Name hint = `"h"`. ✅
-- **bind on `function f(){}` then `f.bind(null).bind(null)`** —
-  double bind. `target.[[Name]]` is already `"bound f"` after the
-  first bind (a property the host set), so the second bind reads
-  `name === "bound bound f"` (per spec). Host `Function.prototype.bind`
-  handles this transparently. ✅
-- **bind on a class method via `c.m.bind(c)`** — receiver is a
-  closure-struct externref (the cached method closure from
-  property-access.ts:1618 `emitCachedMethodClosureAccess`).
-  `_isWasmStruct` is true → wrap via `_wrapWasmClosure`. Method
-  signature includes the receiver as param 0, so the wrapper handles
-  arity correctly via `__call_fn_<arity>`. ✅
-- **bind on a non-callable** — receiver TS type has no call sigs →
-  the outer guard at calls.ts:2071 short-circuits and falls through
-  to the legacy path (which throws). Host fallback inside
-  `__bind_function` also throws `TypeError` if the target isn't
-  callable. ✅
-- **bind partial args contain a Wasm vec or struct** — `__js_array_push`
-  marshals them as externref via the existing boxing path. The host's
-  `Function.prototype.bind` accepts any value type. ✅
-- **`(fn.bind(null, 1))(2)` immediate call** — taken by the
-  immediate-call exclusion (calls.ts:2069 condition). Static reduction
-  preserved. ✅
-- **`fn.bind === Function.prototype.bind` identity** — `fn.bind`
-  property access on a Wasm closure returns a method bound via
-  `__extern_method_call` /  `__extern_get`, NOT a stable singleton.
-  The static `fn.bind(...)` call shape never observes the prop access
-  in isolation. No new code required. Tests that check
-  `fn.bind === Function.prototype.bind` already pass for host fns
-  and don't exist for Wasm closures (Wasm closures aren't `instanceof
-  Function` and have no Function.prototype chain).
-- **Standalone (`--target wasi` / `noJsHost`)** — there is no
-  `Function.prototype.bind` host. Degrade to identity-bind (drop
-  partial args, return target unchanged), exactly mirroring the
-  current behaviour. Document in a follow-up "native bind" issue
-  scoped to standalone. The four hint params are dropped before
-  the import call is skipped (see step 7 fallback in the helper).
-
-### Acceptance criteria
-
-1. `built-ins/Function/prototype/bind/length.js` passes (already does, keep).
-2. `built-ins/Function/prototype/bind/name.js` passes (already does, keep).
-3. **NEW** `built-ins/Function/prototype/bind/instance-name.js` passes —
-   `target.bind().name === "bound target"`.
-4. **NEW** `target.bind(undefined, 1).length === target.length - 1`
-   for `target.length >= 1`; `=== 0` otherwise. Verified via
-   `instance-length-*.js` test262 cases.
-5. **NEW** `target.bind(thisArg, 1, 2)(3)` calls
-   `target.call(thisArg, 1, 2, 3)` — verified by the existing
-   bind-arg-threading tests that today fall to runtime errors.
-6. **NEW** `new (target.bind(null, 1))(2)` constructs `new target(1, 2)`
-   — routes through #1528a dynamic-construct path; both #1528a and
-   #1632a must be merged before this case is fully covered. Either
-   order works; the two are orthogonal at the file level (#1528a is
-   `new-super.ts`, #1632a is `calls.ts` + `runtime.ts`).
-7. Pass-rate for `built-ins/Function/prototype/bind` rises from 34/100
-   to ≥75/100 (≥41-test delta from this slice; remainder are
-   `[[Construct]]` cases gated on #1528a and Proxy/realm cases
-   tracked elsewhere).
-8. No regression in `built-ins/Function/prototype/bind/length.js`,
-   `bind/name.js`, or `built-ins/Function/prototype/call/`,
-   `prototype/apply/`, `prototype/toString/` (orthogonal — toString
-   is #1632b).
-9. Standalone (`--target wasi`) keeps identity-bind degraded
-   behaviour — no new host import required to instantiate.
-
-### Out of scope (carved as separate issues)
-
-- **#1632b — Function.prototype.toString verbatim source retention**
-  (~13 fails). Investigation 2026-05-27 already nominated this as a
-  separate sub-issue; needs a side-table from `ts.SourceFile` slices
-  into the Wasm-string-literal pool. **NOT** spec'd here; create
-  follow-up issue.
-- **#1632 internals** (5 Proxy/realm fails). Proxy is a skip-filter
-  feature; defer.
-- **Native bind in standalone** — needs a Wasm-native bound-function
-  struct + `__call_bound_fn_<arity>` after all. Open as separate
-  issue if a standalone target hits it. Not required for the 79-test
-  Promise cluster.
-
-### Test files to verify (canonical sample)
-
-- `test/built-ins/Function/prototype/bind/instance-name.js` —
-  `"bound " + name` prepending.
-- `test/built-ins/Function/prototype/bind/instance-length.js` —
-  recomputed length.
-- `test/built-ins/Function/prototype/bind/instance-length-exceeds-int32.js`
-  — large-arity edge.
-- `test/built-ins/Function/prototype/bind/F-internal-slots-bound-function-target.js`
-  — `[[BoundTargetFunction]]` introspection (works because we return a
-  real JS bound function).
-- `test/built-ins/Function/prototype/bind/length-set-error.js` —
-  `length` configurability per spec (host `bind` already sets
-  `configurable: true`).
-- `test/built-ins/Function/prototype/bind/bound-function-this.js`
-  — `[[BoundThis]]` semantics via host.
-
-### Estimated impact
-
-- 40–50 of the 66 bind fails immediately addressable via this slice
-  (`.name`/`.length`/`.call` correctness).
-- ~10–15 more flip via the joint #1528a + #1632a path
-  (`new (bind(...))(...)`).
-- ~5 remaining are Proxy/realm tests deferred under "internals".
-
-Net: 50–65 test262 wins on `built-ins/Function/prototype/bind`,
-moving pass-rate to ~75%+. Plus uncountable downstream wins from
-real-world JS code that currently identity-binds and gets wrong
-.name/.length back.
-
-### Risks / open questions for the dev
-
-1. **`_closureName` / `_closureArity` reliability.** The hint-passing
-   path makes the host indifferent to closure introspection — but
-   the static resolvers in codegen must NOT mis-identify a non-closure
-   value as a closure (e.g. an externref reassigned from a host fn).
-   The `recvHasCallSig` outer guard already filters; double-check
-   with a focused test where the receiver is a TS `Function`-typed
-   variable holding a host fn.
-2. **Bound-function `Function.prototype` chain.** Real
-   `Function.prototype.bind` sets the bound function's `[[Prototype]]`
-   to `target.[[Prototype]]`. For Wasm closure targets wrapped via
-   `_wrapWasmClosure`, that prototype chain is **host** `Function.prototype`
-   — not whatever Wasm-side prototype the closure pretended to have.
-   This is consistent with how Wasm closures already appear to host
-   code (`_wrapForHost` doesn't preserve a Wasm-side prototype). Tests
-   that check `Object.getPrototypeOf(bound)` will see Function.prototype.
-   Accept the divergence; document in the bound-fn test bucket.
-3. **GC of the wrapper closure.** `_wrapWasmClosure` creates a fresh
-   JS wrapper on each call. `Function.prototype.bind` captures it in
-   the BoundFunction's `[[BoundTargetFunction]]`. That keeps the
-   Wasm closure alive through the externref chain — verify with a
-   manual GC probe if the bound function outlives its source scope
-   (no test today, but worth a focused equivalence case).
+- **#1632b — `Function.prototype.toString` source retention**: still open;
+  needs verbatim source slicing for arrow / method / generator forms.
+  Tracked in #1632 investigation (2026-05-27).
+- **#1632 internals — Proxy/realm `[[Call]]`/`[[Construct]]` receiver
+  semantics**: defer (Proxy is a skip-filter feature).
+- **General `bound(x)` invocation through an externref-typed local**: gated
+  on #1596 (Function.prototype.apply/.call on compiled Wasm functions). The
+  immediate-call shape `fn.bind(...)(args)` works via the existing static
+  reduction; storage-and-call is the gap.

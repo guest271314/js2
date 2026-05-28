@@ -105,6 +105,7 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__box_boolean") return { type: "box", targetType: "boolean" };
   if (name === "__box_bigint") return { type: "box", targetType: "bigint" };
   if (name === "__to_bigint") return { type: "unbox", targetType: "bigint" };
+  if (name === "__bigint_ctor") return { type: "builtin", name: "__bigint_ctor" };
   if (name === "__is_truthy") return { type: "truthy_check" };
   if (name === "__typeof") return { type: "builtin", name: "__typeof" };
 
@@ -193,6 +194,13 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // properties) that the generic `extern_class` path can't provide. Route
   // through the dedicated builtin handler in the runtime.
   if (name === "__new_AggregateError") return { type: "builtin", name };
+
+  // (#1339) SuppressedError likewise needs spec-specific construction
+  // (CreateNonEnumerableDataPropertyOrThrow for error/suppressed/message,
+  // InstallErrorCause via HasProperty for opaque WasmGC options struct).
+  // The generic `extern_class` path drops options entirely. Route through the
+  // dedicated runtime builtin like AggregateError.
+  if (name === "__new_SuppressedError") return { type: "builtin", name };
 
   // Unknown constructor imports (__new_ClassName)
   if (name.startsWith("__new_")) {
