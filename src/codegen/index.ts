@@ -7929,6 +7929,25 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
       wasmType = { kind: "eqref" };
     }
+    // (#820m) Anonymous/named class expression as property value: TS infers
+    // the property type as `typeof <anonClass>` whose construct signature's
+    // `.prototype` walks back to the instance struct, so resolveWasmType
+    // hands us `ref <instance struct>`. But compileClassExpression emits an
+    // externref (closure-struct via extern.convert_any), and the struct cast
+    // on field assignment drops the value to ref.null. Widen any
+    // construct-signature-only property type (no call signatures) to
+    // externref so the closure ref is retained verbatim. Mirrors the
+    // empty-`{}` widening just above.
+    {
+      const constructSigs = propType.getConstructSignatures();
+      if (
+        constructSigs.length > 0 &&
+        callSigs.length === 0 &&
+        (wasmType.kind === "ref" || wasmType.kind === "ref_null")
+      ) {
+        wasmType = { kind: "externref" };
+      }
+    }
     fields.push({ name: prop.name, type: wasmType, mutable: true });
     if (callSigs.length > 0) {
       const sig = callSigs[0]!;
