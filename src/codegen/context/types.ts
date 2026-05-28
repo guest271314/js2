@@ -446,6 +446,15 @@ export interface CodegenContext {
    * to functions that use `arguments`. -1 = not yet created.
    */
   argcGlobalIdx: number;
+  /**
+   * Absolute Wasm global index for the `__current_this` (mut externref) module
+   * global (#1636-S1). Set by `__call_fn_method_N` to the host-supplied
+   * receiver before invoking the closure body; restored after the call.
+   * A `ThisKeyword` reference in a free-function closure (no local `this`
+   * binding, not in static context) reads from this global instead of the
+   * previous `undefined` fallback. -1 = not yet created.
+   */
+  currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
   /** Tag index for the exception tag (-1 if not yet registered) */

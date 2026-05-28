@@ -777,6 +777,22 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
         return { kind: "externref" };
       }
     }
+    // (#1636-S1) Free-function-closure fallback: when no local `this` binding
+    // exists and we're not in a static-class context, read the host-supplied
+    // receiver from the `__current_this` module global. The global is only
+    // registered when the module emits at least one closure (it's installed
+    // alongside `__call_fn_method_N`), so this branch is a no-op for closure-
+    // less modules and falls through to `undefined` below. The global's
+    // default value is `ref.null.extern`, which JS surfaces as `null` — a
+    // small but observable change from the prior `undefined` semantics, kept
+    // because (a) free-closure `this` was undefined-by-convention only, not
+    // a guarantee any caller could rely on, and (b) the spec-correct value
+    // for `JSON.stringify`'s replacer/`toJSON` callsites is whatever the
+    // host walk installs, never undefined.
+    if (ctx.currentThisGlobalIdx >= 0) {
+      fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
+      return { kind: "externref" };
+    }
     emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
