@@ -494,14 +494,14 @@ function compileDestructuringAssignment(
   // patterns the bindings stay at their defaults (mimics JS behaviour for
   // destructuring primitives — the properties simply do not exist). (#379)
   if (!typeName || !ctx.structMap.has(typeName) || !ctx.structFields.get(typeName)) {
-    // Null/undefined check — throw TypeError (#783, #1260).
+    // Null/undefined check — throw TypeError (#783, #1260, #1701).
     // In JS, `{...} = null` and `{...} = undefined` always throw TypeError per
-    // §13.15.5.5 RequireObjectCoercible. Use emitExternrefAssignDestructureGuard
-    // which checks BOTH ref.is_null (catches null) AND __extern_is_undefined
-    // (catches the JS undefined sentinel). The bare ref.is_null check missed
-    // undefined-encoded externrefs (#1260).
-    // Skip for empty `{} = val` patterns (#225) — only fire on real property accesses.
-    if ((resultType.kind === "externref" || resultType.kind === "ref_null") && target.properties.length > 0) {
+    // §13.15.5.2 ObjectAssignmentPattern step 1 (RequireObjectCoercible(value)),
+    // which fires BEFORE the property list is walked. Even `{} = null` /
+    // `{} = undefined` must throw. The earlier carve-out for empty patterns
+    // (#225) was applied uniformly but is only correct for non-null/undefined
+    // primitive RHS (e.g. `{} = 5` — a number is object-coercible).
+    if (resultType.kind === "externref" || resultType.kind === "ref_null") {
       const tmpNullChk = allocLocal(fctx, `__destruct_null_chk_${fctx.locals.length}`, resultType);
       fctx.body.push({ op: "local.set", index: tmpNullChk });
       if (resultType.kind === "externref") {
@@ -1040,18 +1040,17 @@ function compileArrayDestructuringAssignment(
     if (resultType.kind === "externref") {
       return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, resultType);
     }
-    // For f64/i32 — box to externref and retry
+    // #1701: ArrayAssignmentPattern always invokes GetIterator(value) per
+    // §13.15.5.2. For primitive RHS (number, boolean — both lower to f64/i32
+    // here) the spec result is a TypeError ("value is not iterable") because
+    // numbers/booleans lack a [Symbol.iterator] method. Previously we boxed
+    // the primitive via __box_number and recursed; the lenient runtime then
+    // silently produced an empty array. Drop the value and throw directly.
     if (resultType.kind === "f64" || resultType.kind === "i32") {
-      if (resultType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-        return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, {
-          kind: "externref",
-        });
-      }
+      fctx.body.push({ op: "drop" });
+      emitThrowString(ctx, fctx, "TypeError: value is not iterable");
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
     }
     reportError(ctx, target, "Cannot destructure: not an array type");
     return null;

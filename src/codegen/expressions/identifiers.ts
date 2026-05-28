@@ -5,7 +5,7 @@
 import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isHeterogeneousUnion, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
-import { emitFuncRefAsClosure } from "../closures.js";
+import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -673,7 +673,22 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
         );
       }
     }
-    // Wrap the plain function in a closure struct
+    // (#1340) For captureless top-level function decls, emit a cached
+    // singleton closure so identity is preserved across textual occurrences.
+    // Without this, `foo === foo` is false and any sidecar write keyed by the
+    // per-site struct (e.g. `foo.prototype = X`) does not round-trip — which
+    // is what made the test262 Iterator.prototype.* shim show up as
+    // misclassified "wasm_compile" errors. Captures must be filled at the
+    // construction site (per-instance), so we only take the cached path when
+    // no captures are required.
+    const nestedCaptures = ctx.nestedFuncCaptures.get(name);
+    if (!nestedCaptures || nestedCaptures.length === 0) {
+      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx);
+      if (cachedRefType) {
+        return cachedRefType;
+      }
+    }
+    // Fallback: per-site closure struct (with captures, or if cache emit failed).
     const refType = emitFuncRefAsClosure(ctx, fctx, name, funcRefIdx);
     if (refType) return refType;
   }

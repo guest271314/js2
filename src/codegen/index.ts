@@ -5543,6 +5543,12 @@ export function addStringImports(ctx: CodegenContext): void {
     if (ctx.mod.declaredFuncRefs.length > 0) {
       ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
     }
+    // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
+    // — see the matching block in addUnionImports / shiftLateImportIndices.
+    for (const t of ctx.pendingMethodTrampolines) {
+      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
+      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+    }
   }
 }
 
@@ -6925,6 +6931,14 @@ export function addUnionImports(ctx: CodegenContext): void {
         if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+    }
+    // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep.
+    // The captured methodFuncIdx / trampolineFuncIdx are plain numbers not
+    // reachable from any Instr — without this, finalizeMethodTrampolines later
+    // resolves the wrong (import) signature, producing invalid Wasm.
+    for (const t of ctx.pendingMethodTrampolines) {
+      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
+      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
     }
   }
 }
