@@ -2061,6 +2061,62 @@ function _liveGet(obj: any, key: string | number, exports: Record<string, Functi
   return undefined;
 }
 
+// #1636 Slice B — does the live value graph reach any node with a callable
+// `toJSON`? Used to decide between the fast `_wasmToPlain` path and the live
+// SerializeJSONProperty walk when no replacer is supplied. Bounded recursion
+// (cycle-safe via `seen`) and lazy (returns true on first match) so the
+// no-toJSON common case stays cheap.
+function _hasReachableToJSON(v: any, exports: Record<string, Function> | undefined, seen: Set<any>): boolean {
+  if (v == null || typeof v !== "object") return false;
+  if (seen.has(v)) return false;
+  seen.add(v);
+  // Plain JS object/array: enumerate own keys.
+  if (!_isWasmStruct(v)) {
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        if (_hasReachableToJSON(v[i], exports, seen)) return true;
+      }
+      return false;
+    }
+    const tj = (v as Record<string, unknown>).toJSON;
+    if (typeof tj === "function") return true;
+    for (const k of Object.keys(v)) {
+      if (_hasReachableToJSON((v as Record<string, unknown>)[k], exports, seen)) return true;
+    }
+    return false;
+  }
+  if (!exports) return false;
+  // WasmGC struct or vec — probe toJSON via _liveGet; recurse into entries.
+  const tj = _liveGet(v, "toJSON", exports);
+  if (_isJsonCallable(tj, exports)) return true;
+  if (_liveIsArray(v, exports)) {
+    const lenFn = exports.__vec_len;
+    const getFn = exports.__vec_get;
+    if (typeof lenFn === "function" && typeof getFn === "function") {
+      let len = 0;
+      try {
+        len = lenFn(v) as number;
+      } catch {
+        return false;
+      }
+      for (let i = 0; i < len; i++) {
+        try {
+          if (_hasReachableToJSON(getFn(v, i), exports, seen)) return true;
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    return false;
+  }
+  const keys = _liveGetEnumerableKeys(v, exports);
+  for (const k of keys) {
+    if (k === "toJSON") continue; // already checked
+    if (_hasReachableToJSON(_liveGet(v, k, exports), exports, seen)) return true;
+  }
+  return false;
+}
+
 function _isJsonCallable(v: any, exports: Record<string, Function> | undefined): boolean {
   if (typeof v === "function") return true;
   if (v == null || typeof v !== "object") return false;
@@ -3924,8 +3980,14 @@ function resolveImport(
           // flattened value. Preserves the currently-passing cases and the
           // existing perf characteristic for the common case.
           if (rep.kind === "none") {
-            const plain = _wasmToPlain(v, exports);
-            return JSON.stringify(plain, undefined, sp);
+            // #1636 Slice B — if any reachable value has a callable `toJSON`,
+            // route through the live walk so §25.5.2.4 step 2 fires; the
+            // flatten path would drop the method before host JSON.stringify
+            // sees it.
+            if (!_hasReachableToJSON(v, exports, new Set())) {
+              const plain = _wasmToPlain(v, exports);
+              return JSON.stringify(plain, undefined, sp);
+            }
           }
           // Live walk per §25.5.2.4. The synthetic wrapper holds the root
           // value under the empty-string key (step 8 of §25.5.2.1).
