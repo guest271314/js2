@@ -3,7 +3,7 @@ id: 1338
 title: "spec gap: Array.from / Array.of constructor semantics (39 test262 fails, wasm_compile dominant)"
 status: ready
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -74,3 +74,21 @@ For Array.of — same dispatch.
 - `test262/test/built-ins/Array/from/iter-set-length.js`
 - `test262/test/built-ins/Array/from/calling-from-valid-1-noStrict.js`
 - `test262/test/built-ins/Array/of/proto-from-ctor-realm.js`
+
+## Partial fix (2026-05-28, developer)
+
+Carved a small, safe sub-fix from the broader scope: the Array.from fast path
+(`src/codegen/expressions/calls.ts`, the `Array.from(arr)` array-copy branch)
+was hand-rolling the `array.new` default value as `{ op: "ref.null",
+typeIdx: (elemType as any).typeIdx ?? -1 }`. When `elemType.kind` was
+`externref` (no `typeIdx` field), this emitted invalid Wasm with the validator
+error `Unknown heap type -1`.
+
+Replaced with `defaultValueInstrs(elemType)` — the canonical helper that
+handles `externref`/`ref`/`ref_null`/`i32`/`f64`/`i64` uniformly. Probe
+(`Array.from([0, 'foo', undefined, Infinity])`) now validates and returns
+length 4.
+
+Tests: `tests/issue-1338.test.ts` — 3 cases (mixed-typed, numeric, string)
+all passing. Broader subclass dispatch + iterator bridge work remains in the
+dependency chain (#1320/#820/#1318/#1523/#1684) and is unchanged by this PR.
