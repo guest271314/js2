@@ -42,6 +42,7 @@ import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
+import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -2315,6 +2316,14 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
 
+  // #820l — globals for argc + extras-argv plumbing into the callee's
+  // `arguments` object. Both globals are mode-agnostic; ensureExtrasArgvGlobal
+  // also returns the vec struct typeIdx whose `data` field is an externref
+  // array (the same shape used by emitArgumentsVecBody on the receive side).
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const { globalIdx: extrasArgvGlobalIdx, vecTypeIdx: extrasVecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const extrasArrTypeIdx = getArrTypeIdxFromVec(ctx, extrasVecTypeIdx);
+
   // __call_fn_<arity>(closure: externref, arg0: externref, ..., arg<arity-1>: externref) → externref
   const params: ValType[] = [];
   for (let i = 0; i < arity + 1; i++) params.push({ kind: "externref" });
@@ -2361,7 +2370,34 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
       argInstrs.push(...buildArgConversion(i + 1, paramType));
     }
 
+    // #820l — argc/extras-argv plumbing so the callee's `arguments` object
+    // observes the *actual* host-passed arg count, not just `closureArity`.
+    // The host invokes the dispatcher with `arity` user args at locals
+    // [1..arity]; the closure declares `closureArity ≤ arity` formals. The
+    // receive-side (emitArgumentsVecBody) reads __argc + __extras_argv to
+    // build `arguments` with all `arity` slots populated.
+    const setupInstrs: Instr[] = [
+      { op: "i32.const", value: arity } as Instr,
+      { op: "global.set", index: argcGlobalIdx } as Instr,
+    ];
+    if (arity > entry.closureArity) {
+      // vec struct field order: (length: i32, data: arrRef). Push len first.
+      const extrasCount = arity - entry.closureArity;
+      setupInstrs.push({ op: "i32.const", value: extrasCount } as Instr);
+      for (let i = entry.closureArity; i < arity; i++) {
+        setupInstrs.push({ op: "local.get", index: i + 1 } as Instr);
+      }
+      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
+      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    } else {
+      // No extras for this arm — reset to avoid stale data from a prior call.
+      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    }
+
     const callBody: Instr[] = [
+      ...setupInstrs,
       { op: "local.get", index: anyLocal } as Instr,
       { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
       ...argInstrs,
