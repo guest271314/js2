@@ -200,6 +200,17 @@ export function shiftLateImportIndices(
       ctx.nativeStrHelpers.set(name, idx + added);
     }
   }
+  // (#1525b) Trampolines registered via emitObjectMethodAsClosure /
+  // emitCachedMethodClosureAccess capture the method's funcIdx and the
+  // trampoline's own funcIdx as plain numbers in pendingMethodTrampolines.
+  // This walker only walks Instr arrays — these side-channel numbers must be
+  // shifted too, otherwise finalizeMethodTrampolines later calls
+  // getFuncSignature on a stale index that now points at a late-added import
+  // (e.g. __typeof_string), corrupting the rebuilt body.
+  for (const t of ctx.pendingMethodTrampolines) {
+    if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += added;
+    if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += added;
+  }
   // Shift export descriptors
   for (const exp of ctx.mod.exports) {
     if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
