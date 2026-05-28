@@ -43,6 +43,7 @@ import {
   ensureExnTag,
   ensureI32Condition,
   ensureWasiWriteAnyStringHelper,
+  ensureWasiWriteArrayBufferHelper,
   ensureWasiWriteUint8ArrayHelper,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
@@ -1619,9 +1620,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return VOID_RESULT;
       }
 
-      // Uint8Array (or other typed array) → raw bytes. Uint8Array compiles to a
-      // "vec" struct wrapping an f64 GC array (new-super.ts `new Uint8Array`).
-      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+      // #1655: distinguish ArrayBuffer (vec of i32_byte) from Uint8Array /
+      // typed-array views (vec of f64) at compile time. Under
+      // --target wasi/standalone, `new ArrayBuffer(n)` lowers to a vec struct
+      // with i32 byte elements (one byte per element, see dataview-native.ts);
+      // `new Uint8Array(...)` / `.subarray(...)` lowers to a vec with f64
+      // elements. The two helpers differ only in the per-element read
+      // conversion, so we pick the helper at compile time from the static
+      // type of the argument.
+      const argSymName = argTsType.getSymbol?.()?.name;
+      const isArrayBufferArg = argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
+      const elemKey: "i32_byte" | "f64" = isArrayBufferArg ? "i32_byte" : "f64";
+      const elemType: ValType = isArrayBufferArg ? { kind: "i32" } : { kind: "f64" };
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
       const argType = compileExpression(ctx, fctx, argExpr);
       flushLateImportShifts(ctx, fctx);
       // The helper takes a non-null ref; cast a mismatched ref / assert non-null.
@@ -1636,7 +1647,9 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
         }
       }
-      const helperIdx = ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
+      const helperIdx = isArrayBufferArg
+        ? ensureWasiWriteArrayBufferHelper(ctx, vecTypeIdx, useStderr)
+        : ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
       if (helperIdx >= 0) {
         fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
         return VOID_RESULT;

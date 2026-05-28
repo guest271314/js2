@@ -1,7 +1,8 @@
 ---
 id: 779e
 title: "arguments-object mapped / trailing-comma / sloppy-strict residuals (~161 fails)"
-status: in-review
+status: done
+completed: 2026-05-28
 created: 2026-05-21
 updated: 2026-05-27
 priority: medium
