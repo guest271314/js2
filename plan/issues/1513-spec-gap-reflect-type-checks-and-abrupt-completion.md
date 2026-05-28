@@ -1,7 +1,7 @@
 ---
 id: 1513
 title: "spec gap: Reflect — TypeError on non-object/Symbol target + abrupt-completion propagation"
-status: ready
+status: in-review
 created: 2026-05-20
 updated: 2026-05-28
 priority: medium
