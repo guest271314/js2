@@ -1,9 +1,10 @@
 ---
 id: 1340
 title: "spec gap: Iterator.prototype helpers wasm_compile errors (89 of 245 fails)"
-status: blocked
+status: done
 created: 2026-05-08
 updated: 2026-05-28
+completed: 2026-05-28
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -14,7 +15,7 @@ goal: spec-completeness
 sprint: 50
 parent: 1328
 related: 1320, 1323
-blocked_on: architect-spec
+resolution: "Architect spec landed and was implemented in PR #867 — function-decl closure-singleton cache (`emitCachedFuncClosureAccess`). Each captureless top-level `function foo(){}` now resolves to a single lazy-init externref global at every value-context read, so `(foo as any).prototype = X` round-trips and the test262 Iterator-shim no longer misclassifies as wasm_compile."
 ---
 # #1340 — Iterator.prototype helper methods: wasm_compile failures
 
