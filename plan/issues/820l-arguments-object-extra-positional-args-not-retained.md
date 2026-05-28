@@ -1,7 +1,8 @@
 ---
 id: 820l
 title: "arguments object: extra positional args beyond declared formals not retained (~61 fails)"
-status: in-progress
+status: done
+completed: 2026-05-28
 created: 2026-05-28
 updated: 2026-05-28
 priority: medium
