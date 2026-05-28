@@ -1,7 +1,7 @@
 ---
 id: 820l
 title: "arguments object: extra positional args beyond declared formals not retained (~61 fails)"
-status: ready
+status: in-progress
 created: 2026-05-28
 updated: 2026-05-28
 priority: medium
@@ -183,3 +183,17 @@ Candidate files (verify before editing):
   if that lands first; this issue covers the *direct-call* path.
 - The mapped/unmapped attribute writeback (#849) and trailing-comma elision
   (#1053) — already done; this issue must NOT regress them.
+
+## Resolution (2026-05-28, dev)
+
+The issue's framing (two-layer fix at `__call_fn_<arity>` + `wrapExports.makeCallableClosureWrapper`) was off-target. Direct probe with a tracing host import confirmed `[10,20,30].forEach(function(v){ ... })` does NOT route through `__proto_method_call`/`makeCallableClosureWrapper` — `Array.prototype.{forEach,map,filter,…}` are compiled inline in `compileArrayForEach` & sibling functions (`src/codegen/array-methods.ts`), so the host-bridge dispatcher never sees the call.
+
+The real fix has two complementary parts:
+
+1. **Inlined array-callback path (dominant — ~41 fails)** — `buildClosureCallInstrs` now emits `__argc + __extras_argv` plumbing for every inlined callback dispatch via a new helper `emitArrayCallbackArgsPlumbing`. The callback's spec arity for forEach/map/filter/etc. is fixed at 3; the helper sets `__argc = numFormals` and builds `__extras_argv` with the missing positional slots (index and/or array, boxed to externref). The receive-side `emitArgumentsVecBody` (unchanged) consumes those globals exactly as it did for the trailing-comma case from #1053.
+
+2. **Host-bridge dispatcher path (Map.forEach, Array.from mapFn, sort comparator)** — `emitClosureCallExportN` in `src/codegen/index.ts` sets `__argc = numFormals` and populates `__extras_argv` with locals beyond `closureArity` so the same plumbing covers `__call_fn_3`/`__call_fn_4` dispatched callbacks invoked from the JS host.
+
+`tests/issue-820l.test.ts`: 6/6 pass — forEach/map/filter with 0, 1, and 3 declared formals all observe `arguments.length === 3`, and `arguments[1]`/`arguments[2]` resolve to index/array. Equivalence test count went 101 → 98 fails (–3, no regressions). PR forthcoming.
+
+**Out of scope for this PR:** general (non-array-method) direct calls like `fn(1,2,3,4)` where `fn` has 1 formal still drop the extras — that requires the call-site emitter (`compileExpression`/`compileCallExpression`) to emit the same plumbing, which is a much larger cross-cutting change. Carve to follow-up.
