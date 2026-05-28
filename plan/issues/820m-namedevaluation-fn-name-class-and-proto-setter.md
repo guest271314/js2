@@ -1,7 +1,7 @@
 ---
 id: 820m
 title: "NamedEvaluation: anonymous class/function value not named from binding key (~12 fails, fn-name-class + __proto__-fn-name)"
-status: blocked
+status: in-progress
 created: 2026-05-28
 updated: 2026-05-28
 priority: medium
@@ -216,3 +216,79 @@ all of them.
 No code change landed under this task; needs architect spec before
 implementation. The probe files (`.tmp/probe-820m-*.ts`,
 `.tmp/run-*.mts`) are gitignored and used only for the investigation.
+
+## Implementation 2026-05-28 (senior-developer)
+
+### Landed: Slice 1 only (Phase A value retention)
+
+Implemented a class-constructor-typed field-type widening in
+`ensureStructForType` (src/codegen/index.ts, right after the existing
+empty-`{}` / `valueOf` widenings). For an object-literal property whose
+TS-resolved type has `getConstructSignatures().length > 0` and
+`getCallSignatures().length === 0` (i.e. it's a `typeof <anonymous class>`
+constructor type), `resolveWasmType` originally returned `ref <instance
+struct>`. The struct cast on field assignment then dropped the value to
+`ref.null`. We now widen such field types to `externref`, preserving the
+closure-struct externref that `compileClassExpression` emits via
+`extern.convert_any`.
+
+Verified with `.tmp/probe-820m.ts`:
+```ts
+const obj: any = { id: class {} };
+return obj.id;
+// Before: RESULT=null
+// After:  RESULT=[Object: null prototype] {} (closure externref retained)
+```
+
+Non-regression spot checks:
+- typed class methods (`class Foo { hello(){return 42} }; new Foo().hello()`) → 42
+- typed class instance in object literal (`{ f: new Foo() }; o.f.x`) → 7
+
+### Phase B (NamedEvaluation `.name` propagation): DEFERRED
+
+While implementing Slice 1 the architect's Phase B turned out to require
+more plumbing than its spec described:
+
+1. `ctx.functionNameMap` is **write-only** in the current codebase — no
+   read path consumes it for runtime `.name` resolution. The architect's
+   spec assumed it was the runtime channel; it isn't.
+2. Class `.name` is statically resolved at the property-access call site
+   (`src/codegen/property-access.ts:1780-1879`) only when the receiver
+   expression is an identifier or a property access AND the receiver's
+   TS type has call/construct signatures.
+3. For `o.id.name` where `o: any`, the receiver `o.id` is a
+   PropertyAccessExpression with 0 call/construct sigs → the static
+   `.name` peephole doesn't fire.
+4. The runtime closure-struct externref does not expose a `name` property
+   to the host (no `__set_function_name`-style writeback exists), so
+   `__extern_get(.name)` returns `undefined`.
+
+A proper Phase B therefore requires either:
+- A new `__set_function_name` host writeback called at class-value
+  emission time with the binding-key hint (touches the host-import
+  surface, runtime, and `compileClassExpression`); OR
+- Extending the static `.name` peephole in property-access.ts to
+  recognise `propertyAccess.name` when the outer object is a struct-typed
+  widened externref field whose anon class was registered under a
+  binding-key hint (requires new ctx state mapping the externref field →
+  nameHint at the per-property level).
+
+Either path is a self-contained ~50–100 LOC change with its own test
+matrix and risks. The architect's spec budgeted Phase B as "low-risk,
+30–60 min" but that estimate assumed `functionNameMap` was already
+plumbed end-to-end. Carving as **#820m-b2** for follow-up.
+
+### Test262 impact (expected)
+
+Slice 1 alone changes the failure mode of the target tests from
+`type_error: Cannot access property on null or undefined` (today) to
+either pass (if subsequent assertions pass without the `.name` check) or
+`assertion failure` on the `.name === expected` check. Net impact will
+be visible after CI's test262 sharded run; Phase B is required to fully
+resolve the 7 named tests.
+
+### Files changed
+
+- `src/codegen/index.ts` — single ~10-line widening block at the per-prop
+  loop of `ensureStructForType`, right after the existing
+  `valueOf`/`toString` eqref widening.
