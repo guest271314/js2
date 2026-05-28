@@ -10,8 +10,8 @@
 //
 // Scope:
 //   - fd_write fd=1 (console.log) and fd=2 (console.error / console.warn)
-//   - fd_read fd=0 (readStdin) — polyfill-level; e2e roundtripping through
-//     console.log currently boxes the string and is tracked separately.
+//   - fd_read fd=0 (process.stdin.read) — polyfill-level; the binary,
+//     incremental Node-API stdin read (#1653).
 //   - proc_exit (process.exit) — import-presence only; running
 //     process.exit(N) trips an i32/f64 mismatch in the current codegen,
 //     so e2e is covered once that's fixed.
@@ -218,17 +218,21 @@ describe("WASI: proc_exit (compile-time / ABI level)", () => {
 });
 
 describe("WASI: fd_read — stdin polyfill", () => {
-  // E2E readStdin() → console.log roundtrip currently surfaces a boxed
-  // string ("[object]") because the WASI string return path through
-  // console.log goes via the externref boxing helper; tracked separately.
+  // The binary, incremental Node-API stdin read (process.stdin.read, #1653).
   // We validate the polyfill itself + the import registration here.
 
-  it("emits fd_read import only when readStdin() is used", () => {
+  it("emits fd_read import only when process.stdin.read() is used", () => {
     const used = compile(
       `
-        declare function readStdin(): string;
-        const s = readStdin();
-        console.log("ignored");
+        declare const process: {
+          stdin: { read(buf: Uint8Array, offset?: number): number };
+          stdout: { write(c: Uint8Array): void };
+        };
+        export function main(): void {
+          const buf = new Uint8Array(4);
+          process.stdin.read(buf, 0);
+          process.stdout.write(buf);
+        }
       `,
       { target: "wasi" },
     );

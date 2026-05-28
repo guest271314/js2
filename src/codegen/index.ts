@@ -3962,14 +3962,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         needsEnviron = true;
       }
     }
-    // #1481: readStdin() builtin → triggers fd_read import + helper
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "readStdin") {
-      needsFdRead = true;
-    }
     // #1653: process.stdin.read(buf, offset?) → triggers fd_read import (the
-    // binary, incremental Node-API replacement for readStdin()). Detect the
-    // `process.stdin.read(...)` call shape so fd_read is registered even when
-    // readStdin() is never used.
+    // binary, incremental Node-API stdin read). Detect the
+    // `process.stdin.read(...)` call shape so fd_read is registered.
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -4135,9 +4130,6 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsClockTimeGet) {
     ctx.wasiClockHelpersPending = true;
   }
-  if (needsFdRead) {
-    ctx.wasiPendingFdReadHelper = true;
-  }
   if (needsPollOneoff) {
     ctx.wasiPendingSleepMsHelper = true;
   }
@@ -4171,10 +4163,6 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
-  }
-  // #1481: register __wasi_read_stdin_all() -> ref NativeString helper
-  if (ctx.wasiPendingFdReadHelper && !ctx.funcMap.has("__wasi_read_stdin_all")) {
-    emitWasiReadStdinAllHelper(ctx);
   }
 }
 
@@ -4365,12 +4353,10 @@ const WASI_WRITE_SCRATCH_START = 128 * 1024;
  *
  * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
  * NativeString via the existing __str_flatten helper, then copy the low byte
- * of each i16 code unit into linear memory and issue a single fd_write. This
- * mirrors readStdin's byte-per-i16 model (#1481), so a `readStdin()` →
- * `console.log` round-trip is byte-exact for ASCII / Latin-1 content (the
- * Native Messaging JSON case). Non-Latin-1 code points are truncated to their
- * low byte — acceptable for the protocol use-case and consistent with how
- * stdin bytes are stored.
+ * of each i16 code unit into linear memory and issue a single fd_write. The
+ * round-trip is byte-exact for ASCII / Latin-1 content (the Native Messaging
+ * JSON case). Non-Latin-1 code points are truncated to their low byte —
+ * acceptable for the protocol use-case.
  *
  * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
  * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
@@ -4912,180 +4898,6 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
     name: "__wasi_sleep_ms",
     typeIdx: funcTypeIdx,
     locals: [],
-    body,
-    exported: false,
-  });
-}
-
-/**
- * Emit __wasi_read_stdin_all() -> ref NativeString.
- *
- * Loops fd_read on fd=0 into a linear-memory buffer starting at offset
- * `STDIN_BUF_START` (after the 1024-byte iovec scratch area), in chunks of
- * `CHUNK`, until fd_read reports nread=0 (EOF). The accumulated bytes are
- * copied into a fresh `__str_data` (i16) array and wrapped in a NativeString
- * struct.
- *
- * Memory layout (re-using the WASI scratch area 0..1023):
- *   [0..3]  = iovec.buf  (set per chunk)
- *   [4..7]  = iovec.buf_len
- *   [8..11] = nread (output from fd_read)
- *
- * The total buffer is hard-capped at MAX_BYTES to keep things simple — if
- * stdin exceeds this we stop reading and return what we have. The cap is
- * sized to fit comfortably inside the initial 1 page (64KB) of memory.
- */
-function emitWasiReadStdinAllHelper(ctx: CodegenContext): void {
-  // #1618: stdin buffer lives in its own page (64KB), above the page-0 string
-  // literal data segments, so fd_read can't clobber initialized literal bytes.
-  const STDIN_BUF_START = WASI_STDIN_BUF_START;
-  const CHUNK = 1024;
-  const MAX_BYTES = 60 * 1024; // ~60KB cap; fits in the dedicated stdin page
-
-  // () -> ref NativeString
-  const funcTypeIdx = addFuncType(ctx, [], [{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set("__wasi_read_stdin_all", funcIdx);
-
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-
-  // locals: total(0), nread(1), dataArr(2), i(3), b(4)
-  const TOTAL = 0;
-  const NREAD = 1;
-  const DATA = 2;
-  const I = 3;
-  const B = 4;
-
-  const body: Instr[] = [
-    // total = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: TOTAL } as Instr,
-
-    // outer block to allow break-out
-    {
-      op: "block",
-      blockType: { kind: "empty" },
-      body: [
-        {
-          op: "loop",
-          blockType: { kind: "empty" },
-          body: [
-            // if (total >= MAX_BYTES) break;
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.const", value: MAX_BYTES } as Instr,
-            { op: "i32.ge_u" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // iovec.buf = STDIN_BUF_START + total at memory[0]
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: STDIN_BUF_START } as Instr,
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.store", align: 2, offset: 0 } as Instr,
-
-            // iovec.buf_len = CHUNK at memory[4]
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "i32.const", value: CHUNK } as Instr,
-            { op: "i32.store", align: 2, offset: 0 } as Instr,
-
-            // fd_read(fd=0, iovs=0, iovs_len=1, nread=8)
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.const", value: 8 } as Instr,
-            { op: "call", funcIdx: ctx.wasiFdReadIdx! } as Instr,
-            { op: "drop" } as Instr,
-
-            // nread = memory[8]
-            { op: "i32.const", value: 8 } as Instr,
-            { op: "i32.load", align: 2, offset: 0 } as Instr,
-            { op: "local.set", index: NREAD } as Instr,
-
-            // if (nread == 0) break;
-            { op: "local.get", index: NREAD } as Instr,
-            { op: "i32.eqz" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // total += nread
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "local.get", index: NREAD } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: TOTAL } as Instr,
-
-            // continue
-            { op: "br", depth: 0 } as Instr,
-          ],
-        },
-      ],
-    },
-
-    // dataArr = array.new_default<__str_data>(total)
-    { op: "local.get", index: TOTAL } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-    { op: "local.set", index: DATA } as Instr,
-
-    // i = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
-
-    // copy bytes: while (i < total) dataArr[i] = mem[STDIN_BUF_START+i]; i++
-    {
-      op: "block",
-      blockType: { kind: "empty" },
-      body: [
-        {
-          op: "loop",
-          blockType: { kind: "empty" },
-          body: [
-            // if (i >= total) break;
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.ge_u" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // b = i32.load8_u(STDIN_BUF_START + i)
-            { op: "i32.const", value: STDIN_BUF_START } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.load8_u", align: 0, offset: 0 },
-            { op: "local.set", index: B } as Instr,
-
-            // dataArr[i] = b
-            { op: "local.get", index: DATA } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: B } as Instr,
-            { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-
-            // i++
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
-
-            { op: "br", depth: 0 } as Instr,
-          ],
-        },
-      ],
-    },
-
-    // return struct.new NativeString(total, 0, dataArr)
-    { op: "local.get", index: TOTAL } as Instr, // len
-    { op: "i32.const", value: 0 } as Instr, // off
-    { op: "local.get", index: DATA } as Instr, // data
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-  ];
-
-  ctx.mod.functions.push({
-    name: "__wasi_read_stdin_all",
-    typeIdx: funcTypeIdx,
-    locals: [
-      { name: "total", type: { kind: "i32" } },
-      { name: "nread", type: { kind: "i32" } },
-      { name: "dataArr", type: { kind: "ref", typeIdx: strDataTypeIdx } },
-      { name: "i", type: { kind: "i32" } },
-      { name: "b", type: { kind: "i32" } },
-    ],
     body,
     exported: false,
   });
@@ -8559,10 +8371,6 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
       //   • WASI target → __wasi_*  syscall helpers (#1035)
       //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
       if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
-      // #1481: in WASI mode, readStdin() is a built-in routed to __wasi_read_stdin_all,
-      // not a host import — skip the env.readStdin stub so the codegen path in
-      // compileCallExpression takes over.
-      if (ctx.wasi && name === "readStdin") continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
       // skip the stub so the unified-collector finalize can emit the WasmGC
       // native scanners (registered under the same funcMap names) instead.

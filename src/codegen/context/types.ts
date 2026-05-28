@@ -751,8 +751,6 @@ export interface CodegenContext {
   wasiPendingPathOpenHelper?: boolean;
   /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
   wasiClockHelpersPending?: boolean;
-  /** (#1483 + #1481) Pending flag — emit `__wasi_read_stdin_all` after lib-globals scan. */
-  wasiPendingFdReadHelper?: boolean;
   /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
   wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */

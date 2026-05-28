@@ -29,8 +29,8 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 
 | Capability | Status | Detail |
 |------------|--------|--------|
-| Read framed message from stdin | works | `readStdin()` drains fd=0 to EOF as a string (#1481) |
-| Decode the 4-byte LE length prefix | works | byte math on `charCodeAt` of the first 4 code units |
+| Read framed message from stdin | works | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
+| Decode the 4-byte LE length prefix | works | byte math on the first 4 bytes of the read header buffer |
 | Route debug to stderr (fd=2) | works | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean |
 | Print a **string literal** to stdout | works | `console.log("…")` emits UTF-8 + `\n` (#1480) |
 | Print a **runtime/computed string** to stdout | works | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618) |
