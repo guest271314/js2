@@ -848,7 +848,11 @@ function _validatePropertyDescriptor(
   return resultFlags;
 }
 
-function _toPropertyDescriptorValidate(rawDesc: any, getField: (o: any, f: string) => any): PropertyDescriptor {
+function _toPropertyDescriptorValidate(
+  rawDesc: any,
+  getField: (o: any, f: string) => any,
+  wrapCallable?: (v: any, arity: number) => any,
+): PropertyDescriptor {
   // Primitive rawDesc (number/string/boolean/symbol/bigint) violates
   // ECMA-262 10.1 step 1 — throw TypeError. We intentionally allow null/undefined
   // through as an empty descriptor because reads from WasmGC struct fields whose
@@ -865,8 +869,16 @@ function _toPropertyDescriptorValidate(rawDesc: any, getField: (o: any, f: strin
   const wr = getField(rawDesc, "writable");
   const en = getField(rawDesc, "enumerable");
   const conf = getField(rawDesc, "configurable");
-  const getFn = getField(rawDesc, "get");
-  const setFn = getField(rawDesc, "set");
+  let getFn = getField(rawDesc, "get");
+  let setFn = getField(rawDesc, "set");
+  // (#1629a) When the source descriptor is a WasmGC struct, `get`/`set` arrive
+  // as Wasm-closure structs (not JS callables). Wrap them into JS Functions so
+  // the spec-mandated `typeof === "function"` checks below pass and so that the
+  // resulting property descriptor invokes the closure correctly when called.
+  if (wrapCallable) {
+    if (getFn != null && typeof getFn !== "function") getFn = wrapCallable(getFn, 0);
+    if (setFn != null && typeof setFn !== "function") setFn = wrapCallable(setFn, 1);
+  }
   // Treat null getter/setter as "field absent" — reading a WasmGC struct field
   // whose accessor source read out to null (no value stored) is functionally
   // identical to the field being missing. The spec only throws for present
@@ -4648,6 +4660,10 @@ assert._isSameValue = isSameValue;
             }
             return v;
           };
+          // (#1629a) When the descriptor is a WasmGC struct, its get/set fields
+          // are Wasm-closure structs, not JS callables. Wrap them so the spec
+          // typeof check passes and the resulting accessor is invocable.
+          const wrap = (v: any, arity: number) => _maybeWrapCallable(v, arity, callbackState);
           // For a plain JS object whose descriptor is also a plain JS object,
           // native Object.defineProperty follows the descriptor's prototype
           // chain and accessor getters correctly — use it directly.
@@ -4660,12 +4676,12 @@ assert._isSameValue = isSameValue;
           // Object.defineProperty sees it as null-proto/no-keys and drops every
           // attribute. Materialize a plain descriptor via getField first.
           if (!_isWasmStruct(obj)) {
-            const d2 = _toPropertyDescriptorValidate(desc, getField);
+            const d2 = _toPropertyDescriptorValidate(desc, getField, wrap);
             Object.defineProperty(obj, key, d2);
             return obj;
           }
           // WasmGC struct obj: apply via sidecar
-          const d = _toPropertyDescriptorValidate(desc, getField);
+          const d = _toPropertyDescriptorValidate(desc, getField, wrap);
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
           const existingVal = _sidecarGet(obj, key);

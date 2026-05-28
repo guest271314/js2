@@ -1,7 +1,7 @@
 ---
 id: 779d
 title: "Object-literal destructuring (non-class, non-for-of) residuals (~132 fails)"
-status: in-review
+status: done
 created: 2026-05-21
 updated: 2026-05-27
 priority: medium

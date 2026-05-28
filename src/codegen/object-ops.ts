@@ -759,6 +759,62 @@ export function compileObjectDefineProperty(
     propName = propArg.text;
   }
 
+  // (#1629a) Dynamic-descriptor path: when the descriptor argument is not an
+  // ObjectLiteralExpression (e.g. `var d = {value: 1}; defineProperty(o, k, d)`),
+  // the inline-literal code below has nothing to extract — valueExpr / getNode /
+  // descWritable are all undefined. The legacy fall-through to
+  // emitExternDefinePropertyNoValue silently emits empty flags AND for typed
+  // struct receivers skips the runtime call entirely, so the descriptor's
+  // value / accessor / flag bits are dropped on the floor.
+  //
+  // Route to the runtime's __defineProperty_desc helper, which materializes
+  // the descriptor via struct-aware getField (sidecar + __sget_<f> exports)
+  // and applies it via native Object.defineProperty. The obj is coerced to
+  // externref so the runtime sees a uniform entry point — this matches the
+  // sibling Object.create path at calls.ts:3996+ (#1631).
+  if (!ts.isObjectLiteralExpression(descArg)) {
+    // Compile obj → externref
+    const objType = compileExpression(ctx, fctx, objArg);
+    if (!objType) return null;
+    if (objType.kind === "ref" || objType.kind === "ref_null") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    } else if (objType.kind !== "externref") {
+      coerceType(ctx, fctx, objType, { kind: "externref" });
+    }
+    // Compile prop → externref
+    const propType = compileExpression(ctx, fctx, propArg, { kind: "externref" });
+    if (propType && propType.kind !== "externref") {
+      coerceType(ctx, fctx, propType, { kind: "externref" });
+    } else if (!propType) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    // Compile descArg → externref (WasmGC struct or plain object both work;
+    // runtime helper handles both via struct-aware getField).
+    const descType = compileExpression(ctx, fctx, descArg);
+    if (descType) {
+      if (descType.kind === "ref" || descType.kind === "ref_null") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      } else if (descType.kind !== "externref") {
+        coerceType(ctx, fctx, descType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const dpDescIdx = ensureLateImport(
+      ctx,
+      "__defineProperty_desc",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (dpDescIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: dpDescIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return { kind: "externref" };
+  }
+
   // Check if obj is a struct type with the given field
   const objTsType = ctx.checker.getTypeAtLocation(objArg);
   let structName =
