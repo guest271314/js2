@@ -5,8 +5,17 @@ model_id=$(echo "$input" | jq -r '.model.id // empty')
 ctx_size=$(echo "$input" | jq -r 'if .context_window.context_window_size then (.context_window.context_window_size as $s | if $s >= 1000000 then ($s / 1000000 | floor | tostring) + "M" else ($s / 1000 | floor | tostring) + "K" end) else empty end')
 used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 weekly=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
+five_hour=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
 effort=$(echo "$input" | jq -r '.thinking.type // .effort.level // .effort // empty')
 in_worktree=$(echo "$input" | jq -r '.worktree.path // empty')
+worktree_branch=$(echo "$input" | jq -r '.worktree.branch // empty')
+session_name=$(echo "$input" | jq -r '.session_name // empty')
+pr_number=$(echo "$input" | jq -r '.pr.number // empty')
+pr_state=$(echo "$input" | jq -r '.pr.review_state // empty')
+output_style=$(echo "$input" | jq -r '.output_style.name // empty')
+vim_mode=$(echo "$input" | jq -r '.vim.mode // empty')
+agent_name=$(echo "$input" | jq -r '.agent.name // empty')
+repo=$(echo "$input" | jq -r '.workspace.repo | if . then .owner + "/" + .name else empty end')
 case "$model_id" in
   claude-opus-4-7*)   model='Opus';   price_in=15 ;;
   claude-sonnet-4-6*) model='Sonnet'; price_in=3  ;;
@@ -21,6 +30,19 @@ branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
+# Session name (when /rename has been used)
+[ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
+
+# PR badge from JSON (open PR for current branch — shown in both views)
+if [ -n "$pr_number" ]; then
+  case "$pr_state" in
+    approved)           pr_color="00;32" ;  pr_icon="✓" ;;
+    changes_requested)  pr_color="00;31" ;  pr_icon="✗" ;;
+    draft)              pr_color="00;90" ;  pr_icon="~" ;;
+    *)                  pr_color="00;33" ;  pr_icon="?" ;;
+  esac
+  printf ' \033[%smPR#%s%s\033[00m' "$pr_color" "$pr_number" "$pr_icon"
+fi
 
 # Agent PR badge — only shown when inside a worktree, for that worktree's own agent
 status_dir="/workspace/.claude/agent-status"
@@ -63,7 +85,7 @@ if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
   fi
 fi
 
-if [ -n "$used" ] || [ -n "$weekly" ]; then
+if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
       if (p >= 75)      { fill="48;5;196"; fg=37 }
@@ -72,6 +94,22 @@ if [ -n "$used" ] || [ -n "$weekly" ]; then
       width = 9
       filled = int(p * width / 100)
       label = sprintf(" %d%% ctx", p)
+      bar = ""
+      for (i = 0; i < width; i++) bar = bar " "
+      bar = label substr(bar, length(label) + 1)
+      filled_part = substr(bar, 1, filled)
+      empty_part  = substr(bar, filled + 1)
+      printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
+    }' /dev/null
+  fi
+  if [ -n "$five_hour" ] && [ -z "$in_worktree" ]; then
+    awk -v p="$five_hour" 'BEGIN {
+      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      else if (p >= 50) { fill=43; fg=30 }
+      else              { fill=42; fg=30 }
+      width = 9
+      filled = int(p * width / 100)
+      label = sprintf(" %d%% 5h", int(p))
       bar = ""
       for (i = 0; i < width; i++) bar = bar " "
       bar = label substr(bar, length(label) + 1)
@@ -363,7 +401,23 @@ elif [ -f "$report" ]; then
     [ -n "$days_bar" ] && printf '%s' "$days_bar"
   fi
 fi
-[ -z "$in_worktree" ] && [ -n "$branch" ] && [ "$branch" != "main" ] && printf ' \033[00;37m%s\033[00m' "$branch"
+# Branch display:
+# - In worktree: prefer worktree.branch from JSON (authoritative), fall back to git
+# - On main: show non-main git branches only
+if [ -n "$in_worktree" ]; then
+  show_branch="${worktree_branch:-$branch}"
+  [ -n "$show_branch" ] && [ "$show_branch" != "main" ] && printf ' \033[00;37m%s\033[00m' "$show_branch"
+else
+  [ -n "$branch" ] && [ "$branch" != "main" ] && printf ' \033[00;37m%s\033[00m' "$branch"
+fi
+# Repo identity (owner/name) — shown only when available and not on main (already know the repo there)
+[ -n "$repo" ] && [ -n "$in_worktree" ] && printf ' \033[00;90m%s\033[00m' "$repo"
 [ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 [ -n "$effort" ] && [ "$effort" != "none" ] && [ "$effort" != "disabled" ] && printf ' \033[00;33m%s\033[00m' "$effort"
+# Output style — shown when not "default" (non-default modes are worth flagging)
+[ -n "$output_style" ] && [ "$output_style" != "default" ] && [ "$output_style" != "Default" ] && printf ' \033[00;36m[%s]\033[00m' "$output_style"
+# Vim mode — shown when vim mode is active
+[ -n "$vim_mode" ] && printf ' \033[00;35m%s\033[00m' "$vim_mode"
+# Agent name — shown when running under --agent flag
+[ -n "$agent_name" ] && printf ' \033[00;36magent:%s\033[00m' "$agent_name"
 printf '\n'
