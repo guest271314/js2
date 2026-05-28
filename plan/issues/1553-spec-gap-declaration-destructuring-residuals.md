@@ -1,9 +1,10 @@
 ---
 id: 1553
 title: "spec gap: let/const/var destructuring declarations — residuals after #1432/#1450/#1454/#1550"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-21
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -404,3 +405,30 @@ Dependency on sibling issues:
 This issue (#1553) stays `needs-spec` → flip to `status: decomposed`
 on merge; close when 1553a-e are all `done` and the test262 delta
 on `language/statements/{let,const,variable}/dstr/` is ≥ 60.
+
+## Resolution 2026-05-28 (senior-dev) — DONE
+
+All five decomposed slices are merged to `main` and the parent is now
+closed. The original arch recommendation — collapse the divergent
+declaration-form destructure loops into the battle-tested
+`destructureParam*` helpers via a `mode:'decl'` + `bindingKind` flag —
+was carried out exactly as specified.
+
+| Sub | Status | Landed via |
+| --- | --- | --- |
+| **1553a** — `decl` mode + `bindingKind` plumbing (foundation, additive) | done | PR #453 |
+| **1553b** — typed-struct object decl → helper | done | covered by #1553c (`d447400e9`); verified + regression-locked PR #584 |
+| **1553c** — externref-fallback object decl → helper | done | PR #530 (`d447400e9`) |
+| **1553d** — array decl (typed-vec + externref) → `destructureParamArray` | done | PR #547 (`5ba3fcab5`, `4c57e1207`) |
+| **1553e** — f64 array-literal explicit-`undefined` sentinel | done | PR #454 |
+
+Verified on current `main` (HEAD `c2295fd82`, 2026-05-28): all five
+focused regression suites green —
+`tests/issue-1553{a,b,c,d,e}.test.ts`, **45/45 tests pass**. These
+cover every root-cause bug from the 2026-05-20 investigation (nested
+default-before-destructure, null vs undefined gating, struct-typed
+default field reads via the `ref.test`+`struct.get` fast path, vec-rest
+slot collision, NamedEvaluation in decl defaults, f64
+explicit-`undefined` sentinel). No further code change is required —
+this slice is a documentation-only closeout flipping the stale parent
+frontmatter (`ready` → `done`).

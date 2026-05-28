@@ -1,9 +1,10 @@
 ---
 id: 1525
 title: "spec gap: built-in coercion paths throw 'Cannot convert object to primitive value' eagerly"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-27
+updated: 2026-05-28
+completed: 2026-05-28
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -174,3 +175,28 @@ with a pointer to #1525b.
 
 #1525 stays open (`status: ready`) tracking the full 170-fail cluster; the
 residual is now #1525b.
+
+## Resolution (2026-05-28, dev-1525 — all three root causes landed, closing)
+
+Verified on current main (`c2295fd82`) that **all three root causes are now
+fixed** and the full `tests/issue-1525.test.ts` suite passes 10/10 with both
+previously-`it.skip`'d cases active:
+
+1. Root cause #1 (`new Object()` → null-proto) — landed earlier via the
+   `__new_plain_object` lowering.
+2. Root cause #2 (the dominant ~142: object-literal user `toString`/`valueOf`
+   via `String(obj)` → invalid Wasm in `finalizeMethodTrampolines`,
+   double `f64.convert_i32_s`) — fixed by **#1525b** (pendingMethodTrampolines
+   funcIdx-shift tracked through all three late-import shift sites, task #240).
+   Probe: `String({ valueOf(){return 100;}, toString(){return "stringified";} })`
+   now returns `"stringified"` (was invalid-Wasm / NaN).
+3. Root cause #3 (§7.1.1.1 step-6 TypeError when both `valueOf` and `toString`
+   return objects) — fixed by **#1525b** (ref→f64 step-6 routed through the
+   host `__to_primitive` helper). Probe: `obj + 1` with both methods returning
+   `{}` now throws a genuine `TypeError` observable by user `try/catch`
+   (`TYPEERR:true`), instead of silently bottoming out at `[object Object]`/NaN.
+
+No source change was required in this PR — the residuals were closed by the
+#1525b trampoline + step-6 work. The `tests/issue-1525.test.ts` cases were
+already un-skipped on main. This PR only flips `#1525` frontmatter to
+`status: done`. The umbrella cluster (#1525 + #1525b) is fully resolved.

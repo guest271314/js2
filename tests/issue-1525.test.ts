@@ -171,9 +171,8 @@ describe("#1525 — ToPrimitive walks valueOf/toString before throwing", () => {
     ).toBe(99);
   });
 
-  // Carved to #1525b (root cause #3): §7.1.1.1 step-6 TypeError still bottoms
-  // out instead of surfacing to the Wasm catch_all. Needs architect spec.
-  it.skip("TypeError when both valueOf and toString return objects", async () => {
+  // Fixed by #1525b: route ref→f64 step-6 through the host __to_primitive helper.
+  it("TypeError when both valueOf and toString return objects", async () => {
     // §7.1.1.1 step 6 — TypeError propagates to Wasm catch_all.
     // Pre-#1525 the eager `extern.convert_any` + later `__unbox_number`
     // silently bottomed out at "[object Object]" → NaN; per spec the
@@ -191,9 +190,8 @@ describe("#1525 — ToPrimitive walks valueOf/toString before throwing", () => {
     ).toBe("TYPEERR");
   });
 
-  // Carved to #1525b (root cause #2, dominant ~142): invalid Wasm in
-  // finalizeMethodTrampolines (double f64.convert_i32_s). Needs architect spec.
-  it.skip("explicit String(obj) calls toString even with valueOf present", async () => {
+  // Fixed by #1525b: pendingMethodTrampolines indices now tracked through all three late-import shift sites.
+  it("explicit String(obj) calls toString even with valueOf present", async () => {
     // String(obj) is an explicit ToPrimitive("string") site — toString wins
     // over valueOf for hint "string" per §7.1.1.1.
     expect(
