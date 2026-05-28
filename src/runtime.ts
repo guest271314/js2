@@ -8335,9 +8335,73 @@ export function buildImports(
  * negated();                              // dispatches via __call_fn_0
  * ```
  */
+/**
+ * (#1700) TS-level classification of a single export param or result slot
+ * surfaced via `CompileResult.exportSignatures`. The Wasm signature alone
+ * is ambiguous for TypedArray vs `number[]` — both lower to
+ * `(ref null $Vec[f64])` — so the JS-host wrapper consults this metadata
+ * to (a) copy a JS `Uint8Array` into a fresh Wasm vec before the call and
+ * (b) wrap the returned plain `Array<number>` back into a `Uint8Array`.
+ */
+export interface WrapExportsSignature {
+  params: ("uint8array" | "typed-array" | "other")[];
+  result: "uint8array" | "typed-array" | "other";
+}
+
+/**
+ * (#1700) Copy each `Uint8Array` / TypedArray / plain-array argument into a
+ * fresh Wasm vec via `__new_vec_f64` + `__vec_set_byte`. Non-TypedArray
+ * slots (`kind === "other"`) and `null` / `undefined` pass through. Other
+ * values for a TypedArray slot throw `TypeError`, matching the shape of
+ * `new Uint8Array(nonIterable)`.
+ */
+function marshalTypedArrayArgs(
+  args: any[],
+  sig: WrapExportsSignature,
+  exportName: string,
+  newVecF64: (len: number) => any,
+  vecSetByte: (vec: any, idx: number, byte: number) => void,
+): any[] {
+  const out = new Array(args.length);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const kind = sig.params[i];
+    if (kind !== "uint8array" && kind !== "typed-array") {
+      out[i] = arg;
+      continue;
+    }
+    if (arg == null) {
+      // Pass null/undefined straight through — compiled function takes
+      // a ref_null vec param and is responsible for its own null handling.
+      out[i] = arg;
+      continue;
+    }
+    if (!ArrayBuffer.isView(arg) && !Array.isArray(arg)) {
+      throw new TypeError(`wrapExports: export "${exportName}" expects ${kind} for arg #${i}, got ${typeof arg}`);
+    }
+    const src = arg as ArrayLike<number>;
+    const len = src.length | 0;
+    const vec = newVecF64(len);
+    for (let j = 0; j < len; j++) {
+      // Mask to byte range — matches `new Uint8Array(arr)` indexed-write
+      // semantics (and __vec_set_byte's i32-byte contract).
+      vecSetByte(vec, j, src[j]! & 0xff);
+    }
+    out[i] = vec;
+  }
+  return out;
+}
+
 export function wrapExports(
   rawExports: WebAssembly.Exports,
-  options?: { marshal?: "copy" | false },
+  options?: {
+    marshal?: "copy" | false;
+    /** Per-export TS-level type metadata from `CompileResult.exportSignatures`
+     *  (#1700). When provided, Uint8Array arguments are copied into a Wasm
+     *  vec before the call and Uint8Array-typed returns are wrapped on the
+     *  way out. Omitted ⇒ legacy behaviour (no per-call marshalling). */
+    signatures?: Record<string, WrapExportsSignature>;
+  },
 ): Record<string, any> {
   const callFn0 = rawExports.__call_fn_0 as ((closure: any) => any) | undefined;
   const callFn1 = rawExports.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
@@ -8346,6 +8410,15 @@ export function wrapExports(
   // (used by test262 runners and advanced callers that want zero-copy access).
   const marshal: "copy" | false = options?.marshal === false ? false : "copy";
   const exportsForMarshal = rawExports as unknown as Record<string, Function>;
+  // (#1700) Vec allocator + byte-writer for marshalling Uint8Array args into
+  // Wasm vec structs. Either may be undefined (legacy modules / no TypedArray
+  // exports gated their emission off), in which case the wrapper falls back
+  // to passing the arg through unchanged.
+  const newVecF64 = (rawExports as Record<string, any>).__new_vec_f64 as ((len: number) => any) | undefined;
+  const vecSetByte = (rawExports as Record<string, any>).__vec_set_byte as
+    | ((vec: any, idx: number, byte: number) => void)
+    | undefined;
+  const signatures = options?.signatures;
 
   // Build a JS-callable wrapper around a Wasm closure struct.
   const makeCallableClosureWrapper = (closure: any): ((...args: any[]) => any) => {
@@ -8412,12 +8485,25 @@ export function wrapExports(
     //   - named struct / vec → plain JS object/array via `_wasmToPlain`
     //     (#1504), unless `marshal: false` is passed
     //   - everything else (primitives, strings, raw externrefs) → pass through
+    const sig = signatures ? signatures[key] : undefined;
     wrapped[key] = function (this: any, ...args: any[]): any {
-      const result = (val as Function).apply(this, args);
+      // (#1700) Argument marshalling: copy JS Uint8Array → Wasm vec via
+      // `__new_vec_f64` + `__vec_set_byte`. Runs even under `marshal: false`
+      // because the user must be able to call the export at all.
+      const marshalled =
+        sig && newVecF64 && vecSetByte ? marshalTypedArrayArgs(args, sig, key, newVecF64, vecSetByte) : args;
+      const result = (val as Function).apply(this, marshalled);
       if (result == null || !_isWasmStruct(result)) return result;
       const marshalable = looksMarshalable(result);
       if (marshal === "copy" && marshalable) {
-        return _wasmToPlain(result, exportsForMarshal);
+        const plain = _wasmToPlain(result, exportsForMarshal);
+        // (#1700) Uint8Array fidelity on the return side. The Wasm signature
+        // is ambiguous (Uint8Array and number[] share `(ref null $Vec[f64])`)
+        // so we wrap based on the TS-level metadata, not a runtime probe.
+        if (sig && sig.result === "uint8array" && Array.isArray(plain)) {
+          return new Uint8Array(plain as number[]);
+        }
+        return plain;
       }
       if (marshalable) {
         // Struct/vec but `marshal: false` → return the raw WasmGC handle
