@@ -36,8 +36,6 @@
     "tests/equivalence/generator-expressions.test.ts :: generator function expressions and methods generator function expression with yield in loop",
     "tests/equivalence/generator-type-mismatch.test.ts :: generator type mismatch fixes (#422) generator expression assigned to variable",
     "tests/equivalence/generator-type-mismatch.test.ts :: generator type mismatch fixes (#422) generator with return value expression",
-    "tests/equivalence/gradual-typing.test.ts :: Gradual typing: boxed any (fast mode) any null boxing — truthiness",
-    "tests/equivalence/gradual-typing.test.ts :: Gradual typing: boxed any (fast mode) any undefined boxing — truthiness",
     "tests/equivalence/iife-and-call-expressions.test.ts :: IIFE and call expression edge cases tagged template literals — different sites produce different objects",
     "tests/equivalence/iife-and-call-expressions.test.ts :: IIFE and call expression edge cases tagged template literals — same call site returns same object across calls",
     "tests/equivalence/iife-and-call-expressions.test.ts :: IIFE and call expression edge cases tagged template literals — same site caches even with different expression values",
