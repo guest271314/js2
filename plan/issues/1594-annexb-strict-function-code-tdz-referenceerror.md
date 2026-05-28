@@ -1,7 +1,8 @@
 ---
 id: 1594
 title: "AnnexB strict function-code / class name-binding TDZ: ReferenceError not thrown (~100 fails)"
-status: in-review
+status: done
+completed: 2026-05-28
 created: 2026-05-24
 updated: 2026-05-24
 priority: medium
