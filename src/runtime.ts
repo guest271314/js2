@@ -7358,7 +7358,24 @@ assert._isSameValue = isSameValue;
       if (name === "__call_2_f64") return (fn: Function, a: number, b: number) => fn(a, b);
       if (name === "__call_1_i32") return (fn: Function, a: number) => fn(a);
       if (name === "__call_2_i32") return (fn: Function, a: number, b: number) => fn(a, b);
-      if (name === "__typeof") return (v: any) => typeof v;
+      if (name === "__typeof")
+        return (v: any) => {
+          // (#1594A) Closure structs report `typeof === "object"` in JS, but the
+          // spec answer is "function". Probe via `__is_closure` (matches the
+          // discriminator used by `_maybeWrapCallableUnknownArity`).
+          if (v != null && typeof v === "object" && _isWasmStruct(v)) {
+            const exports = callbackState?.getExports();
+            const isClosureFn = exports?.__is_closure as ((x: any) => number) | undefined;
+            if (typeof isClosureFn === "function") {
+              try {
+                if (isClosureFn(v) === 1) return "function";
+              } catch {
+                /* fall through to typeof */
+              }
+            }
+          }
+          return typeof v;
+        };
       if (name === "__instanceof")
         return (v: any, ctorName: string) => {
           try {
