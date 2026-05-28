@@ -1,9 +1,10 @@
 ---
 id: 1333
 title: "RegExp host-mode: Pre-ES6 (S15.10) tests + annexB legacy accessors"
-status: ready
+status: done
+completed: 2026-05-28
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-05-28
 priority: low
 feasibility: easy
 reasoning_effort: medium
@@ -17,6 +18,68 @@ parent: 1002
 # #1333 — RegExp host-mode: Pre-ES6 (S15.10) tests + annexB legacy accessors
 
 Carved out of #1002 (RegExp js-host mode).
+
+## Resolution (2026-05-28)
+
+Triage matched the architect spec:
+
+- **(a) S15.10.1 syntax-error cluster** — already passing on main (`new RegExp("a**")`
+  → SyntaxError via V8's native ctor + the exception bridge). Pinned by a
+  regression test in `tests/issue-1333.test.ts` so a future bridge bug can't
+  silently break the ~16 tests in this cluster.
+- **(b) S15.10.2.* exec-result cluster** — deferred per spec. The root cause is
+  wasmGC-string vs externref-string strict equality, tracked by #1352
+  (already done) and follow-on tracks. No change here.
+- **(c) S15.10.6.* prototype-method cluster** — covered by #1332(b) which is
+  merged. No change here.
+- **(d) annexB legacy accessors** — **IMPLEMENTED**. `_installLegacyRegExpAccessors`
+  in `src/runtime.ts` overrides V8's non-conformant native accessors on
+  the resolved `%RegExp%` ctor with spec-correct descriptors:
+  - Read-only slots (`lastMatch` / `lastParen` / `leftContext` /
+    `rightContext` / `$1`-`$9` and their `$&` / `$+` / `` $` `` / `$'`
+    aliases) carry `set: undefined` (V8's native variants ship a setter,
+    failing `prop-desc.js`).
+  - Every getter / setter throws `TypeError` when invoked with a `this`
+    that isn't `%RegExp%` itself (V8's native variants silently return
+    `""`, failing `this-not-regexp-constructor.js` etc.).
+  - State (`_legacyRegExpState`) is refreshed by `_updateLegacyRegExpState`
+    after a successful `RegExp.prototype.exec` / `.test` via the
+    `extern_class action === "method"` hook (Annex B §22.2.7.2 step 25-26).
+  - Idempotent install via `_legacyRegExpInstalledOn: WeakSet<object>` so
+    re-instantiating the module doesn't burn the `configurable` flag.
+
+## Test Results
+
+`tests/issue-1333.test.ts` (10 cases): all pass.
+
+- Descriptor shape (4 cases each × 9 RO names + 2 RW names + 9 numeric
+  indexes) — spec-correct `enumerable: false`, `configurable: true`,
+  `set: undefined` for RO slots, `set: function` for RW slots.
+- Cross-this throws — getter/setter rejected for `/ /`, `{}`,
+  `RegExp.prototype`, primitives.
+- Legitimate read returns the refreshed substrings (`RegExp.input`,
+  `RegExp.lastMatch`, `RegExp.leftContext`, `RegExp.rightContext`,
+  `RegExp.$1`, `RegExp.$2`) after `/(foo)/.exec("hello foo world")`.
+- `new RegExp("a**")` still throws `SyntaxError` (regression pin for the
+  exception bridge — cluster (a)).
+
+Related regression checks: `tests/issue-1330.test.ts` (RegExp Symbol.search
+protocol), `tests/issue-1332.test.ts` (RegExp.prototype dispatch),
+`tests/regexp.test.ts` — 23/23 pass after the change.
+
+## Acceptance against the original criteria
+
+- Sub-cluster (a, ~16 tests): already passing — pinned, not implemented again.
+- Sub-cluster (d, ~12 tests, the 5 cross-realm tests track under realm support
+  which is a separate concern):
+  - `*/prop-desc.js` (×5): pass via `set: undefined` for RO slots.
+  - `*/this-not-regexp-constructor.js` (×5): pass via the TypeError guard.
+  - `*/this-subclass-constructor.js` (×5): pass — subclass identity ≠ `C`,
+    getter throws.
+  - `*/this-cross-realm-constructor.js` (×5): unaffected by this change;
+    still blocked on `$262.createRealm` support (out of scope).
+- Sub-clusters (b, ~40) and (c, ~13): deferred per architect spec (no changes
+  here, tracked under other issues).
 
 ## Problem
 

@@ -2363,6 +2363,119 @@ const _symbolToWasm: Map<symbol, string> = new Map([
   [Symbol.matchAll, "@@matchAll"],
 ]);
 
+// (#1333) Annex B §B.2.2 — legacy RegExp static-property slots on %RegExp%.
+// Updated after every successful RegExpBuiltinExec (intercepted in the
+// `extern_class` method handler + `__extern_method_call` + `string_method`
+// branches). Read via the getters installed by _installLegacyRegExpAccessors.
+type LegacyRegExpState = {
+  input: string;
+  lastMatch: string;
+  lastParen: string;
+  leftContext: string;
+  rightContext: string;
+  parens: string[];
+};
+const _legacyRegExpState: LegacyRegExpState = {
+  input: "",
+  lastMatch: "",
+  lastParen: "",
+  leftContext: "",
+  rightContext: "",
+  parens: ["", "", "", "", "", "", "", "", ""],
+};
+const _legacyRegExpInstalledOn: WeakSet<object> = new WeakSet();
+
+function _updateLegacyRegExpState(input: string, m: RegExpExecArray | RegExpMatchArray | null): void {
+  if (m == null) return;
+  const idx = m.index ?? 0;
+  const matchStr = m[0] ?? "";
+  _legacyRegExpState.input = input;
+  _legacyRegExpState.lastMatch = matchStr;
+  _legacyRegExpState.leftContext = input.substring(0, idx);
+  _legacyRegExpState.rightContext = input.substring(idx + matchStr.length);
+  let lastNonEmptyParen = "";
+  for (let i = 0; i < 9; i++) {
+    const cap = m[i + 1];
+    const v = cap == null ? "" : String(cap);
+    _legacyRegExpState.parens[i] = v;
+    if (cap != null) lastNonEmptyParen = v;
+  }
+  _legacyRegExpState.lastParen = lastNonEmptyParen;
+}
+
+function _installLegacyRegExpAccessors(C: unknown): void {
+  if (C == null || (typeof C !== "function" && typeof C !== "object")) return;
+  if (_legacyRegExpInstalledOn.has(C as object)) return;
+  _legacyRegExpInstalledOn.add(C as object);
+  type Slot = readonly [string, readonly string[], () => string, ((v: unknown) => void)?];
+  const slots: Slot[] = [
+    [
+      "input",
+      ["$_"],
+      () => _legacyRegExpState.input,
+      (v) => {
+        _legacyRegExpState.input = String(v);
+      },
+    ],
+    ["lastMatch", ["$&"], () => _legacyRegExpState.lastMatch],
+    ["lastParen", ["$+"], () => _legacyRegExpState.lastParen],
+    ["leftContext", ["$`"], () => _legacyRegExpState.leftContext],
+    ["rightContext", ["$'"], () => _legacyRegExpState.rightContext],
+  ];
+  for (const [name, aliases, getter, setter] of slots) {
+    // (#1333) Note: `set` must be explicitly `undefined` for read-only slots.
+    // Per ES §10.1.6.3 OrdinaryDefineOwnProperty, an absent field in the
+    // descriptor preserves the current value, so V8's pre-existing native
+    // setter would leak through. Spec mandates `set: undefined` for the
+    // read-only legacy accessors (lastMatch/lastParen/leftContext/rightContext
+    // and $1-$9) — see annexB/legacy-accessors/*/prop-desc.js.
+    const desc: PropertyDescriptor = setter
+      ? {
+          get(this: unknown) {
+            if (this !== C) throw new TypeError(`RegExp.${name} getter requires the RegExp constructor as this`);
+            return getter();
+          },
+          set(this: unknown, v: unknown) {
+            if (this !== C) throw new TypeError(`RegExp.${name} setter requires the RegExp constructor as this`);
+            setter(v);
+          },
+          enumerable: false,
+          configurable: true,
+        }
+      : {
+          get(this: unknown) {
+            if (this !== C) throw new TypeError(`RegExp.${name} getter requires the RegExp constructor as this`);
+            return getter();
+          },
+          set: undefined,
+          enumerable: false,
+          configurable: true,
+        };
+    try {
+      Object.defineProperty(C, name, desc);
+      for (const alias of aliases) Object.defineProperty(C, alias, desc);
+    } catch {
+      // Slot non-configurable on this host — leave native annexB in place.
+    }
+  }
+  for (let i = 1; i <= 9; i++) {
+    const idx = i - 1;
+    try {
+      Object.defineProperty(C, `$${i}`, {
+        get(this: unknown) {
+          if (this !== C) throw new TypeError(`RegExp.$${i} getter requires the RegExp constructor as this`);
+          return _legacyRegExpState.parens[idx];
+        },
+        set: undefined,
+        enumerable: false,
+        configurable: true,
+      });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /**
  * Reverse map from well-known symbol i32 IDs (used in compiled Wasm) to
  * the "@@name" string and real JS Symbol. When the compiler sees
@@ -3604,7 +3717,24 @@ function resolveImport(
             args.pop();
           }
         }
-        return (String(recv) as any)[method](...args);
+        const recvStr = String(recv);
+        const ret = (recvStr as any)[method](...args);
+        // (#1333) Annex B — String.prototype.{match,search,replace,split,matchAll}
+        // invokes RegExpBuiltinExec under the hood, which updates the legacy slots.
+        if (
+          args[0] instanceof RegExp &&
+          (method === "match" || method === "search" || method === "replace" || method === "split")
+        ) {
+          try {
+            const re = args[0] as RegExp;
+            const probe = new RegExp(re.source, re.flags.replace(/[gy]/g, ""));
+            const m2 = probe.exec(recvStr);
+            if (m2) _updateLegacyRegExpState(recvStr, m2);
+          } catch {
+            // ignore — best-effort
+          }
+        }
+        return ret;
       };
     }
     case "extern_class": {
@@ -3825,9 +3955,28 @@ function resolveImport(
           // the Set-method path above and __extern_method_call.
           const exports = callbackState?.getExports();
           const hasStructArg = args.some((a) => _isWasmStruct(a));
-          if (!hasStructArg) return fn.call(self, ...args);
-          const wrappedArgs = args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
-          return fn.call(self, ...wrappedArgs);
+          const callArgs = hasStructArg ? args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a)) : args;
+          const ret = fn.call(self, ...callArgs);
+          // (#1333) Annex B §22.2.7.2 — RegExpBuiltinExec updates the legacy
+          // static slots after every successful match. Hook exec/test on a
+          // RegExp receiver with a string first arg.
+          if ((m === "exec" || m === "test") && self instanceof RegExp && typeof callArgs[0] === "string") {
+            const input = callArgs[0] as string;
+            if (m === "exec" && ret != null) {
+              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+            } else if (m === "test" && ret === true) {
+              // .test() also updates the slots per spec. Re-run exec on a
+              // non-sticky/non-global clone so we don't perturb self.lastIndex.
+              try {
+                const clone = new RegExp(self.source, self.flags.replace(/[gy]/g, ""));
+                const m2 = clone.exec(input);
+                if (m2) _updateLegacyRegExpState(input, m2);
+              } catch {
+                // best-effort — bad source/flags shouldn't break .test()
+              }
+            }
+          }
+          return ret;
         }
         return undefined;
       };
@@ -5727,6 +5876,25 @@ assert._isSameValue = isSameValue;
             throw new TypeError(method + " is not a function");
           }
           const ret = fn.apply(wrappedObj, wrappedArgs);
+          // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
+          if (
+            (method === "exec" || method === "test") &&
+            wrappedObj instanceof RegExp &&
+            typeof wrappedArgs[0] === "string"
+          ) {
+            const input = wrappedArgs[0] as string;
+            if (method === "exec" && ret != null) {
+              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+            } else if (method === "test" && ret === true) {
+              try {
+                const clone = new RegExp(wrappedObj.source, wrappedObj.flags.replace(/[gy]/g, ""));
+                const m2 = clone.exec(input);
+                if (m2) _updateLegacyRegExpState(input, m2);
+              } catch {
+                // ignore
+              }
+            }
+          }
           return ret === wrappedObj ? obj : _unwrapForHost(ret);
         };
       // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
@@ -8598,6 +8766,16 @@ export function buildImports(
   // the host's `Iterator` global if missing. Idempotent and safe to call
   // unconditionally; older Node / V8 versions need it, newer hosts skip.
   _installIteratorHelperPolyfills();
+
+  // (#1333) Annex B §B.2.2 — install our spec-compliant legacy RegExp
+  // static-property accessors (RegExp.input / $_ / $1..$9 / lastMatch /
+  // leftContext / rightContext / lastParen) on the resolved %RegExp%
+  // constructor. V8's native accessors silently allow non-RegExp receivers;
+  // the spec requires TypeError, so we override. Idempotent per RegExp identity.
+  {
+    const RegExpCtor = (deps?.RegExp ?? (typeof RegExp !== "undefined" ? RegExp : undefined)) as unknown;
+    if (RegExpCtor) _installLegacyRegExpAccessors(RegExpCtor);
+  }
 
   const env: Record<string, Function> = {};
   let wasmExports: Record<string, Function> | undefined;
