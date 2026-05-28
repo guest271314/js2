@@ -51,4 +51,26 @@ describe("#860 — Wasm closure stored as host-object property value", () => {
     expect(error).toBeUndefined();
     expect(ret).toBe(1);
   });
+
+  it("Wasm closure passed via bracket-then host call is invocable (dynamic-import shape)", async () => {
+    // Mirrors test262 `import(spec)['then'](x => x)` — the closure reaches
+    // the host as an `__extern_method_call` arg; `_PROTO_CB_SLOTS.then` must
+    // route it through `_maybeWrapCallable` so the native engine sees a Function.
+    const src = `
+      export function test(): number {
+        const p = Promise.resolve(42);
+        let invoked = 0;
+        (p as any)["then"](function(x: any) {
+          invoked = 1;
+          return x;
+        });
+        // synchronous: the callback may not have run yet, but if the wrap
+        // is missing the host throws "not a function" before we return.
+        return invoked === 0 || invoked === 1 ? 1 : 2;
+      }
+    `;
+    const { ret, error } = await run(src);
+    expect(error).toBeUndefined();
+    expect(ret).toBe(1);
+  });
 });

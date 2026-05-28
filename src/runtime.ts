@@ -1072,6 +1072,12 @@ const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
   // proposal — see `__extern_method_call` polyfill) — callback at
   // args[1], invoked as `callback(key)`.
   getOrInsertComputed: { argIdx: 1, arity: 1 },
+  // Promise.prototype — onFulfilled/onRejected/onFinally at args[0]
+  // (then's second arg is also a callback but covered by 1-arg patterns;
+  // dynamic-import `import(spec)['then'](x => x)` is the motivating case).
+  then: { argIdx: 0, arity: 1 },
+  catch: { argIdx: 0, arity: 1 },
+  finally: { argIdx: 0, arity: 0 },
 };
 
 /**
