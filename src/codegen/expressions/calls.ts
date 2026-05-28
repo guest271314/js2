@@ -105,7 +105,7 @@ import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImport
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "../native-strings.js";
-import { emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
+import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
  * Known built-in global class/object names that compile to ref.null.extern
@@ -5414,6 +5414,20 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         if (dvResult) {
           return dvResult.kind === "get" ? dvResult.result : VOID_RESULT;
         }
+      }
+    }
+
+    // #1698 — native ArrayBuffer.prototype.slice in no-JS-host mode. Same
+    // dual-mode gap as #1654: JS host has slice natively, standalone has no
+    // runtime and the extern-class dispatch would drop the call. Emit a
+    // byte-by-byte copy into a fresh i32_byte vec.
+    if (noJsHost(ctx) && propAccess.name.text === "slice") {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "ArrayBuffer") {
+        const sliceResult = emitArrayBufferSlice(ctx, fctx, propAccess.expression, expr.arguments, (e, hint) =>
+          compileExpression(ctx, fctx, e, hint),
+        );
+        if (sliceResult) return sliceResult;
       }
     }
 
