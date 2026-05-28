@@ -1,9 +1,10 @@
 ---
 id: 786
 title: "- Multi-assertion failures: returned N > 2 (~1,183 tests)"
-status: in-review
+status: done
 created: 2026-03-25
-updated: 2026-04-28
+updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -151,3 +152,90 @@ separate Wasm functions cannot read/write variables from the enclosing function 
 - Top categories fixed: `class/dstr` (524 tests), `object/dstr` (166), `function/dstr` (51),
   `generators/dstr` (55), `arrow-function/dstr` (30), `async-generator/dstr` (81)
 - Estimated total fix: ~900+ tests (those where callCount is the only failing assertion)
+
+## Implementation notes (Array search-method externref equality, 2026-05-27)
+
+### Sub-cluster picked
+`built-ins/Array/prototype/{indexOf,lastIndexOf,includes}` — the search
+methods were comparing **externref** array elements using the
+`wasm:js-string equals` builtin, which coerces both operands to strings.
+
+### Root cause
+`compileArrayIndexOf` / `compileArrayLastIndexOf` / `compileArrayIncludes`
+(`src/codegen/array-methods.ts`) chose `ctx.jsStringImports.get("equals")`
+for `elemType.kind === "externref"`. That builtin string-coerces its
+operands, so:
+- object elements stringify to `"[object Object]"` (identity lost),
+- `["0"].indexOf(0)` and `[false].indexOf(0)` mis-coerce cross-type
+  comparisons,
+- only string-vs-string comparisons worked.
+
+### Fix
+Route externref comparison through the spec-correct host helpers:
+- `indexOf` / `lastIndexOf` → `__host_eq` (Strict Equality, §7.2.16) —
+  real JS `===`: object identity, cross-type → false.
+- `includes` → `__same_value_zero` (§7.2.11) — like strict eq but NaN
+  matches NaN.
+
+Both are existing late imports (`ensureLateImport` + `flushLateImportShifts`,
+mirroring the array-like `compileArrayLikePrototypeSearch` path that already
+used `__host_eq`). The `wasm:js-string equals` call is removed from these
+three functions.
+
+### Scope limit (documented for the umbrella)
+The fix corrects comparison for **homogeneous-externref** arrays (objects-only,
+strings-only, or mixed-with-string). It does NOT move the dominant test262
+`indexOf` cluster (`[0, targetObj].indexOf(targetObj)`, `arr.indexOf(true)` over
+a boolean array, `[0, 1, targetObj].indexOf(targetObj, 2)`), because those
+arrays are stored with **numeric (f64) / boolean (i32) element types** — the
+search argument is coerced to that numeric type before the comparison path is
+even reached, so the externref branch never runs. Making a number+object array
+literal infer an externref element type is the **array-element-typing**
+representation change tracked under #1130 / #1592, out of scope for this
+localized search-method fix. This fix is a prerequisite for that broader change
+and is a standalone spec-correctness improvement with no regression.
+
+### Test Results
+- `tests/issue-786.test.ts` — 21/21 pass (10 new externref search-equality
+  cases + the pre-existing 11 block-scope / closure-capture cases).
+- Regression: `array-prototype-methods`, `array-externref-indexof`,
+  `array-push-pop`, `issue-1360`, `in-operator-edge-cases` — 97/97 pass.
+
+## Implementation notes (mixed numeric+object array-literal typing, 2026-05-27, follow-up)
+
+This is the **array-element-typing change** the section above deferred — the
+piece that actually moves the dominant `[0, 1, targetObj].indexOf(targetObj)`
+cluster.
+
+### Root cause
+`compileArrayLiteral` (`src/codegen/literals.ts`, vec path ~L2299) inferred the
+vec element type from the **first element only**. For `[0, 1, o]` the first
+element is `0` → element type `f64`, so the trailing object `o` was compiled
+with an f64 hint and coerced to a number — the object reference was lost and
+`indexOf(o)` could never match. (`[o, 1, 2]` worked because the object came
+first.) The pre-existing escape only promoted to externref when a literal
+`null` was present.
+
+### Fix
+When the chosen first-element type is `f64`/`i32` but **any** non-string,
+non-undefined element resolves to a `ref`/`ref_null`/`externref` (a genuine
+object — e.g. an object literal `{}` resolves to externref), promote the whole
+vec to externref so object identity survives. String literals keep the
+native-string path; homogeneous numeric arrays are untouched. Combined with the
+externref strict-equality fix above, the search now matches by reference.
+
+### Test262 impact
+- 8 of 11 `indexOf`/`lastIndexOf` mixed-literal entries flip to PASS
+  (`15.4.4.14-5-10/-11/-18/-19/-20/-31/-32`, `15.4.4.15-5-22`).
+- Residual (out of scope): `[false].indexOf(0)` / `[false].lastIndexOf(0)`
+  cross-type on a **homogeneous boolean** vec (needs boolean arrays to box);
+  the `-0` SameValueZero case on a homogeneous number vec; and
+  `15.4.4.14-9-b-i-9` (index getters → **#1130**).
+
+### Test Results (this follow-up)
+- `tests/issue-786.test.ts` — 27/27 pass (6 new mixed-literal cases added).
+- No new failures in `array-methods` / `fast-arrays` /
+  `functional-array-methods` / `arrays-enums` — those carry a **pre-existing**
+  branch regression (22 / 9 / 23 / 9 fail), verified identical on
+  `c3f55339d~1` (before this issue's work) and unchanged by these edits.
+  Flagged for separate triage; NOT introduced here.

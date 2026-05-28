@@ -1962,6 +1962,37 @@ function compilePropertyAssignment(
       emitThrowTypeError(ctx, fctx, "Cannot assign to private method or read-only accessor");
       return { kind: "externref" };
     }
+    // #1680: Private accessor with a setter (`set #x(v)`). Dispatch to the
+    // setter function. Without this branch control falls through to the
+    // generic struct-field write, which targets a `__priv_<name>` data slot
+    // the getter never reads — silently dropping the write and cross-talking
+    // between stacked accessors. Mirrors the public-accessor setter dispatch.
+    if (privateMember?.kind === "accessor" || privateMember?.kind === "accessor-writeonly") {
+      const setterName = `${privateMember.className}_set_${privateMember.fieldName}`;
+      const funcIdx = ctx.funcMap.get(setterName);
+      if (funcIdx !== undefined) {
+        const recvResult = compileExpression(ctx, fctx, target.expression);
+        if (!recvResult) return null;
+        const setterParamTypes = getFuncParamTypes(ctx, funcIdx);
+        const valTypeHint = setterParamTypes?.[1]; // param 0 = self, param 1 = value
+        const valResult = compileExpression(ctx, fctx, value, valTypeHint);
+        if (!valResult) return null;
+        // Stack: [receiver, value]. Save value for the assignment result.
+        const tmpVal = allocLocal(fctx, `__priv_setter_assign_${fctx.locals.length}`, valResult);
+        fctx.body.push({ op: "local.tee", index: tmpVal });
+        // Setter with no value parameter (only self): drop the value.
+        if (!setterParamTypes || setterParamTypes.length <= 1) {
+          fctx.body.push({ op: "drop" });
+        }
+        // Re-read funcIdx: receiver/RHS compilation may have shifted indices
+        // via late import addition (addUnionImports).
+        const finalSetterIdx = ctx.funcMap.get(setterName) ?? funcIdx;
+        fctx.body.push({ op: "call", funcIdx: finalSetterIdx });
+        // `=` evaluates to the RHS, not the setter's return.
+        fctx.body.push({ op: "local.get", index: tmpVal });
+        return valResult;
+      }
+    }
   }
 
   // Compile-away: if the target object is frozen, emit TypeError throw

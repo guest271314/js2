@@ -75,6 +75,12 @@ let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
 let _AsyncGeneratorPrototypeCache: any = null;
 let _AsyncGeneratorFunctionPrototypeCache: any = null;
+// (#1639) `genFn.prototype` — the per-function instance prototype. Per spec
+// §27.3.4 / §27.4.4 it is `OrdinaryObjectCreate(%(Async)GeneratorPrototype%)`,
+// one level below the shared `%(Async)GeneratorPrototype%`. Generator instances
+// inherit from this object, so `Object.getPrototypeOf(instance) === genFn.prototype`.
+let _GeneratorInstancePrototypeCache: any = null;
+let _AsyncGeneratorInstancePrototypeCache: any = null;
 let _IteratorPrototypeCache: any = null;
 let _AsyncIteratorPrototypeCache: any = null;
 
@@ -254,6 +260,18 @@ function _getGeneratorPrototype(): any {
   return proto;
 }
 
+/**
+ * (#1639) Build the per-`function*` instance prototype `genFn.prototype`
+ * (spec §27.3.4): `OrdinaryObjectCreate(%GeneratorPrototype%)`. Generator
+ * instances inherit from this object so the spec chain holds:
+ *   instance → genFn.prototype → %GeneratorPrototype% → %IteratorPrototype%.
+ */
+function _getGeneratorInstancePrototype(): any {
+  if (_GeneratorInstancePrototypeCache) return _GeneratorInstancePrototypeCache;
+  _GeneratorInstancePrototypeCache = Object.create(_getGeneratorPrototype());
+  return _GeneratorInstancePrototypeCache;
+}
+
 /** Build `%GeneratorFunction.prototype%` (= `%Generator%`, spec §27.3.3). */
 function _getGeneratorFunctionPrototype(): any {
   if (_GeneratorFunctionPrototypeCache) return _GeneratorFunctionPrototypeCache;
@@ -369,6 +387,17 @@ function _getAsyncGeneratorPrototype(): any {
   });
 
   return proto;
+}
+
+/**
+ * (#1639) Build the per-`async function*` instance prototype `genFn.prototype`
+ * (spec §27.4.4): `OrdinaryObjectCreate(%AsyncGeneratorPrototype%)`. The chain
+ * is: instance → genFn.prototype → %AsyncGeneratorPrototype% → %AsyncIteratorPrototype%.
+ */
+function _getAsyncGeneratorInstancePrototype(): any {
+  if (_AsyncGeneratorInstancePrototypeCache) return _AsyncGeneratorInstancePrototypeCache;
+  _AsyncGeneratorInstancePrototypeCache = Object.create(_getAsyncGeneratorPrototype());
+  return _AsyncGeneratorInstancePrototypeCache;
 }
 
 /** Build `%AsyncGeneratorFunction.prototype%` (= `%AsyncGenerator%`, spec §27.4.3). */
@@ -1014,6 +1043,86 @@ const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
  * iterable instead of an opaque WasmGC struct ref. Same machinery the
  * Promise combinators use (#1368).
  */
+/**
+ * (#1320/#1684) Read a field off an iterator-result value that may be an
+ * opaque WasmGC struct. For an object-literal `{ value, done }` returned from
+ * a compiled closure, the field lives in the struct slot and is reachable only
+ * via the exported `__sget_<field>` getter — plain `result[field]` on an
+ * opaque struct returns the zero-initialised default (value=0, done never
+ * truthy). For real JS objects (plain-object-literal returns built via
+ * `__new_plain_object`, or host-supplied iterators) `_safeGet` reads directly.
+ */
+function _readIterResultField(result: any, field: string, exports: Record<string, Function> | undefined): any {
+  if (result != null && typeof result === "object" && _isWasmStruct(result)) {
+    const getter = exports?.[`__sget_${field}`];
+    if (typeof getter === "function") {
+      try {
+        return getter(result);
+      } catch {
+        /* not a struct field — fall through to _safeGet */
+      }
+    }
+  }
+  return _safeGet(result, field);
+}
+
+/**
+ * (#1320/#1684) Drain a closure-backed iterable into a real JS array.
+ *
+ * When compiled code does `obj[Symbol.iterator] = function () { … }`, the
+ * value stored on the plain JS object is an opaque WasmGC closure struct, not
+ * a JS function. Native `Array.from` reads `obj[Symbol.iterator]`, sees a
+ * non-function, and throws "items[Symbol.iterator] … be a function" (#1320
+ * Layer 1). The iterator object the closure returns — and each `{ value, done }`
+ * result — may themselves be WasmGC structs whose fields only read back through
+ * `__sget_*` (#1320 Layer 2 / #1684).
+ *
+ * This drives the iterator protocol entirely through `__call_fn_0` + the
+ * struct-aware field reader, collecting yielded values into a plain array that
+ * native `Array.from` / `Iterator.from` can consume. Mirrors the closure
+ * dispatch already done by the `__iterator` host import.
+ *
+ * Returns null when the object is not a closure-backed iterable (caller keeps
+ * the original value).
+ */
+function _drainClosureIterableToArray(obj: any, exports: Record<string, Function> | undefined): any[] | null {
+  const callFn0 = exports?.__call_fn_0;
+  if (typeof callFn0 !== "function") return null;
+  const iterFn = _safeGet(obj, Symbol.iterator) ?? _safeGet(obj, "@@iterator");
+  if (iterFn == null || typeof iterFn !== "object" || !_isWasmStruct(iterFn)) return null;
+  const iterator = callFn0(iterFn);
+  if (iterator == null) return null;
+  // The iterator object may itself be an opaque WasmGC struct — read its
+  // `next` member through the struct getter, not native property access.
+  const sgetNext = exports?.__sget_next;
+  const out: any[] = [];
+  // Guard against a runaway iterator (bug in compiled next()): the test262
+  // cases that reach here yield a single value, so a generous cap is safe.
+  for (let guard = 0; guard < 1_000_000; guard++) {
+    let nextFn = _safeGet(iterator, "next");
+    if (nextFn == null && typeof sgetNext === "function" && _isWasmStruct(iterator)) {
+      try {
+        nextFn = sgetNext(iterator);
+      } catch {
+        /* not a struct field */
+      }
+    }
+    let result: any;
+    if (typeof nextFn === "function") {
+      result = nextFn.call(iterator);
+    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      result = callFn0(nextFn);
+    } else {
+      return null; // no usable next() — not a well-formed iterator
+    }
+    if (result == null) break;
+    const done = _readIterResultField(result, "done", exports);
+    if (done) break;
+    out.push(_readIterResultField(result, "value", exports));
+  }
+  return out;
+}
+
 function _materializeIterable(
   iter: any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
@@ -1039,9 +1148,84 @@ function _materializeIterable(
     }
     return result;
   }
-  // Plain JS object — pass through if it has Symbol.iterator, else as-is.
-  if (Symbol.iterator in iter) return iter;
+  // Plain JS object. If its `[Symbol.iterator]` is a Wasm closure struct
+  // (compiled `obj[Symbol.iterator] = function(){…}`), native Array.from would
+  // see a non-function and throw — drain it through __call_fn_0 instead
+  // (#1320/#1684). Otherwise pass through (real JS iterables: Maps, Sets,
+  // generators, host objects).
+  const symIter = _safeGet(iter, Symbol.iterator) ?? _safeGet(iter, "@@iterator");
+  if (symIter != null && typeof symIter === "object" && _isWasmStruct(symIter)) {
+    const drained = _drainClosureIterableToArray(iter, callbackState?.getExports());
+    if (drained != null) return drained;
+  }
   return iter;
+}
+
+/**
+ * (#1320) Drain a plain JS object whose own `[Symbol.iterator]` is a compiled
+ * **Wasm closure struct** (typeof "object", not a JS function). Native
+ * `Array.from` / `Iterator.from` reject such an object with
+ * `items[Symbol.iterator] … must be a function`, because V8 sees a non-callable
+ * iterator method. We invoke the closure (and its returned iterator's `.next`,
+ * which is typically also a Wasm closure) through the `__call_fn_0` export and
+ * collect the yielded values into a real JS array.
+ *
+ * Returns `null` when this path does not apply — caller falls back to native
+ * `Array.from`:
+ *   - the value has no own/inherited `@@iterator`, OR
+ *   - the `@@iterator` is already a real JS function (native path is correct), OR
+ *   - the closure-call export is unavailable.
+ *
+ * Throws from the user's `@@iterator()` / `.next()` propagate unchanged (a
+ * custom iterator that throws must surface that throw, per §7.4).
+ */
+function _drainWasmClosureIterable(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any[] | null {
+  if (obj == null || typeof obj !== "object") return null;
+  let iterFn: any;
+  try {
+    iterFn = obj[Symbol.iterator];
+  } catch {
+    return null;
+  }
+  // Only handle the broken case: an @@iterator that exists but is a Wasm
+  // closure struct (non-function object). Real JS functions / generators take
+  // the native path.
+  if (iterFn == null || typeof iterFn === "function" || !_isWasmStruct(iterFn)) return null;
+  const exports = callbackState?.getExports();
+  const callFn0 = exports?.["__call_fn_0"];
+  if (typeof callFn0 !== "function") return null;
+  const iteratorObj = callFn0(iterFn);
+  if (iteratorObj == null || typeof iteratorObj !== "object") return null;
+  const out: any[] = [];
+  const MAX_ITER = 1 << 16;
+  let iterCount = 0;
+  const resolveProp = (target: any, key: string): any => {
+    const direct = target?.[key];
+    if (direct !== undefined) return direct;
+    const safe = _safeGet(target, key);
+    if (safe !== undefined) return safe;
+    const sget = exports?.[`__sget_${key}`];
+    if (typeof sget === "function") return sget(target);
+    return undefined;
+  };
+  while (iterCount++ < MAX_ITER) {
+    const nextFn = resolveProp(iteratorObj, "next");
+    let result: any;
+    if (typeof nextFn === "function") {
+      result = nextFn.call(iteratorObj);
+    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      result = callFn0(nextFn);
+    } else {
+      break;
+    }
+    if (result == null) break;
+    if (resolveProp(result, "done")) break;
+    out.push(resolveProp(result, "value"));
+  }
+  return out;
 }
 
 /**
@@ -3167,7 +3351,17 @@ function resolveImport(
         if (self == null) return undefined;
         // Method call — check sidecar if direct method missing
         const fn = self[m] ?? _sidecarGet(self, m);
-        if (typeof fn === "function") return fn.call(self, ...args);
+        if (typeof fn === "function") {
+          // (#1332) Wrap wasmGC-struct args via _wrapForHost so a native
+          // prototype method (e.g. RegExp.prototype.exec/test) can ToString
+          // or read properties off an opaque wasm struct argument. Mirrors
+          // the Set-method path above and __extern_method_call.
+          const exports = callbackState?.getExports();
+          const hasStructArg = args.some((a) => _isWasmStruct(a));
+          if (!hasStructArg) return fn.call(self, ...args);
+          const wrappedArgs = args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          return fn.call(self, ...wrappedArgs);
+        }
         return undefined;
       };
     }
@@ -4744,10 +4938,12 @@ assert._isSameValue = isSameValue;
       // — NOT the shared prototype itself. So tests walk:
       //   getPrototypeOf(g.prototype)              → %(Async)GeneratorPrototype%
       //   getPrototypeOf(getPrototypeOf(g.prototype)) → %(Async)IteratorPrototype%
-      // The compiled closure is opaque to the host, so codegen routes the
-      // member access `g.prototype` (where `g ∈ ctx.generatorFunctions`) here.
-      if (name === "__get_generator_prototype") return () => Object.create(_getGeneratorPrototype());
-      if (name === "__get_async_generator_prototype") return () => Object.create(_getAsyncGeneratorPrototype());
+      // The per-function object is cached so repeated reads of `g.prototype`
+      // return the same identity. The compiled closure is opaque to the host,
+      // so codegen routes the member access `g.prototype`
+      // (g ∈ ctx.generatorFunctions) through this import.
+      if (name === "__get_generator_prototype") return () => _getGeneratorInstancePrototype();
+      if (name === "__get_async_generator_prototype") return () => _getAsyncGeneratorInstancePrototype();
       // __create_descriptor(value, flags) → {value, writable, enumerable, configurable}
       // flags: bit 0 = writable, bit 1 = enumerable, bit 2 = configurable
       if (name === "__create_descriptor")
@@ -4842,6 +5038,27 @@ assert._isSameValue = isSameValue;
             } else if (method === "apply") {
               // apply(thisArg, argsArray): the receiver is arg 0.
               if (wrappedArgs.length > 0) wrappedArgs[0] = coerceRecv(wrappedArgs[0]);
+            }
+          }
+          // (#1320) `Array.from.call(thisArg, items)` / `.apply(thisArg, [items])`
+          // routes here with obj=Array.from. When `items` is a plain JS object
+          // whose own @@iterator is a Wasm closure (typeof "object"), native
+          // Array.from rejects it ("items[Symbol.iterator] … must be a
+          // function"). Pre-drain the closure-backed iterator to a real array so
+          // the native call sees an array-like it can iterate. The custom
+          // `thisArg` constructor receiver is preserved (arg 0 of call/apply).
+          if (
+            (method === "call" || method === "apply") &&
+            (wrappedObj === Array.from || wrappedObj === (Array as { of?: unknown }).of)
+          ) {
+            // call(thisArg, items)  → items at wrappedArgs[1]
+            // apply(thisArg, [items]) → items at wrappedArgs[1][0]
+            if (method === "call" && wrappedArgs.length > 1) {
+              const drained = _drainWasmClosureIterable(wrappedArgs[1], callbackState);
+              if (drained !== null) wrappedArgs[1] = drained;
+            } else if (method === "apply" && Array.isArray(wrappedArgs[1]) && wrappedArgs[1].length > 0) {
+              const drained = _drainWasmClosureIterable(wrappedArgs[1][0], callbackState);
+              if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
             }
           }
           const fn = wrappedObj[method];
@@ -5280,7 +5497,11 @@ assert._isSameValue = isSameValue;
           return Reflect.construct(wrappedCtor, wrappedArgs ?? [], wrappedNew);
         };
       // Symbol.for(key) — global symbol registry (#965)
-      if (name === "__symbol_for") return (key: any): any => Symbol.for(String(key));
+      // Symbol.for(key) — §20.4.2.2: stringKey = ? ToString(key). Passing a
+      // Symbol makes ToString throw TypeError (not stringify). `Symbol.for`
+      // itself performs ToString, so forwarding a real Symbol primitive
+      // reproduces the spec throw; other values stringify normally.
+      if (name === "__symbol_for") return (key: any): any => Symbol.for(key);
       // Symbol.keyFor(sym) — reverse lookup in global registry (#965, #1342)
       // Spec §20.4.2.6: returns the key string for registered symbols, or
       // `undefined` for any other symbol. Returning `null` (the previous
@@ -5489,6 +5710,16 @@ assert._isSameValue = isSameValue;
       if (name === "__array_from")
         return (iterable: any, mapFn: any): any[] => {
           const iter = _materializeIterable(iterable, callbackState);
+          // (#1320) A plain JS object whose own @@iterator is a Wasm closure
+          // (typeof "object") would make native Array.from throw
+          // "items[Symbol.iterator] … must be a function". Drive the protocol
+          // manually in that case, then apply mapFn over the collected values.
+          const drained = _drainWasmClosureIterable(iter, callbackState);
+          if (drained !== null) {
+            if (mapFn == null) return drained;
+            const fn = _isWasmStruct(mapFn) ? (_wrapWasmClosure(mapFn, 2, callbackState) ?? mapFn) : mapFn;
+            return typeof fn === "function" ? drained.map((v, i) => fn(v, i)) : drained;
+          }
           if (mapFn == null) return Array.from(iter);
           if (_isWasmStruct(mapFn)) {
             const wrapped = _wrapWasmClosure(mapFn, 2, callbackState);
@@ -6106,17 +6337,13 @@ assert._isSameValue = isSameValue;
           // %GeneratorPrototype% inherits from %IteratorPrototype% so
           // .map/.filter/.drop/.take/... (#1367) still resolve through the
           // chain.
-          // Spec §27.5 prototype chain has a per-function `g.prototype` level
-          // *between* the instance and `%GeneratorPrototype%`:
-          //   instance → g.prototype → %GeneratorPrototype% → %IteratorPrototype%
-          // Codegen does not thread the function's own `.prototype` into this
-          // helper, so re-create the missing level with a fresh ordinary object
-          // inheriting from `%GeneratorPrototype%`. This makes the two-hop
-          // `Object.getPrototypeOf(Object.getPrototypeOf(g()))` land on
-          // `%GeneratorPrototype%` (toStringTag = "Generator") as the spec
-          // requires. State lives on the instance, not the prototype, so the
-          // brand check (`_GeneratorState.get(this)`) is unaffected.
-          const proto = Object.create(_getGeneratorPrototype());
+          // (#1639) Instances inherit from the per-function instance prototype
+          // (`genFn.prototype`), which in turn inherits from %GeneratorPrototype%,
+          // so `Object.getPrototypeOf(instance) === genFn.prototype` per spec and
+          // `next`/`return`/`throw` still resolve up the chain. State lives on the
+          // instance, not the prototype, so the brand check
+          // (`_GeneratorState.get(this)`) is unaffected.
+          const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -6127,10 +6354,9 @@ assert._isSameValue = isSameValue;
           // matching comment on `__create_generator`. The instance is just a
           // plain object whose [[Prototype]] is the singleton — state lives in
           // `_AsyncGeneratorState`.
-          // Mirror __create_generator: insert the missing per-function
-          // `g.prototype` level so the two-hop chain reaches
-          // `%AsyncGeneratorPrototype%` (toStringTag = "AsyncGenerator").
-          const proto = Object.create(_getAsyncGeneratorPrototype());
+          // (#1639) See __create_generator — inherit from the instance prototype
+          // so `Object.getPrototypeOf(instance) === asyncGenFn.prototype`.
+          const proto = _getAsyncGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
@@ -6298,53 +6524,51 @@ assert._isSameValue = isSameValue;
           );
         };
       if (name === "__iterator_next")
-        return (iter: any) => {
+        // #1620 v2: returns the iterator step as a Wasm multi-value
+        // [i32 done, externref value]. V8 destructures the returned 2-element
+        // array onto the Wasm stack (the import is declared `(result i32 externref)`).
+        // Folds in the old __iterator_done / __iterator_value extraction — those
+        // separate imports are gone. No $IteratorResult struct crosses the JS hop.
+        return (iter: any): [number, any] => {
+          // Resolve iter.next: own → sidecar → __sget_next → WasmGC closure → __call_next.
+          let raw: any;
           let next = iter.next ?? _sidecarGet(iter, "next");
-          // Try struct getter for "next" method
           if (next === undefined) {
             const exports = callbackState?.getExports();
             next = exports?.__sget_next?.(iter);
           }
-          if (typeof next === "function") return next.call(iter);
-          // If next is a WasmGC closure, call via __call_fn_0
-          if (next != null && _isWasmStruct(next)) {
+          if (typeof next === "function") {
+            raw = next.call(iter);
+          } else if (next != null && _isWasmStruct(next)) {
             const exports = callbackState?.getExports();
             const callFn0 = (exports as any)?.__call_fn_0;
-            if (typeof callFn0 === "function") {
-              const result = callFn0(next);
-              if (result != null) return result;
-            }
+            if (typeof callFn0 === "function") raw = callFn0(next);
           }
-          // Try __call_next dispatch for WasmGC struct iterators
-          {
+          // Try __call_next dispatch for WasmGC struct iterators.
+          if (raw == null) {
             const exports = callbackState?.getExports();
             const callNext = (exports as any)?.["__call_next"];
-            if (typeof callNext === "function") {
-              const result = callNext(iter);
-              if (result != null) return result;
-            }
+            if (typeof callNext === "function") raw = callNext(iter);
           }
-          throw new TypeError("iterator.next is not a function");
-        };
-      if (name === "__iterator_done")
-        return (result: any) => {
-          let done = result.done ?? _sidecarGet(result, "done");
-          // Try struct getter for "done" field
+          if (raw == null) throw new TypeError("iterator.next is not a function");
+
+          // Extract done: own → sidecar → __sget_done.
+          let done = raw.done ?? _sidecarGet(raw, "done");
           if (done === undefined) {
             const exports = callbackState?.getExports();
-            done = exports?.__sget_done?.(result);
+            done = exports?.__sget_done?.(raw);
           }
-          return done ? 1 : 0;
-        };
-      if (name === "__iterator_value")
-        return (result: any) => {
-          let val = result.value;
-          if (val !== undefined) return val;
-          val = _sidecarGet(result, "value");
-          if (val !== undefined) return val;
-          // Try struct getter for "value" field
-          const exports = callbackState?.getExports();
-          return exports?.__sget_value?.(result);
+          // Extract value: own → sidecar → __sget_value.
+          let value = raw.value;
+          if (value === undefined) {
+            value = _sidecarGet(raw, "value");
+            if (value === undefined) {
+              const exports = callbackState?.getExports();
+              value = exports?.__sget_value?.(raw);
+            }
+          }
+          // Multi-value ABI: return an iterable of [i32 done, externref value].
+          return [done ? 1 : 0, value];
         };
       if (name === "__iterator_rest")
         return (iter: any) => {
@@ -6932,36 +7156,57 @@ assert._isSameValue = isSameValue;
       // biome-ignore lint/suspicious/useValidTypeof: targetType is a runtime string from compiled code
       return (v: any) => (typeof v === intent.targetType ? 1 : 0);
     case "box":
-      return intent.targetType === "boolean" ? (v: number) => Boolean(v) : (v: number) => v;
+      if (intent.targetType === "boolean") return (v: number) => Boolean(v);
+      // (#1644) __box_bigint: JS-BigInt-integration already delivers the wasm
+      // i64 as a JS bigint at the boundary, so boxing is identity.
+      if (intent.targetType === "bigint") return (v: bigint) => v;
+      return (v: number) => v;
     case "unbox":
-      return intent.targetType === "boolean"
-        ? (v: any) => (v ? 1 : 0)
-        : (v: any) => {
-            // For objects, try our ToPrimitive first — Number() on WasmGC structs
-            // returns NaN without throwing (#866), and proxied structs may have
-            // WasmGC closures for Symbol.toPrimitive that V8 can't call (#1090).
-            if (v != null && typeof v === "object") {
-              const prim = _toPrimitive(v, "number", callbackState);
-              if (prim !== undefined) {
-                // #1434 — Number() throws TypeError on Symbol/BigInt primitives.
-                // Per ECMA-262 §7.1.4 ToNumber, Symbol MUST throw TypeError; the
-                // unbox/number intent is the centralized ToNumber funnel, so we
-                // let the exception propagate to Wasm catch_all instead of
-                // silently turning it into NaN.
-                return Number(prim);
-              }
-              // _toPrimitive returned undefined — try the full host ToPrimitive (#1090)
-              // which checks real JS properties, sidecar, and Wasm exports.
-              // Let TypeError propagate so Wasm catch_all can intercept it.
-              const prim2 = _hostToPrimitive(v, "number", callbackState);
-              return Number(prim2);
-            }
-            // #1434 — Symbol/BigInt primitives: Number() throws TypeError per
-            // §7.1.4. The previous try/catch swallowed this and returned NaN,
-            // letting `Number(Symbol())`, `+Symbol()`, `-Symbol()`, `~Symbol()`,
-            // `0 + Symbol()` etc. silently coerce. Let the exception propagate.
-            return Number(v);
-          };
+      if (intent.targetType === "boolean") return (v: any) => (v ? 1 : 0);
+      // (#1644) __to_bigint: §7.1.13 ToBigInt. Identity on a bigint; parse
+      // strings / coerce booleans via the BigInt() constructor (SyntaxError on
+      // bad string syntax); number and Symbol arguments throw TypeError. The
+      // returned bigint crosses back to wasm as an i64 (JS-BigInt-integration).
+      if (intent.targetType === "bigint") {
+        return (v: any): bigint => {
+          if (typeof v === "bigint") return v;
+          if (typeof v === "number") {
+            throw new TypeError("Cannot convert a Number to a BigInt");
+          }
+          if (typeof v === "symbol") {
+            throw new TypeError("Cannot convert a Symbol value to a BigInt");
+          }
+          // string / boolean / object-with-primitive — defer to spec BigInt()
+          // (throws SyntaxError on malformed numeric strings).
+          return BigInt(v);
+        };
+      }
+      return (v: any) => {
+        // For objects, try our ToPrimitive first — Number() on WasmGC structs
+        // returns NaN without throwing (#866), and proxied structs may have
+        // WasmGC closures for Symbol.toPrimitive that V8 can't call (#1090).
+        if (v != null && typeof v === "object") {
+          const prim = _toPrimitive(v, "number", callbackState);
+          if (prim !== undefined) {
+            // #1434 — Number() throws TypeError on Symbol/BigInt primitives.
+            // Per ECMA-262 §7.1.4 ToNumber, Symbol MUST throw TypeError; the
+            // unbox/number intent is the centralized ToNumber funnel, so we
+            // let the exception propagate to Wasm catch_all instead of
+            // silently turning it into NaN.
+            return Number(prim);
+          }
+          // _toPrimitive returned undefined — try the full host ToPrimitive (#1090)
+          // which checks real JS properties, sidecar, and Wasm exports.
+          // Let TypeError propagate so Wasm catch_all can intercept it.
+          const prim2 = _hostToPrimitive(v, "number", callbackState);
+          return Number(prim2);
+        }
+        // #1434 — Symbol/BigInt primitives: Number() throws TypeError per
+        // §7.1.4. The previous try/catch swallowed this and returned NaN,
+        // letting `Number(Symbol())`, `+Symbol()`, `-Symbol()`, `~Symbol()`,
+        // `0 + Symbol()` etc. silently coerce. Let the exception propagate.
+        return Number(v);
+      };
     case "truthy_check":
       return (v: any) => (v ? 1 : 0);
     case "extern_get":

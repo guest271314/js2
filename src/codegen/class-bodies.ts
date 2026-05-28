@@ -18,10 +18,10 @@ import {
   destructureParamObject,
   isNullOrUndefinedLiteral,
 } from "./destructuring-params.js";
+import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { cacheStringLiterals, hasAbstractModifier, hasStaticModifier, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -36,13 +36,13 @@ import {
 } from "./shared.js";
 
 /**
- * (#846h) Returns true if `body` lexically contains a `super(...)` call that
- * shares the constructor's `this` binding. Descends through ordinary statements
- * and arrow-function bodies (which inherit `this`), but NOT into nested
- * function/method/class declarations or function expressions, where a `super()`
- * would bind a different constructor. Used to detect a derived constructor that
- * never initialises `this` — per ES §10.2.2 / §13.3.7.1 such a constructor must
- * throw a ReferenceError when constructed.
+ * (#846h / #1682) Returns true if `body` lexically contains a `super(...)` call
+ * that shares the constructor's `this` binding. Descends through ordinary
+ * statements and arrow-function bodies (which inherit `this`), but NOT into
+ * nested function/method/class declarations or function expressions, where a
+ * `super()` would bind a different constructor. Used to detect a derived
+ * constructor that never initialises `this` — per ES §10.2.2 / §13.3.7.1 such a
+ * constructor must throw a ReferenceError when constructed.
  */
 function constructorBodyHasSuperCall(node: ts.Node): boolean {
   let found = false;
@@ -54,6 +54,8 @@ function constructorBodyHasSuperCall(node: ts.Node): boolean {
       return;
     }
     // Do not descend into constructs that introduce a new `this`/`super` binding.
+    // Note: arrow functions ARE descended into — they inherit the enclosing
+    // constructor's `this`, so a `super()` inside an arrow still initialises it.
     if (
       ts.isFunctionDeclaration(n) ||
       ts.isFunctionExpression(n) ||
@@ -1225,12 +1227,15 @@ function compileClassBodiesInner(
     const ctorMissingSuper = isDerivedClass && ctor?.body !== undefined && !constructorBodyHasSuperCall(ctor.body);
 
     if (ctorMissingSuper) {
-      const message =
-        "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor";
-      addStringConstantGlobal(ctx, message);
-      const tagIdx = ensureExnTag(ctx);
-      fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
-      fctx.body.push({ op: "throw", tagIdx });
+      // (#1682) Throw a real ReferenceError instance (not a bare string) so
+      // `e instanceof ReferenceError` holds for the caller. emitThrowReferenceError
+      // constructs via __new_ReferenceError and degrades to a string throw only
+      // when the constructor import is unavailable.
+      emitThrowReferenceError(
+        ctx,
+        fctx,
+        "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+      );
     } else if (ctor?.body) {
       for (const stmt of ctor.body.statements) {
         // Handle super(args) calls: inline parent constructor field initialization
@@ -1626,6 +1631,13 @@ function compileClassBodiesInner(
         { name: "this", type: { kind: "ref", typeIdx: structTypeIdx } },
       ];
 
+      // (#1681) Static accessor bodies reach `this` as the class-constructor
+      // global (externref), not a per-instance struct. Mark the fctx static +
+      // tag the enclosing class so `this.<prop>` routing in member-access /
+      // assignment resolves through the static-global path instead of casting
+      // the externref to the class struct (invalid `extern.convert_any`).
+      const getterIsStatic = hasStaticModifier(member);
+
       const fctx: FunctionContext = {
         name: getterName,
         params,
@@ -1638,6 +1650,8 @@ function compileClassBodiesInner(
         continueStack: [],
         labelMap: new Map(),
         savedBodies: [],
+        enclosingClassName: className,
+        isStaticContext: getterIsStatic ? true : undefined,
       };
 
       // Re-resolve getter function type (see method type re-resolution above)
@@ -1715,6 +1729,10 @@ function compileClassBodiesInner(
         params.push({ name: paramName, type: wasmType });
       }
 
+      // (#1681) See the getter site above — static setter bodies reach `this`
+      // as the class-constructor global, so mark the fctx static.
+      const setterIsStatic = hasStaticModifier(member);
+
       const fctx: FunctionContext = {
         name: setterName,
         params,
@@ -1727,6 +1745,8 @@ function compileClassBodiesInner(
         continueStack: [],
         labelMap: new Map(),
         savedBodies: [],
+        enclosingClassName: className,
+        isStaticContext: setterIsStatic ? true : undefined,
       };
 
       // Re-resolve setter function type (see method type re-resolution above)

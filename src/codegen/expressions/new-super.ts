@@ -3,6 +3,7 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 /**
  * new/super/class expression compilation.
  */
+import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
 import { reportError } from "../context/errors.js";
@@ -1437,12 +1438,32 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return compileNewFunctionExpression(ctx, fctx, expr, expr.expression);
   }
 
+  // (#1528b) Unwrap parens AND `as`/`!`/type-assertion wrappers so the static
+  // non-constructor guards below still fire on `new ((() => {}) as any)()` etc.
+  // — the bare paren-only unwrap let cast arrows slip through to the dynamic
+  // path and silently no-throw. Mirrors the builtin-namespace unwrap below.
+  const unwrapNewTarget = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = ts.isParenthesizedExpression(cur)
+        ? cur.expression
+        : ts.isAsExpression(cur)
+          ? cur.expression
+          : ts.isNonNullExpression(cur)
+            ? cur.expression
+            : (cur as ts.TypeAssertion).expression;
+    }
+    return cur;
+  };
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
-    let unwrappedNew: ts.Expression = expr.expression;
-    while (ts.isParenthesizedExpression(unwrappedNew)) {
-      unwrappedNew = unwrappedNew.expression;
-    }
+    const unwrappedNew = unwrapNewTarget(expr.expression);
     if (ts.isArrowFunction(unwrappedNew)) {
       // #1528: throw a real TypeError instance so `assert.throws(TypeError, …)`
       // catches it (the bare-string throw is only `instanceof Error`/string).
@@ -1489,12 +1510,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   }
 
   // Non-identifier constructor: detect non-constructable functions.
-  if (!ts.isIdentifier(expr.expression) && !ts.isFunctionExpression(expr.expression)) {
+  // (#1528b) Unwrap `as`/`!`/type-assertion/paren wrappers so the guards fire
+  // on `new (Array.prototype.map as any)()` etc., not just the bare form.
+  const unwrappedNonId = unwrapNewTarget(expr.expression);
+  if (!ts.isIdentifier(unwrappedNonId) && !ts.isFunctionExpression(unwrappedNonId)) {
     // Pattern 1: `new X.prototype.Y()` — prototype methods are NEVER constructors.
     // This covers both ES2022 (forEach) and ES2023 (with, toSorted) methods,
     // even when TypeScript lib doesn't know about the method (type resolves to `any`).
-    if (ts.isPropertyAccessExpression(expr.expression)) {
-      const obj = expr.expression.expression; // e.g. Array.prototype
+    if (ts.isPropertyAccessExpression(unwrappedNonId)) {
+      const obj = unwrappedNonId.expression; // e.g. Array.prototype
       if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") {
         // #1528: real TypeError instance so test262 `assert.throws(TypeError, …)`
         // catches it (prototype methods are not constructors per spec §9.2.2).
@@ -1506,7 +1530,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Pattern 2: TypeScript knows the expression has call sigs but no construct sigs.
     // e.g. `new decodeURIComponent()`, `new Math.abs()`, `new Array.from()`.
-    const exprType = ctx.checker.getTypeAtLocation(expr.expression);
+    // Resolve on the unwrapped target so a cast doesn't widen it to `any`.
+    const exprType = ctx.checker.getTypeAtLocation(unwrappedNonId);
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
     if (callSigs.length > 0 && constructSigs.length === 0) {
@@ -1591,6 +1616,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Number(x) → create real JS Number wrapper object via __new_Number host import
         // (typeof new Number(0) === "object", not "number")
         if (args.length >= 1) {
+          // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
+          // ToNumber on its argument before boxing. Mirror the `Number(sym)`
+          // call-path guard so `new Number(Symbol())` throws too (#1564).
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+            return { kind: "externref" };
+          }
           compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
@@ -1624,7 +1658,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // new Boolean(x) → create real JS Boolean wrapper object via __new_Boolean host import
         // (typeof new Boolean(false) === "object", not "boolean")
         if (args.length >= 1) {
-          compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
+          // coerces the arg to f64 first, which would silently lose the Symbol.
+          // A Symbol arg should produce a truthy wrapper: box 1.0.
+          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+            const t = compileExpression(ctx, fctx, args[0]!);
+            if (t !== null) fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "f64.const", value: 1 });
+          } else {
+            compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+          }
         } else {
           fctx.body.push({ op: "f64.const", value: 0 });
         }
@@ -1783,14 +1826,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // expecting a real object, e.g. `Boolean(new Object())` returned `false`
   // because `__to_boolean(null) === 0`.
   //
-  // Use `__object_create(null)` host import to produce a fresh empty
-  // object. Falls back to `ref.null.extern` only if the import can't be
-  // registered (preserving the legacy shape so we never regress further).
+  // Use `__new_plain_object` host import to produce a fresh empty object
+  // with the ordinary `Object.prototype` prototype (#1525). `new Object()`
+  // per §20.1.1.1 must inherit `Object.prototype` — using `__object_create(null)`
+  // gave it a null prototype, so it had no `toString`/`valueOf` and any
+  // ToPrimitive coercion (`==`, arithmetic, `String(...)`) threw
+  // "Cannot convert object to primitive value" instead of producing
+  // "[object Object]". Falls back to `ref.null.extern` only if the import
+  // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (createIdx !== undefined) {
-      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "call", funcIdx: createIdx });
       return { kind: "externref" };
     }
@@ -2252,6 +2299,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         "Recompile without --target standalone.",
     );
     return null;
+  }
+
+  // #1679 — `new this(...)` inside a static method: the callee is `this`, which
+  // the checker resolves to the enclosing constructor (e.g. acorn's `Parser`
+  // function-style class). It is not an identifier, so the function-constructor
+  // path below is skipped. Route a `this`-callee that resolves to a known
+  // function-style constructor (or one we can build from its declaration) to the
+  // same `<Class>_new` machinery, keyed by the resolved className.
+  if (className && !ctx.classSet.has(className) && expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const cachedFnCtor = ctx.funcConstructorMap.get(className);
+    if (cachedFnCtor) {
+      const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
+      if (ctorFuncIdx !== undefined) {
+        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const args = expr.arguments ?? [];
+        for (let i = 0; i < args.length; i++) {
+          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+        }
+        if (paramTypes) {
+          for (let i = args.length; i < paramTypes.length; i++) {
+            pushDefaultValue(fctx, paramTypes[i]!, ctx);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+        return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
+      }
+    } else {
+      // Build the constructor from the resolved constructor function's declaration.
+      const decls = symbol?.getDeclarations();
+      if (decls) {
+        for (const decl of decls) {
+          if (ts.isFunctionDeclaration(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(ctx, fctx, expr, className, decl);
+            if (result) return result;
+            break;
+          }
+          // `var Parser = function Parser(...) {...}` (acorn): the constructor's
+          // symbol resolves directly to the FunctionExpression node, or to the
+          // VariableDeclaration whose initializer is one.
+          if (ts.isFunctionExpression(decl) && decl.body) {
+            const result = compileNewFunctionDeclaration(
+              ctx,
+              fctx,
+              expr,
+              className,
+              decl as unknown as ts.FunctionDeclaration,
+            );
+            if (result) return result;
+            break;
+          }
+          if (ts.isVariableDeclaration(decl) && decl.initializer) {
+            let init: ts.Expression = decl.initializer;
+            while (ts.isParenthesizedExpression(init)) init = init.expression;
+            if (ts.isFunctionExpression(init) && init.body) {
+              const result = compileNewFunctionDeclaration(
+                ctx,
+                fctx,
+                expr,
+                className,
+                init as unknown as ts.FunctionDeclaration,
+              );
+              if (result) return result;
+              break;
+            }
+          }
+        }
+      }
+    }
   }
 
   // Check if the identifier resolves to a function declaration used as constructor
