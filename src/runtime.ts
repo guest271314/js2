@@ -5684,8 +5684,14 @@ assert._isSameValue = isSameValue;
           // Construct without message/options first; the engine's native
           // InstallErrorCause cannot read an opaque WasmGC `options` struct, so
           // we install `cause` ourselves below (#1634).
+          //
+          // (#1339-residuals) Codegen passes `ref.null.extern` for absent
+          // optional args, which arrives here as JS `null`. Treat null as
+          // absent so we don't install an own `message="null"` for the
+          // common `new AggregateError([])` shape (test262
+          // `properties-of-error-objects.js`).
           const inst = new AggregateError([]);
-          if (message !== undefined) {
+          if (message !== undefined && message !== null) {
             const msgStr = typeof message === "string" ? message : String(message);
             Object.defineProperty(inst, "message", {
               value: msgStr,
@@ -5744,7 +5750,10 @@ assert._isSameValue = isSameValue;
           });
           // Spec step 5: if message is not undefined, msg = ToString(message);
           // CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
-          if (message !== undefined) {
+          //
+          // (#1339-residuals) Codegen passes `ref.null.extern` for absent
+          // optional args (JS `null` here); treat null as absent.
+          if (message !== undefined && message !== null) {
             const msgStr = typeof message === "string" ? message : String(message);
             Object.defineProperty(inst, "message", {
               value: msgStr,
