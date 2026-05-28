@@ -1449,15 +1449,22 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
   const setterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [], "$sset_f64_type");
   const setterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [], "$sset_i32_type");
 
-  for (const [fieldName, entries] of fieldMap) {
-    const hasF64 = entries.some((e) => e.fieldType.kind === "f64");
-    const hasI32 = entries.some((e) => e.fieldType.kind === "i32");
-    const hasRef = entries.some((e) => e.fieldType.kind !== "f64" && e.fieldType.kind !== "i32");
-    const allF64 = hasF64 && !hasI32 && !hasRef;
-    const allI32 = hasI32 && !hasF64 && !hasRef;
-    const allRef = hasRef && !hasF64 && !hasI32;
+  // Only kinds we can emit a correct `struct.set` for after the externref →
+  // anyref convert. Abstract heap types other than `anyref` (eqref / structref /
+  // funcref) would need a `ref.cast` to an abstract heap type, which the
+  // current Instr encoding does not express — skip those buckets so the
+  // sidecar still carries the write.
+  const isRefKind = (k: ValType["kind"]) =>
+    k === "ref" || k === "ref_null" || k === "anyref" || k === "externref" || k === "ref_extern";
 
-    // Skip mixed-kind buckets — sidecar handles those.
+  for (const [fieldName, entries] of fieldMap) {
+    const allF64 = entries.every((e) => e.fieldType.kind === "f64");
+    const allI32 = entries.every((e) => e.fieldType.kind === "i32");
+    const allRef = entries.every((e) => isRefKind(e.fieldType.kind));
+
+    // Skip mixed-kind buckets or any bucket containing kinds we can't
+    // route through one of the three setter signatures (i64 / f32 / v128
+    // / packed i8/i16). The sidecar still carries those writes.
     if (!allF64 && !allI32 && !allRef) continue;
 
     let setterTypeIdx: number;
@@ -1550,11 +1557,21 @@ function buildSetterStore(
   then.push({ op: "local.get", index: 1 } as Instr);
 
   if (valMode === "extern") {
-    // Field is a ref type — convert externref → anyref so it matches.
-    if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref" || ft.kind === "eqref") {
+    // Field kinds are restricted by isRefKind above to: ref / ref_null /
+    // anyref / externref / ref_extern. externref & ref_extern need no
+    // conversion; everything else converts externref → anyref first, then
+    // typed-ref fields cast down to the field's specific heap type. Cast
+    // failures trap; the runtime _safeSet wraps the setter call in
+    // try/catch so a wrong-type assign degrades to sidecar-only (the
+    // prior behaviour) rather than crashing.
+    if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref") {
       then.push({ op: "any.convert_extern" } as Instr);
     }
-    // externref / ref_extern: no conversion needed.
+    if (ft.kind === "ref") {
+      then.push({ op: "ref.cast", typeIdx: ft.typeIdx } as Instr);
+    } else if (ft.kind === "ref_null") {
+      then.push({ op: "ref.cast_null", typeIdx: ft.typeIdx } as Instr);
+    }
   }
 
   then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
