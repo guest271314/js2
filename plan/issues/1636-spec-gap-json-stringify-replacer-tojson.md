@@ -180,6 +180,44 @@ slice.
 Slices B / C / D remain as specified above.
 - `test262/test/built-ins/JSON/stringify/replacer-array-normal.js`
 
+## Slice B landed (2026-05-28)
+
+Implementation: `src/runtime.ts` — new helper `_hasReachableToJSON` and a
+gate inside `JSON_stringify` on the `rep.kind === "none"` branch. The fast
+`_wasmToPlain` + host `JSON.stringify` path is preserved when no `toJSON`
+method is reachable from the root; when one is reachable, control falls
+through to the existing live SerializeJSONProperty walk added in Slice A.
+
+The walk's `_serializeJSONProperty` (lines 2143-2201) was already invoking
+`toJSON` via `_invokeJsonCallable`; Slice B only had to route the
+no-replacer call into it. Recursion in `_hasReachableToJSON` is bounded
+(via `seen: Set`) and lazy (returns true on first match), so the common
+no-`toJSON` case keeps its perf characteristic.
+
+Tests: 4 new cases in `tests/issue-1636-json-stringify.test.ts`:
+1. `JSON.stringify({ toJSON: () => "replaced" })` → `"replaced"` (arrow)
+2. `JSON.stringify({ toJSON() { return 42; } })` → `42` (method shorthand)
+3. `JSON.stringify({ toJSON: function () { return "fn"; } })` → `"fn"`
+4. Regression guard: `JSON.stringify({ a:1, b:2 })` still hits the fast
+   path (verified `_hasReachableToJSON` returns false).
+
+Out of scope for Slice B (deferred to a deeper compiler change):
+- **Nested `toJSON` inside an array literal**
+  (`JSON.stringify([1, {toJSON:...}, 3])`) — the compiler flattens
+  heterogeneous array-literal elements into a bare JS array via the
+  externref-coerce path, destroying the WasmGC struct's `__sget_toJSON`
+  binding before `_hasReachableToJSON` can observe it. Visible regression:
+  closure-typed fields serialize as `[]` because the closure struct is
+  flattened by `_wasmToPlain`. Same root cause Slice A flagged for
+  primitive brand loss (§"Empirical baseline" probe #3).
+- **Nested `toJSON` on an object property with `any`-typed parent** —
+  TypeScript inference collapses `any`-typed object literals onto the
+  first matching anonymous struct, so the parent struct ends up with the
+  inner literal's field shape and the user's actual fields disappear at
+  codegen. Visible: outer obj's enumerable keys come back as the inner's
+  fields. Both blockers belong to a sibling issue (Slice 5 of the
+  architect spec).
+
 ## Architect spec (2026-05-28, sendev-1542)
 
 The 2026-05-27 escalation block stays — this is genuinely a cross-cutting
