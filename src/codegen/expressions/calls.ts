@@ -700,6 +700,102 @@ function compileFunctionBind(
 }
 
 /**
+ * (#1337) True when the callee expression denotes a variable whose initializer
+ * is a `Function.prototype.bind` result — i.e. its runtime value is a host
+ * bound-function externref. Mirrors the `isBindHostCall` detector in
+ * statements/variables.ts (which forces the local to externref). Only the
+ * single-assignment `const`/`let`/`var = fn.bind(...)` form is recognised; this
+ * matches the bulk of the test262 bound-function-invocation corpus.
+ */
+function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(expr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+  const init = decl.initializer;
+  if (!ts.isCallExpression(init)) return false;
+  const callee = init.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  // Direct `<receiver>.bind(...)`.
+  if (callee.name.text === "bind") return true;
+  // Indirect `Function.prototype.bind.call(fn, ...)`.
+  if (
+    callee.name.text === "call" &&
+    ts.isPropertyAccessExpression(callee.expression) &&
+    callee.expression.name.text === "bind" &&
+    ts.isPropertyAccessExpression(callee.expression.expression) &&
+    callee.expression.expression.name.text === "prototype" &&
+    ts.isIdentifier(callee.expression.expression.expression) &&
+    callee.expression.expression.expression.text === "Function"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * (#1337) Emit a call to a host bound-function externref via the
+ * `__call_function(fn, thisArg, argsArray)` host helper. The bound function
+ * already carries [[BoundThis]] and [[BoundArguments]], so `thisArg` is passed
+ * as `undefined` (ref.null.extern) and only the call-site arguments are packed.
+ *
+ * Returns `{ kind: "externref" }` on success, or `null` to let the caller fall
+ * through to the normal dispatch (e.g. if late-import wiring fails).
+ */
+function emitBoundFunctionCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | null {
+  const externRef: ValType = { kind: "externref" };
+
+  // 1. Compile callee → externref, stash in a local.
+  const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
+  if (calleeType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (calleeType.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+  }
+  const calleeLocal = allocLocal(fctx, `__bfn_callee_${fctx.locals.length}`, externRef);
+  fctx.body.push({ op: "local.set", index: calleeLocal });
+
+  // 2. Build the arguments array (JS Array externref).
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [externRef]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [externRef, externRef], []);
+  flushLateImportShifts(ctx, fctx);
+  const arrNewResolvedIdx = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+  const arrPushResolvedIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+  if (arrNewResolvedIdx === undefined || arrPushResolvedIdx === undefined) return null;
+
+  fctx.body.push({ op: "call", funcIdx: arrNewResolvedIdx });
+  const argsArrayLocal = allocLocal(fctx, `__bfn_args_${fctx.locals.length}`, externRef);
+  fctx.body.push({ op: "local.set", index: argsArrayLocal });
+  for (const argExpr of expr.arguments) {
+    fctx.body.push({ op: "local.get", index: argsArrayLocal });
+    const inner = ts.isSpreadElement(argExpr) ? argExpr.expression : argExpr;
+    const t = compileExpression(ctx, fctx, inner, externRef);
+    if (t === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (t.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    }
+    fctx.body.push({ op: "call", funcIdx: arrPushResolvedIdx });
+  }
+
+  // 3. Call __call_function(callee, undefined, argsArray).
+  const callIdx = ensureLateImport(ctx, "__call_function", [externRef, externRef, externRef], [externRef]);
+  flushLateImportShifts(ctx, fctx);
+  const callResolvedIdx = ctx.funcMap.get("__call_function") ?? callIdx;
+  if (callResolvedIdx === undefined) return null;
+
+  fctx.body.push({ op: "local.get", index: calleeLocal });
+  fctx.body.push({ op: "ref.null.extern" }); // thisArg — bound fn carries [[BoundThis]]
+  fctx.body.push({ op: "local.get", index: argsArrayLocal });
+  fctx.body.push({ op: "call", funcIdx: callResolvedIdx });
+  return externRef;
+}
+
+/**
  * (#1116b) Resolve a Promise-combinator `thisArg`/receiver that names a
  * Wasm-compiled `class X extends Promise`.
  *
@@ -7703,6 +7799,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // before reading call signatures. Storage is externref either way.
         const nonNull = ctx.checker.getNonNullableType(calleeTsType);
         callSigs = nonNull.getCallSignatures?.();
+      }
+      // (#1337) If the callee is a variable holding a `Function.prototype.bind`
+      // result, its runtime value is a host bound-function externref, NOT a
+      // wasm closure struct — the struct-cast + call_ref path below would null
+      // it and trap. Route the call through the `__call_function` host helper
+      // (Reflect.apply on the bound function, which already carries
+      // [[BoundThis]]/[[BoundArguments]]). JS-host mode only; standalone
+      // degrades bind to identity so the normal path applies.
+      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsBoundFunctionVar(ctx, expr.expression)) {
+        const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
+        if (hostCall !== null) return hostCall;
       }
       if (callSigs && callSigs.length > 0) {
         const sig = callSigs[0]!;

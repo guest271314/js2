@@ -1,9 +1,10 @@
 ---
 id: 1337
 title: "spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -374,10 +375,71 @@ Two edits in `src/codegen/expressions/calls.ts`:
 
 ### Out of scope
 
-- The var-storage round-trip — see #1632a / dev-1303 notes point 3
-  above. Without that, `var bound = bind.call(fn, ...); bound()` still
-  returns null even though the bind result is correct.
 - Source-text retention beyond identifier receivers — #1463 covers
   top-level declarations; the remaining toString gap is concentrated
   in the `built-in-function-object.js` Reflect-walk pattern which is
   a broad-surface workload, not a localized fix.
+
+## Layer-2 fix: bound-function variable storage + invocation (2026-05-29)
+
+This change closes the var-storage round-trip the prior progress note
+flagged as out-of-scope (#1632a notes point 3). `const bound =
+fn.bind(...); bound()` previously trapped with "dereferencing a null
+pointer" because:
+
+1. `bound`'s local was typed (via `resolveWasmType`) as the target's
+   **closure-struct ref** — the bound result is a JS bound-function
+   externref, so `coerceType(externref → struct ref)` emitted a
+   `ref.cast` that nulled the binding.
+2. Calling `bound()` then built a closure-wrapper struct from the TS
+   signature and did `any.convert_extern` + guarded cast + `struct.get`
+   field-0 — the guarded cast yields null on the JS function, so the
+   subsequent `struct.get`/`call_ref` dereferenced null.
+
+Three edits:
+
+- **`src/codegen/statements/variables.ts`** — `isBindHostCall` detector
+  forces an **externref** local for `const/let/var x = fn.bind(...)` (and
+  the `Function.prototype.bind.call` form), mirroring the existing
+  Promise/`split` host-call overrides. A follow-on guard in the callable
+  initializer branch keeps the value externref instead of match-and-
+  recasting it to a closure struct.
+- **`src/codegen/expressions/calls.ts`** — `calleeIsBoundFunctionVar`
+  detects a call whose callee variable was initialized from `.bind(...)`,
+  and `emitBoundFunctionCall` routes the invocation through the new
+  `__call_function` host helper (Reflect.apply on the bound function,
+  which already carries `[[BoundThis]]`/`[[BoundArguments]]`).
+- **`src/runtime.ts`** — `__call_function(fn, thisArg, argsArray)` host
+  import: `Reflect.apply`, unwrapping a wasm-struct closure if one slips
+  through. JS-host mode only; standalone degrades bind to identity so
+  the normal closure path applies.
+
+### Measured outcome (scoped test262, `built-ins/Function/`)
+
+- **+20 passes, 0 regressions** on the 324 common files vs the pre-change
+  run. All newly-passing are `prototype/bind/15.3.4.5*` invocation tests
+  (`newFunc()` returning bound `this`, partial-arg application,
+  `[[Call]]` receiver semantics).
+- The 65% acceptance gate remains **out of reach for this bucket**:
+  ~90 of the ~213 remaining failures depend on the dynamic `Function(...)`
+  / `new Function(...)` constructor (eval territory, `deferred-feature`),
+  and ~37 are the strict-mode `caller`/`arguments` poison-pill
+  (`15.3.5.4_2-*gs.js`) tests — both distinct from bind/toString.
+
+### Still out of scope (after this fix)
+
+- `new boundFn()` construct semantics (`15.3.4.5.2-4-*` — "No dependency
+  provided for extern class NewFunc") — needs bound-function `[[Construct]]`
+  wiring through the wasm `new` path.
+- Binding a function that *returns* `this` where the target isn't wrapped
+  as a closure struct (the `__call_fn_<arity>` lazy-bridge edge): the
+  partial-args / value-returning cases work; the bound-`this`-identity
+  case for an un-wrappable top-level target still needs the bridge export.
+- Dynamic `Function(...)` constructor and strict poison-pill tests
+  (separate features).
+
+### Tests added
+
+- `tests/issue-1337.test.ts` — extended with deferred-storage metadata
+  cases (already present); the invocation wins are covered by the scoped
+  test262 run above.
