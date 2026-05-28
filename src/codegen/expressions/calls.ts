@@ -7942,6 +7942,30 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 fcCallBody.push({ op: "drop" } as Instr);
               } else if (expectedReturn !== null && fc.returnType === null) {
                 fcCallBody.push(...defaultValueInstrs(expectedReturn));
+              } else if (
+                expectedReturn !== null &&
+                fc.returnType !== null &&
+                !valTypesMatch(fc.returnType, expectedReturn) &&
+                (expectedReturn.kind === "i32" || expectedReturn.kind === "f64" || expectedReturn.kind === "i64") &&
+                (fc.returnType.kind === "i32" || fc.returnType.kind === "f64" || fc.returnType.kind === "i64")
+              ) {
+                // (#1693) Numeric-primitive return-type mismatch in the multi-
+                // funcref dispatch ladder (e.g. expected i32, candidate returns
+                // f64). The if-block declares `(result <expectedReturn>)`, so we
+                // must coerce the call_ref result inline. Surfaces at full-module
+                // scale in axios/lib/utils.js where ~30 same-arity arrow
+                // predicates with diverging numeric returns populate
+                // ctx.closureInfoByTypeIdx.
+                //
+                // Narrowly gated to numeric-primitive pairs only — externref/
+                // ref/ref_null mismatches stay on the existing lossy-but-valid
+                // drop+default path that already validates and never executes
+                // (those synthesized candidates only catch funcrefs that the
+                // real signature didn't match).
+                const savedBody = fctx.body;
+                fctx.body = fcCallBody;
+                coerceType(ctx, fctx, fc.returnType, expectedReturn);
+                fctx.body = savedBody;
               }
 
               funcDispatch = [
