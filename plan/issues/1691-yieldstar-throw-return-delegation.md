@@ -12,8 +12,7 @@ area: codegen
 language_feature: generators
 goal: spec-completeness
 parent: 1665
-blocked_on: [1665, 1042]
-escalation: "[ESCALATED-NEEDS-ARCHITECT] 2026-05-28 — senior-dev re-confirmed there is no localized fix. Routing to architect to fold into the lazy-generator design (#1665) and CPS lowering (#1042). See ## Senior-dev re-confirmation (2026-05-28)."
+blocked_by: [1665, 1042]
 ---
 # #1691 — yield* does not delegate throw()/return() to the inner iterator
 
@@ -100,48 +99,90 @@ failures — out of scope for this issue).
 - Blocks-on: #1665, #1373, #1042 (lazy/CPS generator model)
 - Sibling investigation: #820c (async-gen object-method yield* null deref)
 
-## Senior-dev re-confirmation (2026-05-28)
+## Re-investigation 2026-05-28 (senior-developer)
 
-Re-validated the analysis against current main (`e3c53820e`). Findings unchanged:
+Re-walked the eager-buffer model to confirm whether anything has shifted that
+would unlock a localized fix. Conclusion: **architectural block confirmed,
+no hybrid path is feasible without the lazy/CPS generator lowering.**
 
-- `src/codegen/expressions/misc.ts:177-202` still lowers `yield* x` to a single
-  `__gen_yield_star(buf, iterable)` call followed by a `ref.null.extern` result.
-  The inner iterable is **consumed in full inside the generator function body**,
-  before the outer generator object even exists.
-- `src/runtime.ts:6556-6581` (`__create_generator`) confirms the generator
-  instance is just `{ buf, index, pendingThrow }` with no reference to any live
-  inner iterator and no suspension point. `next()` / `throw()` / `return()`
-  (via `_getGeneratorInstancePrototype()`) all walk the same flat buffer.
-- `__gen_yield_star` (`runtime.ts:5692`) drains via `for...of`, calling **only**
-  `next()`. By the time `outerGen.throw(e)` is invoked, the inner iterator is
-  already finalized and unreferenced.
+### Code-path walk (current main)
 
-**Why no incremental "throw-replay" hack works either**: even if we recorded
-each visited inner iterable on the generator state so that a later
-`outerGen.throw(e)` could re-resolve and call `innerIter.throw(e)`, the spec
-(§14.4.14 step 5.b.iii) requires the *delegated* `throw` result to be re-yielded
-to the **caller** of `outerGen.throw` — which in our model is the very loop
-that already finished. The required interleaving (`outerGen.next() → first
-inner yield → outerGen.throw(e) → forwarded to inner.throw → next inner yield`)
-needs the outer body to be **suspended mid-`yield*`**. That suspension point
-does not exist in the eager generator model; producing it is exactly what
-#1665 (native `$Iterator` design) and #1042 (CPS state-machine lowering) are
-chartered to introduce.
+1. `compileYieldExpression` (`src/codegen/expressions/misc.ts:177`) emits
+   `__gen_yield_star(buf, iterable)` synchronously inside the generator body.
+2. `__gen_yield_star` (`src/runtime.ts:6544`) is a single closure:
+   `for (const v of iterable) buf.push(v)`. It runs to completion at the
+   `yield*` call site. Only `iterable[Symbol.iterator]().next()` is touched —
+   `throw`/`return` are never even *looked up*, let alone retained.
+3. By the time `__create_generator` (`src/runtime.ts:6556`) wraps `buf` and
+   returns the generator object, the inner iterator has been fully consumed
+   and dropped. There is no reference to it on the state record
+   (`_GeneratorState` at `src/runtime.ts:71` stores only `{buf, index,
+   pendingThrow}`).
+4. `Generator.prototype.throw` (`src/runtime.ts:216`) does
+   `state.index = state.buf.length; throw e` — there is no delegate slot to
+   route into, because the suspension point does not exist.
 
-**Architect decision needed** (route to architect, fold into #1665 spec):
+### Why a "remember the delegate" patch doesn't work
 
-1. Will lazy `yield*` ride on the #1042 CPS state machine (treating each `yield`
-   / `yield*` as a CPS suspension point with a `[[BoundIterator]]` slot that
-   `throw`/`return` route through), or will generators get their own narrower
-   "iterator-coroutine" representation (cheaper than full CPS)?
-2. If we keep eager generators as the default and only switch to lazy when the
-   compiler detects `yield*` (or any feature that requires re-entry), what's
-   the dispatch boundary — per-function, per-call-site, or runtime-flagged?
-3. Test262 acceptance criteria (the 13 `star-rhs-iter-thrw-*` cases) require
-   spec-compliant `IteratorClose` ordering when `throw` is forwarded but the
-   inner iterator has no `throw` method — the architect spec should pin which
-   §7.4.* algorithm steps are in scope vs deferred.
+To forward `outer.throw(e)` per §14.4.14 step 5.b.ii, the outer generator
+body must pause **mid-iteration** at the `yield*` site holding a live
+reference to the inner iterator. Adding a `delegate` slot to the state
+record is not enough: the generator body would still have to *resume after
+the throw was forwarded*, drain remaining inner values into the outer
+buffer (or propagate IteratorClose), and continue with the next outer
+statement. That resume-after-yield* requires a continuation / state
+machine for the outer body — which is exactly what the eager model
+deliberately omitted. Once `g()` returns, the outer body is gone; there is
+no way to "go back" to it.
 
-No code changes landed on this branch — only the issue-file status flip and
-this note. The implementation belongs to the umbrella lazy-generator work
-once #1665 has an architect spec.
+A partial workaround (`__gen_yield_star` calls `.throw` on the inner
+iterator *during the eager drain* if some future `pendingThrow` flag is
+set) would require either reading the future state (impossible — the
+drain happens before `g()` returns the generator) or making `next()`
+itself the driver of the inner drain, one step at a time — which **is**
+the lazy generator model (#1665).
+
+### Concrete failure mode
+
+```ts
+function* inner() { yield 11; yield 22; yield 33; }
+function* outer() { yield* inner(); }
+const it = outer();
+it.next();          // → {value: 11, done: false}     (spec)
+                    //   actually returns same in eager model because inner
+                    //   is finite, but inner is *already gone* at this point
+it.throw("BOOM");   // spec: looks up inner.throw, calls it, observes
+                    //   IteratorClose or rethrow
+                    // eager: state.index = buf.length; throw "BOOM"
+                    //   (inner never sees the throw — it was discarded)
+```
+
+For the test262 spy-iterator pattern (`star-rhs-iter-thrw-thrw-invoke.js`),
+the spy's `next()` returns `{done: false}` indefinitely, so the eager
+drain at the `yield*` site loops until `__EAGER_GEN_LIMIT = 1_000_000`
+fires a RangeError — `g()` never returns the generator instance to call
+`.throw()` on at all. This is observable today as one of the
+`star-rhs-iter-thrw-*` failures returning `RangeError` instead of the
+spec-required behavior.
+
+### Why this can't be carved into a slice
+
+The `pendingThrow` field on `_GeneratorState` already exists (added for
+synchronous-throw-in-body capture, #1516). One might hope to wire
+`__gen_yield_star` to consult it. But `pendingThrow` is set by the
+generator body itself when a host-side throw is captured for re-throw on
+the next `.next()` — it is not a channel the outer caller can write to,
+because the body has already finished by the time the caller sees `iter`.
+
+There is no path that leaves the buffer model intact and satisfies even
+one of the 13 `star-rhs-iter-thrw-*` cases. The fix is the move to
+generator suspension, owned by #1665 (native generators) + #1042/#1373b
+(CPS lowering for the suspend/resume machinery).
+
+### Recommendation
+
+Keep this issue `blocked` on #1665 and #1042. Do **not** spawn another
+dev on it. When #1665 lands, this issue's acceptance criteria are
+covered by the same lazy-iterator state machine that implements `next()`
+properly — `throw`/`return` delegation is a few additional dispatch
+arms on the state record's resume handler, not a separate workstream.
