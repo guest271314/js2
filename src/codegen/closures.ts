@@ -3400,23 +3400,26 @@ export function emitCachedMethodClosureAccess(
  * Only safe for captureless functions — captures must be filled at the
  * per-construction site, not once at module init.
  *
- * Returns `true` if the cached access was emitted; `false` if the signature
- * couldn't be resolved (caller should fall back to `emitFuncRefAsClosure`).
+ * Returns the closure struct's `ref` ValType when the cached access was
+ * emitted (so downstream consumers like array-methods.ts can take the
+ * direct `call_ref` fast path against the closure's funcref slot rather
+ * than the externref-bridge slow path through `__call_2_f64`). Returns
+ * `null` when the signature couldn't be resolved (caller falls back).
  */
 export function emitCachedFuncClosureAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   funcName: string,
   funcIdx: number,
-): boolean {
+): ValType | null {
   const sig = getFuncSignature(ctx, funcIdx);
-  if (!sig) return false;
+  if (!sig) return null;
 
   const userParams = sig.params;
   const results = sig.results;
 
   const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
-  if (!wrapperTypes) return false;
+  if (!wrapperTypes) return null;
   const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
 
   // Reuse the canonical trampoline if one was already registered for this
@@ -3477,11 +3480,22 @@ export function emitCachedFuncClosureAccess(
     ctx.funcClosureGlobals.set(funcName, cacheGlobalIdx);
   }
 
-  // Emit the lazy-init access (mirrors emitCachedMethodClosureAccess):
+  // Emit the lazy-init access (mirrors emitCachedMethodClosureAccess), but
+  // recover the closure-struct ref on read so downstream consumers like
+  // `array-methods.ts:setupArrayCallback` take the direct `call_ref` fast
+  // path. Returning a bare externref forced the host-bridge slow path
+  // through `__call_2_f64`, which in JS expects a real Function — array
+  // callbacks via top-level fn decls (`[1,2].filter(fn)`) regressed with
+  // `TypeError: fn is not a function`. The externref global is preserved
+  // for stable cross-site identity (`foo === foo` and sidecar writes on
+  // `foo.prototype`); `any.convert_extern + ref.cast` is a cheap, stable
+  // bijection back to the struct ref view used by the call-site.
   //   global.get $cache
   //   ref.is_null
   //   if (then: build closure, extern.convert_any, store in $cache)
   //   global.get $cache
+  //   any.convert_extern
+  //   ref.cast (ref $struct)
   const initBody: Instr[] = [
     { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
     { op: "struct.new", typeIdx: structTypeIdx } as Instr,
@@ -3497,7 +3511,9 @@ export function emitCachedFuncClosureAccess(
     else: [],
   });
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  return true;
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+  return { kind: "ref", typeIdx: structTypeIdx };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

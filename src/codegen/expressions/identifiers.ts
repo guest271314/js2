@@ -683,8 +683,9 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     // no captures are required.
     const nestedCaptures = ctx.nestedFuncCaptures.get(name);
     if (!nestedCaptures || nestedCaptures.length === 0) {
-      if (emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx)) {
-        return { kind: "externref" };
+      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx);
+      if (cachedRefType) {
+        return cachedRefType;
       }
     }
     // Fallback: per-site closure struct (with captures, or if cache emit failed).
