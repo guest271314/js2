@@ -754,15 +754,21 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.continueStack.push(0);
 
   // Condition (inside $loop, before $continue block)
+  // (#1690) Register condInstrs in liveBodies before any nested compilation
+  // can fire an `addStringConstantGlobal` whose fixup walker would otherwise
+  // miss this detached buffer. The cond instrs live outside `fctx.body`
+  // (which is the loop body buffer registered via savedBodies) for the entire
+  // window from cond compilation through body+incrementor compilation until
+  // the assembled loop is pushed back into fctx.body below.
   const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
   if (stmt.condition) {
     const condBody = fctx.body;
-    fctx.body = [];
+    fctx.body = condInstrs;
     const condType = compileExpression(ctx, fctx, stmt.condition);
     ensureI32Condition(fctx, condType, ctx);
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({ op: "br_if", depth: 1 }); // break: exits $break (depth 1 from $loop body)
-    condInstrs.push(...fctx.body);
     fctx.body = condBody;
   }
 
@@ -834,12 +840,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.safeIndexedArrays = savedSafeIndexed;
 
   // Incrementor (inside $loop, after $continue block)
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as condInstrs above: the incrementor
+  // buffer is detached until the assembled loop is pushed below.
+  const incrInstrs: Instr[] = [];
+  ctx.liveBodies.add(incrInstrs);
+  fctx.body = incrInstrs;
   if (stmt.incrementor) {
     const resultType = compileExpression(ctx, fctx, stmt.incrementor);
     if (resultType !== null) fctx.body.push({ op: "drop" });
   }
-  const incrInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -898,6 +907,12 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       },
     ],
   });
+
+  // (#1690) The cond/incr Instr objects are now reachable via fctx.body →
+  // assembled loop. The condInstrs/incrInstrs arrays themselves are no longer
+  // needed by the walker (their contents were spread into `loopBody`).
+  ctx.liveBodies.delete(condInstrs);
+  ctx.liveBodies.delete(incrInstrs);
 
   // #1589: For pre-emptively boxed `var`/outer-scope names, write the final
   // ref-cell value back to the original unboxed local so post-loop reads of
@@ -996,11 +1011,14 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   const bodyInstrs = fctx.body;
 
   // Compile condition — true means continue looping
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as compileForStatement: the cond
+  // buffer is detached from fctx.body until the assembled loop is pushed.
+  const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
+  fctx.body = condInstrs;
   const condType = compileExpression(ctx, fctx, stmt.expression);
   ensureI32Condition(fctx, condType, ctx);
   fctx.body.push({ op: "br_if", depth: 0 }); // restart $loop if true
-  const condInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -1034,6 +1052,9 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
       },
     ],
   });
+
+  // (#1690) The cond Instr objects are now reachable via fctx.body → loop.
+  ctx.liveBodies.delete(condInstrs);
 }
 
 function compileForOfDestructuring(

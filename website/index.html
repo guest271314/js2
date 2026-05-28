@@ -3752,76 +3752,34 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               </summary>
               <div class="approach-faq-answer">
                 <p>
-                  Good question! Large production JavaScript engines are highly optimized multi-tier streaming JIT
-                  compilers that often run code orders of magnitude faster than an interpreter - within reach of native
-                  performance - and have mature, battle-tested sandboxes. WebAssembly has an edge in some scenarios, but
-                  overall it is not always faster or even on par. Embedded JavaScript interpreters, on the other hand,
-                  trade peak performance for a small, portable footprint.
+                  Production engines are highly optimized, multi-tier JIT compilers that after warmup approach native performance. JS engines have mature process sandboxes and ship with browsers. JS interpreters are more lightweight but typically 90% slower. 
+                </p>
+                <p>
+                  <strong>Inside a JS host</strong> WebAssembly is no silver bullet and not always faster or even on par with a warmed up JS JIT engine, but it can be in compute heavy scenarios. Also, it adds a module sandbox for untrusted code, isolating it from the host process and other modules to run third party or AI generated code more securely.
+                </p>
+                <p>
+                  <strong>Outside of a JS host</strong>, embedding a JS engine disables their JIT tier, costing about 90% of performance of a warmed up engine, effectively falling back to their interpreter mode. Shipping an engine alongside typically weights ~14 megabytes. Pure interpreters like QuickJS with ~700kb are more lightweight but 90% slower than a JIT engine. An AOT JS to Wasm approach doesn't have this ceiling and potentially can achieve near-native performance without depending on a JIT or shipping a full engine or interpreter, while start at 100 bytes.
                 </p>
                 <h3>Runtime overhead</h3>
                 <p>
-                  However, in
-                  <strong>constrained environments</strong>
-                  like multi-tenant function as a service - aka. "
-                  <strong>serverless</strong>
-                  " - or
-                  <strong>embedded</strong>
-                  environments a JS host might simply be too heavy-weight and costly. It may result in a slow
-                  interpreter path and having to ship a JS interpreter or engine with JIT disabled (which typically
-                  results in a 10x slowdown) alongside the binary in the Megabyte range. On desktop this might even mean
-                  shipping a full browser or server runtime with 100 MB or more in the case of Electron.
+                  In constrained environments — serverless, embedded, or multi-tenant — a JS host can be prohibitively heavy. JIT-disabled engines typically run 10× slower; bundled interpreters add megabytes of dead weight per module. On desktop, shipping a full runtime like Electron adds 100 MB+. WebAssembly modules pay none of these costs.
                 </p>
-                <ul>
-                  <li>
-                    <strong>Bundled interpreters</strong>
-                    package a JavaScript interpreter into the Wasm module and run the user's program inside it. That can
-                    provide broad compatibility, but each deployed module pays the interpreter/runtime cost.
-                  </li>
-                  <li>
-                    <strong>Bundled engines</strong>
-                    inherit mature JavaScript engine semantics, but also inherit the size, startup, integration,
-                    sandboxing, and runtime code-generation tradeoffs of shipping an engine.
-                  </li>
-                </ul>
                 <h3>Dependency management</h3>
                 <p>
-                  NPM dependencies are fragile and hard to manage. If you upgrade one module globally in a project, this
-                  often forces a cascade of updates across the project which may take weeks, break things loudly,
-                  introduce silent bugs, and you may sometimes end up in situations where one dependency already needs a
-                  newer version while another still depends on an older version, hindering upgrades. In contrast,
-                  WebAssembly modules declare their imports, and you can satisfy them on a module by module basis that
-                  do not force to keep the version of a module in lock step across modules.
+                  NPM dependencies are fragile: upgrading one package often cascades across the project, taking weeks, breaking things loudly, or introducing silent bugs — and version conflicts can block upgrades entirely. WebAssembly modules declare explicit imports satisfied per-module, so versions don't need to stay in lockstep across the project.
                 </p>
                 <h3>Supply Chain Attacks</h3>
                 <p>
-                  Running untrusted code in JavaScript exposes the process to the risk of supply chain attacks: 95% of
-                  JavaScript code is a third party dependency. A single malicious or buggy module can take over the
-                  whole JavaScript process and extract sensitive information or in Node.js even access the file system
-                  or start programs with user rights. While isolation techniques exists they are rarely used in practice
-                  due their overhead, complexity, or ecosystem fragmentation. Supply chain attacks have become a real
-                  threat including high profile incidents in cornerstone dependencies such as
-                  <a href="https://github.com/axios/axios/issues/10636">axios</a>
-                  or
-                  <a
-                    href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
-                  >
-                    chalk
-                  </a>
-                  .
-                </p>
-                <p>
-                  JavaScript engines are highly complex and expose a large attack surface. Despite decades of hardening
-                  hackers and engine developers are in an arms race finding and fixing zero day vulnerabilities, and AI
-                  agents find vulnerabilities in high volumes (e.g. Anthropic's glasswing found
-                  <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
+                  95% of JS code is third-party. A single malicious or buggy dependency can compromise the entire process — exfiltrating data or, in Node.js, accessing the filesystem. Isolation techniques exist but are rarely used due to overhead and complexity. High-profile incidents have hit cornerstone packages like <a href="https://github.com/axios/axios/issues/10636">axios</a> and <a
+                  href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
+                >
+                  chalk
+                </a>.                
+                  JS engines also present a large attack surface: despite decades of hardening, zero-days are found continuously, and AI-assisted vulnerability research is accelerating the pace (Anthropic's Glasswing found <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
                     271 vulnerabilities in Firefox
-                  </a>
-                  ) . If your code ships with a full browser and Node depdendency like in the case of Electron, you need
-                  to maintain manual patches for security vulnerabilities.
-                </p>
-                <p>
-                  WebAssembly has a simpler execution and deny by default security model in which access is granted
-                  explicitly, limiting the blast radius of incidents significantly.
+                  </a>). Electron apps must manually patch engine CVEs indefinitely.
+                
+                  WebAssembly uses a simpler, deny-by-default model: capabilities are granted explicitly, limiting blast radius significantly.
                 </p>
               </div>
             </details>

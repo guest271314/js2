@@ -32,6 +32,7 @@ import {
   addStringImports,
   addUnionImports,
   collectEnumDeclarations,
+  classifyTypedArrayType,
   ensureStructForType,
   extractConstantDefault,
   FUNCTIONAL_ARRAY_METHODS,
@@ -124,6 +125,40 @@ interface UnifiedCollectorState {
 }
 
 const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
+
+/**
+ * (#1700) Record TypedArray classifications for a user-exported function so
+ * the JS-host `wrapExports` can marshal `Uint8Array` params/returns across
+ * the JS↔Wasm boundary. The Wasm signature alone is ambiguous —
+ * `(input: Uint8Array)` and `(input: number[])` lower to the same
+ * `(ref null $Vec[f64])` — so we surface the TS-level distinction here.
+ *
+ * No-op when every slot classifies as `"other"` so non-TypedArray modules
+ * accumulate no metadata.
+ */
+function recordExportSignature(
+  ctx: CodegenContext,
+  exportName: string,
+  stmt: ts.FunctionDeclaration,
+  isAsync: boolean,
+): void {
+  const sig = ctx.checker.getSignatureFromDeclaration(stmt);
+  if (!sig) return;
+  const params: import("../ir/types.js").TypedArrayKind[] = [];
+  let anyHit = false;
+  for (const p of stmt.parameters) {
+    const pt = ctx.checker.getTypeAtLocation(p);
+    const kind = classifyTypedArrayType(pt, ctx.checker);
+    if (kind !== "other") anyHit = true;
+    params.push(kind);
+  }
+  const retType = ctx.checker.getReturnTypeOfSignature(sig);
+  const unwrappedRet = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+  const result = classifyTypedArrayType(unwrappedRet, ctx.checker);
+  if (result !== "other") anyHit = true;
+  if (!anyHit) return;
+  ctx.exportSignatures.set(exportName, { params, result });
+}
 
 export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedCollectorState {
   return {
@@ -261,6 +296,15 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+      }
+    }
+    // (#1644 Slice D) BigInt.prototype.toString — bigint-typed receiver routes
+    // to bigint_toString / bigint_toString_radix (i64 → externref). Without
+    // this registration the property-access path falls through and returns null.
+    if (isBigIntType(receiverType) && methodName === "toString") {
+      state.primitiveNeeded.add("bigint_toString");
+      if (node.arguments.length > 0) {
+        state.primitiveNeeded.add("bigint_toString_radix");
       }
     }
     if (isNumberType(receiverType) && methodName === "toFixed") {
@@ -416,6 +460,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
+      // Under native strings (standalone/WASI) a `Number(string)` argument is a
+      // WasmGC string ref, not an externref the host `__unbox_number` can read.
+      // Emit the pure-Wasm §7.1.4.1 StringToNumber helper so the call site can
+      // route the string ref through it instead of the no-op host path (#1688).
+      if (ctx.nativeStrings) state.parseNeeded.add("__str_to_number");
     }
   }
   if (
@@ -851,6 +900,15 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   if (state.primitiveNeeded.has("number_toString_radix")) {
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
+  }
+  // (#1644 Slice D) BigInt#toString — i64 receiver, optional i32 radix.
+  if (state.primitiveNeeded.has("bigint_toString")) {
+    const t = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", "bigint_toString", { kind: "func", typeIdx: t });
+  }
+  if (state.primitiveNeeded.has("bigint_toString_radix")) {
+    const t = addFuncType(ctx, [{ kind: "i64" }, { kind: "i32" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", "bigint_toString_radix", { kind: "func", typeIdx: t });
   }
   // #1321 / #1335 Phase 2: in standalone / WASI mode there is no JS host to
   // satisfy the `number_toFixed` / `number_toPrecision` / `number_toExponential`
@@ -2521,6 +2579,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           name,
           desc: { kind: "func", index: funcIdx },
         });
+        recordExportSignature(ctx, name, stmt, isAsync);
         // `export default function foo() {}` — also export as "default" (#1074)
         // Skip if name is already "default" (anonymous export default function)
         const mods = ts.canHaveModifiers(stmt) ? ts.getModifiers(stmt) : undefined;
@@ -2530,6 +2589,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             name: "default",
             desc: { kind: "func", index: funcIdx },
           });
+          recordExportSignature(ctx, "default", stmt, isAsync);
         }
       }
     }
@@ -2957,7 +3017,13 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // Module-level expression statements with side effects:
     // new expressions, call expressions, ++/--, assignments to module globals
     if (ts.isExpressionStatement(stmt)) {
-      const expr = stmt.expression;
+      // #1596 — the test262 IIFE-with-trailing-call pattern
+      // `(function(){...}.apply(null, [...]))` parses with a
+      // ParenthesizedExpression at the top of the ExpressionStatement. Unwrap
+      // here so the inner CallExpression is recognised and the statement
+      // reaches `__module_init`.
+      let expr: ts.Expression = stmt.expression;
+      while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
       if (ts.isNewExpression(expr) || ts.isCallExpression(expr)) {
         ctx.moduleInitStatements.push(stmt);
         continue;

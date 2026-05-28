@@ -494,14 +494,14 @@ function compileDestructuringAssignment(
   // patterns the bindings stay at their defaults (mimics JS behaviour for
   // destructuring primitives — the properties simply do not exist). (#379)
   if (!typeName || !ctx.structMap.has(typeName) || !ctx.structFields.get(typeName)) {
-    // Null/undefined check — throw TypeError (#783, #1260).
+    // Null/undefined check — throw TypeError (#783, #1260, #1701).
     // In JS, `{...} = null` and `{...} = undefined` always throw TypeError per
-    // §13.15.5.5 RequireObjectCoercible. Use emitExternrefAssignDestructureGuard
-    // which checks BOTH ref.is_null (catches null) AND __extern_is_undefined
-    // (catches the JS undefined sentinel). The bare ref.is_null check missed
-    // undefined-encoded externrefs (#1260).
-    // Skip for empty `{} = val` patterns (#225) — only fire on real property accesses.
-    if ((resultType.kind === "externref" || resultType.kind === "ref_null") && target.properties.length > 0) {
+    // §13.15.5.2 ObjectAssignmentPattern step 1 (RequireObjectCoercible(value)),
+    // which fires BEFORE the property list is walked. Even `{} = null` /
+    // `{} = undefined` must throw. The earlier carve-out for empty patterns
+    // (#225) was applied uniformly but is only correct for non-null/undefined
+    // primitive RHS (e.g. `{} = 5` — a number is object-coercible).
+    if (resultType.kind === "externref" || resultType.kind === "ref_null") {
       const tmpNullChk = allocLocal(fctx, `__destruct_null_chk_${fctx.locals.length}`, resultType);
       fctx.body.push({ op: "local.set", index: tmpNullChk });
       if (resultType.kind === "externref") {
@@ -1040,18 +1040,17 @@ function compileArrayDestructuringAssignment(
     if (resultType.kind === "externref") {
       return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, resultType);
     }
-    // For f64/i32 — box to externref and retry
+    // #1701: ArrayAssignmentPattern always invokes GetIterator(value) per
+    // §13.15.5.2. For primitive RHS (number, boolean — both lower to f64/i32
+    // here) the spec result is a TypeError ("value is not iterable") because
+    // numbers/booleans lack a [Symbol.iterator] method. Previously we boxed
+    // the primitive via __box_number and recursed; the lenient runtime then
+    // silently produced an empty array. Drop the value and throw directly.
     if (resultType.kind === "f64" || resultType.kind === "i32") {
-      if (resultType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-        return compileExternrefArrayDestructuringAssignment(ctx, fctx, target, {
-          kind: "externref",
-        });
-      }
+      fctx.body.push({ op: "drop" });
+      emitThrowString(ctx, fctx, "TypeError: value is not iterable");
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
     }
     reportError(ctx, target, "Cannot destructure: not an array type");
     return null;
@@ -1962,6 +1961,37 @@ function compilePropertyAssignment(
       emitThrowTypeError(ctx, fctx, "Cannot assign to private method or read-only accessor");
       return { kind: "externref" };
     }
+    // #1680: Private accessor with a setter (`set #x(v)`). Dispatch to the
+    // setter function. Without this branch control falls through to the
+    // generic struct-field write, which targets a `__priv_<name>` data slot
+    // the getter never reads — silently dropping the write and cross-talking
+    // between stacked accessors. Mirrors the public-accessor setter dispatch.
+    if (privateMember?.kind === "accessor" || privateMember?.kind === "accessor-writeonly") {
+      const setterName = `${privateMember.className}_set_${privateMember.fieldName}`;
+      const funcIdx = ctx.funcMap.get(setterName);
+      if (funcIdx !== undefined) {
+        const recvResult = compileExpression(ctx, fctx, target.expression);
+        if (!recvResult) return null;
+        const setterParamTypes = getFuncParamTypes(ctx, funcIdx);
+        const valTypeHint = setterParamTypes?.[1]; // param 0 = self, param 1 = value
+        const valResult = compileExpression(ctx, fctx, value, valTypeHint);
+        if (!valResult) return null;
+        // Stack: [receiver, value]. Save value for the assignment result.
+        const tmpVal = allocLocal(fctx, `__priv_setter_assign_${fctx.locals.length}`, valResult);
+        fctx.body.push({ op: "local.tee", index: tmpVal });
+        // Setter with no value parameter (only self): drop the value.
+        if (!setterParamTypes || setterParamTypes.length <= 1) {
+          fctx.body.push({ op: "drop" });
+        }
+        // Re-read funcIdx: receiver/RHS compilation may have shifted indices
+        // via late import addition (addUnionImports).
+        const finalSetterIdx = ctx.funcMap.get(setterName) ?? funcIdx;
+        fctx.body.push({ op: "call", funcIdx: finalSetterIdx });
+        // `=` evaluates to the RHS, not the setter's return.
+        fctx.body.push({ op: "local.get", index: tmpVal });
+        return valResult;
+      }
+    }
   }
 
   // Compile-away: if the target object is frozen, emit TypeError throw
@@ -1991,6 +2021,44 @@ function compilePropertyAssignment(
       fctx.body.push({ op: "global.set", index: globalIdx });
       fctx.body.push({ op: "local.get", index: tmpVal });
       return valType;
+    }
+  }
+
+  // #1697: `this.X = v` / `this.#X = v` inside a static method body —
+  // mirror the read path's ThisKeyword+staticContext arm in
+  // property-access.ts:1427. Without this, the LHS is `this` (not an
+  // Identifier in classSet) and the static-prop assignment falls through to
+  // the generic struct-write path, which silently drops the write because
+  // `this` is the class constructor (not a per-instance struct).
+  if (
+    target.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
+    let enclosingClass: string | undefined = fctx.enclosingClassName;
+    if (!enclosingClass) {
+      const fname = fctx.name;
+      let pos = -1;
+      while (!enclosingClass) {
+        pos = fname.indexOf("_", pos + 1);
+        if (pos < 0) break;
+        const candidate = fname.substring(0, pos);
+        if (candidate && ctx.classSet.has(candidate)) enclosingClass = candidate;
+      }
+    }
+    if (enclosingClass) {
+      const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
+      const fullName = `${enclosingClass}_${propName}`;
+      const globalIdx = ctx.staticProps.get(fullName);
+      if (globalIdx !== undefined) {
+        const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+        const valType = compileExpression(ctx, fctx, value, globalDef?.type);
+        if (!valType) return null;
+        const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
+        fctx.body.push({ op: "local.tee", index: tmpVal });
+        fctx.body.push({ op: "global.set", index: globalIdx });
+        fctx.body.push({ op: "local.get", index: tmpVal });
+        return valType;
+      }
     }
   }
 

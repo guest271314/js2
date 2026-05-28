@@ -42,6 +42,7 @@ import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
+import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -116,6 +117,59 @@ export {
  * Returns the constant default info if the initializer is a numeric/boolean literal,
  * undefined/null, or a unary minus on a numeric literal. Returns undefined otherwise.
  */
+/**
+ * TypedArray constructor names that lower to a `(ref null $Vec[f64])` Wasm
+ * type (#1700). Shared between `resolveWasmType` and `classifyTypedArrayType`
+ * so the export-signature side table and the codegen lowering stay in sync.
+ */
+export const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+]);
+
+/**
+ * (#1700) Classify a TS type at an export boundary for the runtime
+ * `wrapExports` marshalling step. The Wasm signature for `Uint8Array` and
+ * `number[]` is identical (`(ref null $Vec[f64])`), so we surface the
+ * TS-level distinction as metadata.
+ *
+ * - "uint8array"  → caller may pass JS Uint8Array; result-side wraps as Uint8Array
+ * - "typed-array" → any other TypedArray (Int8Array / Float32Array / ...) — v1
+ *                   treats these like number[] on the return path; tracked for
+ *                   element-fidelity follow-up
+ * - "other"       → not a typed array; wrapper is a no-op for this slot
+ */
+export function classifyTypedArrayType(
+  tsType: ts.Type,
+  checker: ts.TypeChecker,
+): import("../ir/types.js").TypedArrayKind {
+  // Strip null/undefined/void/Promise wrappers so `Uint8Array | undefined`,
+  // `Promise<Uint8Array>` etc. still classify. Match `resolveWasmType`'s
+  // own unwrapping rules.
+  let t = tsType;
+  if (t.isUnion()) {
+    const non = t.types.filter(
+      (x) => !(x.flags & ts.TypeFlags.Null) && !(x.flags & ts.TypeFlags.Undefined) && !(x.flags & ts.TypeFlags.Void),
+    );
+    if (non.length === 1) t = non[0]!;
+  }
+  const sym = t.aliasSymbol ?? t.getSymbol();
+  if (sym?.name === "Promise") {
+    const args = checker.getTypeArguments(t as ts.TypeReference);
+    if (args.length > 0) return classifyTypedArrayType(args[0]!, checker);
+  }
+  const name = sym?.name;
+  if (!name || !TYPED_ARRAY_NAMES.has(name)) return "other";
+  return name === "Uint8Array" ? "uint8array" : "typed-array";
+}
+
 function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
   let found = false;
   function walk(node: ts.Node): void {
@@ -1100,11 +1154,19 @@ export function generateModule(
     }
     mod.stringLiteralValues = ctx.stringLiteralValues;
     mod.asyncFunctions = ctx.asyncFunctions;
+    // (#1700) Surface per-export TypedArray classifications so the JS-host
+    // wrapExports can marshal Uint8Array params/results across the boundary.
+    if (ctx.exportSignatures.size > 0) {
+      const obj: Record<string, import("../ir/types.js").ExportSignature> = {};
+      for (const [k, v] of ctx.exportSignatures) obj[k] = v;
+      mod.exportSignatures = obj;
+    }
 
     // Emit exported struct field getter helpers for the runtime.
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
     emitStructFieldGetters(ctx);
+    emitStructFieldSetters(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback on WasmGC arrays
     emitVecAccessExports(ctx);
@@ -1115,6 +1177,11 @@ export function generateModule(
 
     // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
     emitVecSetByteExport(ctx);
+
+    // (#1700) __new_vec_f64 — JS-callable allocator for f64-element vecs so
+    // wrapExports can copy Uint8Array (and other TypedArray) inputs across
+    // the JS↔Wasm boundary. Gated on an exported user fn accepting a vec.
+    emitNewVecF64Export(ctx);
 
     // Emit __test_str_from_externref / __test_str_to_externref exports for
     // dual-run testing in nativeStrings mode (#1187). No-op unless
@@ -1376,6 +1443,205 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
   // Returns a comma-separated string of field names for the struct type of the argument.
   // The runtime uses this for Object.keys(), JSON.stringify(), for-in, and spread on opaque structs.
   emitStructFieldNamesExport(ctx, fieldMap);
+}
+
+/**
+ * Emit exported `__sset_<name>(externref obj, externref val) -> ()` setters
+ * symmetric to the existing `__sget_<name>` getters (#1630). The runtime
+ * `_safeSet` calls these so a host `Object.assign(typedStruct, src)` (and
+ * other MOP writes routed through `_wrapForHost` set-trap) reflects back
+ * into the real WasmGC struct field rather than only updating the JS-side
+ * sidecar. Without these setters, struct.field reads via compiled Wasm see
+ * the initial value while sidecar reads via host see the updated value —
+ * the asymmetry that masks `Object.assign` and similar writeback cases.
+ *
+ * Only mutable fields get setters; immutable singleton structs (boxed
+ * number / boolean) are skipped to avoid `struct.set` validation errors.
+ * Field-name buckets that mix kinds (f64 / i32 / ref) across struct types
+ * are skipped so the sidecar still carries the write — homogeneous-kind
+ * buckets cover the object-literal cases in test262.
+ */
+function emitStructFieldSetters(ctx: CodegenContext): void {
+  try {
+    _emitStructFieldSettersInner(ctx);
+  } catch {
+    // Non-fatal: setter emission failure degrades to sidecar-only writeback
+    // (the current pre-fix behaviour), the module still runs.
+  }
+}
+
+function _emitStructFieldSettersInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType}]) mappings, but
+  // ONLY for mutable fields. Mirror the skip rules used by the getter
+  // emitter so the two stay in lockstep.
+  const fieldMap = new Map<string, { typeIdx: number; fieldIdx: number; fieldType: ValType }[]>();
+
+  for (const [structName, fields] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+
+    for (let i = 0; i < fields.length; i++) {
+      const field = fields[i];
+      if (!field || !field.type) continue;
+      if (!field.name || field.name.startsWith("$")) continue;
+      // Only emit setters for mutable fields — `struct.set` on an immutable
+      // field is a Wasm validation error (e.g. boxed-number singletons).
+      if (!field.mutable) continue;
+
+      let entries = fieldMap.get(field.name);
+      if (!entries) {
+        entries = [];
+        fieldMap.set(field.name, entries);
+      }
+      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type });
+    }
+  }
+
+  if (fieldMap.size === 0) return;
+
+  // Setter signatures: 3 variants by val type.
+  // Mixed-kind buckets are skipped — sidecar carries the write instead.
+  const setterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [], "$sset_extern_type");
+  const setterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [], "$sset_f64_type");
+  const setterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [], "$sset_i32_type");
+
+  // Only kinds we can emit a correct `struct.set` for after the externref →
+  // anyref convert. Abstract heap types other than `anyref` (eqref / structref /
+  // funcref) would need a `ref.cast` to an abstract heap type, which the
+  // current Instr encoding does not express — skip those buckets so the
+  // sidecar still carries the write.
+  const isRefKind = (k: ValType["kind"]) =>
+    k === "ref" || k === "ref_null" || k === "anyref" || k === "externref" || k === "ref_extern";
+
+  for (const [fieldName, entries] of fieldMap) {
+    const allF64 = entries.every((e) => e.fieldType.kind === "f64");
+    const allI32 = entries.every((e) => e.fieldType.kind === "i32");
+    const allRef = entries.every((e) => isRefKind(e.fieldType.kind));
+
+    // Skip mixed-kind buckets or any bucket containing kinds we can't
+    // route through one of the three setter signatures (i64 / f32 / v128
+    // / packed i8/i16). The sidecar still carries those writes.
+    if (!allF64 && !allI32 && !allRef) continue;
+
+    let setterTypeIdx: number;
+    let valMode: "extern" | "f64" | "i32";
+    if (allF64) {
+      setterTypeIdx = setterF64TypeIdx;
+      valMode = "f64";
+    } else if (allI32) {
+      setterTypeIdx = setterI32TypeIdx;
+      valMode = "i32";
+    } else {
+      setterTypeIdx = setterExternTypeIdx;
+      valMode = "extern";
+    }
+
+    const funcName = `__sset_${fieldName}`;
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
+
+    const funcBody = buildSetterNestedIfElse(entries, anyLocal, valMode);
+
+    mod.functions.push({
+      name: funcName,
+      typeIdx: setterTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body: funcBody,
+      exported: true,
+    } as WasmFunction);
+
+    mod.exports.push({
+      name: funcName,
+      desc: { kind: "func", index: funcIdx },
+    });
+  }
+}
+
+/** Build nested if/else for struct field setter dispatch. */
+function buildSetterNestedIfElse(
+  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType }[],
+  anyLocal: number,
+  valMode: "extern" | "f64" | "i32",
+): Instr[] {
+  const body: Instr[] = [];
+
+  // Convert obj externref to anyref and store
+  body.push({ op: "local.get", index: 0 } as Instr);
+  body.push({ op: "any.convert_extern" } as Instr);
+  body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // Chain: if (ref.test T1) { cast + struct.set T1 } else if (ref.test T2) { ... }
+  let current: Instr[] = []; // final else: no-op
+
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    const thenBranch = buildSetterStore(entry, anyLocal, valMode);
+
+    const ifInstr: Instr = {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: thenBranch,
+      else: current,
+    };
+
+    current = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+      ifInstr,
+    ];
+  }
+
+  body.push(...current);
+  return body;
+}
+
+/** Build the "then" branch that stores `val` (local 1) into a struct field. */
+function buildSetterStore(
+  entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
+  anyLocal: number,
+  valMode: "extern" | "f64" | "i32",
+): Instr[] {
+  const then: Instr[] = [];
+  const ft = entry.fieldType;
+
+  // Push the cast struct ref onto the stack
+  then.push({ op: "local.get", index: anyLocal } as Instr);
+  then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
+
+  // Push the value (already typed per valMode) — since we only emit setters
+  // for homogeneous-kind buckets, valMode and ft.kind line up.
+  then.push({ op: "local.get", index: 1 } as Instr);
+
+  if (valMode === "extern") {
+    // Field kinds are restricted by isRefKind above to: ref / ref_null /
+    // anyref / externref / ref_extern. externref & ref_extern need no
+    // conversion; everything else converts externref → anyref first, then
+    // typed-ref fields cast down to the field's specific heap type. Cast
+    // failures trap; the runtime _safeSet wraps the setter call in
+    // try/catch so a wrong-type assign degrades to sidecar-only (the
+    // prior behaviour) rather than crashing.
+    if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref") {
+      then.push({ op: "any.convert_extern" } as Instr);
+    }
+    if (ft.kind === "ref") {
+      then.push({ op: "ref.cast", typeIdx: ft.typeIdx } as Instr);
+    } else if (ft.kind === "ref_null") {
+      then.push({ op: "ref.cast_null", typeIdx: ft.typeIdx } as Instr);
+    }
+  }
+
+  then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  return then;
 }
 
 /**
@@ -2115,6 +2381,14 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
 
+  // #820l — globals for argc + extras-argv plumbing into the callee's
+  // `arguments` object. Both globals are mode-agnostic; ensureExtrasArgvGlobal
+  // also returns the vec struct typeIdx whose `data` field is an externref
+  // array (the same shape used by emitArgumentsVecBody on the receive side).
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const { globalIdx: extrasArgvGlobalIdx, vecTypeIdx: extrasVecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const extrasArrTypeIdx = getArrTypeIdxFromVec(ctx, extrasVecTypeIdx);
+
   // __call_fn_<arity>(closure: externref, arg0: externref, ..., arg<arity-1>: externref) → externref
   const params: ValType[] = [];
   for (let i = 0; i < arity + 1; i++) params.push({ kind: "externref" });
@@ -2161,7 +2435,34 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
       argInstrs.push(...buildArgConversion(i + 1, paramType));
     }
 
+    // #820l — argc/extras-argv plumbing so the callee's `arguments` object
+    // observes the *actual* host-passed arg count, not just `closureArity`.
+    // The host invokes the dispatcher with `arity` user args at locals
+    // [1..arity]; the closure declares `closureArity ≤ arity` formals. The
+    // receive-side (emitArgumentsVecBody) reads __argc + __extras_argv to
+    // build `arguments` with all `arity` slots populated.
+    const setupInstrs: Instr[] = [
+      { op: "i32.const", value: arity } as Instr,
+      { op: "global.set", index: argcGlobalIdx } as Instr,
+    ];
+    if (arity > entry.closureArity) {
+      // vec struct field order: (length: i32, data: arrRef). Push len first.
+      const extrasCount = arity - entry.closureArity;
+      setupInstrs.push({ op: "i32.const", value: extrasCount } as Instr);
+      for (let i = entry.closureArity; i < arity; i++) {
+        setupInstrs.push({ op: "local.get", index: i + 1 } as Instr);
+      }
+      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
+      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    } else {
+      // No extras for this arm — reset to avoid stale data from a prior call.
+      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+    }
+
     const callBody: Instr[] = [
+      ...setupInstrs,
       { op: "local.get", index: anyLocal } as Instr,
       { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
       ...argInstrs,
@@ -2750,7 +3051,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
  * a dead export and bloat every module.
  */
 function emitVecSetByteExport(ctx: CodegenContext): void {
-  if (!ctx.funcMap.has("__crypto_get_random_values")) return;
+  // (#1503) Originally gated on `__crypto_get_random_values` so the export
+  // only appeared when crypto.getRandomValues was reachable.
+  // (#1700) Now also needed by the JS-host `wrapExports` to populate freshly
+  // allocated f64 vecs with Uint8Array bytes. Emit when either consumer is
+  // present.
+  if (!ctx.funcMap.has("__crypto_get_random_values") && !hasExportedVecParam(ctx)) return;
   try {
     _emitVecSetByteExportInner(ctx);
   } catch {
@@ -2830,6 +3136,103 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
     exported: true,
   } as any);
   mod.exports.push({ name: "__vec_set_byte", desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#1700) Emit `__new_vec_f64(i32 len) -> externref` so the JS-host
+ * `wrapExports` can allocate a fresh f64-element vec struct and populate it
+ * with bytes from a JS `Uint8Array` argument. Without this export, callers
+ * have no JS entry point to construct a `(ref null $Vec[f64])` and hit
+ * "type incompatibility when transforming from/to JS" at the call boundary.
+ *
+ * The signature returns `externref` (not the typed vec ref) so the result
+ * is opaque on the JS side — callers pass it straight back to a compiled
+ * function param, which casts it to the right vec type internally.
+ *
+ * Gated: only emitted when (a) an `f64`-element vec is registered, AND
+ * (b) at least one exported user function accepts a vec-shaped ref param.
+ * Modules without TypedArray exports pay zero bytes.
+ */
+function emitNewVecF64Export(ctx: CodegenContext): void {
+  if (!ctx.vecTypeMap.has("f64")) return;
+  if (!hasExportedVecParam(ctx)) return;
+  try {
+    _emitNewVecF64ExportInner(ctx);
+  } catch {
+    // Non-fatal — if dispatch emission fails the JS-side wrapper falls
+    // back to passing the raw arg (which raises the original TypeError),
+    // which is no worse than the pre-#1700 baseline.
+  }
+}
+
+function hasExportedVecParam(ctx: CodegenContext): boolean {
+  const mod = ctx.mod;
+  const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
+  for (const exp of mod.exports) {
+    if (exp.desc.kind !== "func") continue;
+    const idx = exp.desc.index - ctx.numImportFuncs;
+    if (idx < 0 || idx >= mod.functions.length) continue;
+    const fn = mod.functions[idx]!;
+    const typeDef = mod.types[fn.typeIdx];
+    if (!typeDef) continue;
+    // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
+    const ft = typeDef.kind === "sub" ? typeDef.type : typeDef;
+    if (ft.kind !== "func") continue;
+    for (const p of ft.params) {
+      if ((p.kind === "ref" || p.kind === "ref_null") && vecTypeIdxs.has(p.typeIdx)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function _emitNewVecF64ExportInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecTypeIdx = ctx.vecTypeMap.get("f64")!;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return;
+  // Skip if the export is already emitted (defensive — multi-source paths
+  // may invoke the emit pass more than once; emitVecSetByteExport doesn't
+  // guard either but is gated by funcMap which prevents a second emit).
+  if (mod.exports.some((e) => e.name === "__new_vec_f64")) return;
+
+  // Return the typed vec ref directly (NOT externref). V8 and SpiderMonkey
+  // both reject the JS↔Wasm round-trip if we return externref and try to
+  // pass it back to a `(ref null $Vec)` param — the boundary will not
+  // narrow externref → concrete WasmGC ref. By returning the real type,
+  // JS sees an opaque WasmGC handle and the engine accepts it on the way
+  // back in (same type identity).
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "i32" }],
+    [{ kind: "ref_null", typeIdx: vecTypeIdx }],
+    "$__new_vec_f64_type",
+  );
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // local 0 = len (i32 param)
+  // local 1 = $arr (ref null $arr_f64) — the zero-initialised data array
+  const arrRefType: ValType = { kind: "ref_null", typeIdx: arrTypeIdx };
+  const body: Instr[] = [
+    // arr = array.new_default $arr_f64 (len)
+    { op: "local.get", index: 0 } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.set", index: 1 } as Instr,
+    // struct.new $Vec[f64] { length: len, data: arr }
+    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: 1 } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+  ];
+
+  mod.functions.push({
+    name: "__new_vec_f64",
+    typeIdx,
+    locals: [{ name: "__arr", type: arrRefType }],
+    body,
+    exported: true,
+  } as any);
+  mod.exports.push({ name: "__new_vec_f64", desc: { kind: "func", index: funcIdx } });
 }
 
 /**
@@ -3256,11 +3659,19 @@ export function generateMultiModule(
     }
     mod.stringLiteralValues = ctx.stringLiteralValues;
     mod.asyncFunctions = ctx.asyncFunctions;
+    // (#1700) Surface per-export TypedArray classifications so the JS-host
+    // wrapExports can marshal Uint8Array params/results across the boundary.
+    if (ctx.exportSignatures.size > 0) {
+      const obj: Record<string, import("../ir/types.js").ExportSignature> = {};
+      for (const [k, v] of ctx.exportSignatures) obj[k] = v;
+      mod.exportSignatures = obj;
+    }
 
     // Emit exported struct field getter helpers for the runtime (mirrors
     // generateModule path — #1308 surfaced that multi-source projects
     // were missing these export emits).
     emitStructFieldGetters(ctx);
+    emitStructFieldSetters(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);
@@ -4224,6 +4635,127 @@ export function ensureWasiWriteUint8ArrayHelper(
 }
 
 /**
+ * #1655: Ensure __wasi_write_arraybuffer(buf: ref __vec_i32_byte) -> void
+ * exists and return its function index (lazy).
+ *
+ * Companion to `ensureWasiWriteUint8ArrayHelper` for the ArrayBuffer-backing
+ * representation. Under `--target wasi` / `--target standalone`, an
+ * `ArrayBuffer` is lowered to a vec struct of i32 bytes (one byte per
+ * element, values 0..255 — see dataview-native.ts comment block) rather than
+ * the Uint8Array f64-element shape. The element conversion is therefore a
+ * direct i32 read (no `i32.trunc_sat_f64_s`).
+ */
+export function ensureWasiWriteArrayBufferHelper(
+  ctx: CodegenContext,
+  vecTypeIdx: number,
+  useStderr: boolean = false,
+): number {
+  const helperName = useStderr ? "__wasi_write_arraybuffer_stderr" : "__wasi_write_arraybuffer";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return -1;
+
+  const fd = useStderr ? 2 : 1;
+
+  // param: buf(0); locals: len(1), data(2), i(3)
+  const BUF = 0;
+  const LEN = 1;
+  const DATA = 2;
+  const I = 3;
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    // len = buf.length (field 0)
+    { op: "local.get", index: BUF } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: LEN } as Instr,
+
+    // data = buf.data (field 1)
+    { op: "local.get", index: BUF } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: DATA } as Instr,
+
+    // i = 0
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: I } as Instr,
+
+    // while (i < len) mem[SCRATCH+i] = (u8) data[i]; i++
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I } as Instr,
+            { op: "local.get", index: LEN } as Instr,
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 } as Instr,
+
+            // address = SCRATCH_START + i
+            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.add" } as Instr,
+
+            // value = data[i] (i32; low byte kept by i32.store8)
+            { op: "local.get", index: DATA } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+
+            { op: "i32.store8", align: 0, offset: 0 },
+
+            // i++
+            { op: "local.get", index: I } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: I } as Instr,
+
+            { op: "br", depth: 0 } as Instr,
+          ],
+        },
+      ],
+    },
+
+    // iovec.buf = SCRATCH_START at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = len at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: fd } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "len", type: { kind: "i32" } },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
  * Emit __wasi_write_file_sync(pathPtr: i32, pathLen: i32, dataPtr: i32, dataLen: i32) helper.
  * Opens a file via path_open, writes data via fd_write, then closes via fd_close.
  *
@@ -5010,6 +5542,12 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
       ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+    }
+    // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
+    // — see the matching block in addUnionImports / shiftLateImportIndices.
+    for (const t of ctx.pendingMethodTrampolines) {
+      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
+      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
     }
   }
 }
@@ -6253,6 +6791,22 @@ export function addUnionImports(ctx: CodegenContext): void {
     typeIdx: boxBoolType,
   });
 
+  // __box_bigint: (i64) → externref  (#1644 — boxes a branded-bigint i64 as a
+  // JS bigint; JS-BigInt-integration makes the host body identity)
+  const boxBigType = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "externref" }]);
+  addImport(ctx, "env", "__box_bigint", { kind: "func", typeIdx: boxBigType });
+
+  // __to_bigint: (externref) → i64  (#1644 — §7.1.13 ToBigInt)
+  const toBigType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i64" }]);
+  addImport(ctx, "env", "__to_bigint", { kind: "func", typeIdx: toBigType });
+
+  // __bigint_ctor: (externref) → i64  (#1644 Slice B — §21.2.1.1 BigInt(value):
+  // ToPrimitive(number) then NumberToBigInt (RangeError) for Number, else
+  // ToBigInt (SyntaxError on bad string syntax). Distinct from __to_bigint,
+  // which throws TypeError on a Number per §7.1.13.)
+  const ctorBigType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i64" }]);
+  addImport(ctx, "env", "__bigint_ctor", { kind: "func", typeIdx: ctorBigType });
+
   // __typeof: (externref) → externref (returns type string)
   const typeofStrType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__typeof", {
@@ -6280,6 +6834,9 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__unbox_boolean",
       "__box_number",
       "__box_boolean",
+      "__box_bigint",
+      "__to_bigint",
+      "__bigint_ctor",
       "__typeof",
     ]);
     // Update funcMap entries for defined functions (not imports)
@@ -6365,6 +6922,23 @@ export function addUnionImports(ctx: CodegenContext): void {
     // defined-function index that __module_init lives at.
     if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
       ctx.mod.startFuncIdx += delta;
+    }
+    // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
+    // for this import batch — the inline shiftFuncIndices above already corrected all
+    // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
+    if (ctx.nativeStrHelperImportBase >= 0) {
+      for (const [name, idx] of ctx.nativeStrHelpers) {
+        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+      ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+    }
+    // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep.
+    // The captured methodFuncIdx / trampolineFuncIdx are plain numbers not
+    // reachable from any Instr — without this, finalizeMethodTrampolines later
+    // resolves the wrong (import) signature, producing invalid Wasm.
+    for (const t of ctx.pendingMethodTrampolines) {
+      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
+      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
     }
   }
 }
@@ -7112,17 +7686,6 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // TypedArray types → vec struct with f64 elements (same representation as number[])
     // Covers: Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
     //         Int32Array, Uint32Array, Float32Array, Float64Array
-    const TYPED_ARRAY_NAMES = new Set([
-      "Int8Array",
-      "Uint8Array",
-      "Uint8ClampedArray",
-      "Int16Array",
-      "Uint16Array",
-      "Int32Array",
-      "Uint32Array",
-      "Float32Array",
-      "Float64Array",
-    ]);
     if (sym?.name && TYPED_ARRAY_NAMES.has(sym.name)) {
       const elemWasm: ValType = { kind: "f64" };
       const vecIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
@@ -7379,6 +7942,25 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     // so coercion can recover the closure and call it via call_ref
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
       wasmType = { kind: "eqref" };
+    }
+    // (#820m) Anonymous/named class expression as property value: TS infers
+    // the property type as `typeof <anonClass>` whose construct signature's
+    // `.prototype` walks back to the instance struct, so resolveWasmType
+    // hands us `ref <instance struct>`. But compileClassExpression emits an
+    // externref (closure-struct via extern.convert_any), and the struct cast
+    // on field assignment drops the value to ref.null. Widen any
+    // construct-signature-only property type (no call signatures) to
+    // externref so the closure ref is retained verbatim. Mirrors the
+    // empty-`{}` widening just above.
+    {
+      const constructSigs = propType.getConstructSignatures();
+      if (
+        constructSigs.length > 0 &&
+        callSigs.length === 0 &&
+        (wasmType.kind === "ref" || wasmType.kind === "ref_null")
+      ) {
+        wasmType = { kind: "externref" };
+      }
     }
     fields.push({ name: prop.name, type: wasmType, mutable: true });
     if (callSigs.length > 0) {

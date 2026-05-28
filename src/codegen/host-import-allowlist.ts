@@ -105,6 +105,20 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
   },
   {
     kind: "exact",
+    name: "bigint_toString",
+    signature: "(i64) -> externref",
+    trackingIssue: 1644,
+    reason: "BigInt#toString default radix 10 (Slice D).",
+  },
+  {
+    kind: "exact",
+    name: "bigint_toString_radix",
+    signature: "(i64, i32) -> externref",
+    trackingIssue: 1644,
+    reason: "BigInt#toString(radix) base 2-36 (Slice D).",
+  },
+  {
+    kind: "exact",
     name: "number_toFixed",
     signature: "(f64, i32) -> externref",
     trackingIssue: 1335,
@@ -288,6 +302,16 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
     name: "__create_async_generator",
     trackingIssue: 1376,
     reason: "Async generator constructor host-side; #1376.",
+  },
+
+  // ---- #1632a Function.prototype.bind / .apply / .call (host-delegated) ----
+  {
+    kind: "exact",
+    name: "__bind_function",
+    signature: "(externref, externref, externref, externref, i32) -> externref",
+    trackingIssue: 1632,
+    reason:
+      "Function.prototype.bind delegates to host Function.prototype.bind for spec-correct bound-function exotic. Standalone mode falls back to identity-bind (documented gap).",
   },
 
   // ---- Async / Promise / JSON / dynamic-import (no native path yet) ----

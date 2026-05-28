@@ -1,7 +1,8 @@
 ---
 id: 1677
 title: "Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi)"
-status: in-progress
+status: done
+completed: 2026-05-27
 created: 2026-05-27
 updated: 2026-05-27
 priority: high

@@ -59,6 +59,7 @@ export function createCodegenContext(
     enumStringValues: new Map(),
     arrayTypeMap: new Map(),
     vecTypeMap: new Map(),
+    exportSignatures: new Map(),
     externClassParent: new Map(),
     declaredGlobals: new Map(),
     callbackCounter: 0,
@@ -151,6 +152,7 @@ export function createCodegenContext(
     classStaticMethodNames: new Map(),
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
+    funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,
     // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices

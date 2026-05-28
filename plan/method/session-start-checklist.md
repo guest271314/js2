@@ -8,7 +8,7 @@
 
 ## Environment check
 
-1. [ ] `pwd` — must be `/workspace`
+1. [ ] `pwd` — must be `/workspace`. **If in a worktree (`/workspace/.claude/worktrees/...`), stop and start a new session from `/workspace` before proceeding or spawning background jobs.**
 2. [ ] `git branch --show-current` — must be `main`
 3. [ ] `git status` — working tree should be clean. If dirty, review changes before proceeding.
 4. [ ] `git stash list` — should be empty. If not, investigate what's stashed and why.

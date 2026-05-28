@@ -1438,12 +1438,32 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return compileNewFunctionExpression(ctx, fctx, expr, expr.expression);
   }
 
+  // (#1528b) Unwrap parens AND `as`/`!`/type-assertion wrappers so the static
+  // non-constructor guards below still fire on `new ((() => {}) as any)()` etc.
+  // — the bare paren-only unwrap let cast arrows slip through to the dynamic
+  // path and silently no-throw. Mirrors the builtin-namespace unwrap below.
+  const unwrapNewTarget = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = ts.isParenthesizedExpression(cur)
+        ? cur.expression
+        : ts.isAsExpression(cur)
+          ? cur.expression
+          : ts.isNonNullExpression(cur)
+            ? cur.expression
+            : (cur as ts.TypeAssertion).expression;
+    }
+    return cur;
+  };
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
-    let unwrappedNew: ts.Expression = expr.expression;
-    while (ts.isParenthesizedExpression(unwrappedNew)) {
-      unwrappedNew = unwrappedNew.expression;
-    }
+    const unwrappedNew = unwrapNewTarget(expr.expression);
     if (ts.isArrowFunction(unwrappedNew)) {
       // #1528: throw a real TypeError instance so `assert.throws(TypeError, …)`
       // catches it (the bare-string throw is only `instanceof Error`/string).
@@ -1490,12 +1510,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   }
 
   // Non-identifier constructor: detect non-constructable functions.
-  if (!ts.isIdentifier(expr.expression) && !ts.isFunctionExpression(expr.expression)) {
+  // (#1528b) Unwrap `as`/`!`/type-assertion/paren wrappers so the guards fire
+  // on `new (Array.prototype.map as any)()` etc., not just the bare form.
+  const unwrappedNonId = unwrapNewTarget(expr.expression);
+  if (!ts.isIdentifier(unwrappedNonId) && !ts.isFunctionExpression(unwrappedNonId)) {
     // Pattern 1: `new X.prototype.Y()` — prototype methods are NEVER constructors.
     // This covers both ES2022 (forEach) and ES2023 (with, toSorted) methods,
     // even when TypeScript lib doesn't know about the method (type resolves to `any`).
-    if (ts.isPropertyAccessExpression(expr.expression)) {
-      const obj = expr.expression.expression; // e.g. Array.prototype
+    if (ts.isPropertyAccessExpression(unwrappedNonId)) {
+      const obj = unwrappedNonId.expression; // e.g. Array.prototype
       if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") {
         // #1528: real TypeError instance so test262 `assert.throws(TypeError, …)`
         // catches it (prototype methods are not constructors per spec §9.2.2).
@@ -1507,7 +1530,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Pattern 2: TypeScript knows the expression has call sigs but no construct sigs.
     // e.g. `new decodeURIComponent()`, `new Math.abs()`, `new Array.from()`.
-    const exprType = ctx.checker.getTypeAtLocation(expr.expression);
+    // Resolve on the unwrapped target so a cast doesn't widen it to `any`.
+    const exprType = ctx.checker.getTypeAtLocation(unwrappedNonId);
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
     if (callSigs.length > 0 && constructSigs.length === 0) {
@@ -1802,14 +1826,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // expecting a real object, e.g. `Boolean(new Object())` returned `false`
   // because `__to_boolean(null) === 0`.
   //
-  // Use `__object_create(null)` host import to produce a fresh empty
-  // object. Falls back to `ref.null.extern` only if the import can't be
-  // registered (preserving the legacy shape so we never regress further).
+  // Use `__new_plain_object` host import to produce a fresh empty object
+  // with the ordinary `Object.prototype` prototype (#1525). `new Object()`
+  // per §20.1.1.1 must inherit `Object.prototype` — using `__object_create(null)`
+  // gave it a null prototype, so it had no `toString`/`valueOf` and any
+  // ToPrimitive coercion (`==`, arithmetic, `String(...)`) threw
+  // "Cannot convert object to primitive value" instead of producing
+  // "[object Object]". Falls back to `ref.null.extern` only if the import
+  // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    const createIdx = ensureLateImport(ctx, "__object_create", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (createIdx !== undefined) {
-      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "call", funcIdx: createIdx });
       return { kind: "externref" };
     }
@@ -1922,12 +1950,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // calls (getDay, getHours, getTime, …) can return NaN per spec
       // (`new Date(NaN).getTime() → NaN`). Without this, `i64.trunc_sat_f64_s`
       // saturates NaN to 0 and the Date silently behaves like the epoch.
+      //
+      // (#1343) TimeClip per §21.4.1.31: if !isFinite(ms) or abs(ms) > 8.64e15,
+      // return NaN. Both NaN and out-of-range get the sentinel. ±Infinity is
+      // out-of-range (abs > 8.64e15), so the single magnitude check covers it.
       compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
       const msLocal = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.tee", index: msLocal } as Instr);
-      // ms != ms is true iff ms is NaN
+      // isInvalid = (ms != ms) || (abs(ms) > 8.64e15)
+      // ms != ms is true iff ms is NaN (covers NaN)
       fctx.body.push({ op: "local.get", index: msLocal } as Instr);
       fctx.body.push({ op: "f64.ne" } as Instr);
+      fctx.body.push({ op: "local.get", index: msLocal } as Instr);
+      fctx.body.push({ op: "f64.abs" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
+      fctx.body.push({ op: "f64.gt" } as Instr);
+      fctx.body.push({ op: "i32.or" } as Instr);
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i64" } },
@@ -1944,69 +1982,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     {
       const daysFromCivilIdx = ensureDateDaysFromCivilHelper(ctx);
 
+      // (#1343) Track whether any arg is NaN or non-finite. If so, the resulting
+      // Date is Invalid (§21.4.2.1 MakeDate / TimeClip step on non-finite).
+      // We OR-accumulate an i32 flag and stash the f64 value before trunc.
+      const nonFiniteLocal = allocTempLocal(fctx, { kind: "i32" });
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: nonFiniteLocal } as Instr);
+
+      const checkNonFinite = (f64Local: number) => {
+        // flag = flag | (v != v) | (abs(v) == +Inf)
+        // We treat ±Inf as "non-finite enough" too — abs(v) > 8.64e15 is sufficient.
+        fctx.body.push({ op: "local.get", index: nonFiniteLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+        fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+        fctx.body.push({ op: "f64.ne" } as Instr); // NaN check
+        fctx.body.push({ op: "i32.or" } as Instr);
+        fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+        fctx.body.push({ op: "f64.abs" } as Instr);
+        fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
+        fctx.body.push({ op: "f64.gt" } as Instr);
+        fctx.body.push({ op: "i32.or" } as Instr);
+        fctx.body.push({ op: "local.set", index: nonFiniteLocal } as Instr);
+      };
+
       // Compile year
       compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      const yearF64Local = allocTempLocal(fctx, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: yearF64Local } as Instr);
+      checkNonFinite(yearF64Local);
       fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
       const yearLocal = allocTempLocal(fctx, { kind: "i64" });
       fctx.body.push({ op: "local.set", index: yearLocal } as Instr);
+      releaseTempLocal(fctx, yearF64Local);
 
       // Compile month (0-indexed) + 1 for civil algorithm
       compileExpression(ctx, fctx, args[1]!, { kind: "f64" });
+      const monthF64Local = allocTempLocal(fctx, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: monthF64Local } as Instr);
+      checkNonFinite(monthF64Local);
+      releaseTempLocal(fctx, monthF64Local);
       fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
       fctx.body.push({ op: "i64.const", value: 1n } as Instr);
       fctx.body.push({ op: "i64.add" } as Instr);
       const monthLocal = allocTempLocal(fctx, { kind: "i64" });
       fctx.body.push({ op: "local.set", index: monthLocal } as Instr);
 
-      // Compile day (default 1)
-      if (args.length >= 3) {
-        compileExpression(ctx, fctx, args[2]!, { kind: "f64" });
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-      } else {
-        fctx.body.push({ op: "i64.const", value: 1n } as Instr);
-      }
-      const dayLocal = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.set", index: dayLocal } as Instr);
+      // (#1343) For the remaining optional args, also accumulate the non-finite
+      // flag when the arg is present.
+      const compileTimePart = (argIdx: number, defaultI64: bigint, localKind: ValType) => {
+        if (args.length > argIdx) {
+          compileExpression(ctx, fctx, args[argIdx]!, { kind: "f64" });
+          const f64L = allocTempLocal(fctx, { kind: "f64" });
+          fctx.body.push({ op: "local.tee", index: f64L } as Instr);
+          checkNonFinite(f64L);
+          releaseTempLocal(fctx, f64L);
+          fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        } else {
+          fctx.body.push({ op: "i64.const", value: defaultI64 } as Instr);
+        }
+        const local = allocTempLocal(fctx, localKind);
+        fctx.body.push({ op: "local.set", index: local } as Instr);
+        return local;
+      };
 
-      // Compile hours (default 0)
-      if (args.length >= 4) {
-        compileExpression(ctx, fctx, args[3]!, { kind: "f64" });
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-      } else {
-        fctx.body.push({ op: "i64.const", value: 0n } as Instr);
-      }
-      const hoursLocal = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.set", index: hoursLocal } as Instr);
-
-      // Compile minutes (default 0)
-      if (args.length >= 5) {
-        compileExpression(ctx, fctx, args[4]!, { kind: "f64" });
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-      } else {
-        fctx.body.push({ op: "i64.const", value: 0n } as Instr);
-      }
-      const minutesLocal = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.set", index: minutesLocal } as Instr);
-
-      // Compile seconds (default 0)
-      if (args.length >= 6) {
-        compileExpression(ctx, fctx, args[5]!, { kind: "f64" });
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-      } else {
-        fctx.body.push({ op: "i64.const", value: 0n } as Instr);
-      }
-      const secondsLocal = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.set", index: secondsLocal } as Instr);
-
-      // Compile ms (default 0)
-      if (args.length >= 7) {
-        compileExpression(ctx, fctx, args[6]!, { kind: "f64" });
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-      } else {
-        fctx.body.push({ op: "i64.const", value: 0n } as Instr);
-      }
-      const msLocal = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.set", index: msLocal } as Instr);
+      const dayLocal = compileTimePart(2, 1n, { kind: "i64" });
+      const hoursLocal = compileTimePart(3, 0n, { kind: "i64" });
+      const minutesLocal = compileTimePart(4, 0n, { kind: "i64" });
+      const secondsLocal = compileTimePart(5, 0n, { kind: "i64" });
+      const msLocal = compileTimePart(6, 0n, { kind: "i64" });
 
       // Handle year 0-99 mapping to 1900-1999 (JS Date quirk)
       // if (0 <= year <= 99) year += 1900
@@ -2057,6 +2100,31 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         { op: "local.get", index: msLocal } as Instr,
         { op: "i64.add" } as Instr,
       );
+
+      // (#1343) TimeClip §21.4.1.31: if any arg was NaN/non-finite, or
+      // abs(ts) > 8.64e15, the time is invalid. The nonFiniteLocal flag covers
+      // the f64 NaN/Inf cases (i64.trunc_sat_f64_s would otherwise saturate them
+      // silently); the magnitude check covers in-range f64 values that still
+      // produce an out-of-range timestamp.
+      const tsResultLocal = allocTempLocal(fctx, { kind: "i64" });
+      fctx.body.push({ op: "local.set", index: tsResultLocal } as Instr);
+      fctx.body.push(
+        { op: "local.get", index: nonFiniteLocal } as Instr,
+        { op: "local.get", index: tsResultLocal } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+        { op: "f64.abs" } as Instr,
+        { op: "f64.const", value: 8.64e15 } as Instr,
+        { op: "f64.gt" } as Instr,
+        { op: "i32.or" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i64" } },
+          then: [{ op: "i64.const", value: -9223372036854775808n } as Instr],
+          else: [{ op: "local.get", index: tsResultLocal } as Instr],
+        } as unknown as Instr,
+      );
+      releaseTempLocal(fctx, tsResultLocal);
+      releaseTempLocal(fctx, nonFiniteLocal);
 
       fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
 

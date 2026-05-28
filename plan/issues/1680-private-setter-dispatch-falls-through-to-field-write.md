@@ -1,9 +1,12 @@
 ---
 id: 1680
 title: "Private setter write falls through to struct-field write — stacked private accessors cross-talk (~132 fails)"
-status: ready
+status: done
 created: 2026-05-27
-updated: 2026-05-27
+updated: 2026-05-28
+completed: 2026-05-28
+pr: 721
+fix_commit: 9ffbb1a52
 priority: medium
 feasibility: medium
 reasoning_effort: medium

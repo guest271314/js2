@@ -1,9 +1,10 @@
 ---
 id: 1637
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
-status: in-review
+status: done
 created: 2026-05-08
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: easy
 reasoning_effort: medium

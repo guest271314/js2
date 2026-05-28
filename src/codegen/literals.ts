@@ -338,16 +338,42 @@ function compileObjectLiteralWithAccessors(
     } else if (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) {
       // __extern_set(obj, key, value)
       let propName: string | undefined;
+      let wellKnownSymId: number | undefined;
       if (ts.isIdentifier(prop.name)) propName = prop.name.text;
       else if (ts.isStringLiteral(prop.name)) propName = prop.name.text;
       else if (ts.isNumericLiteral(prop.name)) propName = prop.name.text;
-      // Computed property names not handled here — fall through silently.
-      if (propName === undefined) continue;
-      addStringConstantGlobal(ctx, propName);
-      const keyGlobal = ctx.stringGlobalMap.get(propName);
-      if (keyGlobal === undefined) continue;
-      fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      else if (ts.isComputedPropertyName(prop.name)) {
+        // (#1695) Symmetric with the MethodDeclaration path below: well-known
+        // `[Symbol.X]: …` keys must be boxed into real JS Symbols via
+        // __box_symbol so host APIs (DisposableStack, `using`, iteration
+        // protocols) find the value under the real Symbol property.
+        const inner = prop.name.expression;
+        if (
+          ts.isPropertyAccessExpression(inner) &&
+          ts.isIdentifier(inner.expression) &&
+          inner.expression.text === "Symbol"
+        ) {
+          wellKnownSymId = getWellKnownSymbolId(inner.name.text);
+        }
+        if (wellKnownSymId === undefined) {
+          propName = resolveComputedKeyExpression(ctx, prop.name.expression);
+        }
+      }
+      if (wellKnownSymId !== undefined) {
+        const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (boxSymIdx === undefined) continue;
+        fctx.body.push({ op: "local.get", index: objLocal });
+        fctx.body.push({ op: "i32.const", value: wellKnownSymId });
+        fctx.body.push({ op: "call", funcIdx: boxSymIdx });
+      } else {
+        if (propName === undefined) continue;
+        addStringConstantGlobal(ctx, propName);
+        const keyGlobal = ctx.stringGlobalMap.get(propName);
+        if (keyGlobal === undefined) continue;
+        fctx.body.push({ op: "local.get", index: objLocal });
+        fctx.body.push({ op: "global.get", index: keyGlobal });
+      }
       // Compile value and coerce to externref.
       let valType: ValType | null;
       if (ts.isShorthandPropertyAssignment(prop)) {
@@ -483,7 +509,11 @@ function compileObjectLiteralWithAccessors(
  */
 function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
   for (const p of expr.properties) {
-    if (!ts.isMethodDeclaration(p)) continue;
+    // (#1695) Catch both MethodDeclaration (`[Symbol.dispose]() {}`) and
+    // PropertyAssignment (`[Symbol.dispose]: () => {}`) shapes — both must
+    // route to the externref/accessor path so the host sees a real Symbol
+    // key on the resulting object.
+    if (!ts.isMethodDeclaration(p) && !ts.isPropertyAssignment(p)) continue;
     if (!ts.isComputedPropertyName(p.name)) continue;
     const inner = p.name.expression;
     if (!ts.isPropertyAccessExpression(inner)) continue;
@@ -2308,6 +2338,23 @@ export function compileArrayLiteral(
       const hasNullLiteral = expr.elements.some((e) => e.kind === ts.SyntaxKind.NullKeyword);
       if (hasNullLiteral) {
         elemWasm = { kind: "externref" };
+      } else if (elemWasm.kind === "f64" || elemWasm.kind === "i32") {
+        // A literal whose first element is numeric but which also contains a
+        // genuine object/reference element (e.g. `[0, 1, obj]`) must not store
+        // that object into an f64/i32 vec — the object reference would be
+        // coerced to a number and lost, so `[0,1,o].indexOf(o)` could never
+        // match (#786). Promote the whole vec to externref so object identity
+        // survives. Scoped to struct-ref / non-undefined externref elements:
+        // strings and numbers keep the numeric/native-string fast path.
+        const hasObjectElem = expr.elements.some((el) => {
+          if (ts.isOmittedExpression(el) || _isUndefinedLike(el) || ts.isSpreadElement(el)) return false;
+          if (el.kind === ts.SyntaxKind.StringLiteral) return false;
+          const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
+          return t.kind === "ref" || t.kind === "ref_null" || t.kind === "externref";
+        });
+        if (hasObjectElem) {
+          elemWasm = { kind: "externref" };
+        }
       }
     }
   }

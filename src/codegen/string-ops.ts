@@ -106,6 +106,14 @@ export function compileTemplateExpression(
     return compileNativeTemplateExpression(ctx, fctx, expr);
   }
 
+  // §13.2.8.6 / ToString(Symbol) throws — a Symbol substitution in a template
+  // literal must throw TypeError rather than stringify the internal id.
+  for (const span of expr.templateSpans) {
+    if (tryThrowOnSymbolStringCoercion(ctx, fctx, span.expression)) {
+      return { kind: "externref" };
+    }
+  }
+
   // Ensure string imports (concat, etc.) are available — template literals need concat
   addStringImports(ctx);
 
@@ -167,6 +175,13 @@ export function compileNativeTemplateExpression(
   fctx: FunctionContext,
   expr: ts.TemplateExpression,
 ): ValType | null {
+  // §13.2.8.6 / ToString(Symbol) throws — see compileTemplateExpression.
+  for (const span of expr.templateSpans) {
+    if (tryThrowOnSymbolStringCoercion(ctx, fctx, span.expression)) {
+      return nativeStringType(ctx);
+    }
+  }
+
   const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
   // #1618: the extern bridge (__str_to_extern/__str_from_extern) is JS-host-only
@@ -821,6 +836,8 @@ function createSyntheticStringLiteral(value: string, positionSource: ts.Node): t
  * null/undefined externref → string constant, struct ref → extern.convert_any.
  */
 function compileAndCoerceConcatOperand(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): void {
+  // §7.1.17 ToString(Symbol) throws — `"x" + sym` must throw TypeError.
+  if (tryThrowOnSymbolStringCoercion(ctx, fctx, operand)) return;
   const tsType = ctx.checker.getTypeAtLocation(operand);
   const valType = compileExpression(ctx, fctx, operand);
 
@@ -900,6 +917,16 @@ export function compileStringBinaryOp(
   expr: ts.BinaryExpression,
   op: ts.SyntaxKind,
 ): ValType | null {
+  // §7.1.17 ToString(Symbol) throws — `str + sym` / `sym + str` must throw
+  // TypeError before any concat lowering (native, batched, or host) runs.
+  if (op === ts.SyntaxKind.PlusToken) {
+    if (tryThrowOnSymbolStringCoercion(ctx, fctx, expr.left)) {
+      return ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 ? nativeStringType(ctx) : { kind: "externref" };
+    }
+    if (tryThrowOnSymbolStringCoercion(ctx, fctx, expr.right)) {
+      return ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 ? nativeStringType(ctx) : { kind: "externref" };
+    }
+  }
   // Fast mode: native string operations
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
     const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
@@ -1364,6 +1391,25 @@ function emitTypeErrorThrow(ctx: CodegenContext, fctx: FunctionContext, msg: str
     fctx.body.push({ op: "global.get", index: strIdx } as Instr);
     fctx.body.push({ op: "throw", tagIdx } as Instr);
   }
+}
+
+/**
+ * §13.5.3 / §7.1.17 ToString(Symbol) throws a TypeError. An implicit
+ * string coercion of a statically Symbol-typed expression (template-literal
+ * substitution, `+` concatenation) must therefore throw rather than silently
+ * stringify the internal symbol id. Returns true when a throw was emitted (the
+ * caller must NOT compile the operand — the throw replaces it).
+ */
+function tryThrowOnSymbolStringCoercion(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): boolean {
+  let argTsType: ts.Type | undefined;
+  try {
+    argTsType = ctx.checker.getTypeAtLocation(arg);
+  } catch {
+    return false;
+  }
+  if (!argTsType || !isSymbolType(argTsType)) return false;
+  emitTypeErrorThrow(ctx, fctx, "TypeError: Cannot convert a Symbol value to a string");
+  return true;
 }
 
 function tryThrowOnBigIntOrSymbolArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): boolean {
