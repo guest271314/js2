@@ -633,6 +633,14 @@ export interface CodegenContext {
      */
     wrapperUserParams: ValType[];
     wrapperResult: ValType | undefined;
+    /**
+     * (#1340) True when the underlying callable is a plain function declaration
+     * with no hidden `this` param (so the finalizer must NOT slice off the
+     * first param of `sig.params` and must NOT emit a `ref.null` prologue for
+     * `this`). Methods leave this false/undefined and keep the legacy
+     * `this`-drop behaviour.
+     */
+    noThisParam?: boolean;
   }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
@@ -686,6 +694,12 @@ export interface CodegenContext {
    *  `__obj_meth_tramp_${className}_${methodName}_cached` and is also reused
    *  across all access sites to avoid bloating mod.functions. */
   methodClosureGlobals: Map<string, number>;
+  /** (#1340) Singleton closure-struct externref globals for top-level function
+   *  declarations used as first-class values. Keyed by function name. Ensures
+   *  `foo === foo` and so sidecar writes on `foo.prototype` are observed by
+   *  later reads. Mirrors `methodClosureGlobals` (#1394) for the function-decl
+   *  case where the same JS identifier is read as a value at multiple sites. */
+  funcClosureGlobals: Map<string, number>;
   /** Whether targeting WASI */
   wasi: boolean;
   /** Whether targeting standalone (no JS host, no WASI runtime — #1470).
