@@ -2025,6 +2025,44 @@ function compilePropertyAssignment(
     }
   }
 
+  // #1697: `this.X = v` / `this.#X = v` inside a static method body —
+  // mirror the read path's ThisKeyword+staticContext arm in
+  // property-access.ts:1427. Without this, the LHS is `this` (not an
+  // Identifier in classSet) and the static-prop assignment falls through to
+  // the generic struct-write path, which silently drops the write because
+  // `this` is the class constructor (not a per-instance struct).
+  if (
+    target.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
+    let enclosingClass: string | undefined = fctx.enclosingClassName;
+    if (!enclosingClass) {
+      const fname = fctx.name;
+      let pos = -1;
+      while (!enclosingClass) {
+        pos = fname.indexOf("_", pos + 1);
+        if (pos < 0) break;
+        const candidate = fname.substring(0, pos);
+        if (candidate && ctx.classSet.has(candidate)) enclosingClass = candidate;
+      }
+    }
+    if (enclosingClass) {
+      const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
+      const fullName = `${enclosingClass}_${propName}`;
+      const globalIdx = ctx.staticProps.get(fullName);
+      if (globalIdx !== undefined) {
+        const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+        const valType = compileExpression(ctx, fctx, value, globalDef?.type);
+        if (!valType) return null;
+        const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
+        fctx.body.push({ op: "local.tee", index: tmpVal });
+        fctx.body.push({ op: "global.set", index: globalIdx });
+        fctx.body.push({ op: "local.get", index: tmpVal });
+        return valType;
+      }
+    }
+  }
+
   // Handle externref property set
   if (isExternalDeclaredClass(objType, ctx.checker)) {
     const externSetResult = compileExternPropertySet(ctx, fctx, target, value, objType);
