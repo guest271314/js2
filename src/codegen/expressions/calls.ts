@@ -2366,6 +2366,43 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (callResult !== undefined) return callResult;
     }
 
+    // (#1337) Function.prototype.bind.call(fn, thisArg, ...args) reshape.
+    // Mirrors the #1596 reshape for Function.prototype.{apply,call}.call: rewrite
+    // to `fn.bind(thisArg, ...args)` so the existing #1632a bind dispatch fires
+    // and routes through __bind_function instead of leaking to the host's
+    // Function.prototype.bind on a wasm-struct receiver ("Bind must be called
+    // on a function"). Only the outer `.call` form is matched —
+    // `Function.prototype.bind.apply(fn, [thisArg, ...args])` is rare.
+    //
+    // Narrowing: only fires when the `fn` target has TS call signatures.
+    // This preserves the legacy "Function.prototype.bind.call(undefined, ...)
+    // throws TypeError" behaviour for spec tests like S15.3.4.5_A13 — the
+    // bind dispatch only intercepts callable receivers; non-callable
+    // targets fall through to the legacy host path which throws correctly.
+    if (
+      propAccess.name.text === "call" &&
+      ts.isPropertyAccessExpression(propAccess.expression) &&
+      propAccess.expression.name.text === "bind" &&
+      ts.isPropertyAccessExpression(propAccess.expression.expression) &&
+      propAccess.expression.expression.name.text === "prototype" &&
+      ts.isIdentifier(propAccess.expression.expression.expression) &&
+      propAccess.expression.expression.expression.text === "Function" &&
+      expr.arguments.length >= 1
+    ) {
+      const fnExpr = expr.arguments[0]!;
+      const fnTsType = ctx.checker.getTypeAtLocation(fnExpr);
+      const fnHasCallSig = (fnTsType?.getCallSignatures?.()?.length ?? 0) > 0;
+      if (fnHasCallSig) {
+        const reshapedArgs = expr.arguments.slice(1);
+        const reshapedProp = ts.factory.createPropertyAccessExpression(fnExpr as ts.LeftHandSideExpression, "bind");
+        ts.setTextRange(reshapedProp, propAccess);
+        const reshapedCall = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+        ts.setTextRange(reshapedCall, expr);
+        (reshapedCall as any).parent = expr.parent;
+        return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+    }
+
     // Handle fn.bind(thisArg, ...partialArgs).
     //
     // (#1632a) JS-host mode: lower to `__bind_function(target, thisArg, argsArray,
@@ -9364,8 +9401,30 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
   // Handle fn.bind(thisArg, ...partialArgs)(...remainingArgs) — immediate bind+call
   // Transform to fn(...partialArgs, ...remainingArgs), dropping thisArg.
+  // (#1337) Also accept the equivalent Function.prototype.bind.call(fn, thisArg, ...) form
+  // by reshaping bindCall to the method form before pattern-matching.
   if (ts.isCallExpression(expr.expression)) {
-    const bindCall = expr.expression;
+    let bindCall = expr.expression;
+    if (
+      ts.isPropertyAccessExpression(bindCall.expression) &&
+      bindCall.expression.name.text === "call" &&
+      ts.isPropertyAccessExpression(bindCall.expression.expression) &&
+      bindCall.expression.expression.name.text === "bind" &&
+      ts.isPropertyAccessExpression(bindCall.expression.expression.expression) &&
+      bindCall.expression.expression.expression.name.text === "prototype" &&
+      ts.isIdentifier(bindCall.expression.expression.expression.expression) &&
+      bindCall.expression.expression.expression.expression.text === "Function" &&
+      bindCall.arguments.length >= 1
+    ) {
+      const fnExpr = bindCall.arguments[0]!;
+      const reshapedArgs = bindCall.arguments.slice(1);
+      const reshapedProp = ts.factory.createPropertyAccessExpression(fnExpr as ts.LeftHandSideExpression, "bind");
+      ts.setTextRange(reshapedProp, bindCall.expression);
+      const reshapedInner = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+      ts.setTextRange(reshapedInner, bindCall);
+      (reshapedInner as any).parent = expr;
+      bindCall = reshapedInner;
+    }
     if (ts.isPropertyAccessExpression(bindCall.expression) && bindCall.expression.name.text === "bind") {
       const bindTarget = bindCall.expression.expression;
 

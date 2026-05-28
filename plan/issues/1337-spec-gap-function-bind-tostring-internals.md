@@ -292,3 +292,92 @@ then implement Slice A on top of it. The metadata-restamp logic
 the JS wrapper, before `Function.prototype.bind.call`) is straight
 JavaScript and doesn't need debugging — the open question is the
 codegen / coerce side.
+
+## Progress (2026-05-28, dev-1337-bind-call)
+
+Two slices landed since the original investigation:
+
+1. **Slice A landed via #1632a (PR #796, commit `feb4c7697`)** —
+   `__bind_function` host helper + the `.bind(...)` direct-form dispatch
+   at `calls.ts:~2389` (`compileFunctionBind`). Wasm-struct receivers are
+   wrapped via `_wrapWasmClosure` and stamped with codegen-supplied
+   `nameHint` / `lengthHint` before delegating to the host's
+   `Function.prototype.bind`. The bound result is a real JS bound-function
+   exotic with correct `.name === "bound " + target.name`,
+   `.length === max(0, target.length - boundArgs.length)`, `[[Call]]`,
+   `[[Construct]]`.
+
+2. **Partial Slice B landed via #1463 (`funcSourceText` map)** —
+   `Function.prototype.toString()` on top-level function declarations
+   returns the captured source text. Anything else (built-ins, method
+   refs, arrow functions, expressions) still gets the
+   `"function () { [native code] }"` placeholder. The placeholder is
+   spec-compliant for built-ins per §20.2.3.6 (NativeFunction grammar);
+   only "the toString of a user-defined arrow / method expression"
+   diverges from spec.
+
+### Current baseline (origin/main @ 4f536e4a9, 2026-05-28)
+
+- `built-ins/Function/prototype/bind`: 28 / 100 (28.0%)
+- `built-ins/Function/prototype/toString`: 71 / 80 (**88.8%**) —
+  effectively met by the Slice A + #1463 partial Slice B combination.
+- `built-ins/Function/internals`: 3 / 8 (37.5%) — was 1 / 8 at the
+  original issue baseline.
+- `built-ins/Function` (excl. prototype subtrees): 115 / 321 (35.8%).
+
+### This change: indirect `Function.prototype.bind.call` reshape
+
+Top failure pattern in the bind bucket is "Bind must be called on a
+function" (~30 tests) from the `Function.prototype.bind.call(fn, thisArg,
+...args)` form, which `compileFunctionBind` doesn't intercept because the
+outer call's `propAccess.name === "call"`, not `"bind"`. This change
+mirrors the existing #1596 reshape for `Function.prototype.apply.call`:
+detect the indirect shape and rewrite to `fn.bind(thisArg, ...args)`, so
+the existing #1632a dispatch fires.
+
+Two edits in `src/codegen/expressions/calls.ts`:
+
+1. At `~2369` (top of `compileCallExpression`'s `propAccess` block):
+   reshape `Function.prototype.bind.call(fn, ...)` → `fn.bind(...)` and
+   recurse. Narrowed to `fn` targets that have TS call signatures, so
+   `Function.prototype.bind.call(undefined, {})` still throws TypeError
+   per S15.3.4.5_A13 (the legacy host path catches it).
+
+2. At `~9402` (immediate-bind+call peephole): also accept the indirect
+   shape so `Function.prototype.bind.call(fn, thisArg, ...partials)
+   (...remaining)` reshapes inline before the existing identifier-bind
+   detection runs. This unlocks the IIFE-inlining path for the indirect
+   form — same wins as `fn.bind(thisArg, ...partials)(...remaining)`
+   already gets.
+
+### Outcome
+
+- Eliminates "Bind must be called on a function" V8 rejection for the
+  indirect form (~30 tests' error category changes from `runtime_error`
+  to `assertion_fail` — they now reach the assertion phase).
+- Enables immediate-call optimization for the indirect form (verified
+  with `tests/issue-1337-bind-call.test.ts`).
+- **Does NOT flip the bulk of those ~30 tests to PASS** — most use the
+  `var newFunc = bind.call(...); newFunc()` deferred pattern, which
+  hits the broader #1632a documented var-storage gap: an `any`-typed
+  local that stores an externref bound function doesn't dispatch on a
+  later `()` call (returns null). That gap requires a separate fix
+  (either an `__extern_call` host helper for `any`-typed locals, or
+  type narrowing on the bind result so the LHS doesn't coerce to a
+  closure-struct ref). Tracked under #1632a as the open Layer-2 work.
+
+### Tests added
+
+- `tests/issue-1337-bind-call.test.ts` — 8 cases covering metadata
+  reads (typeof / .length / .name), immediate-call shape with partials
+  (number + string), the negative spec gate (Math.max.call unaffected).
+
+### Out of scope
+
+- The var-storage round-trip — see #1632a / dev-1303 notes point 3
+  above. Without that, `var bound = bind.call(fn, ...); bound()` still
+  returns null even though the bind result is correct.
+- Source-text retention beyond identifier receivers — #1463 covers
+  top-level declarations; the remaining toString gap is concentrated
+  in the `built-in-function-object.js` Reflect-walk pattern which is
+  a broad-surface workload, not a localized fix.
