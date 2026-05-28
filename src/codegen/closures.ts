@@ -3102,6 +3102,16 @@ export function emitObjectMethodAsClosure(
  */
 export function finalizeMethodTrampolines(ctx: CodegenContext): void {
   for (const t of ctx.pendingMethodTrampolines) {
+    // (#1525b) If the captured methodFuncIdx now resolves to an IMPORT (i.e.,
+    // < ctx.numImportFuncs at the time of finalize), the late-import shift
+    // machinery missed this entry. Fail loudly rather than emit invalid Wasm.
+    if (t.methodFuncIdx < ctx.numImportFuncs) {
+      throw new Error(
+        `pendingMethodTrampolines: methodFuncIdx ${t.methodFuncIdx} ` +
+          `points at import "${ctx.mod.imports[t.methodFuncIdx]?.name}" — ` +
+          `shift walker missed this entry (#1525b regression)`,
+      );
+    }
     const sig = getFuncSignature(ctx, t.methodFuncIdx);
     if (!sig || sig.params.length === 0) continue;
     const methodUserParams = sig.params.slice(1);

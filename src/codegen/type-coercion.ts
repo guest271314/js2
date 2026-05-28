@@ -1781,9 +1781,16 @@ export function coerceType(
                 fctx.body.push({ op: "f64.const", value: NaN });
               }
             } else if (closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null") {
-              // valueOf returned an object ref — drop and push NaN
+              // (#1525b §7.1.1.1 step 6) valueOf returned an object — must try
+              // toString and throw TypeError if both return non-primitives.
+              // Route through the host __to_primitive helper (same path the
+              // eqref subpath uses at line ~1882, fixed by #1253). Re-push the
+              // ORIGINAL struct so the host sees it; the valueOf result is
+              // already dropped. Pre-#1525b this silently emitted NaN.
               fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "f64.const", value: NaN });
+              fctx.body.push({ op: "local.get", index: structLocal });
+              const hintRefRet = toPrimitiveHint ?? "number";
+              emitToPrimitiveHostCall(ctx, fctx, "f64", hintRefRet);
             }
             // f64 return → value is already on stack
             cleanup();
@@ -1907,9 +1914,21 @@ export function coerceType(
           // function rather than a closure stored in the struct field.
           const standaloneValueOf = ctx.funcMap.get(`${name}_valueOf`);
           if (standaloneValueOf !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: standaloneValueOf });
             const funcType = ctx.mod.types[ctx.mod.functions[standaloneValueOf - ctx.numImportFuncs]?.typeIdx ?? -1];
             const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
+            // (#1525b §7.1.1.1 step 6) For object-ref return, we must re-route
+            // through the host helper using the ORIGINAL struct. Save it before
+            // the call consumes it. For other return kinds the original code
+            // path is unchanged.
+            const needsHostFallback = retKind === "ref" || retKind === "ref_null";
+            let savedStructLocal = -1;
+            if (needsHostFallback) {
+              savedStructLocal = allocLocal(fctx, `__svo_struct_${fctx.locals.length}`, from);
+              // Stack currently has `from` (struct) — duplicate via tee then
+              // restore via local.get so the call sees the same value.
+              fctx.body.push({ op: "local.tee", index: savedStructLocal });
+            }
+            fctx.body.push({ op: "call", funcIdx: standaloneValueOf });
             if (retKind === "i32") {
               fctx.body.push({ op: "f64.convert_i32_s" });
             } else if (retKind === "externref" || retKind === "ref_extern") {
@@ -1922,10 +1941,13 @@ export function coerceType(
                 fctx.body.push({ op: "drop" });
                 fctx.body.push({ op: "f64.const", value: NaN });
               }
-            } else if (retKind === "ref" || retKind === "ref_null") {
-              // valueOf returned an object ref — drop and push NaN
+            } else if (needsHostFallback) {
+              // (#1525b) valueOf returned an object — try toString and throw
+              // TypeError per §7.1.1.1. Mirror the eqref subpath at ~line 1882.
               fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "f64.const", value: NaN });
+              fctx.body.push({ op: "local.get", index: savedStructLocal });
+              const hintSvoRet = toPrimitiveHint ?? "number";
+              emitToPrimitiveHostCall(ctx, fctx, "f64", hintSvoRet);
             }
             return;
           }
