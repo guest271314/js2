@@ -2042,8 +2042,17 @@ function _safeGet(obj: any, key: any): any {
   return undefined;
 }
 
-/** Safe property set: works on both JS objects and WasmGC structs. */
-function _safeSet(obj: any, key: any, val: any): void {
+/**
+ * Safe property set: works on both JS objects and WasmGC structs.
+ *
+ * When `exports` is provided AND `obj` is a WasmGC struct AND `key` is a
+ * string, the optional `__sset_<key>` export is invoked so the write lands
+ * in the real struct field (not only the sidecar). This is the writeback
+ * symmetric to `__sget_<key>` and unblocks struct-target `Object.assign`,
+ * `Reflect.set`, and `Object.defineProperty` data writes (#1630). Callers
+ * that don't pass `exports` get the prior sidecar-only behaviour.
+ */
+function _safeSet(obj: any, key: any, val: any, exports?: Record<string, Function>): void {
   if (obj == null) return;
   // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090)
   if (key != null && typeof key === "object" && _isWasmStruct(key)) {
@@ -2100,6 +2109,21 @@ function _safeSet(obj: any, key: any, val: any): void {
       const hasInDescs = descs?.has(propKey);
       if (!hasInSidecar && !hasInDescs) {
         return; // silent fail: non-extensible, new property not added
+      }
+    }
+    // Symmetric writeback through the compiled `__sset_<key>` export so the
+    // real WasmGC struct field gets updated, not just the sidecar (#1630).
+    // Falls back silently when the export is missing or doesn't match the
+    // struct's runtime type — sidecar still carries the value so host-side
+    // reads (Object.keys, JSON.stringify, dynamic-key reads) keep working.
+    if (typeof key === "string" && exports) {
+      const setter = exports[`__sset_${key}`];
+      if (typeof setter === "function") {
+        try {
+          setter(obj, val);
+        } catch {
+          /* not a field of this struct's runtime type */
+        }
       }
     }
     try {
@@ -2458,7 +2482,7 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       return val;
     },
     set(_t, key, val) {
-      _safeSet(obj, key, val);
+      _safeSet(obj, key, val, exports);
       return true;
     },
     has(_t, key) {
