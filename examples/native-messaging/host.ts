@@ -8,7 +8,12 @@
 //   https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 //
 // js2wasm support today:
-//   - stdin  : readStdin() drains fd=0 to EOF and returns it as a string (#1481)
+//   - stdin  : process.stdin.read(buf, offset?) does one binary, incremental
+//              fd=0 read into the caller's typed buffer at `offset`, returning
+//              the byte count (#1653) — the standard Node API. A read-until
+//              loop assembles exactly N bytes from possibly-short reads, so a
+//              continuous `while (true)` port loop can read the 4-byte LE
+//              header then exactly the declared body length.
 //   - stdout : process.stdout.write(bytes|str) writes raw bytes / a string to
 //              fd=1 with NO trailing newline (#1651) — used for the binary
 //              4-byte length prefix and the JSON body. console.log(str) also
@@ -16,34 +21,48 @@
 //   - stderr : console.error / console.warn write to fd=2 (#1493) — use these
 //              for debug output so they never corrupt the stdout protocol stream
 //
-// This is a drop-in Chrome host: it reads the framed JSON message off stdin,
+// This is a drop-in Chrome host: it reads each framed JSON message off stdin,
 // builds a JSON response, and writes it back to stdout with the correct
-// 4-byte little-endian length prefix. Run it with the wrapper in run.sh under
-// wasmtime/wasmer to exercise the read -> process -> respond loop end to end.
+// 4-byte little-endian length prefix, looping until stdin reaches EOF. Run it
+// with the wrapper in run.sh under wasmtime/wasmer to exercise the
+// read -> process -> respond loop end to end.
 
-declare function readStdin(): string;
 declare const process: {
+  stdin: { read(buf: Uint8Array, offset?: number): number };
   stdout: { write(chunk: Uint8Array | string): void };
   stderr: { write(chunk: Uint8Array | string): void };
 };
 
-// Decode the little-endian uint32 length that Chrome wrote as the first 4
-// bytes. readStdin() hands us the whole stdin buffer (prefix + body) as a
-// single string, one byte per code unit, so the prefix is the first 4 units.
-function decodeLength(framed: string): number {
-  const b0 = framed.charCodeAt(0) & 0xff;
-  const b1 = framed.charCodeAt(1) & 0xff;
-  const b2 = framed.charCodeAt(2) & 0xff;
-  const b3 = framed.charCodeAt(3) & 0xff;
-  return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+// Read exactly `n` bytes into the first `n` slots of `buf` via a read-until
+// loop, handling short reads (fd_read may return fewer bytes than requested).
+// Returns false on EOF (a read of <= 0 bytes before `n` were assembled) so the
+// caller can cleanly terminate the port loop.
+function readExact(buf: Uint8Array, n: number): boolean {
+  let got = 0;
+  while (got < n) {
+    const r = process.stdin.read(buf, got);
+    if (r <= 0) return false; // EOF or error
+    got = got + r;
+  }
+  return true;
 }
 
-// Extract exactly the declared body bytes after the 4-byte prefix — mirroring
-// the AssemblyScript reference's "read the length, then read that many body
-// bytes" loop, rather than blindly taking everything after the prefix (which
-// would mishandle a stdin buffer carrying trailing bytes).
-function readBody(framed: string, length: number): string {
-  return framed.substring(4, 4 + length);
+// Decode the little-endian uint32 length that Chrome wrote as the first 4
+// bytes of the frame.
+function decodeLength(header: Uint8Array): number {
+  return header[0] + header[1] * 256 + header[2] * 65536 + header[3] * 16777216;
+}
+
+// Build a string from the declared body bytes, one byte per code unit (the
+// Native Messaging JSON body is ASCII/UTF-8 framed by byte length).
+function bodyToString(body: Uint8Array, length: number): string {
+  let s = "";
+  let i = 0;
+  while (i < length) {
+    s = s + String.fromCharCode(body[i]);
+    i = i + 1;
+  }
+  return s;
 }
 
 // Write a framed Native Messaging response: the 4-byte little-endian length
@@ -57,19 +76,31 @@ function writeMessage(body: string): void {
 }
 
 export function main(): void {
-  // Read the whole framed message from stdin (Chrome sends one per launch in
-  // the simplest "stdio" wiring; a long-lived port would loop here).
-  const framed = readStdin();
-  const declaredLen = decodeLength(framed);
-  const body = readBody(framed, declaredLen);
+  // Long-lived port loop: read framed messages off stdin until EOF. A short
+  // read inside readExact is retried; a zero-byte read means the peer closed
+  // stdin, so we break and exit.
+  const header = new Uint8Array(4);
+  while (true) {
+    // 4-byte LE length prefix. EOF here = clean shutdown.
+    if (!readExact(header, 4)) break;
+    const declaredLen = decodeLength(header);
 
-  // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
-  // protocol stream. Chrome ignores the host's stderr.
-  console.error(`[host] received ${framed.length} chars, declared body length ${declaredLen}`);
+    // Read exactly the declared body bytes. A truncated body (EOF mid-frame)
+    // also terminates the loop.
+    const body = new Uint8Array(declaredLen);
+    if (!readExact(body, declaredLen)) break;
+    const bodyStr = bodyToString(body, declaredLen);
 
-  // Application logic: echo the received JSON body back inside a wrapper
-  // object. Real hosts would parse `body`, dispatch on a command field, and
-  // build a structured response.
-  const response = `{"received":${body},"runtime":"js2wasm+wasi"}`;
-  writeMessage(response);
+    // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
+    // protocol stream. Chrome ignores the host's stderr. The frame is the
+    // 4-byte LE prefix plus the declared body, so the total bytes consumed is
+    // 4 + declaredLen.
+    console.error(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}`);
+
+    // Application logic: echo the received JSON body back inside a wrapper
+    // object. Real hosts would parse `bodyStr`, dispatch on a command field,
+    // and build a structured response.
+    const response = `{"received":${bodyStr},"runtime":"js2wasm+wasi"}`;
+    writeMessage(response);
+  }
 }

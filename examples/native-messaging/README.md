@@ -31,8 +31,8 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 
 | Capability | Status | Detail |
 |------------|--------|--------|
-| Read framed message from stdin | works | `readStdin()` drains fd=0 to EOF as a string (#1481) |
-| Decode the 4-byte LE length prefix | works | byte math on `charCodeAt` of the first 4 code units |
+| Read framed message from stdin | works | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
+| Decode the 4-byte LE length prefix | works | byte math on the first 4 bytes of the read header buffer |
 | Route debug to stderr (fd=2) | works | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean |
 | Print a **string literal** to stdout | works | `console.log("…")` emits UTF-8 + `\n` (#1480) |
 | Print a **runtime/computed string** to stdout | works | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618) |
@@ -47,11 +47,13 @@ launch it (see "Run it" below).
 
 ## The host source
 
-[`host.ts`](./host.ts) reads the whole framed message from stdin, strips and
-decodes the 4-byte length prefix, logs diagnostics to **stderr** (so they never
-corrupt the stdout protocol stream), and writes a JSON response. The
-application logic — here, echoing the received body inside a wrapper object —
-is the part you'd replace for a real host.
+[`host.ts`](./host.ts) runs a continuous `while (true)` port loop: it reads the
+4-byte length prefix then exactly the declared body bytes via
+`process.stdin.read` read-until loops (a `readExact` helper handles short
+reads), logs diagnostics to **stderr** (so they never corrupt the stdout
+protocol stream), and writes a framed JSON response, looping until stdin
+reaches EOF. The application logic — here, echoing the received body inside a
+wrapper object — is the part you'd replace for a real host.
 
 ## Build to `.wasm`
 
@@ -85,7 +87,7 @@ message. The 4-byte prefix below (`\x0d\x00\x00\x00`) declares a 13-byte body
 `{"ping":true}`:
 
 ```bash
-printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/run.sh
+printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/nm_js2wasm.sh
 ```
 
 You'll see the host's stderr diagnostic (received-length + decoded body
@@ -108,8 +110,8 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 ## Wire it into Chrome
 
-1. **Build** `out/host.wasm` (above) and make sure `run.sh` is executable
-   (`chmod +x run.sh`).
+1. **Build** `out/host.wasm` (above) and make sure `nm_js2wasm.sh` is executable
+   (`chmod +x nm_js2wasm.sh`).
 
 2. **Edit `nm_js2wasm.json`**:
    - `path` → the **absolute** path to `nm_js2wasm.sh` (Chrome requires an absolute
