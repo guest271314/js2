@@ -1,7 +1,8 @@
 ---
 id: 1698
 title: "ArrayBuffer.prototype.slice() not implemented in --target wasi (dual-mode gap, same shape as #1654)"
-status: in-progress
+status: done
+completed: 2026-05-28
 created: 2026-05-28
 updated: 2026-05-28
 priority: high
