@@ -42,7 +42,7 @@ import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
-import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
+import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -909,6 +909,13 @@ export function generateModule(
     // Shape inference: detect array-like variables and override their types
     applyShapeInference(ctx, ast.checker, ast.sourceFile);
 
+    // (#1636-S1) Eagerly register the `__current_this` module global so that
+    // `ThisKeyword` resolution in free-function-closure bodies (compiled in
+    // the next phase) can emit `global.get __current_this`. The companion
+    // `__call_fn_method_N` exports that install / restore this global are
+    // emitted in post-processing.
+    ensureCurrentThisGlobal(ctx);
+
     // Third pass: compile function bodies
     compileDeclarations(ctx, ast.sourceFile);
 
@@ -1211,6 +1218,18 @@ export function generateModule(
     // closures of arity ≤ N; lower-arity closures see extra args dropped.
     emitClosureCallExport3(ctx);
     emitClosureCallExport4(ctx);
+
+    // #1636-S1 — emit __call_fn_method_N exports (N=0..2) for calling Wasm
+    // closures from JS with a host-supplied `this`-value. Same dispatch
+    // shape as __call_fn_N but takes a leading `thisVal: externref` that
+    // is stored in the `__current_this` module global across the inner
+    // `call_ref` so that `ThisKeyword` references in a free-function
+    // closure body observe the host's receiver. Used by `JSON.stringify`'s
+    // live walk to thread the holder identity through `toJSON` and the
+    // replacer function per §25.5.2.2 steps 2.b / 3.
+    emitClosureMethodCallExportN(ctx, 0);
+    emitClosureMethodCallExportN(ctx, 1);
+    emitClosureMethodCallExportN(ctx, 2);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -2552,6 +2571,251 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 }
 
 /**
+ * Emit `__call_fn_method_<arity>` export (#1636-S1): call an N-arg WasmGC
+ * closure from JS with a host-supplied `this`-value. Signature is
+ * `(thisVal: externref, closure: externref, arg0..arg<arity-1>) -> externref`.
+ *
+ * Dispatch shape mirrors `emitClosureCallExportN` (same funcref-type
+ * iteration, same arg-coercion + return-boxing). The only difference is
+ * that `thisVal` is stored in the `__current_this` module global before the
+ * inner `call_ref` and restored after, so `ThisKeyword` resolution in the
+ * closure body observes the host's receiver instead of the previous null
+ * fallback (see `ensureCurrentThisGlobal`).
+ *
+ * Returns early when no closures of arity ≤ N exist (no export emitted).
+ */
+function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void {
+  const mod = ctx.mod;
+  const exportName = `__call_fn_method_${arity}`;
+
+  // Local index conventions for the dispatcher body:
+  //   0           = thisVal externref
+  //   1           = closure externref
+  //   2..arity+1  = user arg externrefs (arity slots)
+  //   anyLocal    = anyref (closure-as-anyref after extern.convert_any)
+  //   structLocal = (ref null $baseWrapper) for the cast struct
+  //   funcLocal   = funcref extracted from struct field 0
+  //   prevThis    = externref save slot for nested invocations
+  const totalParams = arity + 2; // thisVal + closure + N user args
+  const anyLocal = totalParams;
+  const structLocal = totalParams + 1;
+  const funcLocal = totalParams + 2;
+  const prevThisLocal = totalParams + 3;
+
+  let baseWrapperIdx: number | undefined;
+  const seenFuncTypeIdx = new Set<number>();
+  const entries: {
+    funcTypeIdx: number;
+    returnType: ValType | null;
+    selfTypeIdx: number;
+    closureArity: number;
+  }[] = [];
+
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (info.paramTypes.length > arity) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    if (typeDef.superTypeIdx === -1 && baseWrapperIdx === undefined) {
+      baseWrapperIdx = typeIdx;
+    }
+    if (!seenFuncTypeIdx.has(info.funcTypeIdx)) {
+      seenFuncTypeIdx.add(info.funcTypeIdx);
+      const funcTypeDef = mod.types[info.funcTypeIdx];
+      const selfParam = funcTypeDef?.kind === "func" ? funcTypeDef.params[0] : undefined;
+      const selfTypeIdx =
+        selfParam && (selfParam.kind === "ref" || selfParam.kind === "ref_null")
+          ? (selfParam as { typeIdx: number }).typeIdx
+          : typeIdx;
+      entries.push({
+        funcTypeIdx: info.funcTypeIdx,
+        returnType: info.returnType,
+        selfTypeIdx,
+        closureArity: info.paramTypes.length,
+      });
+    }
+  }
+  if (entries.length === 0) return;
+
+  if (baseWrapperIdx === undefined) {
+    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
+      const typeDef = mod.types[typeIdx];
+      if (typeDef && typeDef.kind === "struct" && typeDef.superTypeIdx === -1) {
+        baseWrapperIdx = typeIdx;
+        break;
+      }
+    }
+  }
+  if (baseWrapperIdx === undefined) {
+    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
+      if (ctx.closureInfoByTypeIdx.get(typeIdx)!.paramTypes.length === arity) {
+        baseWrapperIdx = typeIdx;
+        break;
+      }
+    }
+  }
+  if (baseWrapperIdx === undefined) return;
+
+  addUnionImports(ctx);
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+
+  const params: ValType[] = [];
+  for (let i = 0; i < totalParams; i++) params.push({ kind: "externref" });
+  const exportFuncTypeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$${exportName}_type`);
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+  const bwIdx = baseWrapperIdx;
+
+  // Convert closure externref → anyref (closure is at local index 1).
+  const body: Instr[] = [];
+  body.push({ op: "local.get", index: 1 } as Instr);
+  body.push({ op: "any.convert_extern" } as Instr);
+  body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // Save previous __current_this for nesting safety, then install thisVal.
+  body.push({ op: "global.get", index: currentThisGlobalIdx } as Instr);
+  body.push({ op: "local.set", index: prevThisLocal } as Instr);
+  body.push({ op: "local.get", index: 0 } as Instr);
+  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
+
+  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
+
+  for (const entry of entries) {
+    const funcTypeDef = mod.types[entry.funcTypeIdx];
+
+    const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
+      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
+      if (paramType) {
+        if (paramType.kind === "f64") {
+          const unboxIdx = ctx.funcMap.get("__unbox_number");
+          if (unboxIdx !== undefined) {
+            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+          }
+        } else if (paramType.kind === "i32") {
+          const unboxIdx = ctx.funcMap.get("__unbox_number");
+          if (unboxIdx !== undefined) {
+            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "i32.trunc_f64_s" });
+          }
+        }
+      }
+      return ops;
+    };
+
+    // User args occupy locals [2..arity+1]. Push only as many as the
+    // closure declared.
+    const argInstrs: Instr[] = [];
+    for (let i = 0; i < entry.closureArity; i++) {
+      const paramType =
+        funcTypeDef?.kind === "func" && funcTypeDef.params.length >= i + 2 ? funcTypeDef.params[i + 1] : undefined;
+      argInstrs.push(...buildArgConversion(i + 2, paramType));
+    }
+
+    const callBody: Instr[] = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
+      ...argInstrs,
+      { op: "local.get", index: funcLocal } as Instr,
+      { op: "ref.cast", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "call_ref", typeIdx: entry.funcTypeIdx } as Instr,
+    ];
+
+    if (entry.returnType) {
+      if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
+        callBody.push({ op: "extern.convert_any" } as Instr);
+      } else if (entry.returnType.kind === "f64") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      } else if (entry.returnType.kind === "i32") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "f64.convert_i32_s" } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      } else if (entry.returnType.kind === "i64") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "f64.convert_i64_s" } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      }
+    } else {
+      callBody.push({ op: "ref.null.extern" } as Instr);
+    }
+
+    funcrefDispatch = [
+      { op: "local.get", index: funcLocal } as Instr,
+      { op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: callBody,
+        else: funcrefDispatch,
+      } as Instr,
+    ];
+  }
+
+  const structExtractAndDispatch: Instr[] = [
+    { op: "local.get", index: anyLocal } as Instr,
+    { op: "ref.cast", typeIdx: bwIdx } as Instr,
+    { op: "local.tee", index: structLocal } as Instr,
+    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: funcLocal } as Instr,
+    ...funcrefDispatch,
+  ];
+
+  // Result of the if-block stays on the stack as externref.
+  body.push({ op: "local.get", index: anyLocal } as Instr);
+  body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
+  body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: structExtractAndDispatch,
+    else: [{ op: "ref.null.extern" } as Instr],
+  } as Instr);
+
+  // Restore __current_this. The result value remains on the stack as the
+  // function's return value — we tee it through a local so we can restore
+  // the global without disturbing the return value.
+  // Stack at this point: [result : externref]
+  // Strategy: store result in a local, restore global, reload result.
+  // Reuse `prevThisLocal` is not safe since we still need its contents;
+  // use `anyLocal` is also not safe (externref vs anyref). Add a dedicated
+  // result-save slot at index `prevThisLocal + 1`.
+  const resultSaveLocal = prevThisLocal + 1;
+  body.push({ op: "local.set", index: resultSaveLocal } as Instr);
+  body.push({ op: "local.get", index: prevThisLocal } as Instr);
+  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
+  body.push({ op: "local.get", index: resultSaveLocal } as Instr);
+
+  mod.functions.push({
+    name: exportName,
+    typeIdx: exportFuncTypeIdx,
+    locals: [
+      { name: "__any", type: { kind: "anyref" } },
+      { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
+      { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__prev_this", type: { kind: "externref" } },
+      { name: "__result", type: { kind: "externref" } },
+    ],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: exportName,
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * Emit __is_closure(externref) -> i32 (#1504). Returns 1 if the value is a
  * registered Wasm closure struct, 0 otherwise. Used by the JS-side
  * `wrapExports` to discriminate closures from named structs / vecs so it can
@@ -3599,6 +3863,14 @@ export function generateMultiModule(
     for (const sf of multiAst.sourceFiles) {
       applyShapeInference(ctx, multiAst.checker, sf);
     }
+
+    // (#1636-S1) Eagerly register the `__current_this` module global so that
+    // `ThisKeyword` resolution in free-function-closure bodies (compiled in
+    // the next phase) can emit `global.get __current_this` instead of
+    // falling through to `undefined`. The companion `__call_fn_method_N`
+    // exports that install / restore this global are emitted later in
+    // post-processing — registering the global here keeps both sides in sync.
+    ensureCurrentThisGlobal(ctx);
 
     // Phase 3: Compile all function bodies
     for (const sf of multiAst.sourceFiles) {
@@ -7942,25 +8214,6 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     // so coercion can recover the closure and call it via call_ref
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
       wasmType = { kind: "eqref" };
-    }
-    // (#820m) Anonymous/named class expression as property value: TS infers
-    // the property type as `typeof <anonClass>` whose construct signature's
-    // `.prototype` walks back to the instance struct, so resolveWasmType
-    // hands us `ref <instance struct>`. But compileClassExpression emits an
-    // externref (closure-struct via extern.convert_any), and the struct cast
-    // on field assignment drops the value to ref.null. Widen any
-    // construct-signature-only property type (no call signatures) to
-    // externref so the closure ref is retained verbatim. Mirrors the
-    // empty-`{}` widening just above.
-    {
-      const constructSigs = propType.getConstructSignatures();
-      if (
-        constructSigs.length > 0 &&
-        callSigs.length === 0 &&
-        (wasmType.kind === "ref" || wasmType.kind === "ref_null")
-      ) {
-        wasmType = { kind: "externref" };
-      }
     }
     fields.push({ name: prop.name, type: wasmType, mutable: true });
     if (callSigs.length > 0) {
