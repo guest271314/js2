@@ -105,7 +105,7 @@ import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImport
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "../native-strings.js";
-import { emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
+import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
  * Known built-in global class/object names that compile to ref.null.extern
@@ -4135,10 +4135,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           const entry = userFields.find((e) => e.field.name === propLiteral);
 
           if (entry) {
-            // Look up flags from shapePropFlags
+            // #1629b: Object.defineProperty updates `definedPropertyFlags`
+            // (keyed `varName:propName`) but `shapePropFlags` is built AFTER
+            // body compilation finishes, so per-variable updates made during
+            // codegen are lost when the table is initialized with defaults.
+            // Read the per-variable map first, then fall back to the shape table.
             const flagsArr = ctx.shapePropFlags.get(structTypeIdx);
             const userFieldIdx = userFields.indexOf(entry);
-            const flags = flagsArr && userFieldIdx >= 0 ? flagsArr[userFieldIdx]! : 0x07; // default WEC
+            let flags = flagsArr && userFieldIdx >= 0 ? flagsArr[userFieldIdx]! : 0x07; // default WEC
+            if (ts.isIdentifier(arg0)) {
+              const dpfKey = `${arg0.text}:${propLiteral}`;
+              const dpfFlags = ctx.definedPropertyFlags.get(dpfKey);
+              if (dpfFlags !== undefined) flags = dpfFlags & 0x0f;
+            }
 
             // Compile the object expression
             const objType = compileExpression(ctx, fctx, arg0);
@@ -5414,6 +5423,20 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         if (dvResult) {
           return dvResult.kind === "get" ? dvResult.result : VOID_RESULT;
         }
+      }
+    }
+
+    // #1698 — native ArrayBuffer.prototype.slice in no-JS-host mode. Same
+    // dual-mode gap as #1654: JS host has slice natively, standalone has no
+    // runtime and the extern-class dispatch would drop the call. Emit a
+    // byte-by-byte copy into a fresh i32_byte vec.
+    if (noJsHost(ctx) && propAccess.name.text === "slice") {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "ArrayBuffer") {
+        const sliceResult = emitArrayBufferSlice(ctx, fctx, propAccess.expression, expr.arguments, (e, hint) =>
+          compileExpression(ctx, fctx, e, hint),
+        );
+        if (sliceResult) return sliceResult;
       }
     }
 
