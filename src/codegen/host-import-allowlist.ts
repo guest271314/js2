@@ -105,6 +105,20 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
   },
   {
     kind: "exact",
+    name: "bigint_toString",
+    signature: "(i64) -> externref",
+    trackingIssue: 1644,
+    reason: "BigInt#toString default radix 10 (Slice D).",
+  },
+  {
+    kind: "exact",
+    name: "bigint_toString_radix",
+    signature: "(i64, i32) -> externref",
+    trackingIssue: 1644,
+    reason: "BigInt#toString(radix) base 2-36 (Slice D).",
+  },
+  {
+    kind: "exact",
     name: "number_toFixed",
     signature: "(f64, i32) -> externref",
     trackingIssue: 1335,

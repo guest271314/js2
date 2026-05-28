@@ -5871,6 +5871,58 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return { kind: "externref" };
       }
     }
+    // (#1644 Slice D) BigInt.prototype.toString — bigint receivers cross the
+    // boundary as i64. Mirror the number branch: validate radix range (2-36),
+    // throw RangeError otherwise, then call bigint_toString_radix (or the
+    // 1-arg bigint_toString for the default radix-10 case).
+    if (isBigIntType(receiverType) && propAccess.name.text === "toString") {
+      let radixLocalIdx: number | undefined;
+      if (expr.arguments.length > 0) {
+        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+        fctx.body.push({ op: "f64.floor" });
+        radixLocalIdx = allocLocal(fctx, `__bi_radix_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.tee", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.const", value: 2 });
+        fctx.body.push({ op: "f64.lt" });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.const", value: 36 });
+        fctx.body.push({ op: "f64.gt" });
+        fctx.body.push({ op: "i32.or" });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.ne" });
+        fctx.body.push({ op: "i32.or" });
+        {
+          const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
+          addStringConstantGlobal(ctx, rangeErrMsg);
+          const tagIdx = ensureExnTag(ctx);
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            else: [],
+          });
+        }
+      }
+      const exprType = compileExpression(ctx, fctx, propAccess.expression);
+      if (exprType && exprType.kind === "i32") {
+        fctx.body.push({ op: "i64.extend_i32_s" });
+      }
+      if (radixLocalIdx !== undefined) {
+        const radixFuncIdx = ctx.funcMap.get("bigint_toString_radix");
+        if (radixFuncIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: radixLocalIdx });
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          fctx.body.push({ op: "call", funcIdx: radixFuncIdx });
+          return { kind: "externref" };
+        }
+      }
+      const funcIdx = ctx.funcMap.get("bigint_toString");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+    }
     if (isNumberType(receiverType) && propAccess.name.text === "toFixed") {
       const exprType = compileExpression(ctx, fctx, propAccess.expression);
       if (exprType && exprType.kind === "i32") {
