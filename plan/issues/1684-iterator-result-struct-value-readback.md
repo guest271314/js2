@@ -1,9 +1,10 @@
 ---
 id: 1684
 title: "Iterator-result object literal `{ value, done }` from a nested closure reads back value=0 / done never truthy (closure-backed iterator value round-trip)"
-status: ready
+status: done
 created: 2026-05-27
-updated: 2026-05-27
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
