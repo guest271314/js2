@@ -64,6 +64,189 @@ export function isDataViewAccessor(name: string): boolean {
   return Object.prototype.hasOwnProperty.call(DV_ACCESSORS, name);
 }
 
+/**
+ * #1698 — `ab.slice(begin?, end?)` in no-JS-host mode. Returns a new
+ * ArrayBuffer (i32_byte vec struct) holding bytes `[begin, end)` of the
+ * source, with the spec §25.1.5.3 negative-offset / clamp / default-end
+ * normalisation applied at runtime. Receiver and result are externref
+ * (the user's `const sliced = ab.slice(...)` local is typed externref;
+ * matching that here keeps `new Uint8Array(sliced)` working without
+ * additional coercion).
+ */
+export function emitArrayBufferSlice(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: import("../ts-api.js").ts.Expression,
+  args: readonly import("../ts-api.js").ts.Expression[],
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return null;
+
+  // Recover the source vec struct from the receiver (externref → struct).
+  const srcVecLocal = allocLocal(fctx, `__abs_src_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: vecTypeIdx,
+  });
+  const recvType = compileExpr(receiver);
+  if (recvType && recvType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
+    if ("typeIdx" in recvType && recvType.typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    return null;
+  }
+  fctx.body.push({ op: "local.set", index: srcVecLocal } as Instr);
+
+  // srcLen = src.length (field 0); srcArr = src.data (field 1).
+  const srcLenLocal = allocLocal(fctx, `__abs_srclen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: srcLenLocal } as Instr);
+  const srcArrLocal = allocLocal(fctx, `__abs_srcarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: arrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: srcArrLocal } as Instr);
+
+  // begin (default 0). Spec §25.1.5.3 steps 5-7: ToIntegerOrInfinity, then
+  // negative = max(srcLen + begin, 0), positive = min(begin, srcLen).
+  const beginLocal = allocLocal(fctx, `__abs_begin_${fctx.locals.length}`, { kind: "i32" });
+  if (args.length >= 1) {
+    compileExpr(args[0]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: beginLocal } as Instr);
+  emitNormalizeIndex(fctx, beginLocal, srcLenLocal);
+
+  // end (default srcLen). Same clamp/negate.
+  const endLocal = allocLocal(fctx, `__abs_end_${fctx.locals.length}`, { kind: "i32" });
+  if (args.length >= 2) {
+    compileExpr(args[1]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "local.set", index: endLocal } as Instr);
+    emitNormalizeIndex(fctx, endLocal, srcLenLocal);
+  } else {
+    fctx.body.push({ op: "local.get", index: srcLenLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: endLocal } as Instr);
+  }
+
+  // sliceLen = max(end - begin, 0)
+  const sliceLenLocal = allocLocal(fctx, `__abs_slen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: endLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: beginLocal } as Instr);
+  fctx.body.push({ op: "i32.sub" } as Instr);
+  fctx.body.push({ op: "local.set", index: sliceLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sliceLenLocal } as Instr],
+    else: [],
+  } as unknown as Instr);
+
+  // dstArr = new i32[sliceLen]
+  const dstArrLocal = allocLocal(fctx, `__abs_dstarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: arrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dstArrLocal } as Instr);
+
+  // for (i = 0; i < sliceLen; i++) dstArr[i] = srcArr[begin + i]
+  const iLocal = allocLocal(fctx, `__abs_i_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: sliceLenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: dstArrLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: srcArrLocal } as Instr,
+    { op: "local.get", index: beginLocal } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: iLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // struct.new vec(sliceLen, dstArr); return as externref (matches the
+  // externref local that user code declares for the slice() result).
+  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * Normalize an index in-place per spec §25.1.5.3:
+ *   if (idx < 0) idx = max(srcLen + idx, 0);
+ *   else         idx = min(idx, srcLen);
+ */
+function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: number): void {
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  const negBranch: Instr[] = [
+    // idx = srcLen + idx; if (idx < 0) idx = 0
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "local.get", index: idxLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: idxLocal } as Instr,
+    { op: "local.get", index: idxLocal } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.lt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: idxLocal } as Instr],
+      else: [],
+    } as unknown as Instr,
+  ];
+  const posBranch: Instr[] = [
+    // if (idx > srcLen) idx = srcLen
+    { op: "local.get", index: idxLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.gt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: idxLocal } as Instr],
+      else: [],
+    } as unknown as Instr,
+  ];
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: negBranch,
+    else: posBranch,
+  } as unknown as Instr);
+}
+
 /** Lazily ensure the i32_byte vec type exists and return its struct/array indices. */
 function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: number } {
   const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
