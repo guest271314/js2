@@ -2093,6 +2093,36 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
 
+      // Sub-fix 3 (#1596): Function.prototype.{apply,call}.call(fn, ...) reshape.
+      // Rewrite `Function.prototype.apply.call(fn, thisArg, argsArr)` to
+      // `fn.apply(thisArg, argsArr)` (and analogous for .call.call) so the
+      // existing Case 0 / Case 1 handlers fire. Only the outer `.call` form is
+      // matched — `Function.prototype.apply.apply(fn, [thisArg, argsArr])` is
+      // rare and would need a packed-args reshape.
+      if (
+        isCall &&
+        ts.isPropertyAccessExpression(innerExpr) &&
+        (innerExpr.name.text === "apply" || innerExpr.name.text === "call") &&
+        ts.isPropertyAccessExpression(innerExpr.expression) &&
+        innerExpr.expression.name.text === "prototype" &&
+        ts.isIdentifier(innerExpr.expression.expression) &&
+        innerExpr.expression.expression.text === "Function" &&
+        expr.arguments.length >= 1
+      ) {
+        const innerMethod = innerExpr.name.text; // "apply" or "call"
+        const fnExpr = expr.arguments[0]!;
+        const reshapedArgs = expr.arguments.slice(1);
+        const reshapedProp = ts.factory.createPropertyAccessExpression(
+          fnExpr as ts.LeftHandSideExpression,
+          innerMethod,
+        );
+        ts.setTextRange(reshapedProp, propAccess);
+        const reshapedCall = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+        ts.setTextRange(reshapedCall, expr);
+        (reshapedCall as any).parent = expr.parent;
+        return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+
       // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
       // A compiled function is a WasmGC funcref/struct, not a JS Function, so a
       // host-side `.apply`/`.call` lookup fails ("apply is not a function").
