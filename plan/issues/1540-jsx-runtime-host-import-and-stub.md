@@ -1,9 +1,10 @@
 ---
 id: 1540
 title: "JSX runtime: bind _jsx/_jsxs/_Fragment as host import (default) and standalone stub"
-status: ready
+status: done
+completed: 2026-05-23
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -424,3 +425,28 @@ hardcode `_jsx`.
   plumbing is a small follow-up; this issue assumes the default
   (`react/jsx-runtime`) for codegen-emitted import names but the
   resolver already handles arbitrary specifiers via `intent.specifier`.
+
+## Resolution (2026-05-28)
+
+PR #429 merged on **2026-05-23** implemented the full JSX runtime binding —
+`isJsxRuntime` detection in `preprocessImports`, `JsxRuntimeImport` plumbed
+through `PreprocessResult`, `__jsx_runtime_*` imports recognised by
+`compiler/import-manifest.ts`, call-site routing in
+`src/codegen/expressions/calls.ts:1738`, and the `resolveImport` "jsx_runtime"
+case in `src/runtime.ts:8054` with the built-in React-shaped fallback
+(`$$typeof: Symbol.for("react.element")`, `Fragment: Symbol.for("react.fragment")`).
+
+All 9 tests in `tests/issue-1540.test.ts` pass on current main as of
+2026-05-28: intrinsic-tag elements, built-in fallback shape, stable
+`_Fragment` identity, user-supplied `deps.jsxRuntime` override, module-shaped
+`deps[specifier]` lookup, `_jsxs` multi-child variant, aliased local names
+(`jsx as h`), Preact specifier flow, and component-reference round-trip.
+
+Standalone (`--target wasi`) Wasm-native `$JsxNode` struct emission is **out
+of scope and not implemented** — that path remains a follow-up gated on the
+broader `--target wasi` plain-object story. The host-mode binding is the only
+real-world path JSX users hit today.
+
+The issue file was left at `status: ready` after PR #429 merged because the
+impl PR didn't flip the frontmatter; this commit catches the bookkeeping up
+to the code reality.
