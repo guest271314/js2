@@ -75,21 +75,47 @@ describe("#1596 Function.prototype.apply/.call on function expressions", () => {
     expect(e.test()).toBe(42);
   });
 
-  // Module-level IIFE-with-trailing-call pattern: (function(){...}.apply(...)).
+  it("Function.prototype.apply.call(fn, thisArg, argsArr) forwards arguments", async () => {
+    const e = await compileAndRun(`
+      export function test(): number {
+        function g(a: number, b: number): number { return a + b; }
+        return Function.prototype.apply.call(g, null, [1, 2]);
+      }
+    `);
+    expect(e.test()).toBe(3);
+  });
+
+  it("Function.prototype.call.call(fn, thisArg, ...args) forwards positional args", async () => {
+    const e = await compileAndRun(`
+      export function test(): number {
+        function g(a: number, b: number, c: number): number { return a + b + c; }
+        return Function.prototype.call.call(g, null, 1, 2, 4);
+      }
+    `);
+    expect(e.test()).toBe(7);
+  });
+
+  it("Function.prototype.apply.call on a function literal", async () => {
+    const e = await compileAndRun(`
+      export function test(): number {
+        return Function.prototype.apply.call(
+          function(a: number, b: number): number { return a * b; },
+          null,
+          [3, 7],
+        );
+      }
+    `);
+    expect(e.test()).toBe(21);
+  });
+
+  // Module-level outer-paren CallExpression shape — `(function(){...}.apply(...))`.
   // The outer parens wrap the whole call expression (not the function literal).
-  // Before the fix this ExpressionStatement was silently dropped from
-  // `__module_init` because the collector only matched bare
-  // `isCallExpression`/`isNewExpression`, never a `ParenthesizedExpression`
-  // around them. This is the shape test262 generates for the
-  // `spread-sngl-literal.js` / `spread-mult-literal.js` family.
-  // Module-level IIFE-with-trailing-call shape `(function(){...}.apply(...))`
-  // — the test262 spread-sngl-literal.js / spread-mult-literal.js family's
-  // exact AST. The outer parens wrap the whole call expression, not the
-  // function literal. Before the fix this ExpressionStatement was silently
-  // dropped from `__module_init` because the collector only matched bare
-  // `isCallExpression`/`isNewExpression`, never a `ParenthesizedExpression`
-  // around them. We use a plain CallExpression-on-property-access shape with
-  // an outer paren around the whole statement, matching the test262 source.
+  // This is the exact AST shape test262 emits in the spread-sngl-literal.js /
+  // spread-mult-literal.js family. Before the fix the module-init collector
+  // only matched ExpressionStatements whose direct child was
+  // `isCallExpression`/`isNewExpression` — never a `ParenthesizedExpression`
+  // around them — so the entire `.apply(...)` call was silently dropped from
+  // `__module_init`.
   it("module-level outer-paren CallExpression — was silently dropped from __module_init", async () => {
     const e = await compileAndRun(`
       var callCount = 0;
