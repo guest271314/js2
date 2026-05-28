@@ -5301,6 +5301,17 @@ assert._isSameValue = isSameValue;
           // struct. Tries multiple arities for closures since the user
           // function may declare 1–4 params (replace callback spec passes
           // (match, ...captures, offset, string)).
+          //
+          // (#1329-b3) The wrapping callable also routes the closure's
+          // RETURN value through `_wrapForHost` when it comes back as a
+          // wasmGC struct. V8's @@replace then performs `ToString` on the
+          // returned value (spec §22.2.5.8 step 14.k.vi — `replacement =
+          // ToString(replValue)`); without the host proxy the engine sees
+          // an opaque WebAssembly object and throws "Cannot convert object
+          // to primitive value". The proxy exposes the struct's
+          // `toString`/`valueOf` closure fields as callable, matching the
+          // same `_wrapForHost` treatment we already apply to wasm-struct
+          // args via `wrappedArg0`.
           const wrapCallable = (a: any): any => {
             if (a == null) return a;
             if (!_isWasmStruct(a)) return a;
@@ -5313,7 +5324,19 @@ assert._isSameValue = isSameValue;
                   // wrap — _wrapWasmClosure returns null only when callbacks
                   // are absent, so a non-null return means we can dispatch.
                   const wrapped = _wrapWasmClosure(a, ar, callbackState);
-                  if (wrapped) return wrapped;
+                  if (wrapped) {
+                    return function replacerBridge(...callArgs: any[]): any {
+                      const ret = wrapped(...callArgs);
+                      // Wrap an opaque WasmGC struct return value so the
+                      // host's downstream `ToString` reaches the struct's
+                      // `toString`/`valueOf` closure fields.
+                      if (ret != null && _isWasmStruct(ret)) {
+                        const exps2 = callbackState?.getExports();
+                        return _wrapForHost(ret, exps2);
+                      }
+                      return ret;
+                    };
+                  }
                 }
               }
             }
@@ -5548,6 +5571,68 @@ assert._isSameValue = isSameValue;
           const wrappedThis = _isWasmStruct(thisArg) ? _wrapForHost(thisArg, exports) : thisArg;
           const wrappedArgs = _isWasmStruct(argList) ? _wrapForHost(argList, exports) : argList;
           return Reflect.apply(wrappedFn, wrappedThis, wrappedArgs ?? []);
+        };
+      // (#1632a) Function.prototype.bind — produce a spec-compliant bound
+      // function exotic. The host owns [[BoundTargetFunction]] /
+      // [[BoundThis]] / [[BoundArguments]] / .name (`"bound " + target.name`) /
+      // .length (max(0, target.length - bound.length)) / [[Call]] /
+      // [[Construct]] via the native `Function.prototype.bind`.
+      //
+      // Wasm closure structs are wrapped via `_wrapWasmClosure` so the host
+      // receives a real JS callable. `nameHint`/`lengthHint` are baked at
+      // codegen time from the target's static declaration; the host stamps
+      // them onto the wrapper so the bound function inherits them per spec.
+      // When the hints are unavailable (`""` / `-1`), the wrapper keeps
+      // whatever the host's `_wrapWasmClosure` chose (typically anonymous /
+      // arity 0), which still gives bound `.name === "bound "` and
+      // `.length === 0` — observably wrong but better than the identity-bind
+      // fallback.
+      if (name === "__bind_function")
+        return (target: any, thisArg: any, argsArray: any, nameHint: any, lengthHint: number): any => {
+          let callable: any = target;
+          if (_isWasmStruct(target)) {
+            const arity = typeof lengthHint === "number" && lengthHint >= 0 ? lengthHint : 0;
+            const wrapped = _wrapWasmClosure(target, arity, callbackState);
+            if (wrapped) {
+              callable = wrapped;
+              // Stamp hints onto the wrapper so the bound function inherits
+              // them via the host's own `Function.prototype.bind` (which
+              // computes `name = "bound " + target.name` and copies
+              // `length = max(0, target.length - boundArgs.length)`).
+              try {
+                if (typeof nameHint === "string" && nameHint.length > 0) {
+                  Object.defineProperty(callable, "name", {
+                    value: nameHint,
+                    configurable: true,
+                  });
+                }
+                if (typeof lengthHint === "number" && lengthHint >= 0) {
+                  Object.defineProperty(callable, "length", {
+                    value: lengthHint,
+                    configurable: true,
+                  });
+                }
+              } catch {
+                /* readonly host envs — ignore, bound fn just inherits wrapper defaults */
+              }
+            } else {
+              // No callbackState/exports available (e.g. caller used raw
+              // `buildImports` without setExports). Degrade gracefully to
+              // identity-bind: return the original target so callers that
+              // only need a non-null function value continue to work.
+              // Pre-#1632a behaviour for this hostless path.
+              return target;
+            }
+          }
+          if (typeof callable !== "function") {
+            // Non-callable receiver (typed-struct that isn't a closure, or
+            // anything else passing the `recvHasCallSig` codegen guard but
+            // not actually callable at runtime). Spec §20.2.3.2 step 1
+            // requires `IsCallable(F)` is false → throw TypeError.
+            throw new TypeError("Function.prototype.bind called on non-callable");
+          }
+          const partial: any[] = Array.isArray(argsArray) ? argsArray : [];
+          return Function.prototype.bind.apply(callable, [thisArg, ...partial]);
         };
       if (name === "__reflect_construct")
         return (ctor: any, args: any, newTarget: any): any => {
