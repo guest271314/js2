@@ -47,11 +47,13 @@ launch it (see "Run it" below).
 
 ## The host source
 
-[`host.ts`](./host.ts) reads the whole framed message from stdin, strips and
-decodes the 4-byte length prefix, logs diagnostics to **stderr** (so they never
-corrupt the stdout protocol stream), and writes a JSON response. The
-application logic — here, echoing the received body inside a wrapper object —
-is the part you'd replace for a real host.
+[`host.ts`](./host.ts) runs a continuous `while (true)` port loop: it reads the
+4-byte length prefix then exactly the declared body bytes via
+`process.stdin.read` read-until loops (a `readExact` helper handles short
+reads), logs diagnostics to **stderr** (so they never corrupt the stdout
+protocol stream), and writes a framed JSON response, looping until stdin
+reaches EOF. The application logic — here, echoing the received body inside a
+wrapper object — is the part you'd replace for a real host.
 
 ## Build to `.wasm`
 
@@ -85,7 +87,7 @@ message. The 4-byte prefix below (`\x0d\x00\x00\x00`) declares a 13-byte body
 `{"ping":true}`:
 
 ```bash
-printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/run.sh
+printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/nm_js2wasm.sh
 ```
 
 You'll see the host's stderr diagnostic (received-length + decoded body
@@ -108,8 +110,8 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 ## Wire it into Chrome
 
-1. **Build** `out/host.wasm` (above) and make sure `run.sh` is executable
-   (`chmod +x run.sh`).
+1. **Build** `out/host.wasm` (above) and make sure `nm_js2wasm.sh` is executable
+   (`chmod +x nm_js2wasm.sh`).
 
 2. **Edit `nm_js2wasm.json`**:
    - `path` → the **absolute** path to `nm_js2wasm.sh` (Chrome requires an absolute

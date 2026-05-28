@@ -92,8 +92,10 @@ export function main(): void {
     const bodyStr = bodyToString(body, declaredLen);
 
     // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
-    // protocol stream. Chrome ignores the host's stderr.
-    console.error(`[host] received frame, declared body length ${declaredLen}`);
+    // protocol stream. Chrome ignores the host's stderr. The frame is the
+    // 4-byte LE prefix plus the declared body, so the total bytes consumed is
+    // 4 + declaredLen.
+    console.error(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}`);
 
     // Application logic: echo the received JSON body back inside a wrapper
     // object. Real hosts would parse `bodyStr`, dispatch on a command field,
