@@ -160,6 +160,81 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * Statically evaluate `ToBoolean(expr)` for descriptor flag literals.
+ * Per §6.2.6 ToPropertyDescriptor each attribute flag is ToBoolean-coerced —
+ * `configurable: 123` / `'x'` / `{}` / `[]` are all truthy. Used by the
+ * Object.create/defineProperties static-expansion fast path so the emitted
+ * descriptor flags reflect the spec rather than degrading every non-`true`
+ * literal to `false`. Returns `undefined` when the value isn't statically
+ * resolvable (caller should fall back to the runtime path).
+ */
+function staticToBoolean(expr: ts.Expression): boolean | undefined {
+  while (
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isParenthesizedExpression(expr) ||
+    ts.isSatisfiesExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = (
+      expr as
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.ParenthesizedExpression
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
+  switch (expr.kind) {
+    case ts.SyntaxKind.TrueKeyword:
+      return true;
+    case ts.SyntaxKind.FalseKeyword:
+    case ts.SyntaxKind.NullKeyword:
+      return false;
+    case ts.SyntaxKind.NumericLiteral:
+      return Number((expr as ts.NumericLiteral).text) !== 0;
+    case ts.SyntaxKind.BigIntLiteral: {
+      const t = (expr as ts.BigIntLiteral).text;
+      return BigInt(t.slice(0, -1)) !== 0n;
+    }
+    case ts.SyntaxKind.StringLiteral:
+    case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+      return (expr as ts.StringLiteralLike).text.length > 0;
+    case ts.SyntaxKind.ObjectLiteralExpression:
+    case ts.SyntaxKind.ArrayLiteralExpression:
+    case ts.SyntaxKind.RegularExpressionLiteral:
+    case ts.SyntaxKind.FunctionExpression:
+    case ts.SyntaxKind.ArrowFunction:
+    case ts.SyntaxKind.ClassExpression:
+      return true;
+    case ts.SyntaxKind.Identifier: {
+      const text = (expr as ts.Identifier).text;
+      if (text === "undefined") return false;
+      if (text === "NaN") return false;
+      if (text === "Infinity") return true;
+      return undefined;
+    }
+    case ts.SyntaxKind.VoidExpression:
+      return false;
+    case ts.SyntaxKind.PrefixUnaryExpression: {
+      const u = expr as ts.PrefixUnaryExpression;
+      if (u.operator === ts.SyntaxKind.ExclamationToken) {
+        const inner = staticToBoolean(u.operand);
+        return inner === undefined ? undefined : !inner;
+      }
+      if (u.operator === ts.SyntaxKind.MinusToken || u.operator === ts.SyntaxKind.PlusToken) {
+        if (u.operand.kind === ts.SyntaxKind.NumericLiteral) {
+          return Number((u.operand as ts.NumericLiteral).text) !== 0;
+        }
+      }
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Coerce an already-pushed Number.prototype method argument (toFixed /
  * toPrecision / toExponential digits) to f64. These runtime helpers take an
  * f64 argument, but the source argument may be i32 (boolean) or externref/ref
@@ -3566,16 +3641,28 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "call", funcIdx: hostIdx });
 
         // If there's a second argument (property descriptors), expand at compile time.
-        // Only use static expansion when every descriptor value is an object literal —
-        // non-literal values (identifiers, expressions) may inherit descriptor flags from
-        // their prototype, which static expansion can't see at compile time.
+        // Only use static expansion when every descriptor value is an object literal AND
+        // every writable/enumerable/configurable flag inside each descriptor is
+        // statically ToBoolean-resolvable (per §6.2.6). Non-resolvable flags
+        // (`configurable: someVar`) need runtime ToBoolean — fall through to the
+        // non-fast-path so the runtime honors §7.1.2 instead of silently degrading
+        // to `false`.
         if (
           expr.arguments.length >= 2 &&
           ts.isObjectLiteralExpression(expr.arguments[1]!) &&
-          (expr.arguments[1] as ts.ObjectLiteralExpression).properties.every(
-            (p) =>
-              !ts.isPropertyAssignment(p) || ts.isObjectLiteralExpression((p as ts.PropertyAssignment).initializer),
-          )
+          (expr.arguments[1] as ts.ObjectLiteralExpression).properties.every((p) => {
+            if (!ts.isPropertyAssignment(p)) return true;
+            const init = (p as ts.PropertyAssignment).initializer;
+            if (!ts.isObjectLiteralExpression(init)) return false;
+            for (const dp of init.properties) {
+              if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+              const n = dp.name.text;
+              if (n === "writable" || n === "enumerable" || n === "configurable") {
+                if (staticToBoolean(dp.initializer) === undefined) return false;
+              }
+            }
+            return true;
+          })
         ) {
           const descsLiteral = expr.arguments[1] as ts.ObjectLiteralExpression;
           // Save created object to local for repeated use
@@ -3608,14 +3695,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                   if (dp.name.text === "value") valueExpr = dp.initializer;
                   if (dp.name.text === "get") getExpr = dp.initializer;
                   if (dp.name.text === "set") setExpr = dp.initializer;
+                  // Per §6.2.6 ToPropertyDescriptor: each flag is ToBoolean-coerced —
+                  // `configurable: 123` / `'x'` / `{}` are all truthy. Statically
+                  // evaluate ToBoolean for literal-shape initializers; bail to the
+                  // runtime fallback (descWritable left undefined → handled below)
+                  // for anything we can't resolve at compile time.
                   if (dp.name.text === "writable") {
-                    descWritable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descWritable = staticToBoolean(dp.initializer);
                   }
                   if (dp.name.text === "enumerable") {
-                    descEnumerable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descEnumerable = staticToBoolean(dp.initializer);
                   }
                   if (dp.name.text === "configurable") {
-                    descConfigurable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descConfigurable = staticToBoolean(dp.initializer);
                   }
                 }
               }
