@@ -8,5 +8,3 @@ port.postMessage(new Array(209715));
 chrome.runtime.onInstalled.addListener((reason) => {
   console.log(reason);
 });
-
-
