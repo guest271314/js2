@@ -3470,14 +3470,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             fieldIdx: 1,
           });
           fctx.body.push({ op: "local.set", index: srcData });
-          // Create new data array with default value
-          const defaultVal =
-            elemType.kind === "f64"
-              ? { op: "f64.const", value: 0 }
-              : elemType.kind === "i32"
-                ? { op: "i32.const", value: 0 }
-                : { op: "ref.null", typeIdx: (elemType as any).typeIdx ?? -1 };
-          fctx.body.push(defaultVal as Instr);
+          // Create new data array with default value — defaultValueInstrs
+          // handles externref/ref/ref_null/i32/f64/i64 uniformly. Hand-rolling
+          // `ref.null typeIdx: -1` for the externref element case produced
+          // "Unknown heap type -1" wasm_compile errors (#1338).
+          for (const ins of defaultValueInstrs(elemType)) fctx.body.push(ins);
           fctx.body.push({ op: "local.get", index: lenTmp });
           fctx.body.push({ op: "array.new", typeIdx: arrTypeIdx });
           fctx.body.push({ op: "local.set", index: dstData });
