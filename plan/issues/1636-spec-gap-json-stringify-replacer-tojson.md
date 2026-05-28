@@ -152,3 +152,101 @@ architect spec.
 - `test262/test/built-ins/JSON/stringify/value-tojson-object.js` — `toJSON` never called
 - `test262/test/built-ins/JSON/stringify/value-string-escape-ascii.js` — string-marshaling count mismatch
 - `test262/test/built-ins/JSON/stringify/replacer-array-normal.js`
+
+## Architect spec (2026-05-28, sendev-1542)
+
+The 2026-05-27 escalation block stays — this is genuinely a cross-cutting
+codegen change, not a localized `runtime.ts` patch. This section operationalises
+the work into mergeable slices grounded in empirical probes, and identifies the
+**codegen-side dependency the prior root-cause section missed**.
+
+### Empirical baseline (2026-05-28 probes)
+
+Three probes against current `main` (HEAD `7006b91e2`, src/runtime.ts:3563-3611):
+
+1. **toJSON ignored (FAIL).** `JSON.stringify({a:1, toJSON: () => "T"})` → `{"a":1}`; should be `"T"`. Confirms `_wasmToPlain` flattens the value graph and drops sidecar/closure-valued `toJSON` before host `JSON.stringify` runs.
+2. **Replacer with live-holder `this` (RUNTIME-ERROR illegal cast).** The host wraps the replacer via the `callback_maker` host bridge (`src/runtime.ts:7367-7372`), which dispatches via `__cb_${id}(cap, ...args)`. `cap` is the closure capture; **there is no separate `this` parameter** in the `__cb_${id}` signature. When host JSON.stringify invokes the replacer with `this = holder`, the holder reaches Wasm in the position the closure expects a typed capture and `ref.cast` traps. This is the same failure mode as #1529-A but for closure dispatch.
+3. **Primitive brand loss (REGRESSION).** `JSON.stringify({a:1,b:"x",c:true})` returns `'{"a":1,"b":"x","c":1}'` — boolean `true` becomes `1`. The existing flatten path **already** loses brands on f64-typed struct fields. So the "currently-passing flatten path" framing in the 2026-05-27 escalation block is optimistic; even non-replacer/no-toJSON cases lose fidelity once boolean fields are involved.
+
+### Codegen dependency the prior section missed
+
+There are **two** JS→Wasm closure-call mechanisms in current `runtime.ts`, used in different code paths:
+
+| Path | Mechanism | `this` carried? | Where |
+|------|-----------|-----------------|-------|
+| Generic closure dispatch (Symbol.iterator, Symbol.toPrimitive, replacer literal) | `__call_fn_N(closure, ...args)` | NO — `this` is captured via the closure's own capture | `src/runtime.ts:1419, 1423, 1626, 1655, 3578` |
+| Host-callback bridge (when a Wasm closure is *handed to host JS code*) | `__cb_${id}(cap, ...args)` | NO — same omission | `src/runtime.ts:7367` |
+
+Neither path threads a host-supplied `this` into the Wasm callee. For JSON.stringify the spec wants `Call(toJSON, value, [key])` — `this = value` — and `Call(replacer, holder, [key, value])` — `this = holder`. Both `this` values are *host-decided*, not captured.
+
+**Conclusion:** the impl needs a third dispatch mechanism, e.g. `__call_fn_method_N(closure, thisVal, ...args)` (codegen change in `src/codegen/expressions/calls.ts` + closure literal emit in `src/codegen/expressions/literals.ts` + a runtime export). Without it, no host walk over live values can implement spec §25.5.2.2 step 3 (replacer this) or step 2.b.i (toJSON this).
+
+This dependency is **not** the general JS-callable Wasm function-ref trampoline (#1308/#1382) — those issues are about handing a Wasm function pointer to arbitrary host code so the host can invoke it whenever. Here we already control the invocation site (it's our own host walk), we just need to pass `this`. That's a smaller, scoped change.
+
+### Sliced impl plan
+
+**Slice 1 — `__call_fn_method_N` codegen + runtime export (~150 LOC, no test262 movement)**
+
+- Add `__call_fn_method_0/1/2/3` exports in `src/codegen/expressions/calls.ts` (sibling to the existing `__call_fn_N` emitters)
+- Signature: `(funcref $closure, anyref $this, …args) → anyref`. The body is the same as `__call_fn_N` except instead of dropping `$this`, it stores it in a thread-local global that the closure body's `this`-resolution can read (or, simpler: rebind the closure's existing `this` capture slot at call time — needs design).
+- Acceptance: no test262 movement (no consumer yet). Unit test: a closure literal `function(){ return this.x }` invoked via `__call_fn_method_0(closure, {x:42})` returns 42.
+
+**Slice 2 — toJSON pre-walk (~70 LOC, lands ~10-15 fails)**
+
+- Add `_collectToJSONHolders(v, exports)` — a recursive *non-flattening* walk that returns either `null` (no `toJSON` reachable) or a map `WeakMap<wasmStruct, callable>` of nodes that have `toJSON`.
+- In `JSON_stringify`: if the map is empty, skip pre-walk (preserves the existing 16/18 flatten fast path). Else, recursively rebuild the value graph, substituting each entry per spec §25.5.2.2 step 2 via `__call_fn_method_1(toJSON, holder, key)`.
+- Hand the substituted tree to existing `_wasmToPlain` + `JSON.stringify`.
+- Acceptance: `value-tojson-arguments.js`, `value-tojson-object.js`, `value-tojson-primitive.js`, `value-tojson-result.js`, `value-tojson-not-function.js` flip pass. Targeted test: `tests/issue-1636-tojson.test.ts` (3 unit cases).
+
+**Slice 3 — host-side SerializeJSONProperty walk for replacer-with-this (~200 LOC, lands ~20 fails)**
+
+- Replace `JSON.stringify(plain, rep, sp)` with an in-runtime `SerializeJSONProperty` recursion that calls the replacer at each node via `__call_fn_method_2(replacer, holder, key, value)` *during* the walk — so `holder` identity is preserved per §25.5.2.2 step 3.
+- Gate on `rep !== undefined` AND replacer is a Wasm closure (the JS-function-replacer case keeps the current bridge).
+- Cycle detection: stack-of-seen-holders, throw `TypeError` on revisit per §25.5.2.2 step 1.
+- Acceptance: `replacer-function-arguments.js`, `replacer-function-result.js`, the `replacer-array-*-object.js` cluster.
+
+**Slice 4 — wrapper `[[PrimitiveValue]]` unwrap + BigInt TypeError + escape count (~80 LOC)**
+
+- Wrapper unwrap depends on **#1568** (Object(BigInt)/Object(Symbol) auto-box — already complete) and **#1630/#1631** (struct-writeback descriptor model — also complete). Read the brand via the existing wrapper-prototype-chain check.
+- BigInt TypeError per §25.5.2.2 step 12 — depends on **#1644** Slice B (i64-bigint-brand, PR #766 in flight). Until Slice B lands, throw a TypeError on any value whose `typeof === "bigint"`.
+- String escape count: investigate `value-string-escape-ascii.js` once the live-walk path exists; likely a marshaling-boundary issue inside the substituted-string handling.
+
+**Slice 5 — primitive brand fidelity on flatten path (~30 LOC, regression fix surfaced by the 2026-05-28 probe)**
+
+- `_structToPlainObject` reads field values via `__sget_<f>`; if the field is f64 but a struct flag says "boolean", round-trip through Boolean.
+- Same for f64-as-Number-wrapper vs raw number (depends on #1568 brand observability — same module).
+- This is a **separate sub-issue** worth carving — it affects the 16 currently-passing cases as well, so it can ship independent of #1636.
+
+### Why this is mergeable in slices (not all-or-nothing)
+
+The 2026-05-27 escalation framed this as "no localized patch." The slices above preserve that conclusion (no single PR can move all 49 fails) **but** show three landable slices with measurable, non-overlapping acceptance buckets:
+
+- Slice 1 unblocks all subsequent slices (codegen dep) — no observable test262 effect.
+- Slice 2 lands ~10-15 (toJSON family) — does NOT regress flatten path because of the empty-map gate.
+- Slice 3 lands ~20 (replacer-with-this) — does NOT touch toJSON.
+- Slice 4 lands the wrapper / BigInt / escape tail — depends on Slices 2/3.
+- Slice 5 is the surprise regression-fix carved out as a standalone issue (likely a new #1636-aside).
+
+### Dependencies (corrected)
+
+- **#1308 / #1382** — NOT a blocker. Those are about exporting Wasm closures to *arbitrary* host code; here our host walk owns the invocation.
+- **`__call_fn_method_N` codegen** (new dep) — Slice 1 of this spec.
+- **#1644 Slice B** — Slice 4 (BigInt TypeError). In flight as PR #766.
+- **#1568** — DONE. Used in Slice 4 + Slice 5.
+- **#1630 / #1631** — DONE. Used in Slice 4 (brand observability).
+- **#1324** — Separate workstream (pure-Wasm JSON for standalone mode). Slices 2/3/4 stay JS-host only; #1324 keeps the flatten path for `--standalone`.
+
+### Risk register
+
+| Risk | Mitigation |
+|------|------------|
+| Slice 1 changes closure ABI → breaks existing `__call_fn_N` callers | New exports `__call_fn_method_N` are *additive*. Existing `__call_fn_N` untouched. |
+| Slice 2 pre-walk on a non-toJSON graph imposes a perf tax | Empty-map gate skips the walk entirely. The walk only runs if `_collectToJSONHolders` returned non-null. |
+| Slice 3 cycle-detection diverges from host `JSON.stringify` cycle semantics | Pin to spec §25.5.2.2 exactly; add cycle test from `value-tojson-array-circular.js`. |
+| Slice 5 brand round-trip changes existing-pass output | Gate slice 5 on a per-field brand flag — only applies to fields explicitly typed `boolean`/`Number`/etc. Audit existing flatten-path test262 passes before merging. |
+
+### Verdict
+
+Spec deliverable: this section. Implementation order: 1 → 2 → 3 → 4. Slice 5 belongs in a sibling issue (it surfaces a pre-existing brand-loss bug that affects more than JSON). Any developer (not necessarily senior-dev) can pick up Slice 2 / 3 / 4 individually once Slice 1 lands. Slice 1 itself is senior-dev work (closure-ABI codegen).
+
+Status returning to `ready` — escalation block above remains valid until Slice 1 has an owner; once Slice 1 lands, status flips to `in-progress` and subsequent slices are carved as child issues `#1636-S2`, `#1636-S3`, `#1636-S4`.
