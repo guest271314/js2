@@ -3103,8 +3103,12 @@ export function emitObjectMethodAsClosure(
 export function finalizeMethodTrampolines(ctx: CodegenContext): void {
   for (const t of ctx.pendingMethodTrampolines) {
     const sig = getFuncSignature(ctx, t.methodFuncIdx);
-    if (!sig || sig.params.length === 0) continue;
-    const methodUserParams = sig.params.slice(1);
+    if (!sig) continue;
+    // (#1340) Plain function decls have no hidden `this`; method sigs lead
+    // with `this` at param 0 and need it dropped. The legacy method path
+    // requires `sig.params.length >= 1` because it slices off `this`.
+    if (!t.noThisParam && sig.params.length === 0) continue;
+    const methodUserParams = t.noThisParam ? sig.params : sig.params.slice(1);
     // Only rebuild when the user-param arity is unchanged. The trampoline's
     // OWN func type (its wrapper type) was fixed at registration with
     // `userParamCount` params and is shared/cached, so it cannot change here;
@@ -3166,7 +3170,10 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       savedBodies: [],
     };
 
-    const newBody: Instr[] = [{ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr];
+    // (#1340) Function-decl trampolines have no `this` prologue; method
+    // trampolines emit `ref.null <objStruct>` as the receiver before
+    // forwarding user params.
+    const newBody: Instr[] = t.noThisParam ? [] : [{ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr];
     for (let i = 0; i < methodUserParams.length; i++) {
       newBody.push({ op: "local.get", index: i + 1 } as Instr);
       const from = wrapperUserParams[i];
@@ -3356,6 +3363,124 @@ export function emitCachedMethodClosureAccess(
   //   global.get $cache
   //   ref.is_null
   //   if (then: build closure, store in $cache)
+  //   global.get $cache
+  const initBody: Instr[] = [
+    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
+    { op: "struct.new", typeIdx: structTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+    { op: "global.set", index: cacheGlobalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: initBody,
+    else: [],
+  });
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  return true;
+}
+
+/**
+ * (#1340) Emit a cached singleton closure for a top-level function declaration
+ * used as a first-class value. Mirrors `emitCachedMethodClosureAccess` (#1394)
+ * for the function-decl case.
+ *
+ * Without caching, every textual occurrence of `foo` (in value position)
+ * compiled a fresh `struct.new $closure_struct`, so `foo === foo` was false
+ * and sidecar writes on `foo.prototype` keyed by the struct identity never
+ * round-tripped (test262 Iterator helpers misclassified as `wasm_compile`).
+ *
+ * One externref cache global per function name, lazily initialised on first
+ * read; all later reads return the same externref. Call dispatch is unchanged
+ * (resolved via `funcMap` + direct `call funcIdx`); only the value-context
+ * read uses the cached closure.
+ *
+ * Only safe for captureless functions — captures must be filled at the
+ * per-construction site, not once at module init.
+ *
+ * Returns `true` if the cached access was emitted; `false` if the signature
+ * couldn't be resolved (caller should fall back to `emitFuncRefAsClosure`).
+ */
+export function emitCachedFuncClosureAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  funcIdx: number,
+): boolean {
+  const sig = getFuncSignature(ctx, funcIdx);
+  if (!sig) return false;
+
+  const userParams = sig.params;
+  const results = sig.results;
+
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  if (!wrapperTypes) return false;
+  const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
+
+  // Reuse the canonical trampoline if one was already registered for this
+  // function; otherwise build it once.
+  const trampolineName = `__fn_tramp_${funcName}_cached`;
+  let trampolineFuncIdx = ctx.funcMap.get(trampolineName);
+  if (trampolineFuncIdx === undefined) {
+    // Forward user params (skip self at param 0) — function declarations
+    // don't have a hidden `this` param like methods do.
+    const trampolineBody: Instr[] = [];
+    for (let i = 0; i < userParams.length; i++) {
+      trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+    }
+    trampolineBody.push({ op: "call", funcIdx } as Instr);
+    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: trampolineName,
+      typeIdx: liftedFuncTypeIdx,
+      locals: [],
+      body: trampolineBody,
+      exported: false,
+    });
+    ctx.funcMap.set(trampolineName, trampolineFuncIdx);
+    ctx.mod.declaredFuncRefs.push(trampolineFuncIdx);
+
+    // (#1669-style) Mirror the late-finalization guard used by
+    // `emitCachedMethodClosureAccess`. The function's `func.typeIdx` may
+    // still be re-resolved after this first cached access (default-param /
+    // generator funcs finalize param types during body compile). Enroll
+    // the trampoline so `finalizeMethodTrampolines` rebuilds the body
+    // against the function's final signature.
+    ctx.pendingMethodTrampolines.push({
+      trampolineBody,
+      trampolineFuncIdx,
+      methodFuncIdx: funcIdx,
+      // No `this` param for a plain function decl — `noThisParam: true`
+      // tells the finalizer to skip both the `sig.params.slice(1)` strip
+      // and the `ref.null <objStruct>` prologue. `objStructTypeIdx` is
+      // unused on this path.
+      objStructTypeIdx: -1,
+      userParamCount: userParams.length,
+      wrapperUserParams: userParams,
+      wrapperResult: results[0],
+      noThisParam: true,
+    });
+  }
+
+  // Reuse or allocate the cache global.
+  let cacheGlobalIdx = ctx.funcClosureGlobals.get(funcName);
+  if (cacheGlobalIdx === undefined) {
+    cacheGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__fn_closure_${funcName}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.funcClosureGlobals.set(funcName, cacheGlobalIdx);
+  }
+
+  // Emit the lazy-init access (mirrors emitCachedMethodClosureAccess):
+  //   global.get $cache
+  //   ref.is_null
+  //   if (then: build closure, extern.convert_any, store in $cache)
   //   global.get $cache
   const initBody: Instr[] = [
     { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
