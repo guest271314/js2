@@ -3580,11 +3580,7 @@ function resolveImport(
             if (isSyntaxError) {
               // If the host-eval fallback can compile it, prefer that result;
               // js2wasm is more strict than V8/SpiderMonkey on some forms.
-              try {
-                return _legacyHostEval(src);
-              } catch (e2) {
-                throw e2;
-              }
+              return _legacyHostEval(src);
             }
             return _legacyHostEval(src);
           }
@@ -3633,6 +3629,8 @@ function resolveImport(
           // `as any`) — the eval'd code runs as plain JS and rejects TS syntax.
           const jsSrc = src.replace(/\bas\s+number\b/g, "").replace(/\bas\s+any\b/g, "");
           const needsShim = harnessIds.some((id) => jsSrc.includes(id));
+          // biome-ignore lint/style/noCommaOperator: (0, eval) forces indirect eval (global scope) per §19.2.1.1
+          // biome-ignore lint/security/noGlobalEval: intentional test262 runtime eval for harness compatibility
           if (!needsShim) return (0, eval)(jsSrc);
 
           // Build a JS-side harness that mirrors the wasm-compiled preamble.
@@ -3738,6 +3736,8 @@ assert._isSameValue = isSameValue;
 `;
           const wrapped =
             shim + jsSrc + `;\nif (__fail) throw new Test262Error('eval harness assertion ' + __fail + ' failed');`;
+          // biome-ignore lint/style/noCommaOperator: (0, eval) forces indirect eval (global scope) per §19.2.1.1
+          // biome-ignore lint/security/noGlobalEval: intentional test262 runtime eval for harness compatibility
           return (0, eval)(wrapped);
         }
       }
@@ -5301,6 +5301,17 @@ assert._isSameValue = isSameValue;
           // struct. Tries multiple arities for closures since the user
           // function may declare 1–4 params (replace callback spec passes
           // (match, ...captures, offset, string)).
+          //
+          // (#1329-b3) The wrapping callable also routes the closure's
+          // RETURN value through `_wrapForHost` when it comes back as a
+          // wasmGC struct. V8's @@replace then performs `ToString` on the
+          // returned value (spec §22.2.5.8 step 14.k.vi — `replacement =
+          // ToString(replValue)`); without the host proxy the engine sees
+          // an opaque WebAssembly object and throws "Cannot convert object
+          // to primitive value". The proxy exposes the struct's
+          // `toString`/`valueOf` closure fields as callable, matching the
+          // same `_wrapForHost` treatment we already apply to wasm-struct
+          // args via `wrappedArg0`.
           const wrapCallable = (a: any): any => {
             if (a == null) return a;
             if (!_isWasmStruct(a)) return a;
@@ -5313,7 +5324,19 @@ assert._isSameValue = isSameValue;
                   // wrap — _wrapWasmClosure returns null only when callbacks
                   // are absent, so a non-null return means we can dispatch.
                   const wrapped = _wrapWasmClosure(a, ar, callbackState);
-                  if (wrapped) return wrapped;
+                  if (wrapped) {
+                    return function replacerBridge(...callArgs: any[]): any {
+                      const ret = wrapped(...callArgs);
+                      // Wrap an opaque WasmGC struct return value so the
+                      // host's downstream `ToString` reaches the struct's
+                      // `toString`/`valueOf` closure fields.
+                      if (ret != null && _isWasmStruct(ret)) {
+                        const exps2 = callbackState?.getExports();
+                        return _wrapForHost(ret, exps2);
+                      }
+                      return ret;
+                    };
+                  }
                 }
               }
             }
@@ -7403,7 +7426,7 @@ assert._isSameValue = isSameValue;
     case "host_loose_eq":
       // #1134 — loose equality for two externref operands (§7.2.15).
       // Handles null == undefined → true and other JS coercion rules.
-      // eslint-disable-next-line eqeqeq
+      // biome-ignore lint/suspicious/noDoubleEquals: §7.2.15 IsLooselyEqual requires == semantics (null == undefined, type coercion)
       return (a: any, b: any) => (a == b ? 1 : 0);
     case "same_value_zero":
       // #1360 — SameValueZero comparison (§7.2.11).
@@ -7412,7 +7435,7 @@ assert._isSameValue = isSameValue;
       // Used by Array.prototype.includes for array-like receivers.
       return (a: any, b: any) => {
         if (a === b) return 1;
-        // eslint-disable-next-line no-self-compare
+        // biome-ignore lint/suspicious/noSelfCompare: NaN detection — x !== x is the canonical NaN test (NaN is the only value not equal to itself per IEEE 754)
         if (typeof a === "number" && typeof b === "number" && a !== a && b !== b) return 1;
         return 0;
       };
