@@ -1,9 +1,9 @@
 ---
 id: 1399
 title: "chore: fix 9 biome lint errors in src/runtime.ts"
-status: ready
+status: in-progress
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-28
 priority: low
 feasibility: easy
 reasoning_effort: low
