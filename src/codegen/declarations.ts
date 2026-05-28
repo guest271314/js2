@@ -263,6 +263,15 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         state.primitiveNeeded.add("number_toString_radix");
       }
     }
+    // (#1644 Slice D) BigInt.prototype.toString — bigint-typed receiver routes
+    // to bigint_toString / bigint_toString_radix (i64 → externref). Without
+    // this registration the property-access path falls through and returns null.
+    if (isBigIntType(receiverType) && methodName === "toString") {
+      state.primitiveNeeded.add("bigint_toString");
+      if (node.arguments.length > 0) {
+        state.primitiveNeeded.add("bigint_toString_radix");
+      }
+    }
     if (isNumberType(receiverType) && methodName === "toFixed") {
       state.primitiveNeeded.add("number_toFixed");
     }
@@ -856,6 +865,15 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   if (state.primitiveNeeded.has("number_toString_radix")) {
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
+  }
+  // (#1644 Slice D) BigInt#toString — i64 receiver, optional i32 radix.
+  if (state.primitiveNeeded.has("bigint_toString")) {
+    const t = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", "bigint_toString", { kind: "func", typeIdx: t });
+  }
+  if (state.primitiveNeeded.has("bigint_toString_radix")) {
+    const t = addFuncType(ctx, [{ kind: "i64" }, { kind: "i32" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", "bigint_toString_radix", { kind: "func", typeIdx: t });
   }
   // #1321 / #1335 Phase 2: in standalone / WASI mode there is no JS host to
   // satisfy the `number_toFixed` / `number_toPrecision` / `number_toExponential`

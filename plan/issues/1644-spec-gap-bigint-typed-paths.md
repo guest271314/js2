@@ -144,8 +144,18 @@ JS/host boundary and the `BigInt()` constructor:
   fails.
 - **Slice B:** `BigInt(string|number)` via `__to_bigint` (SyntaxError /
   RangeError per spec). Depends on A for comparable results.
-- **Slice C:** `BigInt.asIntN` / `asUintN` codegen + runtime.
-- **Slice D:** `BigInt.prototype.toString(radix)`.
+- **Slice C:** `BigInt.asIntN` / `asUintN` codegen + runtime. **STATUS:** already
+  works on current main via the generic `__extern_method_call` host-bridge
+  path (verified 2026-05-28 — `BigInt.asIntN(8, 256n) === 0n` etc.). No
+  codegen change required; can be folded into Slice D's PR as a coverage
+  note in the unit test if desired.
+- **Slice D:** `BigInt.prototype.toString(radix)`. **STATUS:** landed in PR for
+  this commit. `bigint_toString` (1-arg i64 → externref) and
+  `bigint_toString_radix` (2-arg i64 + i32 → externref) host imports added
+  to the runtime/allowlist; codegen routes typed-bigint `.toString(...)` via
+  these mirroring the `number_toString` pattern, including the §21.2.3.4
+  radix 2-36 RangeError guard. Test: `tests/issue-1644-slice-d.test.ts`
+  (7 cases, all pass).
 
 No code landed — a type-guard-only patch cannot satisfy the ≥75% acceptance
 bar and risks regressing native `type i64` code without the brand decision.

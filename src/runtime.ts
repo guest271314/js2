@@ -3411,6 +3411,12 @@ function resolveImport(
       // `number_toString` only handled base 10; the codegen previously dropped
       // the radix on the floor, silently producing decimal output for any radix.
       if (name === "number_toString_radix") return (v: number, r: number) => v.toString(r);
+      // (#1644 Slice D) BigInt.prototype.toString — bigint flows as i64 across
+      // the boundary thanks to JS-BigInt-integration. Default radix is 10; the
+      // 2-arg variant accepts a radix (2-36) and propagates RangeError per
+      // §21.2.3.4. Codegen validates radix range before calling.
+      if (name === "bigint_toString") return (v: bigint) => v.toString();
+      if (name === "bigint_toString_radix") return (v: bigint, r: number) => v.toString(r);
       if (name === "number_toFixed") return (v: number, d: number) => v.toFixed(d);
       // #1321: NaN-as-no-arg sentinel (matches `number_toExponential` pattern).
       // Compiled `(123.456).toPrecision()` (no args) pushes f64.const NaN on the
