@@ -1,7 +1,7 @@
 ---
 id: 1596
 title: "Function.prototype.apply / .call not accessible on compiled Wasm functions (~46 fails)"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-24
 priority: high

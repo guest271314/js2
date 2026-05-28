@@ -1,7 +1,7 @@
 ---
 id: 1593
 title: "Destructuring default initializer triggers on null — spec requires undefined-only check (~165 fails)"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-05-24
 priority: high
