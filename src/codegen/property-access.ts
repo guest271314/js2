@@ -2514,9 +2514,15 @@ export function compilePropertyAccess(
         );
         flushLateImportShifts(ctx, fctx);
         if (getIdx !== undefined) {
-          compileExpression(ctx, fctx, expr.expression);
-          // Coerce struct ref to externref
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          // #1623: receiver may already be externref (e.g. `this` in a static
+          // method = the class object global, typed externref). Blindly emitting
+          // extern.convert_any on an externref source produces invalid Wasm
+          // (`expected anyref, found ... of type externref`). Coerce only when
+          // necessary.
+          const recvType = compileExpression(ctx, fctx, expr.expression);
+          if (recvType && recvType.kind !== "externref") {
+            coerceType(ctx, fctx, recvType, { kind: "externref" });
+          }
           addStringConstantGlobal(ctx, propName);
           const strIdx = ctx.stringGlobalMap.get(propName);
           if (strIdx !== undefined) {
