@@ -1,11 +1,12 @@
 ---
 id: 1649
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
-status: ready
+status: blocked
+escalation: needs-architect-spec-OR-carve
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-28
 priority: medium
-feasibility: easy
+feasibility: medium
 reasoning_effort: medium
 task_type: bugfix
 area: codegen, runtime
@@ -95,6 +96,79 @@ For Symbol coercion:
 
 ### Test262 sample
 
-- `test262/test/built-ins/Boolean/prototype/toString/this-val-non-boolean.js`
-- `test262/test/built-ins/Symbol/prototype/toString/symbol-thisvalue.js`
-- `test262/test/built-ins/Symbol/for/registry.js`
+- `test262/test/built-ins/Boolean/prototype/toString/S15.6.4.2_A1_T1.js`
+- `test262/test/built-ins/Symbol/prototype/toString/toString.js`
+- `test262/test/built-ins/Symbol/for/retrieve-value.js`
+
+## 2026-05-28 dev triage (dev-1594, post PR #665)
+
+Ran the full `built-ins/Boolean` (51) + `built-ins/Symbol` (98) suites on
+`origin/main` HEAD `d2f684f3a` (after PR #665 `issue-1637-boolean-symbol-coercion`
+landed). Real current state:
+
+- **Boolean**: 31/51 pass (60.8 %) — 20 fails
+- **Symbol**: 54/98 pass (55.1 %) — 44 fails
+- **Combined residual**: 64 fails
+
+The earlier `~69` issue estimate is close; PR #665 fixed only the
+`Boolean.prototype.method.call(prim)` and `Boolean.prototype.method.apply(prim)`
+paths (runtime.ts:5023-5042 + 5311 receiver coercion). The bare-receiver path
+(`Boolean.prototype.toString()` with no `.call`) is still broken because
+`Boolean.prototype` *itself* is a Boolean wrapper with `[[BooleanData]] = false`,
+which our codegen doesn't recognise as having a thisBooleanValue.
+
+### Failure breakdown by bucket (64 residual fails)
+
+| Bucket | Fails | Diagnosis |
+|---|---|---|
+| `cross-realm` | 17 | Architectural — needs realm support; out of scope for a localized fix |
+| `proto-toString` | 11 | Bare `X.prototype.toString()` receiver coercion (real, addressable gap) |
+| `proto-valueOf` | 8 | Bare `Boolean.prototype.valueOf()` receiver coercion (real gap) |
+| `proto-toPrimitive` | 5 | `Symbol.prototype[@@toPrimitive]` (real gap) |
+| `boolean-misc` (`S15.6.2.1_A2`, …) | 4 | `x.constructor.prototype` / `isPrototypeOf` — prototype-chain on instances; same family as #1364b |
+| `symbol-for-registry` | 4 | `Symbol.for()` registry round-trip; partial — for(s).description, cross-realm |
+| `boolean-proto-misc` | 2 | `Boolean.prototype` itself is a Boolean wrapper |
+| `symbol-keyFor` | 2 | `Symbol.keyFor(non-symbol)` brand check + TypeError |
+| `proto-description` | 2 | `Symbol.prototype.description` is an accessor on prototype, not an own data prop on instances |
+| `desc-to-string` | 2 | Symbol description rendered as wasmGC string vs host string |
+| `species` | 2 | `Symbol.species` |
+| `is-a-constructor` | 1 | `Reflect.construct(Boolean, …)` |
+| `not-callable` | 1 | `new Symbol()` must throw TypeError |
+| `auto-boxing-strict` | 1 | Strict-mode Symbol primitive `this` |
+| `proto-from-ctor-realm` | 1 | Cross-realm proto link |
+
+After excluding the 17 cross-realm cases (architectural), **47 residual fails
+across ~12 distinct sub-buckets** remain. This is not a single coherent
+"~2-line fix" task; it spans:
+
+- Receiver-coercion for bare-receiver bound-method calls (`proto-toString` /
+  `proto-valueOf` / `proto-toPrimitive` — ~24 fails). The hot fix would extend
+  PR #665's `wrappedObj === Boolean.prototype.toString` guards to the
+  non-`.call`/`.apply` dispatch path. Touches `runtime.ts` proto-method dispatch
+  + `compileCallExpression`.
+- Prototype-chain semantics on primitive wrappers (`boolean-misc` /
+  `boolean-proto-misc` / `proto-description` — ~8 fails). Overlaps with #1364b.
+- Symbol-specific brand checks (`not-callable` / `symbol-keyFor` / `auto-boxing` —
+  ~4 fails) — small, isolable.
+- Symbol registry (`symbol-for-registry` / `desc-to-string` — ~6 fails) —
+  runtime.ts only.
+
+### Recommendation
+
+**Carve into sub-issues** before attempting another implementation PR. This
+issue overlaps with #1637 (PR #665, just merged), #1564 (#145, just merged),
+and #1364b (prototype-chain). Three sequential PRs landing in the same hot
+runtime.ts proto-method dispatch in a single sprint creates merge-conflict
+drift; the next step should be **architect carve** into:
+
+- **#1649A** — bare-receiver bound-method receiver coercion (`proto-toString` +
+  `proto-valueOf` + `proto-toPrimitive` ~24 fails). Extension of PR #665.
+- **#1649B** — Symbol brand-check residuals (`not-callable`, `symbol-keyFor`,
+  `auto-boxing-strict` ~4 fails). Small, separate.
+- **#1649C** — Symbol description / registry runtime polish (~6 fails).
+- **#1649D** — Defer to #1364b (`boolean-misc` ~8 fails, prototype-chain).
+- **#1649E** — Defer cross-realm (~17 fails) to a separate architectural issue
+  (realm support is wholly out of scope).
+
+Sub-issue split avoids stepping on #665/#1564 drift and lets a dev claim one
+small bucket at a time with clear acceptance.
