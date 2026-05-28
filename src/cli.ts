@@ -175,6 +175,14 @@ if (!inputPath) {
   process.exit(1);
 }
 
+// #1554 — `--standalone` refuses all JS-host imports; `--allow-fs` enables
+// node:fs JS-host imports. Combining them silently violates standalone mode,
+// so reject at parse time.
+if (target === "standalone" && allowFs) {
+  console.error("error: --standalone and --allow-fs are mutually exclusive");
+  process.exit(1);
+}
+
 const absInput = resolve(inputPath);
 const source = readFileSync(absInput, "utf-8");
 const name = basename(absInput, ".ts");
