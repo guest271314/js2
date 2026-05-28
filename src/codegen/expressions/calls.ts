@@ -7921,6 +7921,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 fcCallBody.push({ op: "drop" } as Instr);
               } else if (expectedReturn !== null && fc.returnType === null) {
                 fcCallBody.push(...defaultValueInstrs(expectedReturn));
+              } else if (
+                expectedReturn !== null &&
+                fc.returnType !== null &&
+                !valTypesMatch(fc.returnType, expectedReturn)
+              ) {
+                // (#191) Candidate's actual return type differs from the dispatch
+                // block's declared result type — must coerce to keep the wasm
+                // validator happy. Without this, the enclosing if (result T)
+                // sees a mismatched type on the stack.
+                const savedBody = fctx.body;
+                fctx.body = fcCallBody;
+                coerceType(ctx, fctx, fc.returnType, expectedReturn);
+                fctx.body = savedBody;
               }
 
               funcDispatch = [
