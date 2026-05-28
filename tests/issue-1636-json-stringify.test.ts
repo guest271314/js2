@@ -31,11 +31,14 @@ export function test(): string {
     expect((r as any).test()).toBe("yes");
   });
 
-  // toJSON-on-plain-object is Slice B — needs __sget_<method> shim emitted
-  // for method-typed struct fields. Slice A's no-replacer fast path still
-  // flattens through host JSON.stringify which doesn't observe Wasm-side
-  // methods.
-  it.skip("[Slice B] toJSON method is invoked", async () => {
+  // Slice B (#1636-B) — when the no-replacer fast path sees a reachable
+  // `toJSON`, route through the live walk so spec §25.5.2.4 step 2 fires.
+  // Nested-in-array and nested-in-object cases are deferred to a future
+  // slice: the compiler collapses object-literal types under `any` and
+  // flattens WasmGC structs into bare JS arrays during heterogeneous
+  // array-literal construction, destroying the closure-typed `toJSON`
+  // field before _hasReachableToJSON can observe it.
+  it("[Slice B] toJSON arrow property is invoked", async () => {
     const src = `
 export function test(): string {
   const obj: any = { toJSON: () => "replaced" };
@@ -44,6 +47,40 @@ export function test(): string {
 `;
     const r = await compileToWasm(src);
     expect((r as any).test()).toBe('"replaced"');
+  });
+
+  it("[Slice B] toJSON method shorthand is invoked", async () => {
+    const src = `
+export function test(): string {
+  const obj: any = { toJSON() { return 42; } };
+  return JSON.stringify(obj);
+}
+`;
+    const r = await compileToWasm(src);
+    expect((r as any).test()).toBe("42");
+  });
+
+  it("[Slice B] toJSON via function expression is invoked", async () => {
+    const src = `
+export function test(): string {
+  const obj: any = { toJSON: function () { return "fn"; } };
+  return JSON.stringify(obj);
+}
+`;
+    const r = await compileToWasm(src);
+    expect((r as any).test()).toBe('"fn"');
+  });
+
+  it("[Slice B] no-toJSON object still hits the fast path (regression guard)", async () => {
+    // Sanity: _hasReachableToJSON returning false keeps the flatten path
+    // active so the currently-passing common case is unchanged.
+    const src = `
+export function test(): string {
+  return JSON.stringify({ a: 1, b: 2 });
+}
+`;
+    const r = await compileToWasm(src);
+    expect((r as any).test()).toBe('{"a":1,"b":2}');
   });
 
   it("cycle through self-reference throws TypeError", async () => {
