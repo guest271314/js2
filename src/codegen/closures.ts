@@ -1110,6 +1110,56 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
 }
 
 /**
+ * Methods that STORE the callback for later invocation rather than calling it
+ * synchronously during the call. Closures passed to these methods need
+ * persistent ref-cell writebacks (re-emitted after every subsequent call) so
+ * that mutations made when the callback eventually runs are reflected in the
+ * outer scope. (#1695)
+ *
+ * Receiver-type-aware allowlist (className → method names): we only promote
+ * to persistent writebacks when the receiver type matches — e.g. a user-defined
+ * `class Foo { defer(cb) {} }` calling `foo.defer(...)` must NOT be promoted.
+ */
+const DEFERRED_CALLBACK_METHODS_BY_CLASS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["DisposableStack", new Set(["defer", "use", "adopt"])],
+  ["AsyncDisposableStack", new Set(["defer", "use", "adopt"])],
+]);
+
+/**
+ * Returns true if the arrow's parent CallExpression is a stored-callback host
+ * method (DisposableStack.defer/use/adopt etc.). The callback is not invoked
+ * synchronously by the call that registers it, so its captured-mutable
+ * writebacks must be persistent. (#1695)
+ */
+export function isDeferredCallbackArgument(node: ts.Node, ctx: CodegenContext): boolean {
+  const parent = node.parent;
+  if (!parent || !ts.isCallExpression(parent)) return false;
+  if (!parent.arguments.some((arg) => arg === node)) return false;
+  if (!ts.isPropertyAccessExpression(parent.expression)) return false;
+  const methodName = parent.expression.name.text;
+  try {
+    const recType = ctx.checker.getTypeAtLocation(parent.expression.expression);
+    const symName = recType.getSymbol?.()?.getName?.();
+    if (symName) {
+      const methods = DEFERRED_CALLBACK_METHODS_BY_CLASS.get(symName);
+      if (methods?.has(methodName)) return true;
+    }
+    const baseTypes = recType.getBaseTypes?.();
+    if (baseTypes) {
+      for (const bt of baseTypes) {
+        const bn = bt.getSymbol?.()?.getName?.();
+        if (!bn) continue;
+        const m = DEFERRED_CALLBACK_METHODS_BY_CLASS.get(bn);
+        if (m?.has(methodName)) return true;
+      }
+    }
+  } catch {
+    // checker failure → conservative false (no behavioural change)
+  }
+  return false;
+}
+
+/**
  * #1177: Returns true if the closure (`arrow`) is provably constructed AFTER
  * the let/const/using declaration of `name` AND the closure is NOT inside a
  * loop that wraps the declaration. In that case, we don't need to force-box
@@ -1185,7 +1235,8 @@ export function compileArrowFunction(
 ): ValType | null {
   // If used as callback argument to a host call, use the __make_callback path
   if (isHostCallbackArgument(arrow, ctx)) {
-    return compileArrowAsCallback(ctx, fctx, arrow);
+    const deferredInvocation = isDeferredCallbackArgument(arrow, ctx);
+    return compileArrowAsCallback(ctx, fctx, arrow, { deferredInvocation });
   }
   // Otherwise, compile as a first-class closure value
   return compileArrowAsClosure(ctx, fctx, arrow);
@@ -2279,7 +2330,7 @@ export function compileArrowAsCallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
-  options?: { needsThis?: boolean },
+  options?: { needsThis?: boolean; deferredInvocation?: boolean },
 ): ValType | null {
   const cbId = ctx.callbackCounter++;
   const cbName = `__cb_${cbId}`;
@@ -2660,8 +2711,14 @@ export function compileArrowAsCallback(
         writebacks.push({ op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 } as Instr);
         writebacks.push({ op: "local.set", index: rc.outerLocalIdx } as Instr);
       }
-      if (needsThis) {
-        // Persistent: re-emit after every call, since getter may be called by any host call
+      // (#1695) Promote to persistent for stored-callback host methods too:
+      // defer/use/adopt only register the callback, the actual invocation
+      // happens later inside dispose(). A one-shot pending writeback would
+      // snapshot the pre-invocation ref-cell value into the outer local.
+      const usePersistent = needsThis || options?.deferredInvocation === true;
+      if (usePersistent) {
+        // Persistent: re-emit after every call, since the callback may be
+        // invoked by a later host call (getter/setter, defer/use/adopt + dispose).
         if (!fctx.persistentCallbackWritebacks) fctx.persistentCallbackWritebacks = [];
         fctx.persistentCallbackWritebacks.push(...writebacks);
       } else {
