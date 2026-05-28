@@ -1,9 +1,10 @@
 ---
 id: 820m
 title: "NamedEvaluation: anonymous class/function value not named from binding key (~12 fails, fn-name-class + __proto__-fn-name)"
-status: in-progress
+status: done
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -292,3 +293,8 @@ resolve the 7 named tests.
 - `src/codegen/index.ts` — single ~10-line widening block at the per-prop
   loop of `ensureStructForType`, right after the existing
   `valueOf`/`toString` eqref widening.
+
+## Status — 2026-05-28
+
+Phase A (class-as-value field-type widening) merged via PR #864. Phase B
+(NamedEvaluation `.name` propagation) carved as #820m-b2 follow-up.
