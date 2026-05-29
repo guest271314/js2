@@ -34,6 +34,7 @@ import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern
 import {
   classifyPrivateMember,
   emitCoercedLocalSet,
+  emitThrowReferenceError,
   emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
@@ -4315,6 +4316,22 @@ export function compileCompoundAssignment(
 
   let localIdx = fctx.localMap.get(name);
   if (localIdx === undefined) {
+    // §13.15.2 CompoundAssignmentEvaluation step 1.c: `lval = GetValue(lref)`
+    // runs before the RHS is evaluated. GetValue on an *unresolvable*
+    // reference throws ReferenceError (§6.2.4). A name that reaches here with
+    // no local / captured-global / module-global / const binding AND no
+    // resolved symbol from the checker is genuinely undeclared (e.g.
+    // `x += 1` with no `x` in scope) — throw rather than silently
+    // auto-allocating a zero local. Names with a symbol (hoisted `var`,
+    // outer-scope bindings, builtins) keep the graceful auto-allocate path.
+    const lhsSym = ctx.checker.getSymbolAtLocation(expr.left);
+    if (lhsSym === undefined && !ctx.moduleGlobals.has(name) && ctx.capturedGlobals.get(name) === undefined) {
+      emitThrowReferenceError(ctx, fctx, `${name} is not defined`);
+      // After throw the stack is polymorphic; push a sentinel so callers that
+      // expect a compound-assignment result value (f64) typecheck.
+      fctx.body.push({ op: "f64.const", value: 0 });
+      return { kind: "f64" };
+    }
     // Graceful fallback: auto-allocate a local for the unknown identifier
     // so compound assignments work correctly (the variable is initialized
     // to the appropriate zero value).
