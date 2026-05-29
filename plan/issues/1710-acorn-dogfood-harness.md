@@ -35,10 +35,12 @@ regression guard once a gap is fixed.
 
 Build a committed harness that mechanizes the dogfood loop:
 
-1. **Acquire acorn deterministically** — pin a specific acorn version
-   (8.16.0, matching #1690) via a vendored copy under `tests/fixtures/acorn/`
-   or a pinned `npm pack` step, so the harness is hermetic and version-stable.
-   Do NOT depend on a live network fetch at test time.
+1. **Acquire acorn deterministically** — **DECISION (2026-05-29, project lead):
+   use a pinned `npm pack` step** at harness setup (acorn 8.16.0, matching
+   #1690), not a vendored source copy. Pin the exact version + integrity so the
+   harness is reproducible; resolve the packed tarball into the harness's
+   fixture dir at setup time. Do NOT depend on an unpinned live network fetch at
+   test time (CI may have no network mid-run — fetch happens at setup/install).
 2. **Compile** each acorn entry module (`acorn.mjs`) via the programmatic
    `compile(src, { fileName: "acorn.mjs" })` API and record:
    - compile `success` + the categorized error list (collapse the known TS
@@ -98,5 +100,5 @@ the decision in the harness).
   *follow-up* (likely a #1711 child) — JS-host execution is the first lap so we
   separate "does acorn run correctly at all" from "does it run host-free".
 - Keep the oracle dependency (node-acorn) as a `devDependency` pinned to the
-  same version as the vendored compiled-acorn source, so the two parsers are
+  same version as the `npm pack`-resolved compiled-acorn source, so the two parsers are
   the same acorn and any divergence is a *compiler* bug, not a version skew.
