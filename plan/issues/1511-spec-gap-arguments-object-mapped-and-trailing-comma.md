@@ -1,9 +1,10 @@
 ---
 id: 1511
 title: "spec gap: arguments object — mapped semantics, descriptors, trailing-comma length"
-status: review
+status: done
+completed: 2026-05-29
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-05-29
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -171,3 +172,62 @@ No regressions in:
 
 Pre-existing failures in these files match the main baseline
 (verified via `git stash` comparison).
+
+## Implementation (second pass — mapped-slot descriptor link-break, 2026-05-29)
+
+Completes the **mapped slot defineProperty fidelity** sub-cluster the first
+pass deferred (the §10.4.4.2 "linked bitset"). Per ECMA-262 §10.4.4.2
+(ArgumentsExoticObject `[[DefineOwnProperty]]`) and §10.4.4.5
+(`[[Delete]]`), once a mapped index is made non-writable (or an accessor) via
+`Object.defineProperty`, or `delete arguments[i]` runs, the param↔arguments
+mapping for that slot is removed: later parameter writes must stop reflecting
+into `arguments[i]` and vice-versa. Setting only `configurable`/`enumerable`
+keeps the map intact.
+
+Implemented as a **compile-time link-break** — the failing test262 cases use
+statically-resolvable shapes (literal index on the `arguments` identifier,
+literal descriptor):
+
+- `src/codegen/context/types.ts` — add `unmappedIndices?: Set<number>` to
+  `FunctionContext.mappedArgsInfo`.
+- `src/codegen/expressions/logical-ops.ts` — `emitMappedArgParamSync` and
+  `emitMappedArgReverseSync` skip indices present in `unmappedIndices`. The
+  emitters read the set **live**, so codegen order makes a break apply only to
+  syncs emitted after the `defineProperty` / `delete`.
+- `src/codegen/object-ops.ts` (`compileObjectDefineProperty`) — when the
+  receiver is the `arguments` identifier in a mapped-args function, the index
+  is a literal mapped slot, and the descriptor makes it non-writable
+  (`writable: false`) or an accessor (`get`/`set`), add the index to
+  `unmappedIndices`.
+- `src/codegen/typeof-delete.ts` (`compileDeleteExpression`) — `delete
+  arguments[<literal index>]` on a mapped slot records the index too.
+
+### Out of scope (documented residual)
+
+- **Read-through of a defined accessor** on the wasmGC vec-backed arguments
+  (e.g. reading `arguments[0]` after `defineProperty(...,{get})` should invoke
+  the getter) — the vec read still returns the stored slot value. The
+  link-break (the spec-mandated stop-propagation) is what this issue targets
+  and is fixed; routing reads through a user accessor on the arguments vec is a
+  separate, larger materialization concern.
+- **`delete arguments[i]` value-after-delete** — the slot value still lingers
+  in the vec (reading returns the old value rather than `undefined`); only the
+  param→arguments propagation is severed. Same vec-materialization gap.
+- `verifyProperty`-style descriptor readback on arguments slots
+  (`writable/enumerable/configurable` attributes) is unchanged.
+
+## Test Results (second pass)
+
+`tests/issue-1511.test.ts` — 6 new descriptor-link-break tests appended to the
+existing trailing-comma suite (12 total, all pass): `writable:false` severs the
+link; `configurable:false` alone keeps it; sequential set-by-param then
+`writable:false` freezes the current value at 2; an accessor descriptor severs
+the link; `delete arguments[i]` stops propagation; the normal mapped link
+(both directions) is undisturbed.
+
+No regression in `tests/equivalence/arguments-object.test.ts` (passes). The 3
+failures in `tests/equivalence/arguments-nested-and-loops.test.ts`
+(`for-loop with function declaration in body`, two `valueOf` #226 cases) are
+**pre-existing on the origin/main baseline** — verified by running that file on
+a branch with zero `src/` changes vs origin/main; they reproduce identically
+and are unrelated to this change.

@@ -289,6 +289,16 @@ export interface FunctionContext {
     paramCount: number;
     paramOffset: number;
     paramTypes: ValType[];
+    /**
+     * Argument indices whose param↔arguments mapping has been severed at
+     * compile time (#1511). Per ECMA-262 §10.4.4.2, a `defineProperty` that
+     * makes a mapped slot non-writable (or turns it into an accessor) or a
+     * `delete arguments[i]` removes the link: later parameter writes must no
+     * longer reflect into `arguments[i]` and vice-versa. The mapped-sync
+     * emitters consult this set and skip severed indices. Populated lazily
+     * during body codegen — order matters, since the emitters read it live.
+     */
+    unmappedIndices?: Set<number>;
   };
   /**
    * #1210: bindings detected as `let s = ""; for (...) s += <expr>` builders
