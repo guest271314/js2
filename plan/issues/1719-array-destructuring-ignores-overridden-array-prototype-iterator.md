@@ -549,3 +549,68 @@ lands the foundation with zero regression risk; S2 banks #1719's 71.
 
 Spec refs: §7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization,
 §13.15.5.3 DestructuringAssignmentEvaluation.
+
+---
+
+## S2 diagnosis — the override assignment is DROPPED at compile time (senior-dev, 2026-05-30)
+
+**This supersedes both the "S2 attempt + BLOCKER" recursion framing AND the
+architecture spec's JS-host S2 premise.** Investigated on a fresh worktree off
+`origin/main` (`d14df3b3a`) with S1 (PR #942) and S0 (#1130 PR-0) both landed.
+
+### What was verified (4 probes, canonical test262 shape)
+
+The shape under test: `Array.prototype[Symbol.iterator] = function* () { … yield this[0]; yield this[1]; yield 42; }`
+then array-destructure `[1,2,3]`.
+
+1. **The override assignment compiles to nothing.** Compiling the assignment
+   alone emits ZERO `__extern_set` / proto-write imports and produces no
+   module-init instructions for it. `compile()` succeeds with no error or
+   warning — the statement is silently discarded.
+2. **`$__module_init` proof.** For `Array.prototype[@@iterator]=fn; var f=function([x,y,z]){…}`,
+   the emitted `$__module_init` contains ONLY the `var f =` store
+   (`ref.func; struct.new; local.tee; global.set`). The
+   `Array.prototype[Symbol.iterator] = …` statement is **entirely absent** from
+   the wasm.
+3. **The host `Array.prototype` is NOT mutated.** Runtime probe: after
+   instantiating the compiled module, `Array.prototype[Symbol.iterator]` on the
+   host is byte-identical to before (`origIter === afterIter`, still the native
+   function). The override reaches **neither** the host prototype **nor** any
+   compiled proto object.
+4. **Every consumer ignores the override.** decl-dstr → `z=3` (not 42);
+   param-dstr `function([x,y,z])` → `z=3`; `[...arr]` spread → length 3;
+   `for (v of arr)` → sum 6 (not the override's 15). No `RangeError` reproduced
+   in any of these shapes — dev-b's recursion was a *secondary* symptom of
+   bolting host-Array reflection onto a value that was never connected to any
+   override.
+
+### Why this invalidates the S2-as-specced approach
+
+- **dev-b's premise** ("reflect the vec to a host Array so it inherits the
+  overridden host `Array.prototype`") cannot work: there is no override on the
+  host prototype to inherit (probe 3).
+- **The architecture spec's JS-host premise** (line ~161: "the override lives on
+  the host's `Array.prototype`") is also wrong for this compiler: the compiled
+  `Array.prototype[k] = v` assignment is dropped before any override exists
+  anywhere (probes 1–2).
+- S1's brand machinery (`arrayIteratorMaybeOverridden` + `arrayDstrNeedsIdentity`
+  gate, PR #942) is sound and correctly placed — but routing the dstr site
+  through ANY observation lane is futile while the override is stored nowhere
+  observable.
+
+### The genuine prerequisite (re-spec needed)
+
+The missing piece is a **writable `Array.prototype` representation**: a
+compiler-owned proto record that `Array.prototype[k] = v` actually mutates, and
+that `GetIterator` / array-method dispatch / dstr / for-of consult. This is the
+architecture spec's S4 (`$ArrayObj.$proto` + funcref dispatch) — which the S1
+note explicitly *deferred*. The JS-host S2 slice cannot close the 71 without it.
+
+**Recommendation:** route back to the architect. Either S2 is re-specced to
+include a minimal writable-`Array.prototype` capture (so `Array.prototype[k]=v`
+lands in a record GetIterator reads), or the S4 proto-object slice is the real
+next step and the host-Array-reflection S2 (dev-b's WIP + the spec's JS-host
+paragraph) is retired. The branch `issue-1719-s2-array-dstr-v2` (dev-b's reflect
++drain WIP) should NOT be merged — its premise is disproved.
+
+No code landed by this investigation; worktree clean.
