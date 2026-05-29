@@ -216,6 +216,15 @@ literal descriptor):
 - `verifyProperty`-style descriptor readback on arguments slots
   (`writable/enumerable/configurable` attributes) is unchanged.
 
+**These all defer to #1432.** Full `language/arguments-object/mapped/*`
+descriptor fidelity (getOwnPropertyDescriptor / defineProperty / delete per
+§10.4.4) requires changing the `arguments` representation from a raw WasmGC vec
+to an **exotic object with a per-slot mapping** — an architect-level
+representation change tracked as **#1432**, not a localized codegen fix. This
+PR deliberately stays within the slice the `unmappedIndices` link-break handles
+*without* a representation change. The trailing-comma / `arguments.length`
+cases were already fixed on main by **PR #373**.
+
 ## Test Results (second pass)
 
 `tests/issue-1511.test.ts` — 6 new descriptor-link-break tests appended to the
