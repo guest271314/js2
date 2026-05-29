@@ -315,3 +315,22 @@ The 2026-05-27 escalation framed this as "no localized patch." The slices above 
 Spec deliverable: this section. Implementation order: 1 → 2 → 3 → 4. Slice 5 belongs in a sibling issue (it surfaces a pre-existing brand-loss bug that affects more than JSON). Any developer (not necessarily senior-dev) can pick up Slice 2 / 3 / 4 individually once Slice 1 lands. Slice 1 itself is senior-dev work (closure-ABI codegen).
 
 Status returning to `ready` — escalation block above remains valid until Slice 1 has an owner; once Slice 1 lands, status flips to `in-progress` and subsequent slices are carved as child issues `#1636-S2`, `#1636-S3`, `#1636-S4`.
+
+## ⚠️ Slice 1 caused a strict-`this` regression — guard Slices 2/3 (2026-05-29)
+
+Slice 1's `__call_fn_method_N` this-threading (PR #873) shipped a
+`__current_this` **fallback** that leaked a `this` value into **strict-mode**
+functions that must observe `undefined`. Net **−101 test262** at the #873
+merge (171 regressions / 70 fixes), clustered in `language/function-code`
+(strict `this`), `language/directive-prologue`, and `built-ins/Array`
+(`every`/`some` thisArg threading) — `'this' had incorrect value!`,
+`typeof this` ≠ `"undefined"`, `innerThisCorrect` failures.
+
+Fixed by **PR #895** — gated the `__current_this` fallback to
+**host-dispatchable closures only**; ~139 tests recovered in exactly those
+clusters. Confirmed via per-test baseline diff (investigation 2026-05-29).
+
+**Guard for Slices 2/3:** any further this-val threading must NOT install a
+`this` for a call site whose target is a strict-mode function. Add a strict-mode
+regression test (a strict fn asserting `this === undefined`) to the slice's
+test set before merging.

@@ -41,6 +41,7 @@
 - [feedback_bypass_permissions.md](feedback_bypass_permissions.md) — Always use bypassPermissions mode when spawning agents
 - [feedback_dev_self_serve_tasklist.md](feedback_dev_self_serve_tasklist.md) — Devs claim next task from TaskList after merge; no re-dispatch
 - [feedback_tasklist_always_populated.md](feedback_tasklist_always_populated.md) — Populate TaskList at sprint start AND whenever a new issue is added mid-sprint; empty queue = agents spin idle
+- [feedback_sprint_autofill_es3_es5.md](feedback_sprint_autofill_es3_es5.md) — When sprint queue runs dry, auto-pull ES3/ES5-fixing tasks into the current sprint
 - [feedback_compact_before_sprint.md](feedback_compact_before_sprint.md) — Run /compact at sprint boundaries to reset context and control token burn
 - [feedback_context_discipline.md](feedback_context_discipline.md) — Don't re-check state; split planning/execution sessions; write handoffs to plan/agent-context/tech-lead.md
 - [feedback_team_comm_channels.md](feedback_team_comm_channels.md) — Dev status via TaskUpdate not verbose SendMessage; shutdown handoffs via agent-context files
@@ -92,6 +93,7 @@
 - [feedback_nothing_impossible.md](feedback_nothing_impossible.md) — Don't label features impossible — find the compilation strategy
 - [feedback_compile_away.md](feedback_compile_away.md) — Compile away, don't emulate — resolve JS semantics statically, zero runtime overhead
 - [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md) — No bespoke builtins (readStdin/writeStdout); expose standard Node.js (process.stdin/stdout) / Web Worker (postMessage) APIs and compile them to WASI
+- [feedback_external_comments_first_person.md](feedback_external_comments_first_person.md) — GitHub/external comments in first-person singular ("I"), never "we"
 - [feedback_no_nuclear_option.md](feedback_no_nuclear_option.md) — Never take destructive shortcuts without consent
 - [feedback_wait_for_answer.md](feedback_wait_for_answer.md) — Ask then STOP — never act on assumed "yes" in the same message
 - [feedback_check_before_cleanup.md](feedback_check_before_cleanup.md) — Check worktree diffs before removing
