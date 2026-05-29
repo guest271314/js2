@@ -250,16 +250,29 @@ Any bucket with count > 50 → **ESCALATE** with the bucket name and count (crit
 
 ## Step 5 — queue for merge
 
-All criteria passed. **Add the PR to the merge queue** (do NOT use `--admin` direct merge — main is now protected by a merge queue ruleset):
+All criteria passed. **Add the PR to the merge queue via the GraphQL `enqueuePullRequest` mutation** (do NOT use `--admin` direct merge — main is now protected by a merge queue ruleset):
 
 ```bash
-gh pr merge <N> --auto \
-  --body "Self-merged via queue. net_per_test=+$(jq .net_per_test .claude/ci-status/pr-<N>.json) ($(jq .improvements .claude/ci-status/pr-<N>.json) improvements, $(jq .regressions .claude/ci-status/pr-<N>.json) regressions). Criteria: /dev-self-merge."
+PRID=$(gh pr view <N> --json id -q .id)
+gh api graphql -f query='mutation($id:ID!){ enqueuePullRequest(input:{pullRequestId:$id}){ clientMutationId } }' -f id="$PRID"
+
+# VERIFY it actually landed in the queue — do NOT trust a silent success:
+gh api graphql -f query='{ repository(owner:"loopdive",name:"js2"){ mergeQueue(branch:"main"){ entries(first:50){ nodes { pullRequest { number } } } } } }' \
+  | grep -q "\"number\":<N>" && echo "queued ✓" || echo "NOT queued — investigate"
 ```
 
-> **Enqueue with `gh pr merge <N> --auto` — do NOT pass `--merge` (or any strategy flag) alongside `--auto`.** This repo's merge queue owns the merge strategy and rejects `--merge --auto` ("The merge strategy for main is set by the merge queue"), which fails silently and leaves the PR green but never queued. A strategy flag is only valid with `--admin` (direct bypass).
+> **Why GraphQL `enqueuePullRequest`, NOT `gh pr merge <N> --auto`.** `--auto` only
+> *arms* auto-merge on a check-state **transition** — it fires when a PENDING
+> required check flips green. By the time `/dev-self-merge` runs (Steps 1–4 only
+> proceed on a **complete, green** CI run) the PR is already `CLEAN`, so there is no
+> transition left to fire on and `--auto` **silently no-ops — the PR is never
+> queued**. This stranded an entire backlog of green PRs on 2026-05-29 (the queue
+> sat empty with 9 CLEAN PRs unmerged). The GraphQL mutation enqueues directly and
+> works whether the PR is `CLEAN` or still finalizing. Also: never pass `--merge`
+> (or any strategy flag) — the merge queue owns the strategy. (`--admin --merge`
+> direct bypass is tech-lead-only.)
 
-The `--auto` flag enqueues the PR. GitHub will:
+Once enqueued, GitHub will:
 1. Place the PR on a temp branch (`gh-readonly-queue/main/pr-<N>-...`)
 2. Re-run the required checks (`cheap gate`, `merge shard reports`, `quality`) against that merged state via the `merge_group` event
 3. Fast-forward main if checks pass — usually within minutes of CI completing
@@ -295,7 +308,7 @@ issues at `in-review` (see #1602/#1603/#1606).
 GitHub will comment on the PR if the final queue checks fail (rare — would mean something flipped between your CI run and the queue's re-run, likely main moved). In that case:
 - The auto-refresh workflow may have already pushed a merge of main into your branch — fetch and review
 - Re-evaluate /dev-self-merge against the new CI run
-- If still good, re-queue with `gh pr merge <N> --auto`
+- If still good, re-queue with the GraphQL `enqueuePullRequest` mutation above (NOT `gh pr merge --auto` — see why in Step 5)
 
 ### Admin direct-merge — only when
 
