@@ -1669,6 +1669,12 @@ export function compileArrowAsClosure(
     // class-object singleton rather than `undefined`.
     isStaticContext: fctx.isStaticContext,
     isGenerator,
+    // (#1636-S1) This lifted closure body can be dispatched from the host via
+    // `__call_fn_method_N` (e.g. as a `JSON.stringify` replacer / `toJSON`),
+    // which installs the host receiver into `__current_this`. Allow `this`
+    // (with no other binding) to read that global. Named functions / methods
+    // are NOT lifted here and keep `undefined`/globalObject `this`.
+    readsCurrentThis: true,
   };
 
   // (#1384) Track liftedFctx.body in liveBodies BEFORE any emission so
@@ -2491,6 +2497,12 @@ export function compileArrowAsCallback(
     // spawned inside static initializers / static methods resolve `this`
     // to the class-object singleton.
     isStaticContext: fctx.isStaticContext,
+    // (#1636-S1) Anonymous callbacks are dispatchable from the host via
+    // `__call_fn_method_N`, which installs the host receiver into
+    // `__current_this`. Allow `this` to read it when no other binding exists.
+    // (When needsThis=true, `this` is already bound to the `__this` param at
+    // localMap index 1, so the fallback is never reached for that path.)
+    readsCurrentThis: true,
   };
 
   // (#1384) Track cbFctx.body in liveBodies BEFORE any emission so addUnionImports

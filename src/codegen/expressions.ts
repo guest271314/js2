@@ -777,19 +777,29 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
         return { kind: "externref" };
       }
     }
-    // (#1636-S1) Free-function-closure fallback: when no local `this` binding
-    // exists and we're not in a static-class context, read the host-supplied
-    // receiver from the `__current_this` module global. The global is only
-    // registered when the module emits at least one closure (it's installed
-    // alongside `__call_fn_method_N`), so this branch is a no-op for closure-
-    // less modules and falls through to `undefined` below. The global's
-    // default value is `ref.null.extern`, which JS surfaces as `null` — a
-    // small but observable change from the prior `undefined` semantics, kept
-    // because (a) free-closure `this` was undefined-by-convention only, not
-    // a guarantee any caller could rely on, and (b) the spec-correct value
-    // for `JSON.stringify`'s replacer/`toJSON` callsites is whatever the
-    // host walk installs, never undefined.
-    if (ctx.currentThisGlobalIdx >= 0) {
+    // (#1636-S1) Host-dispatched-closure fallback: when no local `this`
+    // binding exists and we're not in a static-class context, read the
+    // host-supplied receiver from the `__current_this` module global —
+    // but ONLY for closure bodies that can actually be dispatched through
+    // `__call_fn_method_N` (`fctx.readsCurrentThis`). Those dispatchers
+    // install the host receiver into `__current_this` before the inner
+    // `call_ref`, so this is the only context in which the global holds a
+    // meaningful value.
+    //
+    // The earlier (#1636-S1) version gated this on `ctx.currentThisGlobalIdx
+    // >= 0` alone, but `ensureCurrentThisGlobal` is called eagerly for every
+    // module that emits any closure, so that condition was true for the whole
+    // module. Named function declarations / methods / constructors (compiled
+    // via function-body.ts / class-bodies.ts, NOT through the closure-lift
+    // path) are called directly via `call $f`, where `__current_this` is never
+    // installed — they read its `ref.null.extern` initial value as `null`
+    // instead of the spec-correct `undefined` (strict) / globalObject (sloppy).
+    // That regressed 171 test262 cases (`function-code/10.4.3-1-*`,
+    // `Array/prototype/*` callback `this`). Gating on `readsCurrentThis`
+    // restricts the global read to exactly the lifted-closure / anonymous-
+    // callback bodies that the host can dispatch, leaving direct-call `this`
+    // to fall through to `undefined` as before.
+    if (fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0) {
       fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
       return { kind: "externref" };
     }
