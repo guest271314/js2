@@ -1,5 +1,5 @@
 ---
-id: 1730
+id: 1738
 title: "DataView.prototype.set* (setUint8 etc.) 'not a function' in JS-host mode"
 status: backlog
 created: 2026-05-29
@@ -12,7 +12,7 @@ goal: test262-conformance
 sprint: Backlog
 related: [1717, 1654, 1700]
 ---
-# #1730 — DataView setters are 'not a function' in JS-host mode
+# #1738 — DataView setters are 'not a function' in JS-host mode
 
 ## Problem
 
