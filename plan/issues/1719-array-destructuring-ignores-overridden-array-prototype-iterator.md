@@ -614,3 +614,152 @@ paragraph) is retired. The branch `issue-1719-s2-array-dstr-v2` (dev-b's reflect
 +drain WIP) should NOT be merged — its premise is disproved.
 
 No code landed by this investigation; worktree clean.
+
+---
+
+## Writable-prototype slice design (S2-respec) — senior-dev, 2026-05-30
+
+Tech-lead asked for the **minimal writable-`Array.prototype`** design: the
+narrowest thing that (1) lowers `Array.prototype[k] = v` (`@@iterator` first)
+into a compiler-owned proto record, and (2) teaches GetIterator + array-dstr +
+for-of + spread to consult it. Below is the design plus the three verdicts.
+
+### New probe results that shape the design
+
+1. **The drop is UNIVERSAL across every prototype, not Array-specific.** Verified
+   `Array.prototype[Symbol.iterator]=…`, `Array.prototype.values=…`,
+   `Object.prototype.foo=…`, `String.prototype[Symbol.iterator]=…`,
+   `Number.prototype.toString=…`, and user-class `C.prototype.m=…` — **none**
+   emit any module-init or `__extern_set`; the whole statement is discarded for
+   all of them. So a writable-prototype representation is the **keystone** for the
+   entire prototype-override cluster (#1130 accessor-observation, #1320 Array.from
+   bridge, plus latent String/Number/Object-prototype patches), not a #1719-local
+   patch.
+2. **The RHS value is dead-code-eliminated too.** When
+   `Array.prototype[@@iterator]=function*…` is dropped, the generator function is
+   **never even compiled** (no closure/generator func in the output) — nothing
+   references it. **Design consequence:** the slice must make the proto record a
+   *referencing site* so the RHS closure becomes reachable and gets emitted. A
+   read-side fix alone is insufficient; the write side must root the value.
+3. **Drop site located.** `Array.prototype[Symbol.iterator] = …` is an
+   `ElementAccessExpression` assignment. In
+   `compileElementAssignment` (`src/codegen/expressions/assignment.ts:~2388`) the
+   `ts.isIdentifier(target.expression)` class-static arm and the
+   `ClassName.prototype[key]` arm both gate on `ctx.classSet.has(...)` — `Array`
+   is a builtin, not in `classSet`, so neither fires. Control reaches
+   `compileExpression(target.expression)` on `Array.prototype`, which yields no
+   usable lvalue, and the assignment evaporates with no error. (No `__extern_set`
+   because the receiver isn't a live externref object — `Array.prototype` has no
+   compiled representation at all.)
+
+### Minimal slice — "compiled prototype record" (CPR)
+
+**Scope to exactly one well-known key first: `@@iterator` (and its alias
+`values`) on `Array.prototype`.** Generalize later by table, not by rewrite.
+
+**Write side (capture the override):**
+- A per-program `ctx.protoOverrides: Map<string, Map<string|symbol, FuncRef>>`
+  keyed `("Array", @@iterator) → closure funcref index`. Reuse the existing
+  `staticProps`-style global-map convention (`ctx` already has
+  `staticProps: Map<string, number>` at `context/types.ts:434`) — this is the
+  same "named slot → global/func index" shape, no new infra family.
+- In `compileElementAssignment`, add an arm **before** the `classSet` gates:
+  when `target.expression` is `X.prototype` with `X` a known builtin
+  (`Array`/`Object`/`String`/…) and the key resolves to a tracked well-known
+  symbol, compile the RHS (forcing the closure to be emitted — fixes probe-2's
+  DCE), store its funcref index in `ctx.protoOverrides`, and emit the RHS value
+  as the assignment's result (assignment expr returns RHS). No host write; the
+  record is compile-time state that roots the closure.
+- The `sourceOverridesArrayIterator` S1 pre-scan **already detects exactly this
+  pattern** and sets `ctx.arrayIteratorMaybeOverridden`. The CPR write arm fires
+  under the same condition — S1's brand becomes the *gate* and CPR becomes the
+  *storage* the brand promised. **S1 is reused verbatim; CPR sits directly on top
+  of it.** No rework to S1.
+
+**Read side (consult the record):** the three consumers the brand gate already
+marks:
+- **array-dstr** — `destructureParamArray` (`destructuring-params.ts:799`) +
+  `compileArrayDestructuring` gate site (`destructuring.ts:892`): when
+  `arrayIteratorMaybeOverridden` AND `ctx.protoOverrides` has `Array/@@iterator`,
+  drive iteration by calling the stored closure funcref (via the existing
+  `__call_fn_*` / generator-drive machinery, **in-Wasm**, no host import, no
+  host-Array reflection) instead of the backing-store walk.
+- **for-of** — `compileForOfDestructuring` / the for-of lowering
+  (`statements/loops.ts:1060`): same brand+record check before the fast vec walk.
+- **spread** — array spread lowering: same check.
+
+When the record is empty (the common case — brand clear), every site is
+**byte-identical to today** (the S1 guarantee is preserved: the new branch is
+behind `arrayIteratorMaybeOverridden && protoOverrides.has(...)`, both false).
+
+### VERDICT 1 — does this close the 71 standalone, or need full S4?
+
+**Honest estimate: the MINIMAL single-key CPR closes the #1719 71 by itself, and
+it is NOT the full $ArrayObj.$proto + general funcref-dispatch (S4).** Reasoning:
+- The 71 `*-iter-val-array-prototype.js` tests all install ONE override
+  (`Array.prototype[Symbol.iterator]` or `.values`) and assert array-dstr/for-of
+  uses it. A single-key CPR + the three read-site consults covers exactly that
+  shape — no general prototype-chain `Get`, no per-instance `$proto` link, no
+  arbitrary-key dispatch needed.
+- It runs **in-Wasm** (call the stored closure funcref directly) so it is
+  **standalone-clean** — it does NOT depend on a host `Array.prototype` or
+  host-Array reflection (the disproved premises). This is strictly better than
+  the spec's JS-host S2 and is the correct seed of S4.
+- It is a **proper subset** of S4: S4 = "compiled `%Array.prototype%` object with
+  arbitrary-key `$proto` funcref dispatch + per-`$ArrayObj` `$proto` link." CPR =
+  "one global table for a fixed set of well-known proto keys." CPR is the first,
+  load-bearing slice of S4; S4 generalizes CPR's table to arbitrary keys +
+  instance-level proto links. **CPR closes #1719; full S4 is only needed for
+  runtime-reassigned-per-instance prototypes and arbitrary-key proto reads
+  (#1130's prototype-chain index-getter subset), which #1719 does not require.**
+
+### VERDICT 2 — generalization
+
+`X.prototype[k]=v` is dropped for **ALL** prototypes (probe-1: Array, Object,
+String, Number, user classes). CPR's table is keyed by `(builtinName, key)`, so
+extending from `Array/@@iterator` to `Array/values`, then `String/@@iterator`,
+`Object/*`, etc. is **adding table rows + read-site consults**, not a redesign.
+This makes CPR the **keystone for the prototype-override cluster** — #1130
+(accessor observation can store get/set funcrefs in the same table), #1320
+(Array.from reads the same `Array/@@iterator` record), and future String/Number
+prototype patches all reuse it. That is the strategic argument for building it as
+a foundation rather than a one-off.
+
+### VERDICT 3 — smallest safe increment + position vs S1
+
+Smallest landable increment, in order:
+- **CPR-1 (the seed):** write-arm for `Array.prototype[@@iterator]=fn` →
+  `ctx.protoOverrides` + force-emit RHS closure; read-consult at the **array-dstr
+  gate site only** (the one S1 already placed). Closes the dstr subset of the 71.
+  Byte-identical when brand clear. ~1 codegen write site + 1 read site + 1 ctx
+  field. Sits **directly on S1's landed brand** (reuses
+  `arrayIteratorMaybeOverridden` + `arrayDstrNeedsIdentity` as the gate).
+- **CPR-2:** add `values` alias + for-of + spread read-consults. Closes the rest
+  of the 71.
+- **CPR-3 (folds in S3 of the spec):** add `Array/index-accessor`,
+  `Array/length-accessor` rows for #1130, and route #1320's `Array.from` through
+  the same record.
+- **S4 (deferred):** generalize the table to arbitrary keys + per-instance
+  `$proto` for full prototype-chain fidelity (the #1130 prototype-chain
+  index-getter subset + runtime-reassigned prototypes). Not needed for #1719.
+
+Position: CPR is the **storage layer S1's brand gate was always pointing at**.
+S1 (landed) = detection + gate placement; CPR = capture + in-Wasm dispatch. The
+disproved host-Array-reflection S2 (dev-b's branch) is **retired** — CPR replaces
+it with a standalone-clean mechanism.
+
+### One-paragraph recommendation
+
+Build **CPR-1 + CPR-2** as the #1719 fix (closes the 71, standalone-clean, sits
+on the sound S1 brand, byte-identical when no override). It is a true subset of
+the architect's S4, so it converges rather than forks — and because the
+prototype-assignment drop is universal, CPR is the keystone the #1130/#1320
+cluster reuses. It does NOT require the full $ArrayObj WasmGC struct or
+arbitrary-key proto-chain dispatch (those are S4, only needed for prototype-chain
+index getters and per-instance reassignment, neither of which #1719 exercises).
+Recommend scheduling CPR-1 (seed, ~3 touch points) as the next senior-dev slice;
+it is small enough to land now if the build-now decision is yes. Architect should
+sign off on the `ctx.protoOverrides` table shape + the well-known-key whitelist
+before implementation, since it becomes the shared substrate for the cluster.
+
+No code landed by this design pass; worktree clean (gitignored `.tmp/` probes only).
