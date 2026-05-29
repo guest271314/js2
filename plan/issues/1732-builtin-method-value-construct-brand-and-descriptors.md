@@ -407,7 +407,7 @@ to capture the full set before/after.)
 ## S1 landed (dev-a, 2026-05-29)
 
 **S1 (runtime `new`-site brand check, JS-host) is implemented** on branch
-`issue-1732-s1-construct`. The remaining slices S2 (own `length`/`name`
+`issue-1732-s1-construct` (PR #941). Remaining slices S2 (own `length`/`name`
 descriptors), S3 (unified `$FuncObj`), S4 (standalone parity) stay open under
 this tracking issue; status remains `ready` until they land.
 
@@ -420,25 +420,32 @@ What S1 does:
   externref`, trackingIssue 1732).
 - Codegen wiring in `src/codegen/expressions/new-super.ts`: a new
   `resolvesToNonConstructableValue(ctx, id)` helper detects when a `new <id>`
-  callee identifier's **variable declaration initializer** is provably
+  callee identifier's variable-declaration initializer is provably
   non-constructable — a `<...>.prototype.<method>` member access, or a
   `.bind()/.call()/.apply()` result. In the unknown-ctor fall-through (after the
   function-declaration resolution fails), when the unwrapped callee is such an
-  identifier (covers bare `new f`, `new f()`, and `new (f as any)()`), the held
-  value is routed through `__construct`. The existing compile-time
-  `emitThrowTypeError` fast path for the *direct* `new X.prototype.Y()` form is
-  untouched; user constructable function declarations resolve earlier and never
-  reach the guard.
+  identifier (covers `new f`, `new f()`, `new (f as any)()`), the held value is
+  routed through `__construct`. The existing compile-time `emitThrowTypeError`
+  fast path for the direct `new X.prototype.Y()` form is untouched; user
+  constructable function declarations resolve earlier and never reach the guard.
 
-Scope discipline (per the S1 guardrail): no `$FuncObj` struct migration — the
-brand check rides the existing externref/host path. Conservative initializer
-detection means it cannot intercept a real constructor (ArrayBuffer, DataView,
-TypedArrays, Error subclasses, Promise, user `function`/`class`).
+Scope discipline (S1 guardrail): no `$FuncObj` struct migration — the brand
+check rides the externref/host path. Conservative initializer detection cannot
+intercept a real constructor (ArrayBuffer/DataView/TypedArray/Error/Promise/user
+function/class). Standalone parity is S4.
 
-Tests: `tests/issue-1732-s1.test.ts` — A7 (bare / no-parens / cast forms) throw
-TypeError; regression guards confirm the value stays callable (`.call` works),
-user constructors are not intercepted, and a `.bind()` of a constructable target
-still constructs. The #1632 bind suite (`tests/issue-1632a.test.ts`, 5 pass) and
-class-method descriptor suite (`tests/issue-1364a-class-method-descriptors.test.ts`,
-12 pass) stay green. Closes the JS-host A7 not-a-constructor cluster
+Tests: `tests/issue-1732-s1.test.ts` (7) — A7 bare/no-parens/cast forms throw
+TypeError; guards confirm `.call` works, user ctors not intercepted, `.bind()` of
+a constructable target still constructs. #1632 bind suite + #1364a class-method
+descriptors stay green. Closes the JS-host A7 not-a-constructor cluster
 (`built-ins/String/prototype/*/S15.5.4.*_A7.js`, ~14 files).
+
+### S2 follow-up note (dev-a)
+
+While triaging, found that `new Math.f16round()` (and other namespace methods
+newer than the TS lib) does NOT throw not-a-constructor: Pattern 1 in
+new-super.ts only matches `X.prototype.Y`, not `<NonCtorNamespace>.<method>`
+where the method type resolves to `any`. Fold a `<Math|JSON|Reflect|Atomics>.
+<method>` member-access arm into the S2 PR (same file). The f16round
+`value-conversion.js` fail is a missing test262 harness include
+(`byteConversionValues`), not a compiler bug.
