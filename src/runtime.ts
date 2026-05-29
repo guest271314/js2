@@ -7700,6 +7700,16 @@ assert._isSameValue = isSameValue;
               tag = _userClassParents.get(tag) ?? null;
             }
           }
+          // (#1729) `<obj> instanceof Object` is true for every object value
+          // (§7.3.20 walks the prototype chain to Object.prototype). A
+          // WasmGC-struct-backed value (object literal, array, class instance)
+          // arriving here as an opaque externref is an object — V8's
+          // `v instanceof Object` above returns false for the opaque ref, so
+          // recognise it explicitly. Only for the `Object` RHS; primitives
+          // never reach this branch as wasm structs.
+          if (ctorName === "Object" && v != null && _isWasmStruct(v)) {
+            return 1;
+          }
           return 0;
         };
       // (#1455) Tag an externref-backed user-class instance with the innermost
