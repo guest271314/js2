@@ -176,8 +176,10 @@ export function main(): void {
     const result = compile(src, { fileName: "host.ts", target: "wasi" });
     expect(result.success).toBe(true);
 
+    // The shipped host echoes the received body verbatim (byte-for-byte, no
+    // wrapper), so the response body equals the input body exactly.
     const out = runWasiRaw(result.binary, frame('{"cmd":"ping"}'));
-    const expectedBody = '{"received":{"cmd":"ping"},"runtime":"js2wasm+wasi"}';
+    const expectedBody = '{"cmd":"ping"}';
     expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(expectedBody.length);
     expect(new TextDecoder().decode(out.subarray(4))).toBe(expectedBody);
   });
