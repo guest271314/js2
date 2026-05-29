@@ -4972,11 +4972,12 @@ export function ensureWasiWriteUint8ArrayHelper(
 
   const fd = useStderr ? 2 : 1;
 
-  // param: arr(0); locals: len(1), data(2), i(3)
+  // param: arr(0); locals: len(1), data(2), i(3), needPages(4)
   const ARR = 0;
   const LEN = 1;
   const DATA = 2;
   const I = 3;
+  const NEED_PAGES = 4;
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -4987,6 +4988,42 @@ export function ensureWasiWriteUint8ArrayHelper(
     { op: "local.get", index: ARR } as Instr,
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
+
+    // #389/#1723: grow linear memory if the staging buffer
+    // [WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START+len) would overflow
+    // the current memory size. The module reserves only 3 pages by default, so a
+    // ~1 MiB raw-byte write (the Native Messaging large-message case) writes far
+    // past page 2 and traps "memory access out of bounds" without this guard —
+    // the same fix the string-write helper got in #1723 but that this and the
+    // ArrayBuffer-write sibling were missing, which is what corrupted/dropped
+    // guest271314's 1 MiB framed message.
+    //
+    //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len) / 65536)
+    //               = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
+    // i32.shr_u keeps the page count non-negative for lengths near 2^31.
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 65535 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 16 } as Instr,
+    { op: "i32.shr_u" } as Instr,
+    { op: "local.set", index: NEED_PAGES } as Instr,
+    // if (needPages > memory.size) memory.grow(needPages - memory.size)
+    { op: "local.get", index: NEED_PAGES } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEED_PAGES } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
 
     // data = arr.data (field 1)
     { op: "local.get", index: ARR } as Instr,
@@ -5060,6 +5097,7 @@ export function ensureWasiWriteUint8ArrayHelper(
       { name: "len", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "needPages", type: { kind: "i32" } },
     ],
     body,
     exported: false,
@@ -5094,11 +5132,12 @@ export function ensureWasiWriteArrayBufferHelper(
 
   const fd = useStderr ? 2 : 1;
 
-  // param: buf(0); locals: len(1), data(2), i(3)
+  // param: buf(0); locals: len(1), data(2), i(3), needPages(4)
   const BUF = 0;
   const LEN = 1;
   const DATA = 2;
   const I = 3;
+  const NEED_PAGES = 4;
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -5109,6 +5148,34 @@ export function ensureWasiWriteArrayBufferHelper(
     { op: "local.get", index: BUF } as Instr,
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
+
+    // #389/#1723: grow linear memory if the staging buffer would overflow the
+    // current memory size (only 3 pages reserved by default). A ~1 MiB
+    // ArrayBuffer write to stdout otherwise traps "memory access out of bounds".
+    // Mirrors the string-write helper's #1723 guard.
+    //   neededPages = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 65535 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 16 } as Instr,
+    { op: "i32.shr_u" } as Instr,
+    { op: "local.set", index: NEED_PAGES } as Instr,
+    { op: "local.get", index: NEED_PAGES } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEED_PAGES } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
 
     // data = buf.data (field 1)
     { op: "local.get", index: BUF } as Instr,

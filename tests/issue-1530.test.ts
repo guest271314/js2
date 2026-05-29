@@ -183,4 +183,125 @@ export function main(): void {
     expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(expectedBody.length);
     expect(new TextDecoder().decode(out.subarray(4))).toBe(expectedBody);
   });
+
+  // #389 — the shipped host echoes a 1 MiB framed body byte-for-byte.
+  // guest271314 reported that a 1 MiB message came back corrupt (an array of
+  // `null`s). Root cause: the raw-byte stdout write helper
+  // (`__wasi_write_uint8array`) staged the body into linear memory at
+  // WASI_WRITE_SCRATCH_START without growing memory first — only 3 pages
+  // (192 KiB) are reserved by default, so a ~1 MiB write ran past the end of
+  // memory and trapped / corrupted the output. The host now carries the body
+  // as a raw Uint8Array (no lossy String.fromCharCode stringify) and the write
+  // helper grows memory like the string-write path already did (#1723).
+  //
+  // We build a frame whose body is non-trivial bytes (a repeating 0..250 ramp,
+  // so any truncation, zeroing, or aliasing shows up as a byte mismatch) and
+  // assert the response is the exact same 1 MiB body with the right prefix.
+  it("echoes a 1 MiB framed body byte-exactly (#389 large-message regression)", () => {
+    const src = readFileSync(hostPath, "utf-8");
+    const result = compile(src, { fileName: "host.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const SIZE = 1024 * 1024; // 1 MiB
+    const body = new Uint8Array(SIZE);
+    for (let i = 0; i < SIZE; i++) body[i] = i % 251;
+    const input = new Uint8Array(4 + SIZE);
+    new DataView(input.buffer).setUint32(0, SIZE, true);
+    input.set(body, 4);
+
+    const out = runWasiRaw(result.binary, input);
+    // 4-byte LE prefix declares the full 1 MiB length…
+    expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(SIZE);
+    // …and the body is the exact same bytes, with no truncation/null-fill.
+    const respBody = out.subarray(4);
+    expect(respBody.length).toBe(SIZE);
+    let firstMismatch = -1;
+    for (let i = 0; i < SIZE; i++) {
+      if (respBody[i] !== body[i]) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+  });
+});
+
+// #389 — direct regression for the compiler-side bug: a large
+// process.stdout.write(Uint8Array) under --target wasi must grow linear memory
+// so the staged bytes don't run past the end of memory. Before the fix this
+// trapped "memory access out of bounds" at ~1 MiB (the byte-write helpers were
+// missing the memory.grow guard the string-write helper got in #1723). This is
+// independent of the Native Messaging example shape.
+describe("#389 large raw-byte stdout write grows memory", () => {
+  function runWriteOnly(binary: Uint8Array): Uint8Array {
+    const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
+    const writes: Uint8Array[] = [];
+    const wasi = {
+      fd_read(): number {
+        return 0;
+      },
+      fd_write(fd: number, iovs: number, iovsLen: number, nwritten: number): number {
+        const view = new DataView(ref.mem!.buffer);
+        let total = 0;
+        for (let i = 0; i < iovsLen; i++) {
+          const ptr = view.getUint32(iovs + i * 8, true);
+          const len = view.getUint32(iovs + i * 8 + 4, true);
+          if (fd === 1) writes.push(Uint8Array.from(new Uint8Array(ref.mem!.buffer, ptr, len)));
+          total += len;
+        }
+        view.setUint32(nwritten, total, true);
+        return 0;
+      },
+      proc_exit(code: number): void {
+        throw new Error(`proc_exit(${code})`);
+      },
+      random_get(): number {
+        return 0;
+      },
+      clock_time_get(): number {
+        return 0;
+      },
+    };
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+      wasi_snapshot_preview1: wasi,
+      env: {},
+    });
+    ref.mem = inst.exports.memory as WebAssembly.Memory;
+    (inst.exports.main as () => void)();
+    const total = writes.reduce((n, b) => n + b.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const b of writes) {
+      out.set(b, off);
+      off += b.length;
+    }
+    return out;
+  }
+
+  it("writes a 1 MiB Uint8Array to stdout without trapping", () => {
+    const src = `
+declare const process: {
+  stdout: { write(chunk: Uint8Array | string): void };
+};
+export function main(): void {
+  const n = 1048576;
+  const buf = new Uint8Array(n);
+  let i = 0;
+  while (i < n) { buf[i] = (i % 251); i = i + 1; }
+  process.stdout.write(buf);
+}`;
+    const result = compile(src, { fileName: "u8write.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const out = runWriteOnly(result.binary);
+    expect(out.length).toBe(1048576);
+    let firstMismatch = -1;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== i % 251) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+  });
 });
