@@ -742,7 +742,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-            persist-credentials: true
+          persist-credentials: true
 
       - name: Setup Node
         uses: actions/setup-node@v6
