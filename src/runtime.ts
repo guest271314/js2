@@ -5582,6 +5582,16 @@ assert._isSameValue = isSameValue;
                   // Also mark in sidecar so property enumeration knows it exists
                   _sidecarSet(obj, prop, undefined);
                 } else {
+                  // (#1629 S3) data→accessor flip: if a prior data
+                  // `defineProperty` mirrored a plain value into the value
+                  // sidecar at `sc[prop]`, it would shadow the new getter —
+                  // `_safeGet` consults `_sidecarGet` (which reads `sc[prop]`)
+                  // *before* the `__get_<prop>` getter. Drop the stale value so
+                  // the accessor wins. (A bare struct field's value lives in the
+                  // struct, not `sc`, so this is a no-op in the common case.)
+                  if ((desc.get || desc.set) && prop in sc && typeof sc[prop as string] !== "function") {
+                    delete sc[prop as string];
+                  }
                   if (desc.get) sc[`__get_${prop}`] = desc.get;
                   if (desc.set) sc[`__set_${prop}`] = desc.set;
                   // Mark the property key as "own" for hasOwnProperty checks.

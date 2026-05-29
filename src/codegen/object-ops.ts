@@ -850,6 +850,20 @@ export function compileObjectDefineProperty(
     resolveStructName(ctx, objTsType) ||
     (ts.isIdentifier(objArg) ? ctx.widenedVarStructMap.get(objArg.text) : undefined);
 
+  // (#1629 S3) Whether the receiver is *statically* struct-typed — i.e. resolved
+  // WITHOUT the `any`/externref rescue fallbacks 1-3 below. This is the same
+  // strength of resolution the *read* site (`resolveStructNameForExpr` in
+  // property-access.ts) has, so when it is set the compiled accessor fast path
+  // (`${structName}_get_<prop>` + `classAccessorSet`) is reachable from reads and
+  // must be kept. When it is unset (the `const o:any = {...}` case, resolved only
+  // via the define-site-only fallbacks), reads route through `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — those must
+  // instead mirror the accessor into the runtime sidecar (the working
+  // `emitExternDefinePropertyNoValue` → `__defineProperty_accessor` path). Splitting
+  // on this bit fixes the `const o:any` accessor-get bug without regressing the
+  // statically struct-typed (class-instance) accessor path.
+  const receiverIsStaticStruct = structName !== undefined;
+
   // Fallback 1: resolve struct name from the local variable's Wasm type.
   // This handles cases where the TS type is `any` but the local holds a struct ref.
   if (!structName && ts.isIdentifier(objArg)) {
@@ -907,11 +921,36 @@ export function compileObjectDefineProperty(
 
   // ── Getter/setter path ──────────────────────────────────────────────
   // Object.defineProperty(obj, "prop", { get() {...}, set(v) {...} })
-  // Compile as struct accessor methods, analogous to object literal getters/setters.
-  // Take the struct path whenever a struct is known — accessor properties don't need fieldIdx >= 0
-  // because they compile as Wasm functions (not struct fields). Property assignment uses the
-  // classAccessorSet to route o.foo = v to the compiled setter Wasm function.
-  if ((getNode || setNode) && !valueExpr && structName && structTypeIdx !== undefined && propName) {
+  //
+  // (#1629 S3) For a *statically struct-typed* receiver (a class instance / typed
+  // object — `receiverIsStaticStruct`) this branch compiles the getter/setter into
+  // a `${structName}_get_<prop>` Wasm function + `classAccessorSet` registration,
+  // which the read site dispatches via `compilePropertyAccess`'s class-accessor
+  // path. That read site resolves the same `structName`, so the compiled fast
+  // path is reachable and stays — removing it regresses the #459 accessor suite.
+  //
+  // For a `const o:any = {...}` receiver, by contrast, `structName` was resolved
+  // ONLY via the define-site rescue fallbacks 1-3 below, which the *read* site
+  // (`resolveStructNameForExpr`) lacks. Such reads lower to `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — so the old
+  // unconditional early-return left the getter in neither
+  // `_wasmStructProps[obj]["__get_<prop>"]` nor `_wasmStructAccessors`, and
+  // `o.p` / `o["p"]` / `o[k]` / host reads returned `undefined`. We now fall
+  // those through (below) to `emitExternDefinePropertyNoValue`, which mirrors
+  // get/set into the runtime `__defineProperty_accessor` import (closure-wrapped
+  // via `_maybeWrapCallable` / the unconditional `__call_fn_<n>` bridge, validated
+  // by `_validatePropertyDescriptor`, written to the canonical sidecar slot
+  // `_safeGet` / S1 `_readOwnDescriptor` / GOPD all consult). One write reconciles
+  // every reader — the symmetric mirror the data-value path already emits via
+  // `__defineProperty_value`.
+  if (
+    receiverIsStaticStruct &&
+    (getNode || setNode) &&
+    !valueExpr &&
+    structName &&
+    structTypeIdx !== undefined &&
+    propName
+  ) {
     // Compile obj and save to local
     const objType = compileExpression(ctx, fctx, objArg);
     if (!objType) return null;
