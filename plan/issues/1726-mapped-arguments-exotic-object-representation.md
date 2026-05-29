@@ -1,5 +1,5 @@
 ---
-id: 1432
+id: 1726
 title: "spec gap: mapped `arguments` exotic-object representation (§10.4.4)"
 status: ready
 feasibility: hard
@@ -17,7 +17,7 @@ updated: 2026-05-29
 > use* by the **done** issue
 > `plan/issues/1432-spec-gap-parameter-list-rest-destructuring.md` (merged
 > in commit `260f3df16`, sprint 52). That issue is unrelated
-> (parameter-list rest/destructuring iterator semantics). The "(#1432
+> (parameter-list rest/destructuring iterator semantics). The "(#1726
 > follow-up)" back-reference inside `1511`'s *Out of scope* note was a
 > mistaken citation. This file carries `id: 1432` per the spawning
 > instruction, but the **on-disk slug is distinct**
