@@ -188,6 +188,25 @@ export interface FunctionContext {
    * `enclosingClassName` is.
    */
   isStaticContext?: boolean;
+  /**
+   * (#1636-S1) True only for closure bodies that can be dispatched from the
+   * host via `__call_fn_method_N` (lifted free closures and anonymous
+   * callbacks passed to e.g. `JSON.stringify`'s replacer / a value's
+   * `toJSON`). Those dispatchers install the host-supplied receiver into the
+   * `__current_this` module global before the inner `call_ref`, so the
+   * closure's `this` must read that global when it has no other binding.
+   *
+   * Named function declarations, methods, and constructors are NOT dispatched
+   * through `__call_fn_method_N` — they are called directly via `call $f`,
+   * where `__current_this` is never installed for them. They must keep the
+   * spec-correct `undefined` (strict) / globalObject (sloppy) `this`, so they
+   * must NOT read `__current_this`. The flag gates the fallback to exactly the
+   * bodies that can observe a host-installed receiver. Without it, every
+   * `this` in a free function in any module that emits a closure regressed to
+   * the global's `ref.null.extern` initial value (#1636-S1 regression: 171
+   * test262 failures in `function-code/10.4.3-1-*` and `Array/prototype/*`).
+   */
+  readsCurrentThis?: boolean;
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
   /**
