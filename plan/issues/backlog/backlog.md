@@ -98,3 +98,23 @@ both others); #1653 is the keystone for the read side + continuous loop.
 - [#1564](1564-toNumeric-symbol-throws-typeError.md) — ToNumeric: Symbol → TypeError — ~12 fails, easy
 
 - [#1600](1600-finalizationregistry-host-delegate-noop-stub.md) — FinalizationRegistry host-delegate (JS mode, like WeakRef) + no-op standalone stub; clears ~12 CEs. Faithful standalone finalization stays out of scope (→ #1101).
+
+## Test262 triage — untracked failure causes (PO, 2026-05-29)
+
+New issues from a fresh main-baseline (`.test262-cache/test262-current.jsonl`,
+48,117 records) root-cause triage. Dedup'd against all open issues; clusters
+already covered by open issues (dstr WasmGC type-mismatch → #1556/#1623;
+Promise non-constructor → #1528/#1694; Set set-like → #1627/#1646/#1674; bind
+fidelity → #1463) were NOT re-filed.
+
+- [#1716](../1716-spec-gap-toprimitive-residual-object-property-key-coercion.md) — **RESIDUAL of done #1090/#1319/#1525**: `Cannot convert object to primitive value` still thrown in 111 paths (Object property-key + String/RegExp/JSON/Date `this`-value coercion) — **high**, medium, **ready**
+- [#1717](../1717-arraybuffer-prototype-slice-not-implemented.md) — `ArrayBuffer.prototype.slice` not implemented (`slice is not a function`, 17 fails) — medium, medium, **ready**
+- [#1718](../1718-iterator-sequencing-helpers-concat-zip-flatmap.md) — Iterator sequencing helpers (`Iterator.concat`/`zip`/`zipKeyed`) + `Iterator.prototype.flatMap` not implemented (101 fails; distinct from done #1340) — medium, hard, **ready**
+- [#1719](../1719-array-destructuring-ignores-overridden-array-prototype-iterator.md) — Array destructuring ignores overridden `Array.prototype[Symbol.iterator]` (`items[Symbol.iterator]` must be a function, 71 fails) — **high**, medium, **ready**
+
+### ES3 / edition-0 conformance → Sprint 57 (Track 3)
+
+- [#1720](../1720-es3-incdec-reference-evaluation-order-null-base.md) — ES3: prefix/postfix inc-dec reference evaluated once before null deref (`base[prop()]++`, sputnik S11.x, ~10 fails) — medium, medium, **ready (sprint 57)**
+- [#1721](../1721-es3-subclass-function-object-instanceof.md) — ES3 (residual of #1455): `class extends Function`/`extends Object` instanceof returns false (4 fails) — medium, medium, **ready (sprint 57)**
+- [#1722](../1722-es3-assignmenttargettype-early-syntaxerror.md) — ES3: AssignmentTargetType early SyntaxError not raised (yield/arrow as assignment target, 4 fails) — low, medium, **ready (sprint 57)**
+- [#1511](../1511-spec-gap-arguments-object-mapped-and-trailing-comma.md) — **MOVED to sprint 57** (was sprint 52): arguments object mapped semantics / descriptors / trailing-comma length — covers the ES3 mapped-arguments cluster (~19 edition-0 fails) — high, medium, **review**

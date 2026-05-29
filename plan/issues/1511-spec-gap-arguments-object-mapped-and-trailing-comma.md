@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: arguments-object
 goal: spec-completeness
-sprint: 52
+sprint: 57
 related: [1364, 1432]
 ---
 # #1511 — arguments object fidelity
