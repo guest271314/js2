@@ -55,7 +55,7 @@ by CI on every merge) is below; everything else links to STATUS.md rather than
 duplicating numbers that go stale.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,341 / 43,135 (70.3 %) — baseline 119b766c, 2026-05-28T18:28:42Z
+**test262 conformance**: 30,245 / 43,135 (70.1 %) — baseline 1b6e0643, 2026-05-29T00:14:08Z
 <!-- AUTO:conformance-end -->
 
 ## Current Status
