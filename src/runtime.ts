@@ -1569,10 +1569,31 @@ function _toPrimitive(
  * because we can't dispatch through Wasm exports without callbackState.
  * For regular JS objects, uses V8's native valueOf/toString which throws TypeError
  * per spec if neither produces a primitive.
+ *
+ * (#1716) When a `callbackState` IS supplied (e.g. ToPropertyKey on an object
+ * key inside `_safeGet`/`_safeSet`/`__extern_has`), route WasmGC structs through
+ * `_hostToPrimitive` — the callbackState-aware OrdinaryToPrimitive walker built
+ * for #1319/#1090 — so that a key/arg whose `valueOf` / `toString` /
+ * `Symbol.toPrimitive` is a compiled WasmGC closure is actually invoked instead
+ * of falling through to the opaque-struct "[object Object]" sentinel. This reuses
+ * the existing machinery rather than duplicating the dispatch logic; a §7.1.1.1
+ * step-6 violation (method returns an object) still throws TypeError, which is
+ * the spec-correct outcome for the property-key path too.
  */
-function _toPrimitiveSync(v: any, hint: "number" | "string" | "default"): any {
+function _toPrimitiveSync(
+  v: any,
+  hint: "number" | "string" | "default",
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
   if (v == null || typeof v !== "object") return v;
-  const prim = _toPrimitive(v, hint);
+  // (#1716) With exports available, defer to the full OrdinaryToPrimitive walker
+  // so WasmGC-closure valueOf/toString/@@toPrimitive get dispatched. It returns
+  // "[object Object]" for a no-method struct and throws only on the spec
+  // step-6 violation — both correct here.
+  if (callbackState && _isWasmStruct(v)) {
+    return _hostToPrimitive(v, hint, callbackState);
+  }
+  const prim = _toPrimitive(v, hint, callbackState);
   if (prim !== undefined) return prim;
   // WasmGC structs: JS property access fails on opaque structs, but they may
   // have compiled valueOf/toString that _toPrimitive couldn't dispatch without
@@ -1592,6 +1613,29 @@ function _toPrimitiveSync(v: any, hint: "number" | "string" | "default"): any {
     }
   }
   throw new TypeError("Cannot convert object to primitive value");
+}
+
+/**
+ * (#1716) ToPropertyKey (§7.1.19): coerce a value intended as a property key.
+ * For a WasmGC-struct key, run ToPrimitive(hint "string") via the
+ * callbackState-aware walker so a key with a compiled `valueOf` / `toString` /
+ * `[Symbol.toPrimitive]` is invoked — then ToString the resulting primitive.
+ * Symbols pass through unchanged (they ARE valid property keys). Non-struct
+ * values are returned as-is; native `Object.defineProperty` etc. then apply
+ * their own ToPropertyKey, which is correct for plain JS objects.
+ *
+ * Used by the Object.* / Reflect.* runtime intent handlers that forward a raw
+ * key to a native operation that would otherwise throw "Cannot convert object
+ * to primitive value" on an opaque struct key.
+ */
+function _toPropertyKey(key: any, callbackState?: { getExports: () => Record<string, Function> | undefined }): any {
+  if (key == null || typeof key !== "object") return key;
+  if (typeof key === "symbol") return key;
+  if (!_isWasmStruct(key)) return key;
+  const prim = _toPrimitiveSync(key, "string", callbackState);
+  if (typeof prim === "symbol") return prim;
+  // ToString the primitive (numbers/booleans/etc. → string key per §7.1.19).
+  return prim == null ? prim : typeof prim === "string" ? prim : String(prim);
 }
 
 /**
@@ -1668,6 +1712,33 @@ function _hostToPrimitive(
     }
     // Non-callable Symbol.toPrimitive
     throw new TypeError("Cannot convert object to primitive value");
+  }
+
+  // (#1716) A class that defines `[Symbol.toPrimitive]` as a *method* compiles
+  // the method to a struct-method export `__call_@@toPrimitive`, but does NOT
+  // populate the sidecar `Symbol.toPrimitive` slot — so neither the proxy
+  // property read nor the sidecar check above finds it. `_toPrimitive` only
+  // reaches its `__call_@@toPrimitive` dispatch when the sidecar slot is set, so
+  // the method-shorthand shape was silently missed here (the residual the
+  // property-key / arg paths hit). Probe the struct-method export directly,
+  // mirroring §7.1.1 step 2 (exotic @@toPrimitive consulted before
+  // valueOf/toString).
+  if (_isWasmStruct(raw) && callbackState) {
+    const exports = callbackState.getExports();
+    const callTP = exports?.["__call_@@toPrimitive"];
+    if (typeof callTP === "function") {
+      try {
+        const result = callTP(raw, hint);
+        if (result == null || typeof result !== "object") return result;
+        // Exotic @@toPrimitive returned an object → §7.1.1 step 5 TypeError.
+        throw new TypeError("Cannot convert object to primitive value");
+      } catch (e: any) {
+        // Only a Wasm type-mismatch trap (wrong struct variant) is swallowed so
+        // we can fall through to valueOf/toString; user throws + the TypeError
+        // above propagate.
+        if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+      }
+    }
   }
 
   // OrdinaryToPrimitive §7.1.1.1
@@ -2536,11 +2607,15 @@ function _resolveNamespacedClass(
 }
 
 /** Safe property get: works on both JS objects and WasmGC structs. */
-function _safeGet(obj: any, key: any): any {
+function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record<string, Function> | undefined }): any {
   if (obj == null) return undefined;
-  // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090)
+  // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090, #1716).
+  // Passing callbackState lets a key with a WasmGC-closure valueOf / toString /
+  // @@toPrimitive be dispatched (ToPropertyKey §7.1.19 → ToPrimitive §7.1.1);
+  // without it the opaque struct collapses to "[object Object]" and the lookup
+  // silently misses.
   if (key != null && typeof key === "object" && _isWasmStruct(key)) {
-    const prim = _toPrimitiveSync(key, "string");
+    const prim = _toPrimitiveSync(key, "string", callbackState);
     if (prim != null && typeof prim !== "object") key = prim;
   }
   // Well-known symbol ID (i32 from compiler): only apply to WasmGC structs.
@@ -2608,11 +2683,21 @@ function _safeGet(obj: any, key: any): any {
  * `Reflect.set`, and `Object.defineProperty` data writes (#1630). Callers
  * that don't pass `exports` get the prior sidecar-only behaviour.
  */
-function _safeSet(obj: any, key: any, val: any, exports?: Record<string, Function>): void {
+function _safeSet(
+  obj: any,
+  key: any,
+  val: any,
+  exports?: Record<string, Function>,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): void {
   if (obj == null) return;
-  // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090)
+  // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090, #1716).
+  // Prefer the explicit callbackState; fall back to wrapping `exports` so a
+  // WasmGC-closure key method can still be dispatched when only exports is in
+  // scope at the call site.
   if (key != null && typeof key === "object" && _isWasmStruct(key)) {
-    const prim = _toPrimitiveSync(key, "string");
+    const cbState = callbackState ?? (exports ? { getExports: () => exports } : undefined);
+    const prim = _toPrimitiveSync(key, "string", cbState);
     if (prim != null && typeof prim !== "object") key = prim;
   }
   // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
@@ -3864,11 +3949,41 @@ function resolveImport(
           intent.className === "Float64Array" ||
           intent.className === "BigInt64Array" ||
           intent.className === "BigUint64Array";
+        // (#1716) Constructors that run ToPrimitive / ToString on their
+        // arguments (rather than consuming them as iterables / buffers / struct
+        // identities). When a WasmGC struct is passed as such an arg, V8's
+        // native `new Ctor(struct)` invokes ToString/ToPrimitive on the opaque
+        // struct and throws "Cannot convert object to primitive value" — it
+        // can't reach the compiled valueOf / toString / @@toPrimitive. Coerce
+        // these struct args through `_hostToPrimitive` (the #1319 OrdinaryToPrimitive
+        // walker) FIRST so the user methods run. RegExp/Date/String use a "string"/
+        // "default" ToString-shaped coercion; Number uses "number".
+        // NB: `Boolean` is deliberately excluded — `new Boolean(obj)` applies
+        // ToBoolean (every object is truthy), NOT ToPrimitive, so coercing the
+        // struct to a primitive could flip the result. Iterable/buffer consumers
+        // are excluded too — they need the struct identity, not a primitive.
+        const coercesArgsToPrimitive =
+          intent.className === "RegExp" ||
+          intent.className === "Date" ||
+          intent.className === "String" ||
+          intent.className === "Number";
+        const argCoercionHint: "number" | "string" | "default" =
+          intent.className === "Number" ? "number" : intent.className === "Date" ? "default" : "string";
         return (...args: any[]) => {
           if (!isWrapperCtor) {
             let len = args.length;
             while (len > 0 && args[len - 1] == null) len--;
             args = args.slice(0, len);
+          }
+          if (coercesArgsToPrimitive && args.length > 0) {
+            for (let i = 0; i < args.length; i++) {
+              const a = args[i];
+              if (a != null && typeof a === "object" && _isWasmStruct(a)) {
+                // Throws TypeError per §7.1.1 step 6 if no chain yields a
+                // primitive — the spec-correct outcome here too.
+                args[i] = _hostToPrimitive(a, argCoercionHint, callbackState);
+              }
+            }
           }
           if (isIterableCtor && args.length > 0 && args[0] != null) {
             const exports = callbackState?.getExports();
@@ -4344,7 +4459,7 @@ assert._isSameValue = isSameValue;
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
-          const val = _safeGet(obj, key);
+          const val = _safeGet(obj, key, callbackState);
           if (val !== undefined) return val;
           // Try struct getter exports as fallback for WasmGC opaque fields
           if (typeof key === "string") {
@@ -4362,7 +4477,7 @@ assert._isSameValue = isSameValue;
           // "object is not a function". Wrap it via __call_fn_<arity> so
           // host-driven invocation reaches the closure body.
           const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
-          _safeSet(obj, key, wrappedVal);
+          _safeSet(obj, key, wrappedVal, undefined, callbackState);
         };
       if (name === "__extern_length")
         return (obj: any) => {
@@ -4510,9 +4625,9 @@ assert._isSameValue = isSameValue;
       if (name === "__extern_has")
         return (obj: any, key: any): number => {
           if (obj == null) return 0;
-          // WasmGC struct keys → primitive via ToPrimitive (mirrors _safeGet)
+          // WasmGC struct keys → primitive via ToPrimitive (mirrors _safeGet, #1716)
           if (key != null && typeof key === "object" && _isWasmStruct(key)) {
-            const prim = _toPrimitiveSync(key, "string");
+            const prim = _toPrimitiveSync(key, "string", callbackState);
             if (prim != null && typeof prim !== "object") key = prim;
           }
           try {
@@ -5183,7 +5298,10 @@ assert._isSameValue = isSameValue;
           if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) {
             throw new TypeError("Object.defineProperty called on non-object");
           }
-          const key = prop != null ? String(prop) : "";
+          // (#1716) ToPropertyKey on a struct key invokes its valueOf/toString/
+          // @@toPrimitive instead of collapsing to "[object Object]".
+          prop = _toPropertyKey(prop, callbackState);
+          const key = typeof prop === "symbol" ? prop : prop != null ? String(prop) : "";
           // Field reader that round-trips both plain JS objects (native `o[f]`,
           // which fires accessors / walks the prototype chain per
           // ToPropertyDescriptor) and WasmGC structs (sidecar + the compiled
@@ -5236,6 +5354,7 @@ assert._isSameValue = isSameValue;
           if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) {
             throw new TypeError("Object.defineProperty called on non-object");
           }
+          prop = _toPropertyKey(prop, callbackState); // (#1716) ToPropertyKey on struct key
           const desc: PropertyDescriptor = {};
           if (flags & (1 << 7)) desc.value = _maybeWrapCallableUnknownArity(value, callbackState);
           if (flags & (1 << 3)) desc.writable = !!(flags & 1);
@@ -5272,6 +5391,7 @@ assert._isSameValue = isSameValue;
           if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) {
             throw new TypeError("Object.defineProperty called on non-object");
           }
+          prop = _toPropertyKey(prop, callbackState); // (#1716) ToPropertyKey on struct key
           // (#1382) When the accessor descriptor's `get`/`set` is a Wasm
           // closure struct (not a JS function), wrap it into a JS Function
           // so subsequent property reads/writes invoke through the
@@ -5441,6 +5561,7 @@ assert._isSameValue = isSameValue;
       if (name === "__getOwnPropertyDescriptor")
         return (obj: any, prop: any) => {
           if (obj == null) return undefined;
+          prop = _toPropertyKey(prop, callbackState); // (#1716) ToPropertyKey on struct key
           // Non-WasmGC objects: native JS handles it
           if (!_isWasmStruct(obj)) {
             return Object.getOwnPropertyDescriptor(obj, prop);
@@ -6072,8 +6193,10 @@ assert._isSameValue = isSameValue;
       if (name === "__get_builtin") return (n: string) => (globalThis as any)[n];
       // Object.hasOwn(obj, key) — ES2022 static method (#965)
       if (name === "__object_hasOwn")
-        return (obj: any, key: any): number =>
-          (Object.hasOwn ? Object.hasOwn(obj, key) : Object.prototype.hasOwnProperty.call(obj, key)) ? 1 : 0;
+        return (obj: any, key: any): number => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
+          return (Object.hasOwn ? Object.hasOwn(obj, key) : Object.prototype.hasOwnProperty.call(obj, key)) ? 1 : 0;
+        };
       // Object.is(x, y) — SameValue comparison (#965)
       if (name === "__object_is") return (x: any, y: any): number => (Object.is(x, y) ? 1 : 0);
       // Object.assign(target, ...sources) — shallow copy (#965)
@@ -6116,6 +6239,7 @@ assert._isSameValue = isSameValue;
       // host MOP operations can enumerate / mutate their sidecar fields.
       if (name === "__reflect_get")
         return (target: any, key: any, receiver: any): any => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           const r =
@@ -6128,6 +6252,7 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__reflect_set")
         return (target: any, key: any, value: any, receiver: any): number => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           const v = _isWasmStruct(value) ? _wrapForHost(value, exports) : value;
@@ -6141,18 +6266,21 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__reflect_has")
         return (target: any, key: any): number => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           return Reflect.has(t, key) ? 1 : 0;
         };
       if (name === "__reflect_deleteProperty")
         return (target: any, key: any): number => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           return Reflect.deleteProperty(t, key) ? 1 : 0;
         };
       if (name === "__reflect_defineProperty")
         return (target: any, key: any, desc: any): number => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           const d = _isWasmStruct(desc) ? _wrapForHost(desc, exports) : desc;
@@ -6160,6 +6288,7 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__reflect_getOwnPropertyDescriptor")
         return (target: any, key: any): any => {
+          key = _toPropertyKey(key, callbackState); // (#1716) ToPropertyKey on struct key
           const exports = callbackState?.getExports();
           const t = _isWasmStruct(target) ? _wrapForHost(target, exports) : target;
           return Reflect.getOwnPropertyDescriptor(t, key);
@@ -8083,7 +8212,7 @@ assert._isSameValue = isSameValue;
       return (v: any) => (v ? 1 : 0);
     case "extern_get":
       return (obj: any, key: any) => {
-        const val = _safeGet(obj, key);
+        const val = _safeGet(obj, key, callbackState);
         if (val !== undefined) {
           // (#779c) Sandbox-aware constructor identity. When a
           // `globalSandbox` is supplied (test262 per-test realm isolation),
@@ -8136,7 +8265,7 @@ assert._isSameValue = isSameValue;
         // (#860) Wrap closure-as-value before storing — see __extern_set
         // binding above. Mirrors the by-name path.
         const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
-        _safeSet(obj, key, wrappedVal);
+        _safeSet(obj, key, wrappedVal, undefined, callbackState);
       };
     case "host_eq":
       // #1065 — strict equality for two externref operands that the GC path

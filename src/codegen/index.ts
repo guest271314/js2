@@ -1198,6 +1198,10 @@ export function generateModule(
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
 
+    // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
+    // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
+    emitToPrimitiveMethodExport(ctx);
+
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
 
@@ -1871,6 +1875,126 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
   emitMethodDispatch("next", "__call_next");
+}
+
+/**
+ * (#1716) Emit `__call_@@toPrimitive(self, hint) -> externref` — a 2-arg
+ * dispatch wrapper so the runtime can invoke a class's `[Symbol.toPrimitive]`
+ * *method* on an opaque WasmGC struct.
+ *
+ * Unlike valueOf/toString (which compile to `__call_<name>` 1-arg dispatchers
+ * emitted by `emitToPrimitiveMethodExports` and picked up by `_hostToPrimitive`'s
+ * OrdinaryToPrimitive loop), the exotic @@toPrimitive method takes the ToPrimitive
+ * hint string and had NO runtime dispatch export — so ToPropertyKey (object used
+ * as a property key) and String()/RegExp()/Date() object-arg coercion on such a
+ * key/arg silently fell through to the opaque-struct "[object Object]" sentinel
+ * (the §7.1.1 residual tracked in #1716). The method body is registered as
+ * `${structName}_@@toPrimitive(self, hint)`; we ref.test `self` against each
+ * such struct and forward the externref hint.
+ *
+ * The dispatch forwards the runtime-supplied hint as an externref (the JS-host
+ * string backend's representation). In nativeStrings mode the hint param is a
+ * WasmGC `(ref $string)` i16 array we cannot synthesize from the externref
+ * inline, and the runtime that calls `__call_@@toPrimitive` is JS-host-only and
+ * never runs in the standalone nativeStrings path — so such entries are skipped
+ * to keep Wasm validation green in every mode.
+ */
+function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const methodSuffix = "@@toPrimitive";
+  const exportName = "__call_@@toPrimitive";
+  const entries: { typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
+
+  for (const [structName] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+
+    const funcIdx = ctx.funcMap.get(`${structName}_${methodSuffix}`);
+    if (funcIdx === undefined) continue;
+
+    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
+    const resultType: ValType =
+      funcType && funcType.kind === "func" && funcType.results.length > 0
+        ? funcType.results[0]!
+        : { kind: "externref" };
+
+    // The hint param is param[1] (param[0] is `self`). Only forward when it is
+    // an externref; skip nativeStrings string-ref params (see doc comment).
+    const hintParamType =
+      funcType && funcType.kind === "func" && funcType.params.length > 1 ? funcType.params[1] : undefined;
+    if (hintParamType !== undefined && hintParamType.kind !== "externref") continue;
+
+    entries.push({ typeIdx, funcIdx, resultType });
+  }
+
+  if (entries.length === 0) return;
+
+  const dispatchTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$call_method_2arg_type",
+  );
+
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+  const body: Instr[] = [];
+  // local 2 = any.convert_extern(self)
+  body.push({ op: "local.get", index: 0 });
+  body.push({ op: "any.convert_extern" } as Instr);
+  body.push({ op: "local.set", index: 2 } as Instr);
+
+  let current: Instr[] = [{ op: "ref.null.extern" } as Instr];
+
+  for (const entry of entries) {
+    const testAndCall: Instr[] = [
+      { op: "local.get", index: 2 } as Instr,
+      { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
+      { op: "local.get", index: 1 } as Instr, // hint (externref)
+      { op: "call", funcIdx: entry.funcIdx } as Instr,
+    ];
+
+    if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
+      testAndCall.push({ op: "extern.convert_any" } as Instr);
+    } else if (entry.resultType.kind === "f64") {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+    } else if (entry.resultType.kind === "i32") {
+      testAndCall.push({ op: "f64.convert_i32_s" } as Instr);
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+    }
+
+    current = [
+      { op: "local.get", index: 2 } as Instr,
+      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: testAndCall,
+        else: current,
+      } as Instr,
+    ];
+  }
+
+  body.push(...current);
+
+  mod.functions.push({
+    name: exportName,
+    typeIdx: dispatchTypeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
 }
 
 /**
@@ -3969,6 +4093,10 @@ export function generateMultiModule(
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
+
+    // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
+    // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
+    emitToPrimitiveMethodExport(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
