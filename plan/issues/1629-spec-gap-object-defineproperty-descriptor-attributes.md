@@ -3,7 +3,7 @@ id: 1629
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
 status: ready
 created: 2026-05-08
-updated: 2026-05-29
+updated: 2026-05-30
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -532,6 +532,64 @@ for the no-descriptor case (diff the emitted Wasm for a plain `{a:0}.a` read).
 function-free / 83 plain of c4), `tests/issue-1629-S3.test.ts`
 (accessor read-back, dynamic data overwrite, delete-then-read). Re-run #1130
 suite — expect incidental gains.
+
+> **S3 STATUS — first sub-slice DONE (2026-05-30, senior-developer).** Shipped
+> the inline `defineProperty`-accessor **STORE contract** fix (the verified
+> `const o:any={z:0}; Object.defineProperty(o,"p",{get(){return 42}}); o.p`
+> returns `undefined` bug). Root cause (confirmed by probe): the accessor branch
+> in `compileObjectDefineProperty` (`src/codegen/object-ops.ts:914`) compiled a
+> dead `${structName}_get_<prop>` Wasm function + `classAccessorSet` and
+> EARLY-RETURNED, feeding **no** runtime sidecar — so the getter lived in neither
+> `_wasmStructProps[obj]["__get_<prop>"]` nor `_wasmStructAccessors`, the slots
+> `_safeGet` / `_readOwnDescriptor` / GOPD consult.
+>
+> **Fix (two files, ~50 lines):**
+> 1. `src/codegen/object-ops.ts` — gate the inline accessor branch on a new
+>    `receiverIsStaticStruct` bit (= struct resolved *without* the `any`/externref
+>    define-site rescue fallbacks, i.e. the same resolution strength the read
+>    site `resolveStructNameForExpr` has). **Statically-typed receivers**
+>    (class instances, typed objects) keep the compiled-getter fast path
+>    unchanged — that path IS reachable from their reads, and removing it
+>    regressed the #459 accessor suite by 6 in a first attempt. **`const o:any`
+>    receivers** (resolved only via fallbacks 1–3) now fall through to the
+>    existing `emitExternDefinePropertyNoValue`, which already mirrors get/set
+>    into the runtime `__defineProperty_accessor` import (closure-wrapped via
+>    `_maybeWrapCallable` / `__call_fn_N`) — the symmetric mirror the data-value
+>    path always emitted. One write reconciles `_safeGet`, GOPD, and
+>    `_readOwnDescriptor`.
+> 2. `src/runtime.ts` `__defineProperty_accessor` — one defensive line for the
+>    **data→accessor flip**: drop a stale plain value at `sc[prop]` before
+>    installing the getter, so `_sidecarGet` (checked before `__get_<prop>` in
+>    `_safeGet`) cannot shadow the new accessor.
+>
+> **WHY this shape, not the architect's approach (A) verbatim:** (A) proposed a
+> *new* `emitExternDefinePropertyAccessor` helper, but the exact plumbing it
+> describes (compile get/set via `compileArrowAsCallback({needsThis:true})` →
+> `__defineProperty_accessor`) **already exists** in
+> `emitExternDefinePropertyNoValue` — the bug was purely that the early-returning
+> struct branch *intercepted* the accessor case before reaching it. Routing
+> through the existing helper is strictly less code and reuses proven plumbing.
+>
+> **Fixed (verified by `tests/issue-1629-S3.test.ts`, 10 cases):** getter on
+> dot / bracket / dynamic-key reads of an `any` receiver; getter with `this`
+> receiver (works — `_maybeWrapCallable` binds `this` for getters, contrary to
+> the dropped-`this` note which only affects the broader closure-arity path);
+> getter closing over scope; get-only / set-only / get+set; data→accessor flip
+> via bracket read; GOPD read-back (`{get:fn, set:undefined, enumerable:false,
+> configurable:false}`).
+>
+> **Still deferred to the broader S3 read-shim / representation foundation
+> (#1130/#1320), NOT in this slice — confirmed PRE-EXISTING on main, not
+> regressed:** (1) `o.k` **dot**-access on a *statically-known struct field*
+> redefined as an accessor lowers to a direct `struct.get` that never touches
+> `_safeGet` (bracket/dynamic reads of the same prop DO work); (2) `o.k = v`
+> **setter invocation** on an `any` receiver does not fire (write-side
+> `_safeSet`→`__set_<prop>` gap, independent of this STORE fix); (3) host-side
+> *raw JS* `o.p` access on a returned opaque WasmGC struct externref (same
+> limitation the data path has — the sidecar is only consulted by compiled
+> `_safeGet`, not native V8 access). No-regression confirmed: the #459 /
+> defineProperty / object-literal-getter equivalence suites match baseline
+> exactly (3 pre-existing fails, unchanged).
 
 ### S4 — Invariant enforcement on define (configurable/writable/extensible)  *(est. +40–70)*
 
