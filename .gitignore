@@ -52,6 +52,12 @@ tests/test*_check*.ts
 # Dev scratch — ad-hoc probe/debug/repro scripts
 # Agents: put ALL ad-hoc files here, not at repo root or tests/
 .tmp/
+
+# Dogfood harness (#1710) generated artifacts — the pinned tarball under
+# tests/dogfood/fixtures/ IS committed, but the extracted source and the
+# regenerated surface report are derived and stay out of git.
+tests/dogfood/.acorn/
+tests/dogfood/report/
 /check-*.ts
 /check-*.mts
 /debug-*.ts
