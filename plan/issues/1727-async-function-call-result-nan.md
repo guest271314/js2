@@ -327,12 +327,12 @@ Implemented the architect's **minimal-diff variant (scope 2)** in
 - `npx tsc --noEmit` clean; generator/async-iteration/for-await-of suites show
   no new failures (the pre-existing ones are identical on clean `origin/main`).
 
-### Out of scope — split to #1728
+### Out of scope — split to #1729
 
 The 7th case (`async arrow function`) traps with `RuntimeError: illegal cast`.
 This is NOT the Promise-wrap issue: a **synchronous** module-level `const`
 arrow (`const f = (x:number):number => x*2; main(){ return f(21); }`) traps
 identically, and the async arrow traps even under `await`. It is a
-module-const-arrow closure-dispatch bug, tracked as **#1728**; the equivalence
-case is `it.skip`-ped with a `#1728` reference so shard-4 goes green on the
+module-const-arrow closure-dispatch bug, tracked as **#1729**; the equivalence
+case is `it.skip`-ped with a `#1729` reference so shard-4 goes green on the
 in-scope fix without expanding into closure-ABI work.

@@ -1,5 +1,5 @@
 ---
-id: 1728
+id: 1729
 title: "internal call to a module-level `const` arrow traps with illegal cast"
 status: ready
 created: 2026-05-29
@@ -12,7 +12,7 @@ goal: test262-conformance
 related: [1727, 1115]
 ---
 
-# #1728 — internal call to a module-level `const` arrow → "illegal cast"
+# #1729 — internal call to a module-level `const` arrow → "illegal cast"
 
 ## Problem
 
@@ -50,7 +50,7 @@ site, see closures.ts ~1699 / dispatch ref.cast), not in the async wrap.
 ## Repro / acceptance
 
 - `const f = (x:number):number => x*2; main(){ return f(21); }` → 42 (no trap).
-- The async-arrow variant (the `it.skip("async arrow function (#1728 ...)")`
+- The async-arrow variant (the `it.skip("async arrow function (#1729 ...)")`
   case in `tests/equivalence/async-function.test.ts`) flips green; un-skip it.
 - No regression in inline-arrow / callback-arrow dispatch.
 
