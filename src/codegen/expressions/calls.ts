@@ -256,6 +256,30 @@ function coerceNumberMethodArgToF64(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * (#1735) Normalise an f64 local holding a Number.prototype.{toExponential,
+ * toPrecision} digits/precision argument so that NaN becomes 0, matching
+ * ToIntegerOrInfinity (§7.1.5 / §21.1.3.{3,5} step 5: NaN → +0).
+ *
+ * The `number_toExponential` / `number_toPrecision` runtime helpers overload
+ * NaN as their "no argument supplied" sentinel (the codegen no-arg branch
+ * pushes `f64.const NaN`). Without this normalisation an *explicit* NaN
+ * argument (`(1).toExponential(NaN)`, `(1).toExponential(0/0)`) carries the
+ * same bits as the sentinel and is wrongly handled as no-arg. Rewriting the
+ * local in place — `local = (d == d) ? d : 0` via `f64.eq` self-compare (false
+ * only for NaN) feeding `select` — keeps the subsequent range-check and call
+ * reading a spec-correct value with no host-side change.
+ */
+function normalizeNaNToZero(fctx: FunctionContext, f64Local: number): void {
+  fctx.body.push({ op: "local.get", index: f64Local }); // val-if-true: d
+  fctx.body.push({ op: "f64.const", value: 0 }); // val-if-false: 0
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.eq" }); // condition: d == d (0 only when NaN)
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: f64Local });
+}
+
+/**
  * Look up closure info for a variable by checking if its local type
  * is a ref to a known closure struct. Handles cases like:
  *   var f = function() { ... }; f();
@@ -6512,6 +6536,14 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const precLocal = allocLocal(fctx, `__toPrecision_prec_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: precLocal });
 
+        // (#1735) §21.1.3.5 step 5: p = ToIntegerOrInfinity(precision), NaN → 0.
+        // The `number_toPrecision` runtime helper uses NaN as its "no precision
+        // supplied" sentinel, so an explicit NaN precision (`(1).toPrecision(NaN)`)
+        // must be normalised to 0 here so it isn't mistaken for no-arg. (A 0
+        // precision then trips the RangeError gate below — 0 is out of [1,100] —
+        // which matches V8: explicit NaN precision throws RangeError.)
+        normalizeNaNToZero(fctx, precLocal);
+
         // Re-push receiver for the runtime call.
         fctx.body.push({ op: "local.get", index: recvLocalP });
 
@@ -6594,6 +6626,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const digitsLocal = allocLocal(fctx, `__toExponential_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: digitsLocal });
+
+        // (#1735) §21.1.3.3 step 5: f = ToIntegerOrInfinity(fractionDigits),
+        // which maps NaN → 0. The `number_toExponential` runtime helper reads
+        // NaN as its "no argument supplied" sentinel (see else-branch below),
+        // so an *explicit* NaN argument — e.g. `(1).toExponential(NaN)` or
+        // `(1).toExponential(0/0)` — must be normalised to 0 here, otherwise it
+        // collides with the sentinel and is wrongly treated as no-arg (variable
+        // digits) instead of 0 digits. Spec: explicit NaN → 0 → "Ne+E"; genuine
+        // no-arg → variable digits. test262
+        // Number/prototype/toExponential/tointeger-fractiondigits.js.
+        normalizeNaNToZero(fctx, digitsLocal);
 
         // Re-push receiver for the runtime call.
         fctx.body.push({ op: "local.get", index: recvLocalE });
