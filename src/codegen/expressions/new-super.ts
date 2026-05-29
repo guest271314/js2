@@ -2556,11 +2556,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // the same as the bare `new f` form (both reach here with the value held in
     // a local of type `any`).
     let s1Callee: ts.Expression = expr.expression;
-    while (
-      ts.isParenthesizedExpression(s1Callee) ||
-      ts.isAsExpression(s1Callee) ||
-      ts.isNonNullExpression(s1Callee)
-    ) {
+    while (ts.isParenthesizedExpression(s1Callee) || ts.isAsExpression(s1Callee) || ts.isNonNullExpression(s1Callee)) {
       s1Callee = ts.isParenthesizedExpression(s1Callee)
         ? s1Callee.expression
         : ts.isAsExpression(s1Callee)
