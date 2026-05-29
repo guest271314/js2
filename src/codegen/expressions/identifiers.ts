@@ -860,11 +860,16 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
       if (builtinParent !== undefined) {
         return isBuiltinSubtype(builtinParent, ctorName);
       }
-      return false;
+      // (#1729) A user-class instance with no builtin parent is still an
+      // `instanceof Object` (its prototype chain ends at Object.prototype).
+      // Any other builtin RHS is false (a plain user struct isn't a Map/Array/…).
+      return ctorName === "Object";
     }
     // 2. LHS is itself a built-in (or matches the constructor's instance-type
-    //    name) — apply hierarchy reasoning.
+    //    name) — apply hierarchy reasoning. Every builtin instance is also an
+    //    `instanceof Object` (#1729), so Object is a universal yes here.
     if (isBuiltinTypeName(lhsSymbolName)) {
+      if (ctorName === "Object") return true;
       return isBuiltinSubtype(lhsSymbolName, ctorName);
     }
   }
@@ -874,6 +879,37 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
   //    TS type may be the wrapper, so we leave that to runtime.)
   if (isNumberType(leftTsType) || isBooleanType(leftTsType)) {
     return false;
+  }
+
+  // 4. (#1729) `<obj> instanceof Object` is true for every object value
+  //    (§7.3.20 OrdinaryHasInstance walks the prototype chain to
+  //    Object.prototype). WasmGC-struct-backed values — object literals,
+  //    arrays, tuples — are not real host objects, so the runtime
+  //    `__instanceof` falls through to a spurious `false`. Short-circuit to
+  //    `true` when the RHS is `Object` and the LHS is a provably non-primitive
+  //    object type. Guarded against primitives / null / undefined / any /
+  //    unknown so only definite objects qualify. (User-class instances are
+  //    handled by the `classTagMap` branch above, which returns before here.)
+  if (ctorName === "Object") {
+    const f = leftTsType.flags;
+    const isPrimitiveOrIndeterminate =
+      (f &
+        (ts.TypeFlags.Any |
+          ts.TypeFlags.Unknown |
+          ts.TypeFlags.NumberLike |
+          ts.TypeFlags.StringLike |
+          ts.TypeFlags.BooleanLike |
+          ts.TypeFlags.BigIntLike |
+          ts.TypeFlags.ESSymbolLike |
+          ts.TypeFlags.Null |
+          ts.TypeFlags.Undefined |
+          ts.TypeFlags.Void |
+          ts.TypeFlags.Never)) !==
+      0;
+    // Object literals, arrays, and tuples all carry the Object type flag.
+    if (!isPrimitiveOrIndeterminate && (f & ts.TypeFlags.Object) !== 0) {
+      return true;
+    }
   }
 
   return undefined;
