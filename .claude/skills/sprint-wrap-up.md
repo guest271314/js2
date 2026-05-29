@@ -27,6 +27,16 @@ For each worktree:
 - If all merged: `git worktree remove --force <wt>`
 - If unmerged: document in the issue file as Suspended Work
 
+Then prune dead agent-status heartbeats and resync the shared checkout:
+
+```bash
+node /workspace/scripts/prune-agent-status.mjs          # clears stale ✕ records
+bash /workspace/scripts/sync-workspace-main.sh          # FF /workspace to origin/main
+```
+
+(`prune-agent-status` also runs automatically on every SessionStart; this is
+the belt-and-suspenders end-of-sprint sweep.)
+
 ## Step 3: Clean up branches
 
 ```bash
