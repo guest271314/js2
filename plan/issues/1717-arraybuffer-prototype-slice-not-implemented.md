@@ -1,9 +1,10 @@
 ---
 id: 1717
 title: "ArrayBuffer.prototype.slice not implemented ('slice is not a function', 17 fails)"
-status: ready
+status: done
 created: 2026-05-29
 updated: 2026-05-29
+completed: 2026-05-29
 priority: medium
 feasibility: medium
 task_type: bugfix
@@ -63,3 +64,51 @@ Spec: [§25.1.6.3 ArrayBuffer.prototype.slice](https://tc39.es/ecma262/#sec-arra
 
 Filed by product-owner test262 triage 2026-05-29 against main baseline
 (`.test262-cache/test262-current.jsonl`, 48,117 records).
+
+
+## Implementation (landed)
+
+### Root cause
+
+`ArrayBuffer.prototype.slice` was routed through a Wasm-native emitter
+(`emitArrayBufferSlice`, added in #1698) but the dispatch in
+`src/codegen/expressions/calls.ts` gated it behind `noJsHost(ctx)`. In
+JS-host mode `slice` therefore fell through to the extern-class dispatch,
+which dropped the call — `slice is not a function`.
+
+### Fix
+
+The ArrayBuffer backing store is the same `i32_byte` vec struct in both
+JS-host and standalone modes, so `emitArrayBufferSlice` (a byte-by-byte copy
+into a fresh `i32_byte` vec, with spec §25.1.6.3 ToIntegerOrInfinity +
+relative-index clamping) is mode-agnostic. Dropping the `noJsHost` guard
+routes `slice` through it in both modes. SharedArrayBuffer is filtered out
+(it has no `i32_byte` struct).
+
+### Verification
+
+`slice` is now callable in JS-host mode and returns an object (4 callability
+vitest cases in `tests/issue-1717.test.ts` pass; was `slice is not a
+function`).
+
+### Known limitation (gates the test262 conformance flip)
+
+The 17 `built-ins/ArrayBuffer/prototype/slice/*` cases assert
+`result.byteLength` and (some) byte content. Those assertions additionally
+depend on JS-host infrastructure that has separate, pre-existing gaps —
+filed as Backlog stubs:
+
+- **#1728** — `new ArrayBuffer(n).byteLength` returns `NaN` in JS-host mode.
+- **#1729** — `new Uint8Array(ab)` is backed by a separate f64 vec, so it does
+  not alias the ArrayBuffer's `i32_byte` store.
+- **#1730** — `DataView.set*` is `not a function` in JS-host mode.
+
+So this PR clears the `slice is not a function` symptom (the issue title);
+the full slice-test pass-rate flip is gated on #1728/#1729/#1730. CI measures
+the actual delta (neutral-or-positive — `slice` callability cannot regress).
+
+### Files modified
+
+- `src/codegen/expressions/calls.ts` — drop the `noJsHost` guard on the
+  ArrayBuffer.prototype.slice dispatch.
+- `tests/issue-1717.test.ts` — new (callability cases).

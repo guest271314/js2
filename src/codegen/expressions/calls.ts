@@ -5537,11 +5537,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
-    // #1698 — native ArrayBuffer.prototype.slice in no-JS-host mode. Same
-    // dual-mode gap as #1654: JS host has slice natively, standalone has no
-    // runtime and the extern-class dispatch would drop the call. Emit a
-    // byte-by-byte copy into a fresh i32_byte vec.
-    if (noJsHost(ctx) && propAccess.name.text === "slice") {
+    // #1698 / #1717 — native ArrayBuffer.prototype.slice. The ArrayBuffer
+    // backing store is the same `i32_byte` vec struct in BOTH JS-host and
+    // standalone modes, so the byte-by-byte copy is mode-agnostic. In JS-host
+    // mode `slice` was previously dropped by the extern-class dispatch
+    // (`slice is not a function`, #1717); in standalone there is no runtime
+    // (#1698). Route both through the same native emitter — emit a byte copy
+    // into a fresh i32_byte vec. (SharedArrayBuffer is filtered out: it has no
+    // i32_byte struct, so the cast would trap.)
+    if (propAccess.name.text === "slice") {
       const recvSym = receiverType.getSymbol()?.name;
       if (recvSym === "ArrayBuffer") {
         const sliceResult = emitArrayBufferSlice(ctx, fctx, propAccess.expression, expr.arguments, (e, hint) =>
