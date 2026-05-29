@@ -53,6 +53,63 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   return undefined;
 }
 
+/**
+ * (#1732 S1) Decide whether a `new <id>` callee identifier resolves to a value
+ * that is PROVABLY not a constructor — so the runtime `__construct` brand check
+ * can be emitted without risk of intercepting a real constructor.
+ *
+ * Returns true only when the identifier's (variable/parameter) declaration has
+ * an initializer that is a known-non-constructable expression shape:
+ *   - `<expr>.prototype.<method>` — builtin/user prototype methods never have
+ *     [[Construct]] (§20.x / §10.2.2). This is the `S15.5.4.*_A7` pattern
+ *     (`var f = String.prototype.indexOf; new f`).
+ *   - `<expr>.bind(...)` / `.call(...)` / `.apply(...)` — bound functions are
+ *     non-constructors unless the target is (and the result of `.call`/`.apply`
+ *     is a plain value, never a constructor).
+ *
+ * Deliberately conservative: any other initializer shape (function expression,
+ * class reference, plain identifier, call to a factory, etc.) returns false so
+ * those keep the existing static / unknown-ctor handling. User function
+ * declarations are resolved earlier (2414-2469) and never reach the caller.
+ */
+function resolvesToNonConstructableValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
+  if (!ts.isIdentifier(calleeExpr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(calleeExpr);
+  const decls = sym?.getDeclarations();
+  if (!decls || decls.length === 0) return false;
+
+  const isNonConstructableInit = (init: ts.Expression): boolean => {
+    // Unwrap as/paren/non-null wrappers.
+    let e: ts.Expression = init;
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
+      e = ts.isParenthesizedExpression(e)
+        ? e.expression
+        : ts.isAsExpression(e)
+          ? e.expression
+          : (e as ts.NonNullExpression).expression;
+    }
+    // `<...>.prototype.<method>` — a method pulled off a prototype.
+    if (ts.isPropertyAccessExpression(e)) {
+      const obj = e.expression;
+      if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") return true;
+    }
+    // `<...>.bind(...)` / `.call(...)` / `.apply(...)` result.
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)) {
+      const m = e.expression.name.text;
+      if (m === "bind" || m === "call" || m === "apply") return true;
+    }
+    return false;
+  };
+
+  for (const decl of decls) {
+    // `var/let/const f = <init>`
+    if (ts.isVariableDeclaration(decl) && decl.initializer) {
+      if (isNonConstructableInit(decl.initializer)) return true;
+    }
+  }
+  return false;
+}
+
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */
 /**
  * (#1614) Dispatch `super.method(args)` where the parent is a builtin extern
@@ -2476,6 +2533,67 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // RangeError validation for built-in constructors (type resolves to any
     // when lib declarations are not loaded, so className is undefined here)
     const args = expr.arguments ?? [];
+
+    // (#1732 S1) `new f(...)` where `f` is a LOCAL holding a builtin-method
+    // value — e.g. `var f = String.prototype.indexOf; new f`. The compile-time
+    // Pattern 1/2 guards above only fire on the *direct* `new X.prototype.Y()`
+    // form; through a local the callee is a bare identifier of type `any`, so
+    // no static guard sees it and control reaches here, which never performs
+    // [[Construct]] and so wrongly does not throw (test262 String.prototype
+    // `S15.5.4.*_A7` not-a-constructor cases, ~14 files in JS-host mode).
+    //
+    // Per ECMA-262 §7.3.13 Construct → §10.2.2 [[Construct]], `new` on a value
+    // with no [[Construct]] must throw TypeError. When the local's declaration
+    // initializer is a PROVABLY non-constructable expression — a
+    // `<...>.prototype.<method>` member access, or a `.bind()/.call()/.apply()`
+    // result — route the runtime value through the host `__construct` helper,
+    // which throws a real TypeError when IsConstructor(value) is false. Builtin
+    // namespaces / intrinsic ctors (ArrayBuffer, DataView, TypedArrays, Error
+    // subclasses, Promise) are handled by the explicit branches that FOLLOW, so
+    // this guard is scoped to the proven-non-constructor initializer shapes and
+    // never intercepts a real constructor. Standalone parity is S4.
+    // Unwrap `as`/paren/non-null wrappers so `new (f as any)()` is recognised
+    // the same as the bare `new f` form (both reach here with the value held in
+    // a local of type `any`).
+    let s1Callee: ts.Expression = expr.expression;
+    while (
+      ts.isParenthesizedExpression(s1Callee) ||
+      ts.isAsExpression(s1Callee) ||
+      ts.isNonNullExpression(s1Callee)
+    ) {
+      s1Callee = ts.isParenthesizedExpression(s1Callee)
+        ? s1Callee.expression
+        : ts.isAsExpression(s1Callee)
+          ? s1Callee.expression
+          : (s1Callee as ts.NonNullExpression).expression;
+    }
+    if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToNonConstructableValue(ctx, s1Callee)) {
+      // Evaluate `f` to an externref value (the held callee).
+      const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
+      if (calleeTy && calleeTy.kind !== "externref") {
+        coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+      } else if (calleeTy === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // argsArray — null externref (the A7 cases never reach construction; the
+      // TypeError is thrown by the IsConstructor check before args are used).
+      fctx.body.push({ op: "ref.null.extern" });
+      const funcIdx = ensureLateImport(
+        ctx,
+        "__construct",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+      // Import unavailable (shouldn't happen in JS-host): drop callee+args and
+      // fall through to the existing unknown-ctor path below.
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+    }
 
     // new ArrayBuffer(byteLength) — validate non-negative integer length
     if (ctorName === "ArrayBuffer" && args.length >= 1) {
