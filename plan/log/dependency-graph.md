@@ -4,6 +4,30 @@ Issues organized by dependency order -- work items at the top are ready now,
 items below unlock when their dependencies complete. No sprint batching needed:
 pick any "ready" item and start.
 
+## Sprint 57 — acorn dogfood + backend-agnostic IR (added 2026-05-29)
+
+Architectural sprint. Two tracks; conformance guard is zero-regression.
+
+**Track 1 — self-hosting-dogfood** (compile + run acorn correctly):
+
+| #     | Title | Priority | Feasibility | Status | Depends on |
+|-------|-------|----------|-------------|--------|------------|
+| 1710  | acorn dogfood harness (compile + validate + diff-AST vs node-acorn) | high | medium | Ready | — |
+| 1711  | triage harness surface → file sized child issues | high | medium | Ready | #1710 |
+| 1712  | acceptance: compiled acorn AST == node-acorn on a representative .js | high | hard | Backlog→ready after #1710/#1711 | #1710, #1711 |
+
+Prior acorn blockers #1679 / #1690 / #1690b are **done** (regression-guarded by #1710).
+
+**Track 2 — backend-agnostic-ir** (decouple IR from WasmGC):
+
+| #     | Title | Priority | Feasibility | Status | Depends on |
+|-------|-------|----------|-------------|--------|------------|
+| 1713  | BackendEmitter trait: audit WasmGC bias + seam + WasmGcEmitter | high | hard | Ready — **needs architect spec first** | — |
+| 1714  | lower one IR node kind to BOTH WasmGC + linear via the trait | high | hard | Backlog→ready after #1713 | #1713 (**arch spec**) |
+| 1715  | minimal bytecode emitter + dispatch loop for an IR subset (proof) | medium | hard | Backlog→ready after #1713 | #1713 (**arch spec**) |
+
+Feeds #1584 (in-Wasm bytecode interpreter) — gated on both tracks + #1712.
+
 ## Sprint 50 Extension (added 2026-05-07)
 
 Pulled into S50 alongside the original closure/dispatch cohort. Direct-dispatch items have no architect dependency; spec items wait on architect.

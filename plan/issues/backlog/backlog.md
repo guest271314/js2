@@ -2,6 +2,25 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Sprint 57 — acorn dogfood + backend-agnostic IR (2026-05-29)
+
+Architectural sprint (no pass-count target; zero-regression guard). Goals:
+[`self-hosting-dogfood`](../../goals/self-hosting-dogfood.md),
+[`backend-agnostic-ir`](../../goals/backend-agnostic-ir.md). Plan:
+[sprints/57.md](../sprints/57.md).
+
+Track 1 — acorn dogfood:
+- [#1710](../1710-acorn-dogfood-harness.md) — acorn harness: compile + validate + diff-AST vs node-acorn — high, medium, **ready (s57)**.
+- [#1711](../1711-acorn-failure-surface-triage.md) — triage harness surface → file sized child issues — high, medium, **ready (s57)**, depends on #1710.
+- [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **backlog→ready** after #1710/#1711.
+- Prior blockers #1679/#1690/#1690b are **done**.
+
+Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
+- [#1713](../1713-ir-backend-emitter-trait-seam.md) — BackendEmitter trait + WasmGC bias audit + WasmGcEmitter (pure refactor, zero conformance delta) — high, hard, **ready (s57), needs arch spec**.
+- [#1714](../1714-ir-two-backend-proof-linear.md) — lower one IR node kind to BOTH WasmGC + linear via the trait (primary proof) — high, hard, **backlog→ready** after #1713.
+- [#1715](../1715-ir-bytecode-proof-point.md) — minimal bytecode emitter + dispatch loop for an IR subset (stretch proof) — medium, hard, **backlog→ready** after #1713.
+- Feeds [#1584](../1584-wasm-gc-native-interpreter.md) (in-Wasm bytecode interpreter) — gated on both tracks + #1712.
+
 ## Standalone (--target wasi) host-import audit (2026-05-25) — goal `standalone-mode`
 
 Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.

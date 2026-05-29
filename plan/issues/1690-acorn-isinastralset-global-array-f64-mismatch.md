@@ -11,9 +11,9 @@ reasoning_effort: high
 task_type: bugfix
 area: codegen, import-bookkeeping
 language_feature: arrays, globals, closures, number-arithmetic
-goal: real-world-compat
+goal: self-hosting-dogfood
 sprint: Backlog
-related: [1679, 1677, 1666, 1618, 1314]
+related: [1679, 1677, 1666, 1618, 1314, 1710, 1711, 1712]
 note: "Surfaced behind #1679. With #1679's `new this(...)` blocker gone on current main (e622751f7), acorn.mjs now compiles to success=true with 0 errors but emits INVALID Wasm — the next blocker. Distinct from #1679 (which is codegen-acceptance only)."
 ---
 
