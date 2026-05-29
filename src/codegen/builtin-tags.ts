@@ -105,6 +105,12 @@ export type BuiltinTypeName = keyof typeof BUILTIN_TYPE_TAGS;
  * incomplete chain data).
  */
 const BUILTIN_PARENT: Partial<Record<BuiltinTypeName, BuiltinTypeName>> = {
+  // #1721 — `Function` descends from `Object`, so a subclass of Function is
+  // statically an instance of Object too (every function IS an object). This
+  // is the one chain edge that produces a provably-true (never false-negative)
+  // `instanceof Object` result, so it is safe to record here even though the
+  // module deliberately leaves the other builtins' Object edges to runtime.
+  Function: "Object",
   TypeError: "Error",
   RangeError: "Error",
   SyntaxError: "Error",
@@ -221,6 +227,13 @@ export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = 
   "Number",
   "String",
   "Date",
+  // #1721 — root constructors. `class Sub extends Object {}` / `extends
+  // Function {}` lower to `new Object()` / `new Function()` so the instance is
+  // a real host object/function whose [[Prototype]] is then set to
+  // `Sub.prototype`. Missed by #1455 (which registered Map/TypedArray/etc. but
+  // not the two roots), so `new Sub() instanceof Sub` returned false for both.
+  "Object",
+  "Function",
 ]);
 
 /**
