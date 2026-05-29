@@ -135,6 +135,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "if": "Bash(git worktree add*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/provision-worktree.sh",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "FileChanged": [

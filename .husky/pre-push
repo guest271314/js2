@@ -138,6 +138,29 @@ fi
 rm -f "$tmp_tc" "$tmp_lint"
 echo "Pre-push: typecheck + lint OK."
 
+# ---------- (3b) prettier format check -----------------------------------
+#
+# Catch formatting drift locally — this is the SAME gate CI's `quality` job
+# runs (`pnpm run format:check` = prettier --check). Previously formatting
+# only got caught in CI (e.g. #914's typeof-delete.ts drift) because the
+# on-edit/lint-staged prettier is best-effort + bypassable. Worktrees now get
+# node_modules symlinked (provision-worktree.sh) so the PINNED prettier runs
+# here — matching CI exactly. Skip with --no-verify (CI is the backstop).
+
+if grep -q '"format:check"' package.json 2>/dev/null; then
+  echo "Pre-push: prettier format:check ..."
+  fmt_out=$(pnpm run format:check 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "Pre-push: format:check FAILED. Offending files:"
+    echo "$fmt_out" | grep -iE '\[warn\]|^\S+\.ts$' | head -30
+    echo ""
+    echo "Fix with: pnpm run format:write   (or: npx prettier --write <file>)"
+    echo "Then re-push. (Or --no-verify to defer to CI.)"
+    exit 1
+  fi
+  echo "Pre-push: format:check OK."
+fi
+
 # ---------- (4) sync conformance numbers in docs -------------------------
 #
 # Keeps README.md / ROADMAP.md / CLAUDE.md / plan/goals/goal-graph.md in
