@@ -1,7 +1,8 @@
 ---
 id: 1710
 title: "acorn dogfood harness: compile + validate + differential-AST vs node-acorn"
-status: ready
+status: done
+completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
@@ -102,3 +103,60 @@ the decision in the harness).
 - Keep the oracle dependency (node-acorn) as a `devDependency` pinned to the
   same version as the `npm pack`-resolved compiled-acorn source, so the two parsers are
   the same acorn and any divergence is a *compiler* bug, not a version skew.
+
+## Implementation (done — PR pending)
+
+Harness lives under `tests/dogfood/`:
+
+- `acorn-pin.json` — pinned acorn@8.16.0 (canonical npm sha1
+  `4ce79c89…`, sha512 integrity). Project-lead decision honored:
+  pinned `npm pack` tarball, not a vendored copy.
+- `fixtures/acorn-8.16.0.tgz` — committed pinned tarball (132 KB). Reproducible
+  from a clean checkout with **no run-time network**.
+- `setup-acorn.mjs` — verifies the tarball sha1 against the pin (fail-loud on
+  drift) and extracts to `tests/dogfood/.acorn/` (gitignored).
+- `ast-diff.mjs` — **reusable structural differential-AST comparison**
+  (`diffAst`, `diffParse`); the keystone reused by #1712. Ignores
+  position fields by default; reports the first divergence as
+  `{ path, reason, expected, actual }` with a JSONPath pointer.
+- `acorn-harness.mjs` — the compile→validate→run+diff→report loop. Emits
+  `tests/dogfood/report/acorn-surface.json` (gitignored) + a human summary.
+  Robust to a red surface (records, never crashes).
+- `acorn.test.ts` — vitest contract wrapper. The fast `diffAst` + integrity
+  assertions run every sweep; the heavy full-acorn compile is opt-in
+  (`DOGFOOD_ACORN=1`) and runs the harness as a **child process** so the ~27s
+  compile never starves the vitest RPC heartbeat.
+- `fixtures/inputs/*.js` — arith / fn / class / control / strings corpus.
+- `README.md` — invocation + design decisions.
+
+Invoke: `pnpm run dogfood:acorn` (npm script added).
+
+## Findings on this base (origin/plan-sprint57 = main + sprint docs)
+
+The SAME tarball doubles as the node-acorn oracle (zero version skew). Harness
+output (`report.summary`):
+
+- **Compile**: `success=true` in ~27s → 779,953-byte binary. 471 TS diagnostics,
+  ALL checker noise (464 `ts-property-noise` "Property does not exist on type",
+  3 `ts-possibly-null`, 4 `other` — `comparison has no overlap`,
+  `empty-statement body`, 2× `Operator cannot be applied`). None are codegen
+  blockers — `compile()` reports success.
+- **Validate**: `WebAssembly.compile(binary)` **FAILS** — the surface is RED:
+  `Compiling function #110:"__fnctor_Parser_new" failed: any.convert_extern[0]
+  expected type externref, found ref.cast null of type (ref null 94)`.
+  Notably this is a *different* defect site than the earlier `.tmp/acorn`
+  probe (`isInAstralSet` / `f64.lt`), confirming the surface moves between
+  builds — exactly why a committed harness is needed. This is the **top
+  finding to seed #1711** (a function-constructor/`__fnctor_*` externref
+  coercion mismatch, distinct from #1690's index-shift).
+- **Run + diff**: skipped-and-recorded (binary invalid → can't instantiate).
+  The **oracle self-check passes** (node-acorn-vs-node-acorn: identical sources
+  equal, `+`-vs-`-` sources diverge at `$.body[0].declarations[0].init.operator`),
+  proving `diffAst` is ready for #1712.
+
+**#1712 (full acceptance) is FAR**, not close: the compiled binary does not yet
+validate/instantiate, so no runtime AST comparison has run at all. The next
+dogfood step (a #1711 child) is the `__fnctor_Parser_new` externref-coercion
+validation failure. Once the binary instantiates, the remaining gap is
+marshalling acorn's `parse()` AST back across the JS-host boundary as an
+externref so `diffAst` can consume it.

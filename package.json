@@ -74,6 +74,7 @@
     "test:diff": "npx tsx scripts/diff-test.ts",
     "test:diff:triage": "npx tsx scripts/diff-triage.ts",
     "test:diff:gate": "npx tsx scripts/diff-test-gate.ts",
+    "dogfood:acorn": "npx tsx tests/dogfood/acorn-harness.mjs",
     "prepublishOnly": "pnpm run build",
     "refresh:benchmarks": "npx tsx benchmarks/run.ts && pnpm run build:compiler-bundle && node scripts/generate-playground-benchmark-sidebar.mjs && node scripts/generate-playground-benchmark-sidebar-no-jit.mjs && pnpm run generate:size-benchmarks && node scripts/generate-browser-runtime-benchmarks.mjs",
     "refresh:benchmarks:no-jit": "pnpm run build:compiler-bundle && node scripts/generate-playground-benchmark-sidebar-no-jit.mjs",

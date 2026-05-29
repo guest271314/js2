@@ -1,0 +1,10 @@
+{
+  "name": "acorn",
+  "version": "8.16.0",
+  "tarball": "fixtures/acorn-8.16.0.tgz",
+  "registryTarball": "https://registry.npmjs.org/acorn/-/acorn-8.16.0.tgz",
+  "shasum": "4ce79c89be40afe7afe8f3adb902a1f1ce9ac08a",
+  "integrity": "sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==",
+  "entryModule": "package/dist/acorn.mjs",
+  "_note": "Pinned per #1710 project-lead decision (2026-05-29): acquire acorn via a pinned npm-pack tarball, NOT a vendored source copy. The tarball is committed as a fixture so the harness reproduces from a clean checkout with NO run-time network. shasum is the canonical npm sha1 (`npm view acorn@8.16.0 dist.shasum`); integrity is the canonical npm sha512 (`dist.integrity`). To refresh: `npm pack acorn@<ver>`, update this file, re-run setup. The SAME tarball is the compiled-acorn source AND the node-acorn differential oracle, so any AST divergence is a compiler bug, never version skew."
+}
