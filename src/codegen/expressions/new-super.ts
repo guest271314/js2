@@ -1583,6 +1583,27 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
+      // (#1732 S2) `new <NonCtorNamespace>.<method>()` — a method pulled off a
+      // non-constructor namespace object (Math/JSON/Reflect/Atomics). Every such
+      // method is an ordinary function with no [[Construct]] (§21.3/§25.5/§28.1/
+      // §25.4), so `new` must throw TypeError. Pattern 2 below only fires when
+      // the TS lib KNOWS the method has call-sigs/no-construct-sigs; methods
+      // NEWER than the bundled lib (e.g. `Math.f16round`, `Math.sumPrecise`)
+      // resolve to `any`, slip past Pattern 2, and reach the unknown-ctor path
+      // which never performs [[Construct]] and so wrongly returns instead of
+      // throwing (test262 built-ins/Math/f16round/not-a-constructor.js etc.).
+      // Keying on the namespace NAME makes the guard lib-version-independent —
+      // it fires for any current or future Math/JSON/Reflect/Atomics method. The
+      // receiver-name match is intentionally narrow to those four built-ins
+      // (the same discipline as the namespace-identifier guard below).
+      if (ts.isIdentifier(obj)) {
+        const NS_NON_CONSTRUCTORS = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+        if (NS_NON_CONSTRUCTORS.has(obj.text)) {
+          emitThrowTypeError(ctx, fctx, "is not a constructor");
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+      }
     }
 
     // Pattern 2: TypeScript knows the expression has call sigs but no construct sigs.
