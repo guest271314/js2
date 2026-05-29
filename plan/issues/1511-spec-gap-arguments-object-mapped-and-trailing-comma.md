@@ -13,7 +13,7 @@ area: codegen
 language_feature: arguments-object
 goal: spec-completeness
 sprint: 57
-related: [1364, 1432]
+related: [1364, 1726]
 ---
 # #1511 — arguments object fidelity
 
@@ -142,7 +142,7 @@ global would corrupt the next caller that does read `arguments`.
 
 ### Out of scope for this PR
 
-- **Mapped slot defineProperty fidelity** (#1432 follow-up). The
+- **Mapped slot defineProperty fidelity** (#1726 follow-up). The
   `mapped/nonconfigurable-*` cluster needs a "linked" bitset on the
   arguments struct so writes after a `defineProperty(..., {writable:
   false})` no longer propagate.
@@ -216,11 +216,11 @@ literal descriptor):
 - `verifyProperty`-style descriptor readback on arguments slots
   (`writable/enumerable/configurable` attributes) is unchanged.
 
-**These all defer to #1432.** Full `language/arguments-object/mapped/*`
+**These all defer to #1726.** Full `language/arguments-object/mapped/*`
 descriptor fidelity (getOwnPropertyDescriptor / defineProperty / delete per
 §10.4.4) requires changing the `arguments` representation from a raw WasmGC vec
 to an **exotic object with a per-slot mapping** — an architect-level
-representation change tracked as **#1432**, not a localized codegen fix. This
+representation change tracked as **#1726**, not a localized codegen fix. This
 PR deliberately stays within the slice the `unmappedIndices` link-break handles
 *without* a representation change. The trailing-comma / `arguments.length`
 cases were already fixed on main by **PR #373**.
