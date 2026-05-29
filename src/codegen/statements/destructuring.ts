@@ -59,6 +59,36 @@ export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * True when the binding pattern is declared at module top level — i.e. its
+ * nearest function-like ancestor is the SourceFile, not a nested function.
+ *
+ * #1690b: only module-level destructuring bindings genuinely back a module
+ * global and need the local→global writeback. A `var [a] = ...` / `var {a} =
+ * ...` declared inside a function body introduces a function-local that
+ * shadows any same-named module global, so its destructured value must NOT be
+ * synced to the global (doing so corrupted the module binding).
+ */
+function isModuleLevelBindingPattern(pattern: ts.BindingPattern): boolean {
+  let n: ts.Node | undefined = pattern;
+  while (n) {
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n)
+    ) {
+      return false;
+    }
+    if (ts.isSourceFile(n)) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+/**
  * After destructuring, sync any bound locals that have corresponding module
  * globals. Destructuring stores values into locals, but module-level variables
  * need to also be written via global.set so other functions can read them.
@@ -68,6 +98,9 @@ export function syncDestructuredLocalsToGlobals(
   fctx: FunctionContext,
   pattern: ts.BindingPattern,
 ): void {
+  // #1690b: a destructuring declaration inside a function body binds
+  // function-locals that shadow module globals — never write them back.
+  const isModuleLevel = isModuleLevelBindingPattern(pattern);
   for (const element of pattern.elements) {
     if (ts.isOmittedExpression(element)) continue;
     if (ts.isBindingElement(element)) {
@@ -82,7 +115,7 @@ export function syncDestructuredLocalsToGlobals(
         // the central "destructure complete" callsite — and is a
         // no-op for non-let/const bindings, which have no TDZ flag.
         emitLocalTdzInit(fctx, name);
-        const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+        const moduleGlobalIdx = isModuleLevel ? ctx.moduleGlobals.get(name) : undefined;
         const localIdx = fctx.localMap.get(name);
         if (moduleGlobalIdx !== undefined && localIdx !== undefined) {
           const localType = getLocalType(fctx, localIdx);
