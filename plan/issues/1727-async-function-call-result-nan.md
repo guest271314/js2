@@ -266,7 +266,7 @@ i.e. identical to the passing sync control. No `__box_number`,
   Do NOT skip the wrap for a bare `f()` with no cast feeding a Promise-typed
   sink. The regression test in edge case (4) guards this.
 - **Mixed-mode with future CPS (#1042/#1373b)**: the joint async spec
-  (`plan/issues/1042-*.md` Step 13) mandates keeping `wrapAsyncReturn` /
+  (`plan/issues/1042-async-await-state-machine-lowering.md` Step 13) mandates keeping `wrapAsyncReturn` /
   `wrapAsyncCallInTryCatch` for the legacy path during the CPS rollout. This
   fix only adds a *consumer-side skip condition* in front of them — it does
   not remove or alter the wrap helpers, so it is forward-compatible with the
