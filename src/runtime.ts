@@ -2964,6 +2964,153 @@ function _getClassMethodBridge(classObj: object, name: string): Function {
   return fn;
 }
 
+/**
+ * (#1629 S1) Canonical own-property-descriptor reader for a WasmGC struct.
+ *
+ * This is the single read-back path shared by `Object.getOwnPropertyDescriptor`
+ * (single key) and `Object.getOwnPropertyDescriptors` (all keys). It resolves
+ * a descriptor from the three storage sites in spec-precedence order:
+ *   1. sidecar (`_wasmStructProps` value + `_wasmPropDescs` flags) — covers any
+ *      property that has been touched by `defineProperty` / dynamic write,
+ *      including accessor descriptors (`_SC_ACCESSOR`);
+ *   2. registered class proto-/static-method allowlists — spec method flags;
+ *   3. the bare WasmGC struct field via the exported `__sget_<key>` getter, with
+ *      default data-property flags (the zero-overhead fast path for fields that
+ *      were never `defineProperty`'d — the no-regression guarantee).
+ *
+ * Returns a PropertyDescriptor object, or `undefined` when `prop` is not an own
+ * property of `obj`. Caller is responsible for the non-struct fast path
+ * (`Object.getOwnPropertyDescriptor`) and for `ToPropertyKey` on `prop`.
+ */
+function _readOwnDescriptor(
+  obj: any,
+  prop: string | symbol,
+  exports: Record<string, Function> | undefined,
+): PropertyDescriptor | undefined {
+  // 1. Sidecar (dynamically added / defineProperty'd props).
+  const sc = _wasmStructProps.get(obj);
+  if (sc && prop in sc) {
+    const descs = _wasmPropDescs.get(obj);
+    const flags = descs?.get(_normalizeDescKey(prop)) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
+    if (flags & _SC_ACCESSOR) {
+      if (typeof prop === "symbol") {
+        const accessor = _wasmStructAccessors.get(obj)?.get(prop) as
+          | { get?: () => any; set?: (v: any) => void }
+          | undefined;
+        return {
+          get: accessor?.get,
+          set: accessor?.set,
+          enumerable: !!(flags & _SC_ENUMERABLE),
+          configurable: !!(flags & _SC_CONFIGURABLE),
+        };
+      }
+      return {
+        get: (sc as any)[`__get_${prop}`],
+        set: (sc as any)[`__set_${prop}`],
+        enumerable: !!(flags & _SC_ENUMERABLE),
+        configurable: !!(flags & _SC_CONFIGURABLE),
+      };
+    }
+    return {
+      value: (sc as any)[prop as any],
+      writable: !!(flags & _SC_WRITABLE),
+      enumerable: !!(flags & _SC_ENUMERABLE),
+      configurable: !!(flags & _SC_CONFIGURABLE),
+    };
+  }
+  const propStr = String(prop);
+  // 2a. Registered class prototype method (#1364a): spec non-enumerable,
+  // configurable, writable.
+  const protoMethods = _prototypeMethodNames.get(obj);
+  if (protoMethods !== undefined && protoMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
+    return {
+      value: _getProtoMethodBridge(obj, propStr),
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    };
+  }
+  // 2b. Registered class-object static method (#1395).
+  const staticMethods = _staticMethodNames.get(obj);
+  if (staticMethods !== undefined && staticMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
+    return {
+      value: _getClassMethodBridge(obj, propStr),
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    };
+  }
+  // 3. Bare struct field via exported getter — zero-overhead data-property path.
+  const fieldNames = _getStructFieldNames(obj, exports) ?? [];
+  if (fieldNames.includes(propStr)) {
+    const getter = exports?.[`__sget_${propStr}`];
+    const value = typeof getter === "function" ? getter(obj) : undefined;
+    const descs = _wasmPropDescs.get(obj);
+    const flags = descs?.get(propStr) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
+    return {
+      value,
+      writable: !!(flags & _SC_WRITABLE),
+      enumerable: !!(flags & _SC_ENUMERABLE),
+      configurable: !!(flags & _SC_CONFIGURABLE),
+    };
+  }
+  return undefined; // not an own property
+}
+
+/**
+ * (#1629 S1) Own-key enumeration for a WasmGC struct, mirroring the union of
+ * `__getOwnPropertyNames` (string keys) and `__getOwnPropertySymbols`. Used by
+ * `Object.getOwnPropertyDescriptors`, which must visit every own key.
+ *
+ * `Reflect.ownKeys(_wrapForHost(obj))` can NOT be used here: the host proxy's
+ * `ownKeys` trap does not expose the typed WasmGC struct fields (they are only
+ * reachable via `_getStructFieldNames` + `__sget_<key>`), so a plain struct
+ * would enumerate as `[]`.
+ */
+function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined): (string | symbol)[] {
+  const keys: (string | symbol)[] = [];
+  const push = (k: string | symbol) => {
+    if (!keys.includes(k)) keys.push(k);
+  };
+  // String keys: class allowlist OR struct field names, then sidecar + native.
+  const protoMethods = _prototypeMethodNames.get(obj);
+  const staticMethods = _staticMethodNames.get(obj);
+  if (protoMethods !== undefined) {
+    for (const n of protoMethods) if (!_isDeletedClassProp(obj, n)) push(n);
+  } else if (staticMethods !== undefined) {
+    for (const n of staticMethods) if (!_isDeletedClassProp(obj, n)) push(n);
+  } else {
+    for (const n of _getStructFieldNames(obj, exports) ?? []) push(n);
+  }
+  const sc = _wasmStructProps.get(obj);
+  if (sc) {
+    for (const k of Object.getOwnPropertyNames(sc)) {
+      if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
+      push(k);
+    }
+  }
+  // Native JS string props added directly to the struct object.
+  try {
+    for (const k of Object.getOwnPropertyNames(obj)) push(k);
+  } catch {
+    // ignore if not enumerable on this object
+  }
+  // Symbol keys: sidecar symbols + accessor-table symbols + native symbols.
+  if (sc) {
+    for (const s of Object.getOwnPropertySymbols(sc)) push(s);
+  }
+  const acc = _wasmStructAccessors.get(obj);
+  if (acc) {
+    for (const s of acc.keys()) if (typeof s === "symbol") push(s);
+  }
+  try {
+    for (const s of Object.getOwnPropertySymbols(obj)) push(s);
+  } catch {
+    // ignore
+  }
+  return keys;
+}
+
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
   if (obj == null || typeof obj !== "object") return obj;
   if (!_isWasmStruct(obj)) return obj;
@@ -5566,85 +5713,9 @@ assert._isSameValue = isSameValue;
           if (!_isWasmStruct(obj)) {
             return Object.getOwnPropertyDescriptor(obj, prop);
           }
-          // WasmGC struct: check sidecar properties first (dynamically added props)
-          const sc = _wasmStructProps.get(obj);
-          if (sc && prop in sc) {
-            const descs = _wasmPropDescs.get(obj);
-            const flags =
-              descs?.get(_normalizeDescKey(prop)) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
-            if (flags & _SC_ACCESSOR) {
-              if (typeof prop === "symbol") {
-                const accessor = _wasmStructAccessors.get(obj)?.get(prop);
-                return {
-                  get: accessor?.get,
-                  set: accessor?.set,
-                  enumerable: !!(flags & _SC_ENUMERABLE),
-                  configurable: !!(flags & _SC_CONFIGURABLE),
-                };
-              }
-              return {
-                get: sc[`__get_${prop}`],
-                set: sc[`__set_${prop}`],
-                enumerable: !!(flags & _SC_ENUMERABLE),
-                configurable: !!(flags & _SC_CONFIGURABLE),
-              };
-            }
-            return {
-              value: sc[prop],
-              writable: !!(flags & _SC_WRITABLE),
-              enumerable: !!(flags & _SC_ENUMERABLE),
-              configurable: !!(flags & _SC_CONFIGURABLE),
-            };
-          }
-          // Check struct fields via exported getters
-          const exports = callbackState?.getExports();
-          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-          const propStr = String(prop);
-          // #1364a — registered class prototype + proto-method allowlist:
-          // class instance methods are spec-non-enumerable, configurable,
-          // writable. Without this arm, `Object.getOwnPropertyDescriptor(
-          // C.prototype, "m")` returned `undefined` (key isn't in fields/
-          // sidecar) and `verifyProperty`-style tests under
-          // `language/{statements,expressions}/class/elements/` failed at
-          // their first descriptor lookup. Returns a method descriptor
-          // backed by the cached bridge so subsequent
-          // `assert.sameValue(c.m, C.prototype.m)` assertions also pass.
-          const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined && protoMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
-            return {
-              value: _getProtoMethodBridge(obj, propStr),
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            };
-          }
-          // (#1395) Static-method receiver: when `obj` is a registered class
-          // object (lazily materialized by `emitLazyClassObjectGet`),
-          // `Object.getOwnPropertyDescriptor(C, "m")` must return a method
-          // descriptor with the spec-correct flags. Mirrors the
-          // proto-methods arm above.
-          const staticMethods = _staticMethodNames.get(obj);
-          if (staticMethods !== undefined && staticMethods.includes(propStr) && !_isDeletedClassProp(obj, propStr)) {
-            return {
-              value: _getClassMethodBridge(obj, propStr),
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            };
-          }
-          if (fieldNames.includes(propStr)) {
-            const getter = exports?.[`__sget_${propStr}`];
-            const value = typeof getter === "function" ? getter(obj) : undefined;
-            const descs = _wasmPropDescs.get(obj);
-            const flags = descs?.get(propStr) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
-            return {
-              value,
-              writable: !!(flags & _SC_WRITABLE),
-              enumerable: !!(flags & _SC_ENUMERABLE),
-              configurable: !!(flags & _SC_CONFIGURABLE),
-            };
-          }
-          return undefined; // not an own property
+          // (#1629 S1) WasmGC struct: single canonical read-back path, shared
+          // with Object.getOwnPropertyDescriptors.
+          return _readOwnDescriptor(obj, prop, callbackState?.getExports());
         };
       if (name === "__getOwnPropertyNames")
         return (obj: any) => {
@@ -6222,8 +6293,30 @@ assert._isSameValue = isSameValue;
       // Object.fromEntries(iterable) — create object from entries (#965)
       if (name === "__object_fromEntries") return (iterable: any): any => Object.fromEntries(iterable);
       // Object.getOwnPropertyDescriptors(obj) — all own descriptors (#965)
+      // (#1629 S1) For WasmGC structs, enumerate own keys and read each
+      // descriptor through the same canonical path as the single-key
+      // Object.getOwnPropertyDescriptor, so the two agree on struct fields,
+      // sidecar (defineProperty'd) props, accessors, and class methods.
       if (name === "__object_getOwnPropertyDescriptors")
-        return (obj: any): any => Object.getOwnPropertyDescriptors(obj);
+        return (obj: any): any => {
+          // ES §20.1.2.9 → ToObject(O) (§7.1.18) throws on null/undefined.
+          if (obj == null) throw new TypeError(`Cannot convert ${obj === null ? "null" : "undefined"} to object`);
+          if (!_isWasmStruct(obj)) return Object.getOwnPropertyDescriptors(obj);
+          const exports = callbackState?.getExports();
+          const result: Record<string | symbol, PropertyDescriptor> = {};
+          for (const key of _ownStructKeys(obj, exports)) {
+            const desc = _readOwnDescriptor(obj, key, exports);
+            if (desc !== undefined) {
+              // Per spec, the result is an ordinary object whose own
+              // properties are enumerable, writable, configurable data
+              // properties holding each descriptor object. Plain assignment
+              // creates exactly such a property and keeps the keys reachable
+              // by the host property-get path that compiled member access uses.
+              (result as any)[key] = desc;
+            }
+          }
+          return result;
+        };
       // Object.groupBy(iterable, keyFn) — ES2024 grouping (#965)
       // (#1382) keyFn is invoked as `keyFn(value, index)` — arity 2.
       // Wrap Wasm-closure keyFn before handing it to the native engine.
