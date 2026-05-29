@@ -1,7 +1,8 @@
 ---
 id: 1714
 title: "Lower one IR node kind through the BackendEmitter trait to BOTH WasmGC and linear"
-status: in-progress
+status: done
+completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
