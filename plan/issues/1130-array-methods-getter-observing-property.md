@@ -12,6 +12,20 @@ sprint: 55
 ---
 # #1130 — Array methods: getter-observing property access on indices and length
 
+> **2026-05-29 — folded into the array object-value representation track.**
+> This is one of the three convergent symptoms of the missing array object
+> identity (compiled WasmGC arrays are not host JS Arrays / not on the host
+> `Array.prototype` chain). The canonical architecture spec lives in **#1719**
+> ("Architecture Spec — array object-value representation"), which is the array
+> analog of #1732's `$FuncObj`. Under that spec, the own index/length accessor
+> descriptor moves onto `$ArrayObj.$descs` (a #1629 descriptor record) and the
+> element-load slow path reads it from there. **PR-0 (vec array-index-exotic
+> `length` growth, branch `issue-1130-getter-observe-v2`) is independent and
+> still valid to land on its own**; the accessor-observation slow path (PR-1/2)
+> is **S3** of the #1719 spec. See #1719 for the dual-mode (JS-host vs
+> standalone) design and the honest test-count scope (native-vec ~30–45,
+> interior-hole + prototype-chain subsets are explicit follow-ups).
+
 ## Problem
 
 **~80 test262 failures** in `assertion_fail / /Array/prototype/{forEach,map,every,some,filter,reduce,reduceRight}/` install a getter via `Object.defineProperty` on an array index or the `length` property, and expect the getter to fire when the Array iteration method accesses that slot:
