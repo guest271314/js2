@@ -40,22 +40,37 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 | Emit the **binary 4-byte LE length prefix** on stdout | works | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651) |
 
 The response is framed with `process.stdout.write` — a `Uint8Array` for the
-binary length prefix, then the JSON body string — mirroring the Node.js host
-API used by the AssemblyScript reference (`nm_assemblyscript.ts`). It is a
-drop-in Chrome host; the only external dependency is a WASI preview1 runtime to
-launch it (see "Run it" below).
+binary length prefix, then the body bytes — mirroring the Node.js host API used
+by the reference hosts (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`).
+It is a drop-in Chrome host; the only external dependency is a WASI preview1
+runtime to launch it (see "Run it" below).
 
 ## The host source
 
-[`host.ts`](./host.ts) runs a continuous `while (true)` port loop: it reads the
-4-byte length prefix then exactly the declared body bytes via
-`process.stdin.read` read-until loops (a `readExact` helper handles short
-reads), logs diagnostics to **stderr** (so they never corrupt the stdout
-protocol stream), and writes a framed JSON response, looping until stdin
-reaches EOF. The application logic — here, a **strict echo** that writes the
-received body back verbatim, byte-for-byte, with no wrapper and no added bytes
-(so the stdin→stdout round-trip is directly observable) — is the part you'd
-replace for a real host that parses the body and builds a structured response.
+[`host.ts`](./host.ts) follows the **3-symbol shape** the reference hosts use
+across runtimes:
+
+- **`getMessage()`** — reads the 4-byte little-endian length header, then
+  exactly that many body bytes, via `process.stdin.read` read-until loops (a
+  `readExact` helper handles short reads). It returns the body as a raw
+  **`Uint8Array`** (a zero-length buffer signals EOF / a truncated frame). The
+  body is **never** decoded to a JS string, so it round-trips byte-exactly at
+  any size — including megabyte-scale messages (#389).
+- **`sendMessage(message)`** — frames a `Uint8Array` body: writes the 4-byte LE
+  length prefix, then the body bytes, to stdout with no trailing newline. Large
+  bodies grow linear memory as needed (#389/#1723).
+- **`main()`** — the continuous port loop: `const m = getMessage();
+  sendMessage(m);`, looping until `getMessage()` returns an empty body.
+
+Diagnostics go to **stderr** (so they never corrupt the stdout protocol
+stream). The application logic — here, a **strict echo** that sends the received
+body back verbatim, byte-for-byte, with no wrapper and no added bytes (so the
+stdin→stdout round-trip is directly observable) — lives entirely in the loop
+body and is the part you'd replace for a real host that decodes `message`,
+dispatches on a command field, and frames a structured response with
+`sendMessage()`. Carrying the body as bytes (rather than a string) is also
+forward-compatible with Chromium's in-progress `Uint8Array` Native Messaging
+support — the protocol body is fundamentally a byte buffer.
 
 ## Build to `.wasm`
 
@@ -75,6 +90,33 @@ runs on any standards-compliant WASI preview1 runtime.
 
 > The `-o` flag is an **output directory**, not a filename. js2wasm names the
 > output after the input basename (`host.wasm`).
+
+### What is `out/host.imports.js`?
+
+Alongside `host.wasm`, js2wasm emits **`host.imports.js`** (plus `host.d.ts`).
+It is the **generated host-imports glue** a compiled module needs when you
+instantiate it from a JavaScript host. It re-exports `createImports`,
+`instantiateBytes`, and `instantiateFromUrl` from the `js2wasm` runtime package,
+wiring up the module's import manifest and string pool:
+
+```js
+import { instantiateBytes } from "./out/host.imports.js";
+const { instance } = await instantiateBytes(wasmBytes, deps, options);
+instance.exports.main();
+```
+
+For **this** example it is **not used at runtime**: the Native Messaging host
+is a fully standalone `--target wasi` module whose only imports are the WASI
+preview1 syscalls (`fd_read`/`fd_write`), which the runtime — `wasmtime`,
+`wasmer`, `wazero`, or Node's WASI — supplies directly. So the `nm_js2wasm.sh`
+wrapper launches `host.wasm` under a WASI runtime and `host.imports.js` is
+never imported.
+
+The glue file is emitted unconditionally by the compiler because the **same
+module can also be driven from a JS host** (e.g. instantiated in the browser or
+in Node via `WebAssembly.instantiate`), where the import wiring it provides is
+required. Treat it as the JS-host on-ramp for the module; for the standalone
+WASI path it is a harmless extra artifact you can ignore or delete.
 
 ## Run it under a WASI runtime
 
