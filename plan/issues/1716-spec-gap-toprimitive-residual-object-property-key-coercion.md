@@ -1,9 +1,10 @@
 ---
 id: 1716
 title: "spec gap (RESIDUAL of #1090/#1525): 'Cannot convert object to primitive value' still thrown in 111 coercion paths"
-status: ready
+status: done
 created: 2026-05-29
 updated: 2026-05-29
+completed: 2026-05-29
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -90,3 +91,66 @@ property-key** and **RegExp/JSON/Date** coercion sites #1442 does not.
 
 Filed by product-owner test262 triage 2026-05-29 against main baseline
 (`.test262-cache/test262-current.jsonl`, 48,117 records).
+
+## Resolution (senior-dev, 2026-05-29)
+
+**Diagnosis: NEVER-COVERED, not a regression.** #1319 fixed `_hostToPrimitive`
+(the callbackState-aware OrdinaryToPrimitive walker) and that path works today —
+`String(obj)` with a user `toString` already passed. What was never wired:
+
+1. **ToPropertyKey (§7.1.19)** — `_safeGet`/`_safeSet`/`__extern_has` and the
+   `Object.*`/`Reflect.*` runtime handlers coerced an object key via
+   `_toPrimitiveSync(key, "string")` **without** `callbackState` (or a bare
+   `String(prop)`). `_toPrimitiveSync` with no exports cannot dispatch a WasmGC
+   closure, so a key whose `valueOf`/`toString`/`@@toPrimitive` is a compiled
+   method collapsed to `"[object Object]"` and the lookup silently missed; the
+   `Object.*` handlers passed the opaque struct straight to native, which threw.
+2. **A class's `[Symbol.toPrimitive]` *method*** had **no runtime dispatch
+   export at all.** `valueOf`/`toString` compile to `__call_<name>` 1-arg
+   dispatchers (emitted by `emitToPrimitiveMethodExports`) that
+   `_hostToPrimitive`'s loop picks up; the exotic `@@toPrimitive` method (which
+   takes a hint) was only emitted for `@@iterator`/`next`, so it was unreachable
+   from the runtime. The reference to `__call_@@toPrimitive` in `_toPrimitive`
+   (runtime.ts) was dead — the export never existed.
+3. **Host-constructor object args** — `new RegExp(obj)` / `new Date(obj)` /
+   `new String(obj)` / `new Number(obj)` passed the opaque struct to V8's
+   constructor, which ran its own ToString/ToPrimitive and threw before reaching
+   the compiled methods.
+
+**Fix (reuses #1319/#1525, no duplication):**
+- `src/codegen/index.ts` — new `emitToPrimitiveMethodExport`: emits a 2-arg
+  `__call_@@toPrimitive(self, hint) -> externref` dispatch wrapper (called in
+  both `generateModule` and `generateMultiModule`). Skips entries whose hint
+  param isn't externref (nativeStrings standalone path is JS-host-free), keeping
+  Wasm validation green in every mode.
+- `src/runtime.ts`:
+  - `_toPrimitiveSync` gained an optional `callbackState`; for WasmGC structs it
+    now defers to `_hostToPrimitive` (the #1319 walker) instead of the
+    "[object Object]" sentinel.
+  - `_hostToPrimitive` now probes the new `__call_@@toPrimitive(self, hint)`
+    export for the method-shorthand `[Symbol.toPrimitive]` shape (the sidecar
+    slot is empty for class methods).
+  - new `_toPropertyKey(key, callbackState)` helper (§7.1.19) applied at
+    `__defineProperty_{desc,value,accessor}`, `__getOwnPropertyDescriptor`,
+    `__object_hasOwn`, and all six `Reflect.*` key handlers.
+  - `_safeGet`/`_safeSet`/`__extern_get`/`__extern_set`/`__extern_has` thread
+    `callbackState` into the key coercion.
+  - the `extern_class` constructor coerces WasmGC struct args through
+    `_hostToPrimitive` for RegExp/Date/String/Number (Boolean excluded — it runs
+    ToBoolean, not ToPrimitive).
+
+A §7.1.1.1 step-6 violation (a coercion method returning an object) still throws
+TypeError on every path — spec-correct.
+
+**No-regression evidence:** #1319 (3), #1525 (10), #1525b (5), #1442 (10),
+#1629a/b (8), #1630 (5), object-methods, object-keys-values-entries all stay
+green alongside the new #1716 suite (10). The class-methods/iterators test files
+fail identically on clean origin/main (their `{ env: {} }` harness omits
+`string_constants`) — pre-existing, not touched by this change.
+
+**Test:** `tests/issue-1716.test.ts` (10 tests) — property-key valueOf/@@toPrimitive,
+Object.getOwnPropertyDescriptor/defineProperty with object keys, String/RegExp/Date
+object args, the step-6 TypeError guard, and the #1319 "defined method still wins"
+guard.
+
+PR: see implementation PR. Expected impact: ~+111 (the unified cluster).
