@@ -6888,7 +6888,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Pad missing externref position args with JS undefined (via
           // `__get_undefined`) so the host sees the spec-correct "not passed"
           // value instead of `null`.
-          const padsUndefined = method === "endsWith" || method === "lastIndexOf";
+          // #1740 — padStart/padEnd: an OMITTED fillString must default to a
+          // single space " " (§22.1.3.17 StringPad: if fillString is
+          // undefined, set it to " "). Padding the missing externref arg with
+          // `ref.null.extern` makes the host see JS `null`, which ToString-
+          // coerces to "null" → e.g. `"abc".padStart(6)` returned "nulabc"
+          // instead of "   abc". Pass JS `undefined` so the host applies the
+          // spec default. (Same null-vs-undefined distinction as endsWith.)
+          const padsUndefined =
+            method === "endsWith" || method === "lastIndexOf" || method === "padStart" || method === "padEnd";
           let undefIdx: number | undefined;
           if (padsUndefined) {
             undefIdx = ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
