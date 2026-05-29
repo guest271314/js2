@@ -3761,6 +3761,13 @@ function resolveImport(
           Number,
           Boolean,
           String,
+          // (#1721) Root constructors so `class Sub extends Object {}` /
+          // `extends Function {}` route through `__new_Object()` /
+          // `__new_Function()` instead of throwing "No dependency provided for
+          // extern class". The instance's [[Prototype]] is then set to
+          // `Sub.prototype` by `__set_subclass_proto`.
+          Object,
+          Function,
           // (#1366b) Array and Promise added so `class Sub extends Array {}` /
           // `class Sub extends Promise {}` route through `__new_Array(arg)` /
           // `__new_Promise(executor)` host imports. Without these entries the
