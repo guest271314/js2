@@ -97,10 +97,12 @@ export function main(): void {
     // 4 + declaredLen.
     console.error(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}`);
 
-    // Application logic: echo the received JSON body back inside a wrapper
-    // object. Real hosts would parse `bodyStr`, dispatch on a command field,
-    // and build a structured response.
-    const response = `{"received":${bodyStr},"runtime":"js2wasm+wasi"}`;
-    writeMessage(response);
+    // Strict echo: write the received body back verbatim, byte-for-byte, with
+    // no wrapper and no added bytes. This makes the demo a true round-trip
+    // proof — what Chrome sends in is exactly what comes back out, so the
+    // stdin->stdout fidelity of the WASI build is directly observable.
+    // A real host would instead parse `bodyStr`, dispatch on a command field,
+    // and build a structured response here.
+    writeMessage(bodyStr);
   }
 }

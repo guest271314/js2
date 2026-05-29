@@ -52,8 +52,10 @@ launch it (see "Run it" below).
 `process.stdin.read` read-until loops (a `readExact` helper handles short
 reads), logs diagnostics to **stderr** (so they never corrupt the stdout
 protocol stream), and writes a framed JSON response, looping until stdin
-reaches EOF. The application logic — here, echoing the received body inside a
-wrapper object — is the part you'd replace for a real host.
+reaches EOF. The application logic — here, a **strict echo** that writes the
+received body back verbatim, byte-for-byte, with no wrapper and no added bytes
+(so the stdin→stdout round-trip is directly observable) — is the part you'd
+replace for a real host that parses the body and builds a structured response.
 
 ## Build to `.wasm`
 

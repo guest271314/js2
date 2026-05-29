@@ -41,9 +41,11 @@ echo "== Running under wasmtime ($(wasmtime --version)) =="
 printf "$FRAME" | wasmtime $WASMTIME_FLAGS "$WASM" >"$STDOUT_FILE" 2>"$STDERR_FILE"
 
 # ---- Expected stdout frame -------------------------------------------------
-# Body is the echo wrapper the host builds; its length is the LE prefix.
-EXPECTED_BODY='{"received":{"ping":true},"runtime":"js2wasm+wasi"}'
-BODY_LEN=${#EXPECTED_BODY}            # 51 → prefix 0x33 0x00 0x00 0x00 (computed, not hardcoded)
+# Strict echo: the response body is the received body verbatim, byte-for-byte.
+# So the expected stdout body equals the input body and its length (13) is the
+# LE prefix — a true round-trip with no added bytes.
+EXPECTED_BODY='{"ping":true}'
+BODY_LEN=${#EXPECTED_BODY}            # 13 → prefix 0x0d 0x00 0x00 0x00 (computed, not hardcoded)
 EXPECTED_STDOUT_FILE="$OUT_DIR/expected_stdout.bin"
 {
   # 4-byte little-endian uint32 length prefix.
