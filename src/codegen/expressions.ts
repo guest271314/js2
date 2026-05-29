@@ -190,6 +190,66 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
 }
 
 /**
+ * Decide whether an async call's result is consumed as a raw value (`T`) rather
+ * than as a `Promise<T>` (#1727).
+ *
+ * In the synchronous-wasm async model the async function body already returns
+ * the unwrapped `T` (e.g. an f64), and the export boundary calls it directly to
+ * get that raw value. But for an INTERNAL call (`f()` inside another wasm fn)
+ * the default lowering runs `wrapAsyncReturn` — boxing the f64 and wrapping it
+ * in a real `Promise.resolve(...)` object. When the surrounding code then
+ * consumes the result as a primitive (`f() as unknown as number` feeding a
+ * numeric return / arithmetic), the consuming `coerceType(externref → f64)`
+ * emits `__unbox_number(Promise{42})` === `Number(Promise{42})` === **NaN**.
+ *
+ * The existing `await` consumer (handled at the call site) skips the wrap and
+ * leaves the raw `T` on the stack. This helper generalises that skip to the
+ * primitive/non-Promise cast sink: walk the wrapper chain
+ * (`Parenthesized`/`As`/`NonNull`/`TypeAssertion`) from `expr.parent` and
+ * return `true` when the immediate semantic consumer is:
+ *
+ *   1. an `AwaitExpression` (the existing case), or
+ *   2. a cast/assertion (`as T`, `<T>x`, `x!`) whose target type is NOT
+ *      `Promise<…>` — e.g. `as any`, `as unknown as number`, `as number`.
+ *      `as any`/`as unknown` resolve to the `any`/`unknown` type → not a
+ *      Promise → treated as a value consumer. This is the repro and the 7
+ *      `tests/equivalence/async-function.test.ts` cases.
+ *
+ * Returning `true` means: skip both `wrapAsyncReturn` and
+ * `wrapAsyncCallInTryCatch`, leaving the raw `f64`/`T` the sink wants. Genuine
+ * Promise consumers (`f().then(...)`, `const p: Promise<T> = f();`,
+ * `Promise.all([f()])`, a bare `return f()` from an async/Promise-returning fn)
+ * have NO non-Promise cast in the chain, so this returns `false` and the
+ * Promise wrap fires as before. The cast gate keeps the blast radius minimal:
+ * we only skip when an explicit non-Promise cast/assertion is present (#1727
+ * minimal-diff variant — scope 2).
+ */
+function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  let sawNonPromiseCast = false;
+  let parent: ts.Node | undefined = expr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isNonNullExpression(parent) ||
+      ts.isTypeAssertionExpression(parent))
+  ) {
+    if (ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isTypeAssertionExpression(parent)) {
+      // The cast/assertion's resolved type. For `f() as unknown as number`,
+      // each layer is inspected; the value-consumer signal is that at least one
+      // cast in the chain targets a non-Promise type.
+      const castType = ctx.checker.getTypeAtLocation(parent);
+      if (!isPromiseType(castType)) sawNonPromiseCast = true;
+    }
+    parent = parent.parent;
+  }
+  // (case 1) await consumer — raw-T passthrough (folds in the existing skip).
+  if (parent && ts.isAwaitExpression(parent)) return true;
+  // (case 2) non-Promise cast/assertion sink — raw value wanted.
+  return sawNonPromiseCast;
+}
+
+/**
  * Wrap the current stack value in Promise.resolve() for async function calls (#919).
  *
  * `resultType` is the TypeScript-level result from compileCallExpression; when
@@ -1004,19 +1064,19 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       // raw-T consumer, every other consumer as Promise consumer. Both
       // shapes are observable in test262 today; this PR keeps both
       // working while eliminating the `[object Promise]` stringification.
-      let parent: ts.Node | undefined = expr.parent;
-      while (
-        parent &&
-        (ts.isParenthesizedExpression(parent) ||
-          ts.isAsExpression(parent) ||
-          ts.isNonNullExpression(parent) ||
-          ts.isTypeAssertionExpression(parent))
-      ) {
-        parent = parent.parent;
-      }
-      if (parent && ts.isAwaitExpression(parent)) {
-        // Skip the wrap; await's passthrough lowering will leave the raw
-        // value on the stack for the consumer.
+      //
+      // (#1727) Generalised: ALSO skip the wrap when the result is consumed
+      // as a raw value through a non-Promise cast/assertion
+      // (`f() as unknown as number`, `as any`, `as number`). Otherwise the
+      // internal call boxes the f64 and wraps it in a real Promise object, and
+      // the consuming numeric sink unboxes `Number(Promise{42})` === NaN. The
+      // raw `T` already on the stack is exactly what the sink wants. Genuine
+      // Promise consumers (`.then`, `const p: Promise<T> = f()`,
+      // `Promise.all`, bare `return f()`) have no non-Promise cast, so the
+      // wrap still fires. See `asyncResultConsumedAsValue` above.
+      if (asyncResultConsumedAsValue(ctx, expr)) {
+        // Skip the wrap; the raw value on the stack is what the consumer
+        // (await passthrough or primitive cast sink) expects.
         return callResult;
       }
       const wrappedType = wrapAsyncReturn(ctx, fctx, callResult);
