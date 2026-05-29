@@ -974,6 +974,29 @@ export function ensureArgcGlobal(ctx: CodegenContext): number {
 }
 
 /**
+ * (#1636-S1) Lazily register a `(mut externref)` module global
+ * `__current_this` used by `__call_fn_method_N` to thread a host-supplied
+ * `this`-value into a Wasm closure body. The dispatcher save+restores the
+ * previous value across the inner `call_ref`, and `ThisKeyword` resolution
+ * reads this global when no local `this` binding is in scope (free-closure
+ * fallback). Default value is `ref.null.extern` (= JS `null`), which is
+ * compatible with the prior "undefined fallback" behaviour for the vast
+ * majority of references that compare strictly against null/undefined.
+ */
+export function ensureCurrentThisGlobal(ctx: CodegenContext): number {
+  if (ctx.currentThisGlobalIdx >= 0) return ctx.currentThisGlobalIdx;
+  const globalIdx = nextModuleGlobalIdx(ctx);
+  ctx.mod.globals.push({
+    name: "__current_this",
+    type: { kind: "externref" },
+    mutable: true,
+    init: [{ op: "ref.null.extern" } as Instr],
+  });
+  ctx.currentThisGlobalIdx = globalIdx;
+  return globalIdx;
+}
+
+/**
  * Emit code to build a vec struct from `args[startIdx..]` and
  * store it in the `__extras_argv` module global. Used at call sites when
  * the callee reads `arguments` and the caller passes more runtime args

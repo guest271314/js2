@@ -446,6 +446,15 @@ export interface CodegenContext {
    * to functions that use `arguments`. -1 = not yet created.
    */
   argcGlobalIdx: number;
+  /**
+   * Absolute Wasm global index for the `__current_this` (mut externref) module
+   * global (#1636-S1). Set by `__call_fn_method_N` to the host-supplied
+   * receiver before invoking the closure body; restored after the call.
+   * A `ThisKeyword` reference in a free-function closure (no local `this`
+   * binding, not in static context) reads from this global instead of the
+   * previous `undefined` fallback. -1 = not yet created.
+   */
+  currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
   /** Tag index for the exception tag (-1 if not yet registered) */
@@ -751,8 +760,6 @@ export interface CodegenContext {
   wasiPendingPathOpenHelper?: boolean;
   /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
   wasiClockHelpersPending?: boolean;
-  /** (#1483 + #1481) Pending flag — emit `__wasi_read_stdin_all` after lib-globals scan. */
-  wasiPendingFdReadHelper?: boolean;
   /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
   wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
