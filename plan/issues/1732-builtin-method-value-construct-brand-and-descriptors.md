@@ -449,3 +449,34 @@ where the method type resolves to `any`. Fold a `<Math|JSON|Reflect|Atomics>.
 <method>` member-access arm into the S2 PR (same file). The f16round
 `value-conversion.js` fail is a missing test262 harness include
 (`byteConversionValues`), not a compiler bug.
+
+## S2 landed (dev-a, 2026-05-29)
+
+**S2 scope refined during implementation.** The A8 own-`length`/`name`
+descriptor family (the slice's nominal target) is **already green on main** —
+all 14 `String.prototype/*/S15.5.4.*_A8.js` tests pass post-#941/#936. The
+host-method values resolve through `__get_builtin`/`__extern_get` and carry
+correct descriptors, `hasOwnProperty('length')`/`propertyIsEnumerable('length')`
+return true/false correctly, and `for-in` routes through the host key path that
+already honors non-enumerability (verified: the `for (p in
+String.prototype.charAt)` count-0 assertion passes). So **no codegen change was
+needed for A8** — the jsonl baseline listing them as failing was pre-#941/stale.
+
+The one genuinely-unfixed gap in S2's scope was the **`new
+<NonCtorNamespace>.<method>()` not-a-constructor arm**: `new Math.f16round()` /
+`new Math.sumPrecise()` returned instead of throwing TypeError, because those
+methods are newer than the bundled TS lib → type `any` → slip past the
+Pattern 2 (call-sigs/no-construct-sigs) guard → reach the unknown-ctor path that
+never performs [[Construct]]. Fixed with a Pattern-1 extension in
+`src/codegen/expressions/new-super.ts` keyed on the receiver **namespace name**
+(`Math`/`JSON`/`Reflect`/`Atomics`), making it lib-version-independent — it
+fires for any current or future method on those namespaces. The existing
+`new Math.abs()` (Pattern 2) and `new Math()` (namespace guard) paths are
+untouched. JS-host realization, no `$FuncObj` struct (that's S3/S4).
+
+Tests: `tests/issue-1732-s2.test.ts` (6) — `new Math.f16round`/`Math.sumPrecise`
+/`Reflect.has`/`JSON.parse` throw TypeError; regression guards confirm
+`new Math.abs()` and `new Math()` still throw. The 14 A8 tests stay green; #1732
+S1 tests stay green. Closes test262
+`built-ins/Math/f16round/not-a-constructor.js` and the analogous newer-method
+not-a-constructor cases.
