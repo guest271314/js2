@@ -39,6 +39,36 @@ import {
 import { collectInstrs } from "./shared.js";
 import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
 
+/**
+ * (#1719 S1) Gate predicate for the array object-value representation track.
+ *
+ * Returns true iff array destructuring of a **typed vec / tuple RHS** must
+ * route through the host-Array reflection + host `GetIterator` lane instead of
+ * the backing-store fast path — i.e. when the program's `ITER_OVERRIDDEN`
+ * whole-program brand (`ctx.arrayIteratorMaybeOverridden`, set by
+ * `sourceOverridesArrayIterator`) is set AND the RHS is not a string.
+ *
+ * The string exclusion is load-bearing: a string is not an Array, so a
+ * monkeypatched `Array.prototype[@@iterator]` cannot affect string
+ * destructuring, and routing a string through the array iterator lane would
+ * regress string dstr (per the architecture spec).
+ *
+ * **S1 status (this PR):** this predicate establishes the *placement and
+ * string guard* the architecture spec mandates keeping from dev-a's
+ * scaffolding, but the routing target it gates is supplied by **S2** (the
+ * host-Array reflection helper + host `GetIterator`). Until S2 lands, callers
+ * evaluate this predicate but fall through to the existing fast path — so the
+ * predicate is correct and unit-tested while the codegen is behaviorally a
+ * no-op (zero test delta, the spec's S1 requirement). When
+ * `ctx.arrayIteratorMaybeOverridden` is false (the common case) this is always
+ * false, guaranteeing byte-identical output.
+ *
+ * Spec: §7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization.
+ */
+export function arrayDstrNeedsIdentity(ctx: CodegenContext, isStringRHS: boolean): boolean {
+  return ctx.arrayIteratorMaybeOverridden && !isStringRHS;
+}
+
 export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, pattern: ts.BindingPattern): void {
   for (const element of pattern.elements) {
     if (ts.isOmittedExpression(element)) continue;
@@ -844,6 +874,23 @@ export function compileArrayDestructuring(
     ctx.nativeStrings &&
     ctx.anyStrTypeIdx >= 0 &&
     (typeIdx === ctx.anyStrTypeIdx || typeIdx === ctx.nativeStrTypeIdx || typeIdx === ctx.consStrTypeIdx);
+
+  // #1719 S1 — gate-site for the array object-value representation track.
+  // When the program may have overridden Array.prototype's @@iterator/values
+  // (the ITER_OVERRIDDEN brand) and the RHS is a real array (not a string),
+  // the backing-store fast path below silently ignores the override (§7.4.2
+  // GetIterator / §8.5.2 IteratorBindingInitialization). The **S2** slice
+  // replaces today's behavior at this site: reflect the vec into a host Array
+  // and drive the host GetIterator so the override's @@iterator runs.
+  //
+  // S1 is intentionally a behavioral no-op — it establishes the placement +
+  // the string-guard predicate (`arrayDstrNeedsIdentity`) but does NOT wire the
+  // (invalid) externref→__array_from_iter lane dev-a's first attempt used. The
+  // predicate is always false when the brand is clear, so override-free modules
+  // stay byte-identical; when the brand is set, the dstr still falls through to
+  // the existing fast path until S2 supplies the routing target.
+  const _needsArrayObjIdentity = arrayDstrNeedsIdentity(ctx, isStringStruct);
+  void _needsArrayObjIdentity; // S2 fills the routing here; S1 no-ops.
 
   if (!isVecArray && !isTupleStruct && !isStringStruct) {
     // Unknown struct: convert to externref and use __extern_get fallback

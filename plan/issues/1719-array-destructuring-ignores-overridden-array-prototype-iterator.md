@@ -1,7 +1,7 @@
 ---
 id: 1719
 title: "Array destructuring ignores overridden Array.prototype[Symbol.iterator] ('items[Symbol.iterator] must be a function', 71 fails)"
-status: ready
+status: in-progress
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
@@ -458,3 +458,94 @@ issue** (frontmatter `canonical_tracking`). Cross-linked: #1130 (accessor
 observation, S3), #1320 (bridge, S3), #1732 (sibling `$FuncObj`), #1629
 (descriptor model), #1632/#1665 (function/iterator prototype scheme). Future
 array value-identity gaps close by reusing S1–S4 with no new design.
+
+---
+
+## S1 implementation note — brand-gate machinery (senior-dev, 2026-05-29)
+
+**Slice landed by this PR: S1 (JS-host).** S0 (#1130 PR-0) is already on
+`main` (`252f7a3ee`), so this is the first implementation slice of the array
+object-value representation track.
+
+### WHY this slice does NOT emit a WasmGC `$ArrayObj` struct (cross-cutting)
+
+The spec's S1 bullet says "Introduce the struct." After reading dev-a's
+sibling **#1732-S1** (`issue-1732-s1-construct`), the realization is that
+the **JS-host** slices of *both* tracks deliberately do **not** materialize
+the WasmGC brand struct — they lean on the host's real object identity:
+
+- #1732-S1's JS-host `new f` fix is a runtime `__construct`/`IsConstructor`
+  host import at the new-site, **not** a `$FuncObj` struct. Its
+  host-import-allowlist comment states *"Standalone parity is S4 ($FuncObj
+  brand read)"* — i.e. the `$FuncObj` WasmGC struct is an **S4/standalone**
+  concern.
+- The array analog is identical: in JS-host mode the override lives on the
+  **host** `Array.prototype`, so the mechanism that observes it is
+  "reflect the vec into a real host `Array` + pair them in a WeakMap"
+  (the spec's own "Dual-mode story → JS-host mode" paragraph). That is S2.
+  The WasmGC `$ArrayObj` struct is only needed where there is **no host to
+  lean on** — i.e. standalone (S4), where `$ArrayObj.$proto` + funcref
+  dispatch replaces the host prototype.
+
+Emitting a `$ArrayObj` WasmGC struct now (in the JS-host slices) would be a
+**dead type**: nothing in JS-host mode reads its `$proto`/`$descs` fields,
+because the host Array carries that identity. It would also risk perturbing
+the #1016/#1021/#1024/#1025/#1320 fast-path guards for zero benefit. So to
+keep ONE shared convention with $FuncObj and avoid forking a third scheme,
+**the WasmGC `$ArrayObj`/`$FuncObj` brand structs are deferred to S4
+(standalone) for both tracks.** Coordinated with dev-a.
+
+### What S1 actually delivers (the foundation S2/S3 build on)
+
+1. **`ITER_OVERRIDDEN` whole-program brand** = `ctx.arrayIteratorMaybeOverridden`
+   (the spec's recommended ctx-flag name, kept verbatim from dev-a's
+   scaffolding). Sourced by the `sourceOverridesArrayIterator` whole-tree
+   pre-scan, OR'd across all program source files (multi-module safe). The
+   pre-scan is dev-a's, unchanged — wrapper-stripping LHS match for
+   `Array.prototype[Symbol.iterator] = …` / `Array.prototype.values = …`
+   assignment, plus `Object.defineProperty(Array.prototype, …)` /
+   `defineProperties`. **This is the reusable front-end half the spec's
+   "Reusable scaffolding" section endorses ("Sound, no rework needed").**
+
+2. **A single gate predicate** `arrayDstrNeedsIdentity(ctx, isStringRHS)`
+   placed at the two dstr fast-path sites (`compileArrayDestructuring`,
+   `destructureParamArray`) with the string-RHS exclusion (a string is not
+   an Array, so `Array.prototype` changes can't affect it). The predicate is
+   the *placement* the spec mandates keeping; **the routing target it gates
+   is an S2 concern** and is not wired here.
+
+3. **Byte-identical-when-clear guarantee.** When
+   `ctx.arrayIteratorMaybeOverridden === false` (the overwhelming common
+   case), every dstr site emits **exactly today's bytes** — the gate
+   predicate short-circuits to the existing backing-store walk. Proven by a
+   byte-equality microcheck in `tests/issue-1719-s1.test.ts` (an
+   override-free module compiles to identical Wasm pre/post this change).
+   This is the analog of #1130's `arrayAccessorObserved` whole-program gate
+   and #1732's "`HAS_CONSTRUCT` clear ⇒ static fast path".
+
+### Why the S1 gate is behaviorally a no-op even when the brand IS set
+
+dev-a's original `issue-1719-impl` routed a branded vec RHS through
+`extern.convert_any → __array_from_iter`. The spec proved that lane
+**invalid** (a coerced vec is not a host Array; it returns empty / throws —
+the same object-rep gap). So S1 keeps the pre-scan + flag + gate-site
+*placement* but **does not** wire that dead-end lane. Until S2 supplies the
+host-Array reflection + host `GetIterator`, the gate predicate exists and is
+unit-tested, but the dstr sites fall through to the existing fast path —
+meaning **S1 is behaviorally a no-op** (zero test delta, as the spec's S1
+bullet requires) while establishing the brand plumbing and the single,
+correctly-placed gate predicate that S2 fills in. This is intentional: S1
+lands the foundation with zero regression risk; S2 banks #1719's 71.
+
+### Files touched (S1)
+
+| File | Change |
+|------|--------|
+| `src/codegen/context/types.ts` | add `arrayIteratorMaybeOverridden: boolean` to `CodegenContext` |
+| `src/codegen/context/create-context.ts` | init `arrayIteratorMaybeOverridden: false` |
+| `src/codegen/index.ts` | `sourceOverridesArrayIterator` pre-scan (ported from dev-a); set flag OR'd across modules |
+| `src/codegen/statements/destructuring.ts` | export `arrayDstrNeedsIdentity` gate predicate (placement only; S2 fills routing) |
+| `tests/issue-1719-s1.test.ts` | pre-scan detection unit tests + byte-identical-when-clear microcheck |
+
+Spec refs: §7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization,
+§13.15.5.3 DestructuringAssignmentEvaluation.

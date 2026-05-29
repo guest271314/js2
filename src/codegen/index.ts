@@ -184,6 +184,99 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
   return found;
 }
 
+/**
+ * (#1719 S1) Whole-program pre-scan for the `ITER_OVERRIDDEN` brand of the
+ * array object-value representation track. Returns true iff the source may
+ * monkeypatch `Array.prototype`'s iterator surface, i.e. it contains:
+ *   (i)  an assignment `Array.prototype[Symbol.iterator] = …` or
+ *        `Array.prototype.values = …` (any element/property access whose
+ *        object is `Array.prototype`), OR
+ *   (ii) `Object.defineProperty(Array.prototype, …)` /
+ *        `Object.defineProperties(Array.prototype, …)`.
+ *
+ * When this returns false (the overwhelming common case), the array
+ * destructuring / spread / for-of fast paths are provably unaffected by any
+ * prototype override and stay byte-identical (see `arrayDstrNeedsIdentity`).
+ * When true, the S2 slice routes a branded array RHS through the host-Array
+ * reflection + host `GetIterator` so the override's `@@iterator` is observed
+ * (§7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization).
+ *
+ * Reused verbatim from the dev-a `issue-1719-impl` scaffolding (the front-end
+ * half the architecture spec endorses keeping). Conservative by design: it
+ * over-approximates (a false positive only costs the S2 slow path, never
+ * correctness) and never under-approximates a literal `Array.prototype` LHS.
+ */
+export function sourceOverridesArrayIterator(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  // Strip `as`/`!`/type-assertion/paren wrappers so `(Array.prototype as any)[…]`
+  // and `(Array.prototype)[…]` match the same as the bare form.
+  function unwrap(e: ts.Expression): ts.Expression {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = ts.isParenthesizedExpression(cur)
+        ? cur.expression
+        : ts.isAsExpression(cur)
+          ? cur.expression
+          : ts.isNonNullExpression(cur)
+            ? cur.expression
+            : (cur as ts.TypeAssertion).expression;
+    }
+    return cur;
+  }
+  // `e` is the object being assigned INTO: match `Array.prototype[...]`
+  // (element access) or `Array.prototype.values` (property access).
+  function isArrayProtoLHS(e: ts.Expression): boolean {
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+      const obj = unwrap(e.expression);
+      return (
+        ts.isPropertyAccessExpression(obj) &&
+        obj.name.text === "prototype" &&
+        ts.isIdentifier(obj.expression) &&
+        obj.expression.text === "Array"
+      );
+    }
+    return false;
+  }
+  function walk(node: ts.Node): void {
+    if (found) return;
+    // (i) assignment: Array.prototype[Symbol.iterator] = … / Array.prototype.values = …
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isArrayProtoLHS(node.left)
+    ) {
+      found = true;
+      return;
+    }
+    // (ii) Object.defineProperty(Array.prototype, …) / Object.defineProperties(Array.prototype, …)
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const callee = node.expression;
+      const arg0 = node.arguments[0];
+      if (
+        ts.isIdentifier(callee.expression) &&
+        callee.expression.text === "Object" &&
+        (callee.name.text === "defineProperty" || callee.name.text === "defineProperties") &&
+        arg0 !== undefined &&
+        ts.isPropertyAccessExpression(arg0) &&
+        arg0.name.text === "prototype" &&
+        ts.isIdentifier(arg0.expression) &&
+        arg0.expression.text === "Array"
+      ) {
+        found = true;
+        return;
+      }
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
 export function extractConstantDefault(
   initializer: ts.Expression,
   paramType: ValType,
@@ -905,6 +998,14 @@ export function generateModule(
 
     // Second pass: collect all function declarations and interfaces
     collectDeclarations(ctx, ast.sourceFile);
+
+    // #1719 S1 — set the ITER_OVERRIDDEN brand if the program may monkeypatch
+    // Array.prototype's @@iterator/values. When clear (the common case) every
+    // array-destructuring site stays byte-identical; when set, the S2 slice
+    // routes a branded array RHS through the host GetIterator lane (§7.4.2).
+    if (sourceOverridesArrayIterator(ast.sourceFile)) {
+      ctx.arrayIteratorMaybeOverridden = true;
+    }
 
     // Shape inference: detect array-like variables and override their types
     applyShapeInference(ctx, ast.checker, ast.sourceFile);
@@ -3981,6 +4082,12 @@ export function generateMultiModule(
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);
+      // #1719 S1 — whole-realm: OR across all source files so an override in
+      // any module trips the ITER_OVERRIDDEN brand (never cleared by a later
+      // clean file).
+      if (sourceOverridesArrayIterator(sf)) {
+        ctx.arrayIteratorMaybeOverridden = true;
+      }
     }
 
     // Shape inference: detect array-like variables and override their types
