@@ -6789,9 +6789,16 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // when padding the missing `end` arg.
         const args = expr.arguments;
         const paramTypes = getFuncParamTypes(ctx, funcIdx);
+        // #1248 + no-arg: substring/slice with a missing `end` (0 OR 1 args)
+        // default `end` to `s.length` per §22.1.3.24 (substring: end ?? len) /
+        // §22.1.3.21 (slice: ToIntegerOrInfinity(end ?? len)). With only the
+        // single-arg case handled, `s.substring()` / `s.slice()` padded BOTH
+        // start and end to 0 → host called `s.substring(0, 0)` → "" instead of
+        // the whole string. The pad loop's `pi === 2` branch supplies s.length
+        // for the missing end; the missing start (pi === 1) correctly pads to 0.
         const needsLengthDefault =
           (method === "substring" || method === "slice") &&
-          args.length === 1 &&
+          args.length <= 1 &&
           paramTypes !== undefined &&
           paramTypes.length === 3;
         let savedReceiverLocal: number | undefined;
