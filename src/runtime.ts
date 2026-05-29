@@ -6575,6 +6575,42 @@ assert._isSameValue = isSameValue;
           const wrappedNew = _isWasmStruct(newTarget) ? _wrapForHost(newTarget, exports) : newTarget;
           return Reflect.construct(wrappedCtor, wrappedArgs ?? [], wrappedNew);
         };
+      // (#1732 S1) __construct(callee, argsArray) — runtime [[Construct]] for a
+      // `new f(...)` whose callee value cannot be proven constructable at
+      // compile time (e.g. `var f = String.prototype.indexOf; new f`). Per
+      // ECMA-262 §7.3.13 Construct → §10.2.2 [[Construct]] / §10.3.2 (built-in):
+      // IsConstructor(F) false ⇒ throw a real TypeError. Builtin method values,
+      // arrow functions, methods, and bound-without-construct functions all
+      // lack [[Construct]] and must throw here. The thrown error is a genuine
+      // host TypeError instance so test262 `assert.throws(TypeError, …)` /
+      // `e instanceof TypeError` observe it.
+      if (name === "__construct")
+        return (callee: any, argsArray: any): any => {
+          const exports = callbackState?.getExports();
+          const wrappedCallee = _isWasmStruct(callee) ? _wrapForHost(callee, exports) : callee;
+          // IsConstructor probe: Reflect.construct with `wrappedCallee` as the
+          // newTarget throws TypeError when it has no [[Construct]] (the
+          // standard "is this constructable?" test). A throw here means the
+          // value is not a constructor → re-throw the spec TypeError with the
+          // method's name.
+          let isCtor = false;
+          if (typeof wrappedCallee === "function") {
+            try {
+              // Probe via a no-op proxy target; only [[Construct]] presence is
+              // tested, the proxy is never actually instantiated.
+              Reflect.construct(function () {}, [], wrappedCallee);
+              isCtor = true;
+            } catch {
+              isCtor = false;
+            }
+          }
+          if (!isCtor) {
+            const nm = wrappedCallee && wrappedCallee.name ? wrappedCallee.name : String(wrappedCallee);
+            throw new TypeError(nm + " is not a constructor");
+          }
+          const wrappedArgs = _isWasmStruct(argsArray) ? _wrapForHost(argsArray, exports) : argsArray;
+          return Reflect.construct(wrappedCallee, wrappedArgs ?? []);
+        };
       // Symbol.for(key) — global symbol registry (#965)
       // Symbol.for(key) — §20.4.2.2: stringKey = ? ToString(key). Passing a
       // Symbol makes ToString throw TypeError (not stringify). `Symbol.for`
