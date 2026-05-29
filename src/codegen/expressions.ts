@@ -800,7 +800,50 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
     // callback bodies that the host can dispatch, leaving direct-call `this`
     // to fall through to `undefined` as before.
     if (fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0) {
+      // (#1702) Null-guard the `__current_this` read. A lifted closure body can
+      // be reached two ways:
+      //   (a) host dispatch via `__call_fn_method_N` — installs a real receiver
+      //       (a non-null externref) into `__current_this` before the call_ref;
+      //   (b) a *direct* call (`f1()` where `f1` is a closure local / module
+      //       global) — which never installs anything, so `__current_this` still
+      //       holds its `ref.null.extern` initial value (or a leftover from an
+      //       unrelated host dispatch that has since been restored to null).
+      //
+      // #1636-S1 / #895 narrowed this fallback to `readsCurrentThis` bodies, but
+      // for the *direct-call* case the raw `global.get` surfaces JS `null`, not
+      // the spec-correct `undefined`. That made strict free-function /
+      // function-expression `this` observe `null` (`typeof this === "object"`,
+      // `this === undefined` ⇒ false), regressing the residual
+      // `language/function-code/10.4.3-1-*-s` + class-method strict-`this`
+      // shapes (#873 follow-up).
+      //
+      // The receiver a host installs is always a non-null externref, so the
+      // null/non-null distinction cleanly separates the two reach paths: when
+      // the global is non-null use it (host dispatch), otherwise fall through to
+      // `undefined` (direct call — `undefined` for strict, and the prior
+      // pre-#1636-S1 fallback for sloppy free functions). This is additive to
+      // #895's gating: it only changes the *value* the existing
+      // `readsCurrentThis` branch yields when the global is null, never widening
+      // which bodies read the global. The Array.prototype.{every,…} callbacks
+      // and top-level strict `this` (#873/#895-fixed) are unaffected — those
+      // either bind `this` via a local or do not set `readsCurrentThis`.
+      const thisTmp = allocTempLocal(fctx, { kind: "externref" });
       fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: thisTmp });
+      fctx.body.push({ op: "ref.is_null" });
+      const elseBody: Instr[] = [{ op: "local.get", index: thisTmp }];
+      const savedBody = fctx.body;
+      const thenBody: Instr[] = [];
+      fctx.body = thenBody;
+      emitUndefined(ctx, fctx);
+      fctx.body = savedBody;
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenBody,
+        else: elseBody,
+      } as unknown as Instr);
+      releaseTempLocal(fctx, thisTmp);
       return { kind: "externref" };
     }
     emitUndefined(ctx, fctx);
