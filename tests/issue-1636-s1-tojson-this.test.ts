@@ -189,11 +189,18 @@ describe("#1636-S1 __call_fn_method_N — host-supplied `this` for Wasm closures
     expect(callFnMethod0(null, closure)).toBe(baseline);
   });
 
-  it("__current_this defaults to null when no __call_fn_method_N invocation has happened", async () => {
-    // Invoking the closure via __call_fn_0 (no `this` threading) reads
-    // the initial global value, which is `ref.null.extern` — surfaced to
-    // JS as null. This is the only observable semantic shift for free
-    // closures that previously fell through to `undefined`.
+  it("free closure with no installed receiver resolves `this` to undefined (#1702)", async () => {
+    // Invoking the closure via __call_fn_0 (no `this` threading) leaves the
+    // `__current_this` global at its `ref.null.extern` initial value. The
+    // first cut of #1636-S1 surfaced that raw null to JS, but a free function
+    // / function-expression that reads `this` with no installed receiver must
+    // observe the spec default — `undefined` for a strict free function (and
+    // the pre-#1636-S1 `undefined` fallback for sloppy) — NOT `null`
+    // (`typeof null === "object"`, `null === undefined` ⇒ false). #1702
+    // null-guards the `__current_this` read so the direct-call path yields
+    // `undefined`; only a host-installed (non-null) receiver flows through.
+    // This fixed the residual `language/function-code/10.4.3-1-*-s` +
+    // class-method strict-`this` test262 cases (the #873/#895 follow-up).
     const src = `
       const probe3 = function (): any {
         return this;
@@ -205,6 +212,6 @@ describe("#1636-S1 __call_fn_method_N — host-supplied `this` for Wasm closures
     const getProbe3 = exp.getProbe3 as () => unknown;
     const closure = getProbe3();
     const callFn0 = exp.__call_fn_0 as (closure: unknown) => unknown;
-    expect(callFn0(closure)).toBe(null);
+    expect(callFn0(closure)).toBe(undefined);
   });
 });

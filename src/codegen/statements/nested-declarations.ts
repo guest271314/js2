@@ -249,6 +249,21 @@ export function compileNestedFunctionDeclaration(
   }[] = [];
   for (const name of referencedNames) {
     if (ownLocals.has(name)) continue;
+    // (#1702) A nested `FunctionDeclaration` establishes its OWN `this`
+    // binding per ECMA-262 §10.2.1.1 (OrdinaryCallBindThis) — `this` is
+    // never lexically captured the way an arrow function inherits it. When
+    // such a function is invoked without a receiver (e.g. a plain `inner()`
+    // call inside a class method body or another function), its `this` is
+    // `undefined` in strict code, NOT the enclosing method's receiver.
+    // Capturing the outer `this` here threaded the method's instance into
+    // the lifted body as param 0, so `inner()` saw the instance instead of
+    // `undefined` — the class-method half of the #873/#895 strict-`this`
+    // residual. Skipping `this`/`super` lets `ThisKeyword` fall through to
+    // the `undefined` / `__current_this` resolution path, which is correct
+    // for a free function. (Arrow functions are compiled via closures.ts,
+    // which keeps lexical `this` capture — this branch only handles
+    // `FunctionDeclaration`s.)
+    if (name === "this" || name === "super") continue;
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
     if (ctx.funcMap.has(name)) continue;
