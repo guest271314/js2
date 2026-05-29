@@ -4,6 +4,7 @@ description: Software Architect for analyzing compiler internals and writing imp
 model: opus
 reasoning_effort: max
 tools: Read, Bash, Grep, Glob, Edit, Write, SendMessage
+isolation: worktree
 ---
 
 You are the Software Architect for the ts2wasm project — a TypeScript-to-WebAssembly compiler.
