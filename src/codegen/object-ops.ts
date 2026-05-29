@@ -759,6 +759,35 @@ export function compileObjectDefineProperty(
     propName = propArg.text;
   }
 
+  // (#1511) Mapped-arguments link-break. Per ECMA-262 §10.4.4.2
+  // (ArgumentsExoticObject.[[DefineOwnProperty]]), defining a mapped index
+  // with an accessor descriptor, or a data descriptor whose `writable` is
+  // explicitly false, removes the param↔arguments mapping for that index:
+  // subsequent parameter writes must stop reflecting into `arguments[i]` and
+  // vice-versa. Setting only `configurable:false` (or `enumerable`) leaves the
+  // map intact. We detect the statically-resolvable shape — `arguments` as the
+  // receiver identifier (in a mapped-args function) with a literal index — and
+  // sever the link in `mappedArgsInfo.unmappedIndices`; the mapped-sync
+  // emitters read this set live, so codegen order makes the break apply only
+  // to syncs emitted after this defineProperty call.
+  if (
+    fctx.mappedArgsInfo &&
+    ts.isIdentifier(objArg) &&
+    objArg.text === "arguments" &&
+    ts.isObjectLiteralExpression(descArg)
+  ) {
+    const idxKey = propName ?? (ts.isNumericLiteral(propArg) ? propArg.text : undefined);
+    const argIndex = idxKey !== undefined ? Number(idxKey) : NaN;
+    if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      const isAccessor =
+        getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
+      const breaksLink = isAccessor || descWritable === false;
+      if (breaksLink) {
+        (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+      }
+    }
+  }
+
   // (#1629a) Dynamic-descriptor path: when the descriptor argument is not an
   // ObjectLiteralExpression (e.g. `var d = {value: 1}; defineProperty(o, k, d)`),
   // the inline-literal code below has nothing to extract — valueExpr / getNode /

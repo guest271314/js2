@@ -296,6 +296,11 @@ function emitMappedArgParamSync(
   // Check if this local index corresponds to a mapped parameter
   const argIndex = paramIdx - info.paramOffset;
   if (argIndex < 0 || argIndex >= info.paramCount) return;
+  // #1511: the param↔arguments link for this slot may have been severed
+  // (defineProperty writable:false / accessor, or delete arguments[i]) per
+  // §10.4.4.2 — once severed, a parameter write must NOT propagate to
+  // arguments[i].
+  if (info.unmappedIndices?.has(argIndex)) return;
 
   // Save the expression result (currently on stack from local.tee)
   const tmp = allocLocal(fctx, `__arg_sync_${fctx.locals.length}`, resultType);
@@ -356,6 +361,9 @@ function emitMappedArgReverseSync(
 
   // For each mapped parameter, check if the index matches and sync
   for (let i = 0; i < info.paramCount; i++) {
+    // #1511: skip slots whose param↔arguments link has been severed
+    // (§10.4.4.2) — an arguments[i] write must not flow back into the param.
+    if (info.unmappedIndices?.has(i)) continue;
     const paramType = info.paramTypes[i]!;
     const localIdx = i + info.paramOffset;
 
