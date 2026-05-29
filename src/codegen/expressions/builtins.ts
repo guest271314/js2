@@ -1628,23 +1628,30 @@ function emitWasiValueToStdout(
     isStringType(ctx.checker.getTypeAtLocation(node)) &&
     ctx.nativeStrTypeIdx >= 0
   ) {
-    // #1618: runtime string value (variable / concatenation / template span).
-    // The compiled value is a NativeString ref (or its AnyString supertype).
-    // Flatten + write its bytes to fd=1/fd=2 instead of dropping it and
-    // emitting the "[object]" placeholder. The value on the stack may be typed
-    // as the AnyString supertype after a concat; cast to NativeString so it
-    // matches the helper's param type (__str_flatten accepts the supertype, so
-    // any non-flat tree is handled there — but the static cast is required for
-    // the call to typecheck against the helper signature).
+    // #1618 / #1723: runtime string value (variable / concatenation / template
+    // span). The compiled value is a NativeString ref, a ConsString ref (a
+    // rope, produced by concat / template interpolation), or their AnyString
+    // supertype. Flatten + write its bytes to fd=1/fd=2 instead of dropping it
+    // and emitting the "[object]" placeholder.
+    //
+    // #1723 ROOT CAUSE: this used to `ref.cast` the value DOWN to NativeString
+    // before the call, on the assumption that "__str_flatten accepts the
+    // supertype, so any non-flat tree is handled there". But the downcast runs
+    // BEFORE flatten — so a ConsString value (the common case for any
+    // multi-segment response, e.g. the Native Messaging host's
+    // `{"received":${body},...}`) trapped with "illegal cast" at the call site,
+    // never reaching flatten. The host worked for tiny single-segment messages
+    // (still flat) and trapped once the response became a rope.
+    //
+    // FIX: `__wasi_write_any_string` now takes the AnyString supertype
+    // (see ensureWasiWriteAnyStringHelper), so NO downcast is needed — a
+    // NativeString or ConsString value is already a subtype of AnyString and
+    // passes directly. For a `ref_null` we only need the non-null guarantee;
+    // `ref.as_non_null` keeps the value's (sub)type intact instead of forcing
+    // it to NativeString. Flatten inside the helper collapses any rope.
     const refKind = exprType.kind;
-    if (
-      refKind === "ref" &&
-      "typeIdx" in exprType &&
-      (exprType as { typeIdx: number }).typeIdx !== ctx.nativeStrTypeIdx
-    ) {
-      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
-    } else if (refKind === "ref_null") {
-      fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+    if (refKind === "ref_null") {
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
     }
     const writeAnyIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
     if (writeAnyIdx >= 0) {
@@ -1674,6 +1681,24 @@ function emitWasiValueToStdout(
  * variant that routes the formatted digits through __wasi_write_string_stderr
  * (fd=2) instead of __wasi_write_string (fd=1).
  */
+/**
+ * Offset of the WASI integer-formatting (itoa) scratch buffer (#1724).
+ *
+ * Lives in the reserved low-scratch region (0..1023) that `registerWasiImports`
+ * keeps below the first string-literal data segment (which starts at 1024). We
+ * use offset 16 — above the iovec (memory[0..7]) and nwritten (memory[8..11])
+ * that `__wasi_write_string` populates, and below Math.random's offset-64
+ * scratch. 16 bytes is ample: a 32-bit int is at most 10 digits + sign = 11
+ * bytes, and the helper reserves a 11-byte window from this base.
+ *
+ * Previously the itoa buffer used `global.get $__wasi_bump_ptr`, which
+ * initialises to 1024 and is never advanced — colliding head-on with the
+ * string-literal data segments (also based at 1024). That overwrote literal
+ * bytes mid-string when a number was formatted between literal writes (#1724:
+ * `"received"` -> `"re60ived"`). Anchoring to 16 removes the aliasing.
+ */
+const WASI_ITOA_SCRATCH = 16;
+
 function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = false): number {
   const helperName = useStderr ? "__wasi_write_i32_stderr" : "__wasi_write_i32";
   const writeStringHelperName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
@@ -1703,8 +1728,10 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
   const tmpLocal = 5;
 
   body.push(
-    // buf_start = bump_ptr
-    { op: "global.get", index: ctx.wasiBumpPtrGlobalIdx } as Instr,
+    // buf_start = WASI_ITOA_SCRATCH (#1724). MUST NOT be the bump pointer
+    // (=1024), which aliases the string-literal data segments — see the
+    // WASI_ITOA_SCRATCH doc comment for the full root cause.
+    { op: "i32.const", value: WASI_ITOA_SCRATCH } as Instr,
     { op: "local.set", index: bufStartLocal } as Instr,
     // buf_pos = buf_start + 11 (write digits right-to-left, max 11 digits + sign)
     { op: "local.get", index: bufStartLocal } as Instr,

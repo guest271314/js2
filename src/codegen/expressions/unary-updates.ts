@@ -303,16 +303,52 @@ function compileMemberIncDec(
     if (!objResult) return null;
 
     // Externref element access: cannot do struct.get/struct.set on externref,
-    // gracefully emit NaN (incrementing a dynamic property produces NaN)
+    // gracefully emit NaN (incrementing a dynamic property produces NaN).
+    //
+    // #1720 — reference evaluation order on `base[key]++`. Per §13.4 the LHS
+    // MemberExpression is evaluated to a Reference *before* GetValue forces the
+    // ToNumeric coercion, and per §13.3.3 evaluating `base[key]` evaluates both
+    // the base sub-expression AND the property-key sub-expression (with their
+    // side effects) before the Reference is resolved. The old code dropped the
+    // base and emitted NaN without ever compiling the key expression, so a
+    // side-effecting key (`base[prop()]++`) silently skipped `prop()`. We now
+    // evaluate the key for its side effects, then — when the base is null at
+    // runtime — throw a TypeError (RequireObjectCoercible inside GetValue),
+    // which is observable *before* ToPropertyKey would call the key's
+    // `toString`. A non-null externref base still falls through to NaN.
     if (objResult.kind === "externref") {
-      fctx.body.push({ op: "drop" });
+      const elemBaseTmp = allocLocal(fctx, `__incdec_ebase_${fctx.locals.length}`, objResult);
+      fctx.body.push({ op: "local.set", index: elemBaseTmp });
+      // Evaluate the property-key expression for its side effects, then discard
+      // its value (ToPropertyKey itself is skipped — GetValue throws first when
+      // the base is null/undefined).
+      const keyResult = compileExpression(ctx, fctx, operand.argumentExpression);
+      if (keyResult) fctx.body.push({ op: "drop" });
+      // RequireObjectCoercible: null base -> TypeError before the update step.
+      fctx.body.push({ op: "local.get", index: elemBaseTmp });
+      fctx.body.push({ op: "ref.is_null" });
+      // Emit the TypeError throw into the REAL body first so emitThrowTypeError's
+      // late-import-shift bookkeeping (ensureLateImport + flushLateImportShifts)
+      // patches the already-emitted instructions correctly, then splice the
+      // freshly-appended throw instrs out into the `if` then-body. Building the
+      // throw against a detached body would skip the shift on prior instrs and
+      // emit an index-corrupt module (#1720).
+      const throwStart = fctx.body.length;
+      emitThrowTypeError(ctx, fctx, "TypeError: Cannot read properties of null (update target)");
+      const thenBody = fctx.body.splice(throwStart);
+      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenBody });
+      // Non-null externref base: incrementing a dynamic property yields NaN.
       fctx.body.push({ op: "f64.const", value: NaN });
       return { kind: "f64" };
     }
 
     if (objResult.kind !== "ref" && objResult.kind !== "ref_null") {
-      // Non-ref element access: gracefully emit NaN
+      // Non-ref element access (numeric/i32 base): gracefully emit NaN.
+      // #1720 — still evaluate the property-key expression for its side effects
+      // (a numeric base can't be null, so no TypeError path applies here).
       fctx.body.push({ op: "drop" });
+      const keyResult = compileExpression(ctx, fctx, operand.argumentExpression);
+      if (keyResult) fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "f64.const", value: NaN });
       return { kind: "f64" };
     }

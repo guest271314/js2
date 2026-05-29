@@ -1,7 +1,7 @@
 ---
 id: 1713
 title: "IR backend-trait: audit WasmGC bias in lower.ts + define BackendEmitter seam"
-status: ready
+status: in-progress
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
@@ -569,3 +569,70 @@ encoding detail; the proof only needs numbers in and out.)
 - **(#1714)** create `src/ir/lower-linear.ts` (`LinearEmitter`), differential
   test. **(#1715)** `src/ir/backend/bytecode-emitter.ts` + `bytecode-vm.ts`,
   triple-equivalence test.
+
+---
+
+## 2026-05-29 — Phase 1 implementation note (senior-dev, stages 1-2)
+
+**Landed** (branch `issue-1713-backend-emitter`): the seam exists and the
+pass-through + vec groups route through it. The remaining aggregate / union /
+closure-refcell / ref-coercion groups stay inline (the issue Scope §4 + spec
+migration order explicitly permit a partial-but-clean seam; the recommended
+Phase-1 floor for unblocking #1714/#1715 was stages 1-2, which this delivers).
+
+**Files**
+- `src/ir/backend/handles.ts` — the layout-handle type decls, moved verbatim
+  out of `lower.ts` (re-exported from `lower.ts` so existing
+  `import { IrVecLowering } from "./lower.js"` sites are unchanged). This is
+  the cycle-avoidance the spec §4 recommended (emitter.ts must not import the
+  2.4k-line lower.ts).
+- `src/ir/backend/emitter.ts` — the `BackendEmitter` interface. Stage-1/2
+  methods are required; the not-yet-moved groups are declared **optional**
+  (`?`) so a Phase-1 `WasmGcEmitter` need not implement them yet, while #1714
+  has a stable signature to migrate against.
+- `src/ir/backend/wasmgc-emitter.ts` — `WasmGcEmitter`. Every method is a 1:1
+  mechanical move of the exact `out.push` object literal from the audited
+  `lower.ts` line, so the emitted `Instr` stream is byte-identical.
+- `src/ir/lower.ts` — `lowerIrFunctionToWasm` gains
+  `emitter: BackendEmitter = new WasmGcEmitter()` (default-arg, so the sole
+  caller `integration.ts` is unchanged → zero-delta). Routed: const,
+  binary/unary final op, select, global.get/set, value-producing `if`, the
+  `br_if`/`return`/`unreachable`/`drop` terminators, the function-tail
+  `unreachable`, and the vec primitives in `vec.len`/`vec.get`/`forof.vec`
+  (`emitVecLen`/`emitVecDataPtr`/`emitElemGet`). The `f64.convert_i32_s` after
+  a length load is an **IR-result-type coercion, not a backend op**, so it
+  stays in the caller (spec §3).
+
+**WHY a partial seam, not all six groups in one PR**
+- Byte-identity is the load-bearing invariant. Each routed site was moved as
+  an exact literal and re-verified; doing all ~30 aggregate/closure sites in
+  one pass multiplies the chance of a silent reordering relative to the
+  `emitValue` operand emission. The spec stages 3-6 as independently-testable
+  follow-ups for exactly this reason. The vec group is the #1714 proof
+  surface and pass-through is the #1715 subset, so stages 1-2 unblock both
+  followers — which is the whole point of this issue.
+- The deeply-nested loop-body slot `local.get`/`local.set` inside
+  `forof.vec` / `forof.iter` / `while.loop` / the `if`-arm `emitArmBody`
+  cross-block materialisation are **slot/SSA scaffolding, not the per-node
+  terminal vec/pass-through primitives** — they are left inline (flagged
+  not-yet-moved) so the moved set is 100% behind the trait and the rest is
+  explicit, per the acceptance criteria.
+
+**Zero-delta evidence**
+- Full IR test suite (`tests/ir`, `tests/ir-*equivalence*`, `tests/linear-ir`,
+  …): **87 failed / 248 passed on BOTH this branch and a clean `origin/main`
+  worktree** — identical, proving the refactor introduces no behavioural
+  change. (The 87 failures are pre-existing on the sprint-57 base — e.g.
+  `func.params is not iterable` in ir-scaffold, the inline-small/passes
+  end-to-end LinkError — and are unrelated to this change.)
+- New `tests/ir-backend-emitter.test.ts` — 9 golden-Instr unit tests asserting
+  each routed primitive pushes the exact expected `Instr` (direct byte-identity
+  proof, spec §7 recommendation).
+- `tsc --noEmit` clean · `biome lint` clean · `check:ir-fallbacks` OK (no
+  unintended bucket increase).
+
+**Remaining (follow-up PRs under this issue, then `status: done`)**
+- Stage 3 object/class field group (`emitFieldGet`/`emitFieldSet`/
+  `emitAggregateNew`), stage 4 union (`emitBox`/`emitUnbox`/`emitTagLoad`),
+  stage 5 ref-coercion, stage 6 closure/refcell. Async/Promise + string groups
+  stay inline by design.

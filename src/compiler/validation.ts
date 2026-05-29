@@ -343,18 +343,25 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
    * property/element access are valid — no destructuring patterns.
    */
   function isInvalidAssignmentTarget(node: ts.Expression, allowDestructuring = false): boolean {
+    // (#1722) A destructuring AssignmentPattern is only a valid target when it
+    // appears *directly* as the LHS — a parenthesized object/array literal
+    // (`({}) = 1`, `({a:1}) = 1`) is NOT a valid target and is an early
+    // SyntaxError per §13.15.1 (CoverParenthesizedExpression cannot be
+    // refined to an AssignmentPattern). So test the destructuring forms on
+    // the un-unwrapped node before stripping parens. Note `({} = 1)` is fine
+    // because there the parens wrap the whole assignment, not the pattern.
+    if (allowDestructuring) {
+      if (ts.isObjectLiteralExpression(node)) return false;
+      if (ts.isArrayLiteralExpression(node)) return false;
+    }
     let expr: ts.Node = node;
     while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
-    // Valid: identifiers, property access, element access
+    // Valid: identifiers, property access, element access (parens are
+    // transparent for these — `(x) = 1` / `(o.p) = 1` are valid).
     if (ts.isIdentifier(expr)) return false;
     if (ts.isPropertyAccessExpression(expr)) return false;
     if (ts.isElementAccessExpression(expr)) return false;
-    // Valid only in simple assignment: destructuring patterns
-    if (allowDestructuring) {
-      if (ts.isObjectLiteralExpression(expr)) return false;
-      if (ts.isArrayLiteralExpression(expr)) return false;
-    }
-    // Everything else is invalid
+    // Everything else (incl. parenthesized object/array literals) is invalid.
     return true;
   }
 
