@@ -23,7 +23,7 @@
 // + a schedule, and is runnable by hand: `node scripts/enqueue-green-prs.mjs`.
 // Requires `gh` authenticated (GITHUB_TOKEN with pull-requests:write in CI).
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const REPO = process.env.GH_REPO || "loopdive/js2";
 const DRY = process.argv.includes("--dry-run");
@@ -32,14 +32,16 @@ const HOLD_LABELS = new Set(["hold", "do-not-merge", "do not merge", "wip", "blo
 // but a NON-required check failed (required are green) — still queue-able.
 const ENQUEUEABLE = new Set(["CLEAN", "UNSTABLE", "HAS_HOOKS"]);
 
+// IMPORTANT: invoke gh via execFileSync with an ARG ARRAY — never a shell
+// string. GraphQL queries contain `$id` and the shell would expand it to
+// empty, producing "Expected VAR_SIGN" parse errors. Arrays bypass the shell.
 function gh(args) {
-  return execSync(`gh ${args}`, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 function graphql(query, vars = {}) {
-  const fields = Object.entries(vars)
-    .map(([k, v]) => `-F ${k}=${JSON.stringify(v)}`)
-    .join(" ");
-  return JSON.parse(gh(`api graphql ${fields} -f query=${JSON.stringify(query)}`));
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [k, v] of Object.entries(vars)) args.push("-f", `${k}=${v}`); // -f = raw string field
+  return JSON.parse(gh(args));
 }
 
 // PR node IDs already in the merge queue → skip.
@@ -53,7 +55,18 @@ function queuedNumbers() {
 
 function openPrs() {
   return JSON.parse(
-    gh(`pr list --repo ${REPO} --state open --limit 100 --json number,mergeStateStatus,isDraft,labels,id,title`),
+    gh([
+      "pr",
+      "list",
+      "--repo",
+      REPO,
+      "--state",
+      "open",
+      "--limit",
+      "100",
+      "--json",
+      "number,mergeStateStatus,isDraft,labels,id,title",
+    ]),
   );
 }
 
