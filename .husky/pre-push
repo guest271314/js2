@@ -137,3 +137,28 @@ if [ "$lint_rc" -ne 0 ]; then
 fi
 rm -f "$tmp_tc" "$tmp_lint"
 echo "Pre-push: typecheck + lint OK."
+
+# ---------- (4) sync conformance numbers in docs -------------------------
+#
+# Keeps README.md / ROADMAP.md / CLAUDE.md / plan/goals/goal-graph.md in
+# sync with benchmarks/results/test262-current.json. The quality CI gate
+# fails with "Conformance numbers in sync (#1522)" when these drift.
+# Running here auto-commits any change so the push carries the update.
+# Note: reads from the local test262-current.json — merge main first so
+# your baseline is current before pushing.
+
+if command -v pnpm > /dev/null 2>&1 && [ -f package.json ]; then
+  conf_out=$(pnpm run sync:conformance 2>&1)
+  conf_rc=$?
+  if [ "$conf_rc" -eq 0 ]; then
+    changed=$(echo "$conf_out" | grep "wrote" | sed 's/.*wrote  //')
+    if [ -n "$changed" ]; then
+      echo "Pre-push: conformance numbers updated in: $(echo "$changed" | tr '\n' ' ')"
+      echo "$changed" | xargs git add --
+      git commit --no-verify -m "chore: sync conformance numbers [skip ci]"
+      echo "Pre-push: conformance commit added to push."
+    fi
+  else
+    echo "Pre-push: sync:conformance failed (non-fatal) — CI quality gate may flag drift."
+  fi
+fi
