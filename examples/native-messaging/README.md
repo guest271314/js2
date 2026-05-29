@@ -12,10 +12,12 @@ script. This directory contains:
 
 ```
 examples/native-messaging/
-  host.ts        ← the TypeScript host (compiled with --target wasi)
-  README.md      ← this file
-  manifest.json  ← Chrome native-host manifest template
-  run.sh         ← wasmtime/wasmer wrapper Chrome invokes
+  host.ts          ← the TypeScript host (compiled with --target wasi)
+  README.md        ← this file
+  nm_js2wasm.json  ← Chrome native-host manifest template
+  manifest.json    ← Web extension manifest
+  nm_js2wasm.sh    ← wasmtime/wasmer wrapper Chrome invokes
+  background.js    ← MV3 Web extension background `ServiceWorker` script
 ```
 
 ## Status: a working drop-in Chrome host
@@ -29,8 +31,8 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 
 | Capability | Status | Detail |
 |------------|--------|--------|
-| Read framed message from stdin | works | `readStdin()` drains fd=0 to EOF as a string (#1481) |
-| Decode the 4-byte LE length prefix | works | byte math on `charCodeAt` of the first 4 code units |
+| Read framed message from stdin | works | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
+| Decode the 4-byte LE length prefix | works | byte math on the first 4 bytes of the read header buffer |
 | Route debug to stderr (fd=2) | works | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean |
 | Print a **string literal** to stdout | works | `console.log("…")` emits UTF-8 + `\n` (#1480) |
 | Print a **runtime/computed string** to stdout | works | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618) |
@@ -45,11 +47,13 @@ launch it (see "Run it" below).
 
 ## The host source
 
-[`host.ts`](./host.ts) reads the whole framed message from stdin, strips and
-decodes the 4-byte length prefix, logs diagnostics to **stderr** (so they never
-corrupt the stdout protocol stream), and writes a JSON response. The
-application logic — here, echoing the received body inside a wrapper object —
-is the part you'd replace for a real host.
+[`host.ts`](./host.ts) runs a continuous `while (true)` port loop: it reads the
+4-byte length prefix then exactly the declared body bytes via
+`process.stdin.read` read-until loops (a `readExact` helper handles short
+reads), logs diagnostics to **stderr** (so they never corrupt the stdout
+protocol stream), and writes a framed JSON response, looping until stdin
+reaches EOF. The application logic — here, echoing the received body inside a
+wrapper object — is the part you'd replace for a real host.
 
 ## Build to `.wasm`
 
@@ -72,7 +76,7 @@ runs on any standards-compliant WASI preview1 runtime.
 
 ## Run it under a WASI runtime
 
-`run.sh` wraps the runtime invocation. wasmtime is **not bundled** with this
+`nm_js2wasm.sh` wraps the runtime invocation. `wasmtime` is **not bundled** with this
 repo — install it from <https://wasmtime.dev> (or use `wasmer` /
 [wazero](https://github.com/tetratelabs/wazero); see
 [`../wasi/README.md`](../wasi/README.md) for the full runtime matrix and how to
@@ -83,7 +87,7 @@ message. The 4-byte prefix below (`\x0d\x00\x00\x00`) declares a 13-byte body
 `{"ping":true}`:
 
 ```bash
-printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/run.sh
+printf '\x0d\x00\x00\x00{"ping":true}' | ./examples/native-messaging/nm_js2wasm.sh
 ```
 
 You'll see the host's stderr diagnostic (received-length + decoded body
@@ -106,26 +110,27 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 ## Wire it into Chrome
 
-1. **Build** `out/host.wasm` (above) and make sure `run.sh` is executable
-   (`chmod +x run.sh`).
+1. **Build** `out/host.wasm` (above) and make sure `nm_js2wasm.sh` is executable
+   (`chmod +x nm_js2wasm.sh`).
 
-2. **Edit `manifest.json`**:
-   - `path` → the **absolute** path to `run.sh` (Chrome requires an absolute
-     path and does not set a predictable working directory).
+2. **Edit `nm_js2wasm.json`**:
+   - `path` → the **absolute** path to `nm_js2wasm.sh` (Chrome requires an absolute
+     path and does not set a predictable working directory), and make sure the file is 
+     set to executable.
    - `allowed_origins` → `chrome-extension://YOUR_EXTENSION_ID/` for the
      extension that will connect. Find the ID on `chrome://extensions` with
-     Developer mode enabled.
+     Developer mode enabled after installing the unpacked Web extension.
 
 3. **Install the manifest** in the per-platform location Chrome scans:
 
    | Platform | Manifest location |
    |----------|-------------------|
-   | Linux | `~/.config/google-chrome/NativeMessagingHosts/com.example.js2wasm_host.json` |
-   | macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.example.js2wasm_host.json` |
-   | Windows | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.example.js2wasm_host` whose default value is the absolute path to the manifest `.json` |
+   | Linux | `~/.config/google-chrome/NativeMessagingHosts/nm_js2wasm.json` |
+   | macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_js2wasm.json` |
+   | Windows | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_js2wasm` whose default value is the absolute path to the manifest `.json` |
 
    The manifest **filename** must match the host `name` field
-   (`com.example.js2wasm_host`). On Windows, `run.sh` won't run directly —
+   (`nm_js2wasm`). On Windows, `nm_js2wasm.sh` won't run directly —
    use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\host.wasm"`) and point
    `path` at the `.bat`.
 
@@ -133,9 +138,14 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
    extension manifest:
 
    ```js
-   const port = chrome.runtime.connectNative("com.example.js2wasm_host");
+   const port = chrome.runtime.connectNative("nm_js2wasm");
    port.onMessage.addListener((msg) => console.log("from host:", msg));
-   port.onDisconnect.addListener(() => console.log("host disconnected"));
+   port.onDisconnect.addListener((_) => {
+     console.log("host disconnected");
+     if (chrome.runtime.lastError) {
+       console.log(chrome.runtime.lastError);
+     }
+   }
    port.postMessage({ ping: true });
    ```
 

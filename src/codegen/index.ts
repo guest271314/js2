@@ -42,7 +42,7 @@ import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { addImport, addStringConstantGlobal } from "./registry/imports.js";
-import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
+import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -909,6 +909,13 @@ export function generateModule(
     // Shape inference: detect array-like variables and override their types
     applyShapeInference(ctx, ast.checker, ast.sourceFile);
 
+    // (#1636-S1) Eagerly register the `__current_this` module global so that
+    // `ThisKeyword` resolution in free-function-closure bodies (compiled in
+    // the next phase) can emit `global.get __current_this`. The companion
+    // `__call_fn_method_N` exports that install / restore this global are
+    // emitted in post-processing.
+    ensureCurrentThisGlobal(ctx);
+
     // Third pass: compile function bodies
     compileDeclarations(ctx, ast.sourceFile);
 
@@ -1211,6 +1218,18 @@ export function generateModule(
     // closures of arity ≤ N; lower-arity closures see extra args dropped.
     emitClosureCallExport3(ctx);
     emitClosureCallExport4(ctx);
+
+    // #1636-S1 — emit __call_fn_method_N exports (N=0..2) for calling Wasm
+    // closures from JS with a host-supplied `this`-value. Same dispatch
+    // shape as __call_fn_N but takes a leading `thisVal: externref` that
+    // is stored in the `__current_this` module global across the inner
+    // `call_ref` so that `ThisKeyword` references in a free-function
+    // closure body observe the host's receiver. Used by `JSON.stringify`'s
+    // live walk to thread the holder identity through `toJSON` and the
+    // replacer function per §25.5.2.2 steps 2.b / 3.
+    emitClosureMethodCallExportN(ctx, 0);
+    emitClosureMethodCallExportN(ctx, 1);
+    emitClosureMethodCallExportN(ctx, 2);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -2552,6 +2571,251 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 }
 
 /**
+ * Emit `__call_fn_method_<arity>` export (#1636-S1): call an N-arg WasmGC
+ * closure from JS with a host-supplied `this`-value. Signature is
+ * `(thisVal: externref, closure: externref, arg0..arg<arity-1>) -> externref`.
+ *
+ * Dispatch shape mirrors `emitClosureCallExportN` (same funcref-type
+ * iteration, same arg-coercion + return-boxing). The only difference is
+ * that `thisVal` is stored in the `__current_this` module global before the
+ * inner `call_ref` and restored after, so `ThisKeyword` resolution in the
+ * closure body observes the host's receiver instead of the previous null
+ * fallback (see `ensureCurrentThisGlobal`).
+ *
+ * Returns early when no closures of arity ≤ N exist (no export emitted).
+ */
+function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void {
+  const mod = ctx.mod;
+  const exportName = `__call_fn_method_${arity}`;
+
+  // Local index conventions for the dispatcher body:
+  //   0           = thisVal externref
+  //   1           = closure externref
+  //   2..arity+1  = user arg externrefs (arity slots)
+  //   anyLocal    = anyref (closure-as-anyref after extern.convert_any)
+  //   structLocal = (ref null $baseWrapper) for the cast struct
+  //   funcLocal   = funcref extracted from struct field 0
+  //   prevThis    = externref save slot for nested invocations
+  const totalParams = arity + 2; // thisVal + closure + N user args
+  const anyLocal = totalParams;
+  const structLocal = totalParams + 1;
+  const funcLocal = totalParams + 2;
+  const prevThisLocal = totalParams + 3;
+
+  let baseWrapperIdx: number | undefined;
+  const seenFuncTypeIdx = new Set<number>();
+  const entries: {
+    funcTypeIdx: number;
+    returnType: ValType | null;
+    selfTypeIdx: number;
+    closureArity: number;
+  }[] = [];
+
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (info.paramTypes.length > arity) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    if (typeDef.superTypeIdx === -1 && baseWrapperIdx === undefined) {
+      baseWrapperIdx = typeIdx;
+    }
+    if (!seenFuncTypeIdx.has(info.funcTypeIdx)) {
+      seenFuncTypeIdx.add(info.funcTypeIdx);
+      const funcTypeDef = mod.types[info.funcTypeIdx];
+      const selfParam = funcTypeDef?.kind === "func" ? funcTypeDef.params[0] : undefined;
+      const selfTypeIdx =
+        selfParam && (selfParam.kind === "ref" || selfParam.kind === "ref_null")
+          ? (selfParam as { typeIdx: number }).typeIdx
+          : typeIdx;
+      entries.push({
+        funcTypeIdx: info.funcTypeIdx,
+        returnType: info.returnType,
+        selfTypeIdx,
+        closureArity: info.paramTypes.length,
+      });
+    }
+  }
+  if (entries.length === 0) return;
+
+  if (baseWrapperIdx === undefined) {
+    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
+      const typeDef = mod.types[typeIdx];
+      if (typeDef && typeDef.kind === "struct" && typeDef.superTypeIdx === -1) {
+        baseWrapperIdx = typeIdx;
+        break;
+      }
+    }
+  }
+  if (baseWrapperIdx === undefined) {
+    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
+      if (ctx.closureInfoByTypeIdx.get(typeIdx)!.paramTypes.length === arity) {
+        baseWrapperIdx = typeIdx;
+        break;
+      }
+    }
+  }
+  if (baseWrapperIdx === undefined) return;
+
+  addUnionImports(ctx);
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+
+  const params: ValType[] = [];
+  for (let i = 0; i < totalParams; i++) params.push({ kind: "externref" });
+  const exportFuncTypeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$${exportName}_type`);
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+  const bwIdx = baseWrapperIdx;
+
+  // Convert closure externref → anyref (closure is at local index 1).
+  const body: Instr[] = [];
+  body.push({ op: "local.get", index: 1 } as Instr);
+  body.push({ op: "any.convert_extern" } as Instr);
+  body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // Save previous __current_this for nesting safety, then install thisVal.
+  body.push({ op: "global.get", index: currentThisGlobalIdx } as Instr);
+  body.push({ op: "local.set", index: prevThisLocal } as Instr);
+  body.push({ op: "local.get", index: 0 } as Instr);
+  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
+
+  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
+
+  for (const entry of entries) {
+    const funcTypeDef = mod.types[entry.funcTypeIdx];
+
+    const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
+      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
+      if (paramType) {
+        if (paramType.kind === "f64") {
+          const unboxIdx = ctx.funcMap.get("__unbox_number");
+          if (unboxIdx !== undefined) {
+            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+          }
+        } else if (paramType.kind === "i32") {
+          const unboxIdx = ctx.funcMap.get("__unbox_number");
+          if (unboxIdx !== undefined) {
+            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "i32.trunc_f64_s" });
+          }
+        }
+      }
+      return ops;
+    };
+
+    // User args occupy locals [2..arity+1]. Push only as many as the
+    // closure declared.
+    const argInstrs: Instr[] = [];
+    for (let i = 0; i < entry.closureArity; i++) {
+      const paramType =
+        funcTypeDef?.kind === "func" && funcTypeDef.params.length >= i + 2 ? funcTypeDef.params[i + 1] : undefined;
+      argInstrs.push(...buildArgConversion(i + 2, paramType));
+    }
+
+    const callBody: Instr[] = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
+      ...argInstrs,
+      { op: "local.get", index: funcLocal } as Instr,
+      { op: "ref.cast", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "call_ref", typeIdx: entry.funcTypeIdx } as Instr,
+    ];
+
+    if (entry.returnType) {
+      if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
+        callBody.push({ op: "extern.convert_any" } as Instr);
+      } else if (entry.returnType.kind === "f64") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      } else if (entry.returnType.kind === "i32") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "f64.convert_i32_s" } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      } else if (entry.returnType.kind === "i64") {
+        if (boxNumberIdx !== undefined) {
+          callBody.push({ op: "f64.convert_i64_s" } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+        } else {
+          callBody.push({ op: "drop" } as Instr);
+          callBody.push({ op: "ref.null.extern" } as Instr);
+        }
+      }
+    } else {
+      callBody.push({ op: "ref.null.extern" } as Instr);
+    }
+
+    funcrefDispatch = [
+      { op: "local.get", index: funcLocal } as Instr,
+      { op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: callBody,
+        else: funcrefDispatch,
+      } as Instr,
+    ];
+  }
+
+  const structExtractAndDispatch: Instr[] = [
+    { op: "local.get", index: anyLocal } as Instr,
+    { op: "ref.cast", typeIdx: bwIdx } as Instr,
+    { op: "local.tee", index: structLocal } as Instr,
+    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: funcLocal } as Instr,
+    ...funcrefDispatch,
+  ];
+
+  // Result of the if-block stays on the stack as externref.
+  body.push({ op: "local.get", index: anyLocal } as Instr);
+  body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
+  body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: structExtractAndDispatch,
+    else: [{ op: "ref.null.extern" } as Instr],
+  } as Instr);
+
+  // Restore __current_this. The result value remains on the stack as the
+  // function's return value — we tee it through a local so we can restore
+  // the global without disturbing the return value.
+  // Stack at this point: [result : externref]
+  // Strategy: store result in a local, restore global, reload result.
+  // Reuse `prevThisLocal` is not safe since we still need its contents;
+  // use `anyLocal` is also not safe (externref vs anyref). Add a dedicated
+  // result-save slot at index `prevThisLocal + 1`.
+  const resultSaveLocal = prevThisLocal + 1;
+  body.push({ op: "local.set", index: resultSaveLocal } as Instr);
+  body.push({ op: "local.get", index: prevThisLocal } as Instr);
+  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
+  body.push({ op: "local.get", index: resultSaveLocal } as Instr);
+
+  mod.functions.push({
+    name: exportName,
+    typeIdx: exportFuncTypeIdx,
+    locals: [
+      { name: "__any", type: { kind: "anyref" } },
+      { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
+      { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__prev_this", type: { kind: "externref" } },
+      { name: "__result", type: { kind: "externref" } },
+    ],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: exportName,
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * Emit __is_closure(externref) -> i32 (#1504). Returns 1 if the value is a
  * registered Wasm closure struct, 0 otherwise. Used by the JS-side
  * `wrapExports` to discriminate closures from named structs / vecs so it can
@@ -3600,6 +3864,14 @@ export function generateMultiModule(
       applyShapeInference(ctx, multiAst.checker, sf);
     }
 
+    // (#1636-S1) Eagerly register the `__current_this` module global so that
+    // `ThisKeyword` resolution in free-function-closure bodies (compiled in
+    // the next phase) can emit `global.get __current_this` instead of
+    // falling through to `undefined`. The companion `__call_fn_method_N`
+    // exports that install / restore this global are emitted later in
+    // post-processing — registering the global here keeps both sides in sync.
+    ensureCurrentThisGlobal(ctx);
+
     // Phase 3: Compile all function bodies
     for (const sf of multiAst.sourceFiles) {
       compileDeclarations(ctx, sf);
@@ -3962,14 +4234,9 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
         needsEnviron = true;
       }
     }
-    // #1481: readStdin() builtin → triggers fd_read import + helper
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "readStdin") {
-      needsFdRead = true;
-    }
     // #1653: process.stdin.read(buf, offset?) → triggers fd_read import (the
-    // binary, incremental Node-API replacement for readStdin()). Detect the
-    // `process.stdin.read(...)` call shape so fd_read is registered even when
-    // readStdin() is never used.
+    // binary, incremental Node-API stdin read). Detect the
+    // `process.stdin.read(...)` call shape so fd_read is registered.
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -4135,9 +4402,6 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsClockTimeGet) {
     ctx.wasiClockHelpersPending = true;
   }
-  if (needsFdRead) {
-    ctx.wasiPendingFdReadHelper = true;
-  }
   if (needsPollOneoff) {
     ctx.wasiPendingSleepMsHelper = true;
   }
@@ -4171,10 +4435,6 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
-  }
-  // #1481: register __wasi_read_stdin_all() -> ref NativeString helper
-  if (ctx.wasiPendingFdReadHelper && !ctx.funcMap.has("__wasi_read_stdin_all")) {
-    emitWasiReadStdinAllHelper(ctx);
   }
 }
 
@@ -4365,12 +4625,10 @@ const WASI_WRITE_SCRATCH_START = 128 * 1024;
  *
  * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
  * NativeString via the existing __str_flatten helper, then copy the low byte
- * of each i16 code unit into linear memory and issue a single fd_write. This
- * mirrors readStdin's byte-per-i16 model (#1481), so a `readStdin()` →
- * `console.log` round-trip is byte-exact for ASCII / Latin-1 content (the
- * Native Messaging JSON case). Non-Latin-1 code points are truncated to their
- * low byte — acceptable for the protocol use-case and consistent with how
- * stdin bytes are stored.
+ * of each i16 code unit into linear memory and issue a single fd_write. The
+ * round-trip is byte-exact for ASCII / Latin-1 content (the Native Messaging
+ * JSON case). Non-Latin-1 code points are truncated to their low byte —
+ * acceptable for the protocol use-case.
  *
  * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
  * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
@@ -4912,180 +5170,6 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
     name: "__wasi_sleep_ms",
     typeIdx: funcTypeIdx,
     locals: [],
-    body,
-    exported: false,
-  });
-}
-
-/**
- * Emit __wasi_read_stdin_all() -> ref NativeString.
- *
- * Loops fd_read on fd=0 into a linear-memory buffer starting at offset
- * `STDIN_BUF_START` (after the 1024-byte iovec scratch area), in chunks of
- * `CHUNK`, until fd_read reports nread=0 (EOF). The accumulated bytes are
- * copied into a fresh `__str_data` (i16) array and wrapped in a NativeString
- * struct.
- *
- * Memory layout (re-using the WASI scratch area 0..1023):
- *   [0..3]  = iovec.buf  (set per chunk)
- *   [4..7]  = iovec.buf_len
- *   [8..11] = nread (output from fd_read)
- *
- * The total buffer is hard-capped at MAX_BYTES to keep things simple — if
- * stdin exceeds this we stop reading and return what we have. The cap is
- * sized to fit comfortably inside the initial 1 page (64KB) of memory.
- */
-function emitWasiReadStdinAllHelper(ctx: CodegenContext): void {
-  // #1618: stdin buffer lives in its own page (64KB), above the page-0 string
-  // literal data segments, so fd_read can't clobber initialized literal bytes.
-  const STDIN_BUF_START = WASI_STDIN_BUF_START;
-  const CHUNK = 1024;
-  const MAX_BYTES = 60 * 1024; // ~60KB cap; fits in the dedicated stdin page
-
-  // () -> ref NativeString
-  const funcTypeIdx = addFuncType(ctx, [], [{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set("__wasi_read_stdin_all", funcIdx);
-
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-
-  // locals: total(0), nread(1), dataArr(2), i(3), b(4)
-  const TOTAL = 0;
-  const NREAD = 1;
-  const DATA = 2;
-  const I = 3;
-  const B = 4;
-
-  const body: Instr[] = [
-    // total = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: TOTAL } as Instr,
-
-    // outer block to allow break-out
-    {
-      op: "block",
-      blockType: { kind: "empty" },
-      body: [
-        {
-          op: "loop",
-          blockType: { kind: "empty" },
-          body: [
-            // if (total >= MAX_BYTES) break;
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.const", value: MAX_BYTES } as Instr,
-            { op: "i32.ge_u" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // iovec.buf = STDIN_BUF_START + total at memory[0]
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: STDIN_BUF_START } as Instr,
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.store", align: 2, offset: 0 } as Instr,
-
-            // iovec.buf_len = CHUNK at memory[4]
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "i32.const", value: CHUNK } as Instr,
-            { op: "i32.store", align: 2, offset: 0 } as Instr,
-
-            // fd_read(fd=0, iovs=0, iovs_len=1, nread=8)
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.const", value: 8 } as Instr,
-            { op: "call", funcIdx: ctx.wasiFdReadIdx! } as Instr,
-            { op: "drop" } as Instr,
-
-            // nread = memory[8]
-            { op: "i32.const", value: 8 } as Instr,
-            { op: "i32.load", align: 2, offset: 0 } as Instr,
-            { op: "local.set", index: NREAD } as Instr,
-
-            // if (nread == 0) break;
-            { op: "local.get", index: NREAD } as Instr,
-            { op: "i32.eqz" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // total += nread
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "local.get", index: NREAD } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: TOTAL } as Instr,
-
-            // continue
-            { op: "br", depth: 0 } as Instr,
-          ],
-        },
-      ],
-    },
-
-    // dataArr = array.new_default<__str_data>(total)
-    { op: "local.get", index: TOTAL } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-    { op: "local.set", index: DATA } as Instr,
-
-    // i = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
-
-    // copy bytes: while (i < total) dataArr[i] = mem[STDIN_BUF_START+i]; i++
-    {
-      op: "block",
-      blockType: { kind: "empty" },
-      body: [
-        {
-          op: "loop",
-          blockType: { kind: "empty" },
-          body: [
-            // if (i >= total) break;
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: TOTAL } as Instr,
-            { op: "i32.ge_u" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-
-            // b = i32.load8_u(STDIN_BUF_START + i)
-            { op: "i32.const", value: STDIN_BUF_START } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.load8_u", align: 0, offset: 0 },
-            { op: "local.set", index: B } as Instr,
-
-            // dataArr[i] = b
-            { op: "local.get", index: DATA } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: B } as Instr,
-            { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-
-            // i++
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
-
-            { op: "br", depth: 0 } as Instr,
-          ],
-        },
-      ],
-    },
-
-    // return struct.new NativeString(total, 0, dataArr)
-    { op: "local.get", index: TOTAL } as Instr, // len
-    { op: "i32.const", value: 0 } as Instr, // off
-    { op: "local.get", index: DATA } as Instr, // data
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-  ];
-
-  ctx.mod.functions.push({
-    name: "__wasi_read_stdin_all",
-    typeIdx: funcTypeIdx,
-    locals: [
-      { name: "total", type: { kind: "i32" } },
-      { name: "nread", type: { kind: "i32" } },
-      { name: "dataArr", type: { kind: "ref", typeIdx: strDataTypeIdx } },
-      { name: "i", type: { kind: "i32" } },
-      { name: "b", type: { kind: "i32" } },
-    ],
     body,
     exported: false,
   });
@@ -7943,25 +8027,6 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (wasmType.kind === "externref" && callSigs.length > 0 && (prop.name === "valueOf" || prop.name === "toString")) {
       wasmType = { kind: "eqref" };
     }
-    // (#820m) Anonymous/named class expression as property value: TS infers
-    // the property type as `typeof <anonClass>` whose construct signature's
-    // `.prototype` walks back to the instance struct, so resolveWasmType
-    // hands us `ref <instance struct>`. But compileClassExpression emits an
-    // externref (closure-struct via extern.convert_any), and the struct cast
-    // on field assignment drops the value to ref.null. Widen any
-    // construct-signature-only property type (no call signatures) to
-    // externref so the closure ref is retained verbatim. Mirrors the
-    // empty-`{}` widening just above.
-    {
-      const constructSigs = propType.getConstructSignatures();
-      if (
-        constructSigs.length > 0 &&
-        callSigs.length === 0 &&
-        (wasmType.kind === "ref" || wasmType.kind === "ref_null")
-      ) {
-        wasmType = { kind: "externref" };
-      }
-    }
     fields.push({ name: prop.name, type: wasmType, mutable: true });
     if (callSigs.length > 0) {
       const sig = callSigs[0]!;
@@ -8559,10 +8624,6 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
       //   • WASI target → __wasi_*  syscall helpers (#1035)
       //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
       if (ctx.wasiNodeFsFuncs.has(name) && (ctx.wasi || ctx.allowFs)) continue;
-      // #1481: in WASI mode, readStdin() is a built-in routed to __wasi_read_stdin_all,
-      // not a host import — skip the env.readStdin stub so the codegen path in
-      // compileCallExpression takes over.
-      if (ctx.wasi && name === "readStdin") continue;
       // #1663: parseInt / parseFloat have no JS host under WASI / standalone —
       // skip the stub so the unified-collector finalize can emit the WasmGC
       // native scanners (registered under the same funcMap names) instead.
@@ -9562,7 +9623,12 @@ function hoistBindingPattern(ctx: CodegenContext, fctx: FunctionContext, pattern
     if (ts.isIdentifier(element.name)) {
       const name = element.name.text;
       if (fctx.localMap.has(name)) continue;
-      if (ctx.moduleGlobals.has(name)) continue;
+      // #1690b: do NOT skip allocation when the name collides with a module
+      // global. This hoister only runs for nested function bodies; a `var`
+      // declared anywhere inside a function must shadow any module-level
+      // binding with the same name (ECMA-262 §10.2.10). Skipping left the
+      // identifier resolver falling through to `global.get/set $__mod_<name>`,
+      // so the inner destructured var aliased the module global.
       const elemType = ctx.checker.getTypeAtLocation(element);
       const wasmType = resolveWasmType(ctx, elemType);
       const localIdx = allocLocal(fctx, name, wasmType);
@@ -9604,7 +9670,10 @@ export function ensureLetConstBindingPatternTdzFlags(
     if (ts.isOmittedExpression(element)) continue;
     if (ts.isIdentifier(element.name)) {
       const name = element.name.text;
-      if (ctx.moduleGlobals.has(name)) continue;
+      // #1690b: do NOT skip when the name collides with a module global. This
+      // runs only for nested function bodies, where a `let`/`const`
+      // destructuring binding must shadow any module-level binding of the same
+      // name (and carry its own TDZ flag) rather than aliasing the global.
       // Allocate the binding local up front if missing — needed so that when
       // a default initializer for a SIBLING binding compiles its expression,
       // a forward-reference to this binding (e.g. `let { a = b, b } = {}`)
@@ -9633,7 +9702,12 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
   if (ts.isIdentifier(decl.name)) {
     const name = decl.name.text;
     if (fctx.localMap.has(name)) return;
-    if (ctx.moduleGlobals.has(name)) return;
+    // #1690b: do NOT skip allocation when the name collides with a module
+    // global. This hoister only runs for nested function bodies; per JS var
+    // hoisting (ECMA-262 §10.2.10) a `var x` inside a function must allocate a
+    // function-local that shadows any module-level `x`. The previous skip left
+    // the resolver aliasing `global.get/set $__mod_x` for every read/write of
+    // the inner `x`, so the function mutated the module global instead.
     const varType = ctx.checker.getTypeAtLocation(decl);
     // (#1239 / #1433) Object literals carrying get/set accessor declarations,
     // or `[Symbol.dispose]` / `[Symbol.asyncDispose]` computed methods, are

@@ -1675,7 +1675,7 @@ function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expressi
 
 /**
  * #1653 — match `process.stdin.read(buf, offset?)` under --target wasi: the
- * binary, incremental stdin read (the Node-API replacement for readStdin()).
+ * binary, incremental Node-API stdin read.
  * Returns true when matched. Mirrors `matchProcessStdStreamWrite`.
  */
 function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
@@ -1877,33 +1877,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     }
   }
 
-  // #1481: readStdin() builtin under --target wasi → call __wasi_read_stdin_all
-  //
-  // DEPRECATED (#1653): readStdin() drains fd=0 to EOF and UTF-8-decodes the
-  // result to a STRING, so it cannot read a fixed byte count, cannot read
-  // incrementally (no continuous port loop), and loses binary fidelity. Prefer
-  // the standard Node API `process.stdin.read(buf, offset?)` (above) for binary,
-  // incremental reads. readStdin() is kept working for back-compat only.
-  if (
-    ctx.wasi &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "readStdin" &&
-    ctx.wasiFdReadIdx !== undefined &&
-    ctx.wasiFdReadIdx >= 0
-  ) {
-    const helperIdx = ctx.funcMap.get("__wasi_read_stdin_all");
-    if (helperIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
-      return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
-    }
-  }
-
   // #1653: process.stdin.read(buf, offset?) under --target wasi → fd_read(0, …)
   // into the caller-supplied typed buffer's backing array starting at `offset`,
-  // returning the number of bytes read. The binary, incremental Node-API
-  // replacement for readStdin() (which drains to EOF and UTF-8-decodes, losing
-  // binary fidelity). Lets a `while (true)` port loop read a fixed 4-byte LE
-  // header then exactly N body bytes — the Native Messaging frame shape.
+  // returning the number of bytes read. The binary, incremental Node-API stdin
+  // read. Lets a `while (true)` port loop read a fixed 4-byte LE header then
+  // exactly N body bytes — the Native Messaging frame shape.
   if (matchProcessStdinRead(ctx, fctx, expr)) {
     const r = emitProcessStdinRead(ctx, fctx, expr);
     if (r) return r;

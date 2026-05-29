@@ -212,20 +212,6 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
     shifted.add(ctx.pendingInitBody);
   }
 
-  // (#1690) Walk detached instruction buffers that codegen has parked in
-  // `liveBodies` while they sit outside `fctx.body`/savedBodies. The for-loop
-  // condition/incrementor buffers (see `compileForStatement`) live here for the
-  // window between when they're compiled and when they're spliced into the
-  // assembled loop body — without this walk, an `addStringConstantGlobal` fired
-  // from body compilation in the middle of that window leaves their stale
-  // `global.get`/`global.set` indices pointing one or more globals too low.
-  for (const lb of ctx.liveBodies) {
-    if (!shifted.has(lb)) {
-      shiftGlobalIndices(lb);
-      shifted.add(lb);
-    }
-  }
-
   for (const g of ctx.mod.globals) {
     if (g.init) shiftGlobalIndices(g.init);
   }
@@ -263,5 +249,8 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   }
   if (ctx.extrasArgvGlobalIdx >= threshold) {
     ctx.extrasArgvGlobalIdx += delta;
+  }
+  if (ctx.currentThisGlobalIdx >= threshold) {
+    ctx.currentThisGlobalIdx += delta;
   }
 }

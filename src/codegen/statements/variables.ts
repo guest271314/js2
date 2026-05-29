@@ -195,6 +195,17 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
     const name = decl.name.text;
 
+    // #1690b: a `var`/`let`/`const` declaration inside a function body always
+    // introduces a function-local binding (ECMA-262 §10.2.10 for `var`;
+    // block scoping for let/const), which shadows any module-level global of
+    // the same name. The function-body hoister has already allocated that
+    // local, so it is present in `localMap`. When it is, the declaration's
+    // initializer must store into the LOCAL, never the module global —
+    // otherwise the inner declaration aliases and corrupts the module binding.
+    // (The module-init body compiles with an empty `localMap`, so this stays
+    // false there and the module-global store path is preserved.)
+    const hasLocalShadow = fctx.localMap.has(name);
+
     // Track const bindings for runtime enforcement (assignment throws TypeError)
     if (stmt.declarationList.flags & ts.NodeFlags.Const) {
       if (!fctx.constBindings) fctx.constBindings = new Set();
@@ -238,7 +249,9 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
       // If this is a module-level variable, also store in the module global
       // so other functions can access the closure via global.get.
-      const modGlobalIdx = ctx.moduleGlobals.get(name);
+      // #1690b: skip the module-global path when a function-local shadow
+      // exists — the inner declaration must bind to the local, not the global.
+      const modGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
       if (modGlobalIdx !== undefined) {
         // Update the global's type to match the actual closure ref type
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
@@ -300,8 +313,9 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         if (!allComputedResolvable) {
           const actualType = compileExpression(ctx, fctx, decl.initializer);
           const objType = actualType ?? { kind: "externref" as const };
-          // Store to module global if available, otherwise local
-          const modGlobal = ctx.moduleGlobals.get(name);
+          // Store to module global if available, otherwise local.
+          // #1690b: a function-local shadow takes precedence over the global.
+          const modGlobal = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
           if (modGlobal !== undefined) {
             fctx.body.push({ op: "global.set", index: modGlobal });
             emitTdzInit(ctx, fctx, name);
@@ -323,8 +337,10 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       }
     }
 
-    // Check if this is a module-level global (already registered)
-    const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+    // Check if this is a module-level global (already registered).
+    // #1690b: a function-local shadow (inner `var`/`let`/`const` of the same
+    // name) must bind to the local, so suppress the module-global store here.
+    const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
     if (moduleGlobalIdx !== undefined) {
       // Shape-inferred array-like: compile {} as empty vec struct
       const shapeInfo = ctx.shapeMap.get(name);

@@ -1,7 +1,7 @@
 // #1530 — Native Messaging host example compiles to a valid WASI module.
 //
 // The example under examples/native-messaging/host.ts demonstrates reading a
-// Chrome Native Messaging framed message off stdin (fd=0 via readStdin), routing
+// Chrome Native Messaging framed message off stdin (fd=0 via process.stdin.read), routing
 // debug to stderr (fd=2 via console.error), and emitting a JSON response on
 // stdout (fd=1). This test pins down that the example still compiles to a valid
 // WASI binary that imports only wasi_snapshot_preview1 — so a refactor of the
@@ -34,7 +34,7 @@ describe("#1530 Native Messaging host example", () => {
     const result = compile(src, { fileName: "host.ts", target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.wat).toContain("wasi_snapshot_preview1");
-    expect(result.wat).toContain("fd_read"); // readStdin()
+    expect(result.wat).toContain("fd_read"); // process.stdin.read()
     expect(result.wat).toContain("fd_write"); // console.log / console.error
     // Standalone: no JS host env.* imports leak in.
     expect(result.wat).not.toContain('(import "env"');
@@ -123,22 +123,34 @@ describe("#1618/#1651 framed stdin→stdout round-trip", () => {
   }
 
   it("decodes a framed input and re-frames the response with a 4-byte LE prefix", () => {
-    // A self-contained host that mirrors the example: strip the 4-byte prefix,
-    // rebuild the body char-by-char from the decoded length, then write a framed
-    // response (binary length prefix via Uint8Array + JSON body via string).
+    // A self-contained host that mirrors the example: read the 4-byte prefix and
+    // then exactly the declared body bytes via process.stdin.read read-until
+    // loops, rebuild the body char-by-char, then write a framed response (binary
+    // length prefix via Uint8Array + JSON body via string).
     const src = `
-declare function readStdin(): string;
-declare const process: { stdout: { write(chunk: Uint8Array | string): void } };
+declare const process: {
+  stdin: { read(buf: Uint8Array, offset?: number): number };
+  stdout: { write(chunk: Uint8Array | string): void };
+};
 export function main(): void {
-  const framed = readStdin();
-  const b0 = framed.charCodeAt(0) & 0xff;
-  const b1 = framed.charCodeAt(1) & 0xff;
-  const b2 = framed.charCodeAt(2) & 0xff;
-  const b3 = framed.charCodeAt(3) & 0xff;
-  const len = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+  const header = new Uint8Array(4);
+  let got = 0;
+  while (got < 4) {
+    const n = process.stdin.read(header, got);
+    if (n <= 0) return;
+    got = got + n;
+  }
+  const len = header[0] + header[1] * 256 + header[2] * 65536 + header[3] * 16777216;
+  const bodyBuf = new Uint8Array(len);
+  let bgot = 0;
+  while (bgot < len) {
+    const n = process.stdin.read(bodyBuf, bgot);
+    if (n <= 0) break;
+    bgot = bgot + n;
+  }
   let body = "";
   for (let i = 0; i < len; i++) {
-    body = body + framed.charAt(4 + i);
+    body = body + String.fromCharCode(bodyBuf[i]);
   }
   const response = \`{"received":\${body}}\`;
   const rl = response.length;
