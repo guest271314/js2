@@ -144,3 +144,20 @@ export interface IrClassLowering {
   readonly constructorFuncName: string;
   methodFuncName(name: string): string;
 }
+
+/**
+ * #1714: linear-memory layout handle for a vec (array). Sibling to
+ * {@link IrVecLowering} (the WasmGC handle). The linear backend stores an
+ * array as a base `i32` pointer to `[header 8B][len:u32 @+8][cap:u32
+ * @+12][elements @+16…]` (see `src/codegen-linear/runtime.ts:339`), so the
+ * only representation detail the emitter needs is the element ValType (for
+ * stride + load op). Field offsets are fixed by the layout, not per-instance.
+ *
+ * This is the "different handle shape the linear resolver returns" that the
+ * #1713 spec §7 anticipated. The `BackendEmitter` vec methods accept
+ * `IrVecLowering | LinearVecLowering`; each emitter narrows to its own shape.
+ */
+export interface LinearVecLowering {
+  /** Element ValType — drives stride (4 vs 8) and the load op. */
+  readonly elementValType: ValType;
+}
