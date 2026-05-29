@@ -278,7 +278,14 @@ issues at `in-review` (see #1602/#1603/#1606).
 1. (Status already `done` in the merged PR — no separate flip needed.)
 2. `TaskUpdate taskId=<your-task> status=completed`
 3. Remove your worktree: `git worktree remove /workspace/.claude/worktrees/<branch>`
-4. `TaskList` → claim next unowned task (or message tech lead if empty)
+4. **Sync the shared checkout once the queue lands the PR:**
+   `bash scripts/sync-workspace-main.sh` — fast-forwards `/workspace` to
+   `origin/main` so it never rots behind (it silently fell 135 commits behind
+   on 2026-05-29, which made the statusline report a stale sprint). It's a
+   no-op on a clean, current tree and refuses to touch a dirty one, so it's
+   always safe to run. (Tech lead's auto-merge monitor also runs this; running
+   it here too keeps the checkout fresh between monitor passes.)
+5. `TaskList` → claim next unowned task (or message tech lead if empty)
 
 > If the queue *rejects* the PR (rare — see below), the `status: done` you set
 > has not yet landed on main, so nothing is orphaned; re-evaluate and re-queue.

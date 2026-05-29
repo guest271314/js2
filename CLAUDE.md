@@ -316,7 +316,7 @@ GitHub branch protection is the hard block.
    - **CI failure** (any required check failed) → diagnose with full PR context (the agent KNOWS what it changed), fix locally, push again, loop back to step 4
 6. **If regressions per `/dev-self-merge`**: dev fixes on branch, pushes again, loops back to step 4
 7. **Escalate to tech lead** only when: regressions >10, single bucket >50, or judgment call needed. **Drift and ordinary CI failures are NOT escalations — dev handles them with full context.**
-8. **After merge**: dev marks task `completed`, claims next task
+8. **After merge**: dev marks task `completed`, then **syncs the shared checkout** — `bash scripts/sync-workspace-main.sh` fast-forwards `/workspace` to `origin/main` (no-op when clean+current, refuses a dirty tree). Agents work in worktrees, so `/workspace` never advances on its own and silently rots behind `main` (it hit 135 commits behind on 2026-05-29, which made the statusline report a stale sprint off the old local tree). Always pull `/workspace` from `origin/main` after a PR merges. Then claim next task.
 9. **Never use `git merge` on main directly.** All merges go through PRs + CI.
 10. **Never rebase.** Merge preserves history and is safely reversible.
 11. **Public `main` is append-only — never force-push or rewrite published history** (it breaks every external clone/fork). Fix bad commits forward via revert PRs. See `docs/ci-policy.md`.
