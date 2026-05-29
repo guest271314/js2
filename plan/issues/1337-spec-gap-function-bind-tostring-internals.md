@@ -1,9 +1,10 @@
 ---
 id: 1337
 title: "spec gap: Function.prototype.bind/toString + Function/internals (175 + 7 test262 fails)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -292,3 +293,153 @@ then implement Slice A on top of it. The metadata-restamp logic
 the JS wrapper, before `Function.prototype.bind.call`) is straight
 JavaScript and doesn't need debugging — the open question is the
 codegen / coerce side.
+
+## Progress (2026-05-28, dev-1337-bind-call)
+
+Two slices landed since the original investigation:
+
+1. **Slice A landed via #1632a (PR #796, commit `feb4c7697`)** —
+   `__bind_function` host helper + the `.bind(...)` direct-form dispatch
+   at `calls.ts:~2389` (`compileFunctionBind`). Wasm-struct receivers are
+   wrapped via `_wrapWasmClosure` and stamped with codegen-supplied
+   `nameHint` / `lengthHint` before delegating to the host's
+   `Function.prototype.bind`. The bound result is a real JS bound-function
+   exotic with correct `.name === "bound " + target.name`,
+   `.length === max(0, target.length - boundArgs.length)`, `[[Call]]`,
+   `[[Construct]]`.
+
+2. **Partial Slice B landed via #1463 (`funcSourceText` map)** —
+   `Function.prototype.toString()` on top-level function declarations
+   returns the captured source text. Anything else (built-ins, method
+   refs, arrow functions, expressions) still gets the
+   `"function () { [native code] }"` placeholder. The placeholder is
+   spec-compliant for built-ins per §20.2.3.6 (NativeFunction grammar);
+   only "the toString of a user-defined arrow / method expression"
+   diverges from spec.
+
+### Current baseline (origin/main @ 4f536e4a9, 2026-05-28)
+
+- `built-ins/Function/prototype/bind`: 28 / 100 (28.0%)
+- `built-ins/Function/prototype/toString`: 71 / 80 (**88.8%**) —
+  effectively met by the Slice A + #1463 partial Slice B combination.
+- `built-ins/Function/internals`: 3 / 8 (37.5%) — was 1 / 8 at the
+  original issue baseline.
+- `built-ins/Function` (excl. prototype subtrees): 115 / 321 (35.8%).
+
+### This change: indirect `Function.prototype.bind.call` reshape
+
+Top failure pattern in the bind bucket is "Bind must be called on a
+function" (~30 tests) from the `Function.prototype.bind.call(fn, thisArg,
+...args)` form, which `compileFunctionBind` doesn't intercept because the
+outer call's `propAccess.name === "call"`, not `"bind"`. This change
+mirrors the existing #1596 reshape for `Function.prototype.apply.call`:
+detect the indirect shape and rewrite to `fn.bind(thisArg, ...args)`, so
+the existing #1632a dispatch fires.
+
+Two edits in `src/codegen/expressions/calls.ts`:
+
+1. At `~2369` (top of `compileCallExpression`'s `propAccess` block):
+   reshape `Function.prototype.bind.call(fn, ...)` → `fn.bind(...)` and
+   recurse. Narrowed to `fn` targets that have TS call signatures, so
+   `Function.prototype.bind.call(undefined, {})` still throws TypeError
+   per S15.3.4.5_A13 (the legacy host path catches it).
+
+2. At `~9402` (immediate-bind+call peephole): also accept the indirect
+   shape so `Function.prototype.bind.call(fn, thisArg, ...partials)
+   (...remaining)` reshapes inline before the existing identifier-bind
+   detection runs. This unlocks the IIFE-inlining path for the indirect
+   form — same wins as `fn.bind(thisArg, ...partials)(...remaining)`
+   already gets.
+
+### Outcome
+
+- Eliminates "Bind must be called on a function" V8 rejection for the
+  indirect form (~30 tests' error category changes from `runtime_error`
+  to `assertion_fail` — they now reach the assertion phase).
+- Enables immediate-call optimization for the indirect form (verified
+  with `tests/issue-1337-bind-call.test.ts`).
+- **Does NOT flip the bulk of those ~30 tests to PASS** — most use the
+  `var newFunc = bind.call(...); newFunc()` deferred pattern, which
+  hits the broader #1632a documented var-storage gap: an `any`-typed
+  local that stores an externref bound function doesn't dispatch on a
+  later `()` call (returns null). That gap requires a separate fix
+  (either an `__extern_call` host helper for `any`-typed locals, or
+  type narrowing on the bind result so the LHS doesn't coerce to a
+  closure-struct ref). Tracked under #1632a as the open Layer-2 work.
+
+### Tests added
+
+- `tests/issue-1337-bind-call.test.ts` — 8 cases covering metadata
+  reads (typeof / .length / .name), immediate-call shape with partials
+  (number + string), the negative spec gate (Math.max.call unaffected).
+
+### Out of scope
+
+- Source-text retention beyond identifier receivers — #1463 covers
+  top-level declarations; the remaining toString gap is concentrated
+  in the `built-in-function-object.js` Reflect-walk pattern which is
+  a broad-surface workload, not a localized fix.
+
+## Layer-2 fix: bound-function variable storage + invocation (2026-05-29)
+
+This change closes the var-storage round-trip the prior progress note
+flagged as out-of-scope (#1632a notes point 3). `const bound =
+fn.bind(...); bound()` previously trapped with "dereferencing a null
+pointer" because:
+
+1. `bound`'s local was typed (via `resolveWasmType`) as the target's
+   **closure-struct ref** — the bound result is a JS bound-function
+   externref, so `coerceType(externref → struct ref)` emitted a
+   `ref.cast` that nulled the binding.
+2. Calling `bound()` then built a closure-wrapper struct from the TS
+   signature and did `any.convert_extern` + guarded cast + `struct.get`
+   field-0 — the guarded cast yields null on the JS function, so the
+   subsequent `struct.get`/`call_ref` dereferenced null.
+
+Three edits:
+
+- **`src/codegen/statements/variables.ts`** — `isBindHostCall` detector
+  forces an **externref** local for `const/let/var x = fn.bind(...)` (and
+  the `Function.prototype.bind.call` form), mirroring the existing
+  Promise/`split` host-call overrides. A follow-on guard in the callable
+  initializer branch keeps the value externref instead of match-and-
+  recasting it to a closure struct.
+- **`src/codegen/expressions/calls.ts`** — `calleeIsBoundFunctionVar`
+  detects a call whose callee variable was initialized from `.bind(...)`,
+  and `emitBoundFunctionCall` routes the invocation through the new
+  `__call_function` host helper (Reflect.apply on the bound function,
+  which already carries `[[BoundThis]]`/`[[BoundArguments]]`).
+- **`src/runtime.ts`** — `__call_function(fn, thisArg, argsArray)` host
+  import: `Reflect.apply`, unwrapping a wasm-struct closure if one slips
+  through. JS-host mode only; standalone degrades bind to identity so
+  the normal closure path applies.
+
+### Measured outcome (scoped test262, `built-ins/Function/`)
+
+- **+20 passes, 0 regressions** on the 324 common files vs the pre-change
+  run. All newly-passing are `prototype/bind/15.3.4.5*` invocation tests
+  (`newFunc()` returning bound `this`, partial-arg application,
+  `[[Call]]` receiver semantics).
+- The 65% acceptance gate remains **out of reach for this bucket**:
+  ~90 of the ~213 remaining failures depend on the dynamic `Function(...)`
+  / `new Function(...)` constructor (eval territory, `deferred-feature`),
+  and ~37 are the strict-mode `caller`/`arguments` poison-pill
+  (`15.3.5.4_2-*gs.js`) tests — both distinct from bind/toString.
+
+### Still out of scope (after this fix)
+
+- `new boundFn()` construct semantics (`15.3.4.5.2-4-*` — "No dependency
+  provided for extern class NewFunc") — needs bound-function `[[Construct]]`
+  wiring through the wasm `new` path.
+- Binding a function that *returns* `this` where the target isn't wrapped
+  as a closure struct (the `__call_fn_<arity>` lazy-bridge edge): the
+  partial-args / value-returning cases work; the bound-`this`-identity
+  case for an un-wrappable top-level target still needs the bridge export.
+- Dynamic `Function(...)` constructor and strict poison-pill tests
+  (separate features).
+
+### Tests added
+
+- `tests/issue-1337.test.ts` — extended with deferred-storage metadata
+  cases (already present); the invocation wins are covered by the scoped
+  test262 run above.

@@ -8,7 +8,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
+import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
@@ -132,6 +132,44 @@ function isPromiseHostCall(_ctx: CodegenContext, expr: ts.Expression): boolean {
       method === "race" ||
       method === "allSettled" ||
       method === "any")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * (#1337) Check if an initializer is a `Function.prototype.bind` call whose
+ * result is a real JS bound-function exotic (externref), NOT a wasm closure
+ * struct. In JS-host mode `fn.bind(...)` / `Function.prototype.bind.call(fn, ...)`
+ * lower to `__bind_function` which returns a host bound function as externref.
+ *
+ * Such a variable MUST get an `externref` local — `resolveWasmType` would
+ * otherwise type it as the target function's closure-struct ref (TS infers the
+ * bound result's type from the target's call signature), and the subsequent
+ * `coerceType(externref → struct ref)` emits a `ref.cast` that traps on the JS
+ * function, nulling the binding (the LHS-coerce blocker documented in #1337).
+ * With an externref local the value round-trips intact and calling it routes
+ * through the host externref-callee dispatch.
+ *
+ * Standalone mode degrades bind to identity (returns the receiver unchanged),
+ * so this override is intentionally scoped to JS-host mode by the caller.
+ */
+function isBindHostCall(expr: ts.Expression): boolean {
+  if (!ts.isCallExpression(expr)) return false;
+  const callee = expr.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  // Direct form: `<receiver>.bind(...)`.
+  if (callee.name.text === "bind") return true;
+  // Indirect form: `Function.prototype.bind.call(fn, ...)`.
+  if (
+    callee.name.text === "call" &&
+    ts.isPropertyAccessExpression(callee.expression) &&
+    callee.expression.name.text === "bind" &&
+    ts.isPropertyAccessExpression(callee.expression.expression) &&
+    callee.expression.expression.name.text === "prototype" &&
+    ts.isIdentifier(callee.expression.expression.expression) &&
+    callee.expression.expression.expression.text === "Function"
   ) {
     return true;
   }
@@ -415,7 +453,13 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                 ? { kind: "externref" as const }
                 : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
                   ? { kind: "externref" as const }
-                  : resolveWasmType(ctx, varType)));
+                  : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
+                    // returns a host bound-function externref in JS-host mode;
+                    // force an externref local so the value isn't ref.cast to
+                    // the target's closure struct (which traps → null binding).
+                    decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                    ? { kind: "externref" as const }
+                    : resolveWasmType(ctx, varType)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
@@ -523,6 +567,22 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             if (localSlot && localSlot.type.kind !== "externref") localSlot.type = closureType;
           }
           stackType = closureType;
+        } else if (
+          closureType.kind === "externref" &&
+          !ctx.standalone &&
+          !noJsHost(ctx) &&
+          isBindHostCall(decl.initializer)
+        ) {
+          // (#1337) A `.bind(...)` result is a host bound-function exotic.
+          // Keep it as externref — do NOT match-and-recast it to a wasm
+          // closure struct (the JS function isn't a struct; the cast would
+          // trap and null the binding). Calling it dispatches through the
+          // host externref-callee path.
+          if (localIdx >= fctx.params.length) {
+            const localSlot = fctx.locals[localIdx - fctx.params.length];
+            if (localSlot) localSlot.type = { kind: "externref" };
+          }
+          stackType = { kind: "externref" };
         } else if (closureType.kind === "externref" && callSigs!.length > 0) {
           // The initializer returned externref but the type is callable.
           // This happens when a function returns a closure coerced to externref.

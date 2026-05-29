@@ -6241,9 +6241,42 @@ assert._isSameValue = isSameValue;
               } catch {
                 /* readonly host envs — ignore, bound fn just inherits wrapper defaults */
               }
+            } else if (callbackState) {
+              // (#1337) Exports aren't bound yet — this happens for
+              // module-level `const bound = fn.bind(...)`, which runs during
+              // instantiation *before* `setExports`. We can't build the
+              // `__call_fn_<arity>` bridge now, but we can build a JS function
+              // that resolves it lazily at call time (exports are populated by
+              // then) and stamp the spec metadata immediately so deferred
+              // `.name` / `.length` reads are correct. Without this the bound
+              // value degraded to the raw wasm-struct (an object), so
+              // `bound.name` / `bound.length` / `bound()` all failed.
+              const arity2 = typeof lengthHint === "number" && lengthHint >= 0 ? lengthHint : 0;
+              const captured = target;
+              const lazyBridge = function lazyWasmClosureBridge(...args: any[]): any {
+                const ex = callbackState.getExports();
+                const callFn = ex?.[`__call_fn_${arity2}`];
+                if (typeof callFn !== "function") {
+                  throw new TypeError("Function.prototype.bind: target closure is not callable");
+                }
+                const padded: any[] = [];
+                for (let i = 0; i < arity2; i++) padded.push(args[i]);
+                return callFn(captured, ...padded);
+              };
+              callable = lazyBridge;
+              try {
+                if (typeof nameHint === "string" && nameHint.length > 0) {
+                  Object.defineProperty(callable, "name", { value: nameHint, configurable: true });
+                }
+                if (typeof lengthHint === "number" && lengthHint >= 0) {
+                  Object.defineProperty(callable, "length", { value: lengthHint, configurable: true });
+                }
+              } catch {
+                /* readonly host envs — bound fn inherits wrapper defaults */
+              }
             } else {
-              // No callbackState/exports available (e.g. caller used raw
-              // `buildImports` without setExports). Degrade gracefully to
+              // No callbackState at all (e.g. caller used raw `buildImports`
+              // without setExports support). Degrade gracefully to
               // identity-bind: return the original target so callers that
               // only need a non-null function value continue to work.
               // Pre-#1632a behaviour for this hostless path.
@@ -6259,6 +6292,27 @@ assert._isSameValue = isSameValue;
           }
           const partial: any[] = Array.isArray(argsArray) ? argsArray : [];
           return Function.prototype.bind.apply(callable, [thisArg, ...partial]);
+        };
+      // (#1337) Invoke an arbitrary callable externref with an arguments array.
+      // Used to call values that the codegen knows are JS-functional externrefs
+      // (e.g. a `Function.prototype.bind` result) rather than wasm closure
+      // structs — those can't be cast to a closure struct + call_ref. The host
+      // handles [[Call]] with the function's own `this` binding (bound functions
+      // already carry [[BoundThis]]; for plain functions `thisArg` is used).
+      if (name === "__call_function")
+        return (fn: any, thisArg: any, argsArray: any): any => {
+          if (typeof fn !== "function") {
+            // Unwrap a wasm-struct closure if one slipped through.
+            if (_isWasmStruct(fn)) {
+              const wrapped = _wrapWasmClosure(fn, 0, callbackState);
+              if (wrapped) fn = wrapped;
+            }
+          }
+          if (typeof fn !== "function") {
+            throw new TypeError(String(fn) + " is not a function");
+          }
+          const args: any[] = Array.isArray(argsArray) ? argsArray : [];
+          return Reflect.apply(fn, thisArg, args);
         };
       if (name === "__reflect_construct")
         return (ctor: any, args: any, newTarget: any): any => {

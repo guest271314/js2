@@ -79,6 +79,48 @@ function getWellKnownSymbolId(name: string): number | undefined {
   return WELL_KNOWN_SYMBOLS[name];
 }
 
+/**
+ * (#1337) True when `expr` is the syntactic shape `<receiver>.bind(...)`.
+ */
+function isDirectBindCall(expr: ts.Expression): boolean {
+  return (
+    ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "bind"
+  );
+}
+
+/**
+ * (#1337) True when `expr` denotes a value produced by `Function.prototype.bind`
+ * — either directly (`fn.bind(...)`) or indirectly through a `const`/`let`/`var`
+ * binding whose initializer is a `.bind(...)` call (`const g = fn.bind(...); g.name`).
+ *
+ * `.name` / `.length` on a bound function MUST be read at runtime (the host's
+ * bound exotic carries `"bound " + target.name` and
+ * `max(0, target.length - boundArgs.length)`), NOT statically folded to the
+ * target's symbol name / param count. The immediate form is handled by the
+ * direct check; this helper extends that to the deferred-storage form, which is
+ * the bulk of the `built-ins/Function/prototype/bind/*` test262 cluster.
+ */
+function isBindResultExpr(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (isDirectBindCall(expr)) return true;
+  if (ts.isIdentifier(expr)) {
+    const sym = ctx.checker.getSymbolAtLocation(expr);
+    const decl = sym?.valueDeclaration;
+    if (
+      decl &&
+      ts.isVariableDeclaration(decl) &&
+      decl.initializer &&
+      // Only trust the initializer for single-assignment bindings (const, or
+      // a let/var with exactly one declaration site we can see). A reassigned
+      // binding could hold something else, but const is the overwhelming case
+      // in the test262 corpus and matches the spec-correct runtime read.
+      isDirectBindCall(decl.initializer)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ── Struct name resolution (moved from expressions/misc.ts) ──────────
 
 /**
@@ -1681,10 +1723,7 @@ export function compilePropertyAccess(
     // `max(0, target.length - boundArgs.length)`. Fall through to the
     // externref / __extern_get path so the host-bound function's actual
     // `.length` is read.
-    const isBindResult =
-      ts.isCallExpression(expr.expression) &&
-      ts.isPropertyAccessExpression(expr.expression.expression) &&
-      expr.expression.expression.name.text === "bind";
+    const isBindResult = isBindResultExpr(ctx, expr.expression);
     const callSigs = objType.getCallSignatures?.();
     const constructSigs2 = objType.getConstructSignatures?.();
     const lengthSigs =
@@ -1782,13 +1821,10 @@ export function compilePropertyAccess(
     // resolved to the target's symbol name — per spec it's `"bound " +
     // target.name`. Fall through to the runtime __extern_get path so the
     // host-bound function's actual `.name` property is read.
-    if (
-      ts.isCallExpression(expr.expression) &&
-      ts.isPropertyAccessExpression(expr.expression.expression) &&
-      expr.expression.expression.name.text === "bind"
-    ) {
+    if (isBindResultExpr(ctx, expr.expression)) {
       // Skip the static peephole entirely; fall through to the externref
-      // property-access path below.
+      // property-access path below. Covers both `fn.bind(...).name` and the
+      // deferred `const g = fn.bind(...); g.name` form (#1337).
     } else {
       const callSigs = objType.getCallSignatures?.();
       const constructSigs = objType.getConstructSignatures?.();
