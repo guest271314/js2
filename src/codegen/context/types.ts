@@ -570,6 +570,17 @@ export interface CodegenContext {
   fast: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings: boolean;
+  /** #1719 S1 — `ITER_OVERRIDDEN` whole-program brand for the array
+   *  object-value representation track. Set by the `sourceOverridesArrayIterator`
+   *  pre-scan (in index.ts) when the program may monkeypatch
+   *  `Array.prototype[Symbol.iterator]` / `Array.prototype.values`
+   *  (assignment or `Object.define{Property,Properties}(Array.prototype, …)`).
+   *  When `false` (the common case) every array-destructuring site emits
+   *  byte-identical output and takes the existing backing-store fast path.
+   *  The S2 slice consults this flag to route a branded array RHS through the
+   *  host-Array reflection + host `GetIterator` so an overridden `@@iterator`
+   *  is observed (§7.4.2 / §8.5.2). Default `false`. */
+  arrayIteratorMaybeOverridden: boolean;
   /** #1588 PR-B: dual i8/i16 storage. When true (and `nativeStrings`),
    *  string allocation sites proven `ascii`/`utf8-guaranteed` by the encoding
    *  analysis use an i8-backed `Utf8String`; everything else stays i16.

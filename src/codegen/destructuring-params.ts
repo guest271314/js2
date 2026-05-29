@@ -804,6 +804,13 @@ export function destructureParamArray(
   paramType: ValType,
   opts: DestructureOpts = {},
 ): void {
+  // #1719 S2 gate-site (second of two): this is the shared vec/tuple lowering
+  // that `compileArrayDestructuring` delegates to (and the parameter-dstr
+  // lane). When the ITER_OVERRIDDEN brand is set and `paramType` is a real
+  // array (not a string), S2 routes the typed-vec/tuple path below through the
+  // host-Array reflection + host GetIterator (see `arrayDstrNeedsIdentity` in
+  // statements/destructuring.ts). S1 does not wire it here — placement note
+  // only; the typed path stays byte-identical when the brand is clear.
   const isDecl = isDeclMode(opts);
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
