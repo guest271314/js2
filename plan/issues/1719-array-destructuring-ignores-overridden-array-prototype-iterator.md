@@ -1,7 +1,7 @@
 ---
 id: 1719
 title: "Array destructuring ignores overridden Array.prototype[Symbol.iterator] ('items[Symbol.iterator] must be a function', 71 fails)"
-status: ready
+status: in-progress
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
