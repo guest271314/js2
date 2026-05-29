@@ -102,11 +102,7 @@ export function compileDeleteExpression(
     inner.expression.text === "arguments"
   ) {
     const idxArg = inner.argumentExpression;
-    const idxText = ts.isNumericLiteral(idxArg)
-      ? idxArg.text
-      : ts.isStringLiteral(idxArg)
-        ? idxArg.text
-        : undefined;
+    const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
     const argIndex = idxText !== undefined ? Number(idxText) : NaN;
     if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
       (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
