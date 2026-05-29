@@ -381,6 +381,33 @@ order (integer-index ascending, then insertion-order strings, then symbols).
 **Tests**: `getOwnPropertyDescriptors/*` (18), the `15.2.3.6-3-*` GOPD
 read-back subset.
 
+> **S1 STATUS — DONE (2026-05-29, dev-b).** Implemented in `src/runtime.ts`:
+> the canonical `_readOwnDescriptor(obj, prop, exports)` reader (sidecar
+> value/accessor → proto/static method allowlists → bare struct field via
+> `__sget_<key>` with default data flags) and `_ownStructKeys(obj, exports)`
+> own-key enumeration (mirrors `__getOwnPropertyNames` + `__getOwnPropertySymbols`;
+> a host-proxy `Reflect.ownKeys` does **not** surface typed struct fields, so a
+> dedicated enumerator is required). The single-key `__getOwnPropertyDescriptor`
+> now delegates to `_readOwnDescriptor`, and `__object_getOwnPropertyDescriptors`
+> is a loop over `_ownStructKeys` + `_readOwnDescriptor` (was: bare
+> `Object.getOwnPropertyDescriptors(obj)`, which returned `{}` for WasmGC
+> structs). Both forms now agree on bare fields, sidecar (defineProperty'd)
+> data/accessor props, and class methods. Tests: `tests/issue-1629-S1.test.ts`.
+>
+> The inline-literal `__record_desc` bullet was **not needed for agreement**:
+> `getOwnPropertyDescriptors` always routes through the runtime
+> `_readOwnDescriptor` reader (never the compile-time `ctx.definedPropertyFlags`
+> shortcut), and `defineProperty` already populates the `_wasmPropDescs` /
+> `_wasmStructProps` sidecar that the reader consults — so single-key and plural
+> read the same source. Two adjacent pre-existing defects observed and left to
+> their owners (out of S1 scope): (1) compiled member *dot*-access into a
+> struct-shaped descriptor result (`ds.a.value`) reads as a struct field rather
+> than a host property — a codegen member-access issue, not descriptor
+> read-back; bracket access and returning the whole object to the host both
+> work; (2) module-top-level `defineProperty` runs in the wasm start function
+> before `setExports`, so the dynamic-descriptor materialization throws
+> (start-fn/exports timing, #1629a / #1320 family). S2/S3 remain open.
+
 ### S2 — ToPropertyDescriptor / descriptor-validation completeness  *(est. +25–40)*
 
 **Goal**: `15.2.3.6-3-*` (ToPropertyDescriptor, 178 fails) and the
