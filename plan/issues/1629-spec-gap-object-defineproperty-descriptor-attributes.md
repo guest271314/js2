@@ -3,7 +3,7 @@ id: 1629
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
 status: ready
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-29
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,10 +11,22 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: 56
+sprint: Backlog
 renumbered_from: 1335
 parent: 1328
 ---
+
+> **Sprint 56 close-out (2026-05-29):** carried over to Backlog. Two of the
+> three sub-clusters landed this sprint — **#1629a** (dynamic/non-literal
+> descriptor materialization, PR #835) and **#1629b** (`getOwnPropertyDescriptor`
+> attribute read-back for plain-object struct fields). The remaining residual is
+> **#1629c** — Array/Function *exotic* `defineProperty` semantics, the largest
+> sub-cluster, which overlaps **#1130** (`status: in-review`). Live baseline
+> `9ee8e921` (2026-05-29) still shows ~1,000 non-passing tests across the
+> `Object.defineProperty` / `getOwnPropertyDescriptor` family, so the umbrella is
+> **not** done. #1629c needs the attribute-table + struct-descriptor-read design
+> from the Implementation Plan below, gated behind / coordinated with #1130.
+
 # #1335 — Object.defineProperty: descriptor attribute fidelity
 
 ## Problem
