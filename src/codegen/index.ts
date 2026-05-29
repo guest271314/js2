@@ -4652,16 +4652,28 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
   const fd = useStderr ? 2 : 1;
   const strTypeIdx = ctx.nativeStrTypeIdx;
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  // #1723: the param MUST be the AnyString supertype, NOT the concrete
+  // NativeString. A runtime concat / template span can be a ConsString (rope),
+  // and the caller hands us whatever the expression produced. If the param were
+  // typed NativeString, the call site would have to `ref.cast` the argument down
+  // to NativeString first — which TRAPS ("illegal cast") for a ConsString. By
+  // accepting AnyString here, both NativeString and ConsString pass without any
+  // downcast, and `__str_flatten` (which takes AnyString and collapses ropes)
+  // does the flattening internally. The original NativeString param + call-site
+  // downcast is exactly what made `writeMessage` trap on a multi-segment
+  // response in the Native Messaging host (#1723).
+  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
 
-  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5)
+  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5), needPages(6)
   const S = 0;
   const FLAT = 1;
   const LEN = 2;
   const OFF = 3;
   const DATA = 4;
   const I = 5;
+  const NEED_PAGES = 6;
 
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: strTypeIdx }], []);
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set(helperName, funcIdx);
 
@@ -4675,6 +4687,41 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "local.get", index: FLAT } as Instr,
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
+
+    // #1723: grow linear memory if the staging buffer
+    // [WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START+len) would overflow
+    // the current memory size. The module reserves only 3 pages by default, so
+    // a ~1 MiB response (the Native Messaging large-message case) writes far
+    // past page 2 and traps "memory access out of bounds" without this guard.
+    //
+    //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len) / 65536)
+    //   if (memory.size < neededPages) memory.grow(neededPages - memory.size)
+    //
+    // ceil(x / 65536) == (x + 65535) >> 16. We `i32.shr_u` so a large length
+    // near 2^31 still computes a non-negative page count.
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 65535 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 16 } as Instr,
+    { op: "i32.shr_u" } as Instr,
+    { op: "local.set", index: NEED_PAGES } as Instr,
+    // if (needPages > memory.size) memory.grow(needPages - memory.size)
+    { op: "local.get", index: NEED_PAGES } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEED_PAGES } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
 
     // off = flat.off (field 1)
     { op: "local.get", index: FLAT } as Instr,
@@ -4756,6 +4803,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
       { name: "off", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "needPages", type: { kind: "i32" } },
     ],
     body,
     exported: false,
