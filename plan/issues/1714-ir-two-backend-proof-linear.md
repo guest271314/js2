@@ -1,7 +1,7 @@
 ---
 id: 1714
 title: "Lower one IR node kind through the BackendEmitter trait to BOTH WasmGC and linear"
-status: backlog
+status: in-progress
 created: 2026-05-29
 updated: 2026-05-29
 priority: high
@@ -82,3 +82,35 @@ and with a well-understood linear-memory representation.
 - This is the higher-value of the two s57 backend proofs (vs #1715 bytecode)
   because the linear backend is a real shipping target (WASI) and this directly
   retires front-end duplication between `src/ir/` and `src/codegen-linear/`.
+
+---
+
+## 2026-05-29 — implementation (senior-dev, branch issue-1714-vec-linear)
+
+Chosen node kind: **vec** (the recommended one). Delivered:
+- `src/ir/backend/linear-emitter.ts` — `LinearEmitter implements BackendEmitter`,
+  implementing ONLY the three vec primitives against the linear array layout
+  (`[header 8B][len:u32 @+8][cap:u32 @+12][elements @+16]`,
+  `codegen-linear/runtime.ts:339`): `emitVecLen` = `i32.load offset=8`,
+  `emitVecDataPtr` = `+16`, `emitElemGet` = `dataBase + i*stride; <t>.load`.
+  Every other trait method throws a clear not-implemented marker (scope per
+  issue Notes).
+- `src/ir/backend/handles.ts` — added `LinearVecLowering` (offset-based sibling
+  to the WasmGC `IrVecLowering`); this is the "different handle shape the linear
+  resolver returns" the #1713 spec §7 anticipated.
+- `src/ir/backend/emitter.ts` — widened the three vec-method handle params to
+  `IrVecLowering | LinearVecLowering` (the §7 "handle union" option); each
+  emitter narrows to its own shape (TS method-param bivariance).
+- `tests/ir-vec-two-backend.test.ts` — the proof: (1) the same three vec
+  intents produce DIFFERENT, each-backend-correct Instr sequences (WasmGC
+  struct.get/array.get vs linear i32.load/offset-arith); (2) the LinearEmitter's
+  emitted ops, executed against a hand-laid-out linear `[10,20,30]` array,
+  sum to 60 at runtime (wabt-assembled module mirroring the exact emitted ops).
+
+Scope honoured: ONE node kind, no attempt to route all of lower.ts to linear.
+The WasmGC path is unchanged (only a type-union widening + new files), so its
+runtime correctness stays covered by the existing IR equivalence suite. Full
+target-driven emitter selection at the integration.ts call site (so a real
+`--target wasi` compile routes vec ops through LinearEmitter end-to-end) is the
+natural follow-up; this PR proves the seam abstracts the second backend, which
+is the issue's stated value.

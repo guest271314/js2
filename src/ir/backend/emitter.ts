@@ -51,7 +51,14 @@ import type {
   IrRefCellLowering,
   IrUnionLowering,
   IrVecLowering,
+  LinearVecLowering,
 } from "./handles.js";
+
+// #1714: the vec primitives accept either backend's vec-layout handle. WasmGc
+// uses IrVecLowering (typeIdx-based); Linear uses LinearVecLowering
+// (offset-based). Each emitter narrows to its own shape. This is the
+// "widen to a handle union" option from the #1713 spec section 7.
+type VecLayout = IrVecLowering | LinearVecLowering;
 
 export interface BackendEmitter {
   // ---- vec (array) -- the Phase-1 stage-2 primitives ------------------
@@ -60,16 +67,16 @@ export interface BackendEmitter {
    * when the IR result type is f64 (that is an IR-result-type coercion, not
    * a backend op, so it stays in lower.ts).
    */
-  emitVecLen(layout: IrVecLowering, out: Instr[]): void;
+  emitVecLen(layout: VecLayout, out: Instr[]): void;
   /**
    * vec ref on stack -> data-region handle. WasmGC leaves a `(ref $arr)`;
    * a linear backend would leave an `i32` base pointer. Both feed
    * `emitElemGet`, which closes the abstraction so `lower.ts` never reasons
    * about what is on the stack between the two calls.
    */
-  emitVecDataPtr(layout: IrVecLowering, out: Instr[]): void;
+  emitVecDataPtr(layout: VecLayout, out: Instr[]): void;
   /** data-region handle + i32 index on stack -> element value. */
-  emitElemGet(layout: IrVecLowering, out: Instr[]): void;
+  emitElemGet(layout: VecLayout, out: Instr[]): void;
 
   // ---- scalars / locals / globals / control flow (Phase-1 stage 1) ----
   /** Emit a `const` IR instr's literal op(s). Delegates to the shared free fn. */
