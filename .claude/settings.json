@@ -12,6 +12,18 @@
     "allow": ["Bash(*)"]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /workspace/scripts/prune-agent-status.mjs --quiet 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "matcher": "",
