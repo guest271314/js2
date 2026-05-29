@@ -1,5 +1,5 @@
 ---
-id: 1729
+id: 1737
 title: "Uint8Array(arrayBuffer) does not alias the ArrayBuffer's backing store (JS-host)"
 status: backlog
 created: 2026-05-29
@@ -12,7 +12,7 @@ goal: test262-conformance
 sprint: Backlog
 related: [1717, 1700, 1350]
 ---
-# #1729 — TypedArray view over ArrayBuffer does not alias the buffer (JS-host)
+# #1737 — TypedArray view over ArrayBuffer does not alias the buffer (JS-host)
 
 ## Problem
 
