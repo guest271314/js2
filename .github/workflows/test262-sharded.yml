@@ -891,6 +891,17 @@ jobs:
             echo "ABORT: report looks corrupt (pass=$PASS total=$TOTAL). Not committing to main."
             exit 0
           fi
+          # Sync the conformance numbers baked into the prose docs to match the
+          # freshly-promoted test262-current.json. This is the ONLY writer of
+          # the number on main, so it must update everything derived from it
+          # ATOMICALLY in the same commit — otherwise main goes out of sync the
+          # instant the baseline bumps, and every in-flight PR that reaches the
+          # merge-queue head is dropped by the `quality` gate's
+          # sync:conformance:check (it validates the PR merged with main, where
+          # the number has moved but the PR's docs haven't). See #1522 + the
+          # 2026-05-29 merge-queue drops of #895/#896.
+          node scripts/sync-conformance-numbers.mjs || \
+            echo "WARN: sync-conformance-numbers failed (non-fatal) — docs may drift"
           stage_files() {
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
@@ -898,6 +909,10 @@ jobs:
             # editions JSON is regenerated into public/ by the earlier step
             [ -f public/benchmarks/results/test262-editions.json ] && \
               git add -f public/benchmarks/results/test262-editions.json || true
+            # Conformance numbers in prose docs (synced just above). Staged so
+            # the number and its derived docs land in ONE atomic commit.
+            git add -f README.md ROADMAP.md CLAUDE.md plan/goals/goal-graph.md \
+              2>/dev/null || true
           }
           stage_files
           if git diff --cached --quiet; then
