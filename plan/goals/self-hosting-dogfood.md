@@ -1,0 +1,76 @@
+# Goal: self-hosting-dogfood
+
+**The compiler can compile real, idiomatic ES-module codebases — starting with acorn, the parser the compiler itself depends on — to Wasm and run them correctly.**
+
+- **Status**: Active
+- **Track**: Supporting / dogfood track (parallel to conformance)
+- **Target**: Compiled-to-Wasm acorn parses a representative `.js` file and emits an AST structurally equal to node-acorn's on the same input.
+- **Dependencies**: `compilable` (met), `crash-free` (partial). Shares value-representation and builtins with `standalone-mode` but is not blocked on it.
+
+## Why
+
+test262 is a synthetic corpus: each case is small, hand-written, and exercises
+one feature in isolation. Real codebases combine features at scale, in
+idioms test262 never produces — deep prototype chains, 700-element module
+globals indexed in hot loops, recursive-descent parsers, `new this()`
+static factories, regex-heavy scanners, Maps/Sets, getters/setters.
+
+acorn (MIT, ~6.3k-line pure-ESM JavaScript parser, no native deps) is the
+ideal first dogfood target for three reasons:
+
+1. **It is the compiler's own front-end dependency** — compiling it is the
+   literal "compiler compiles its own parser" milestone, and a hard
+   prerequisite for the in-Wasm bytecode interpreter (#1584, goal
+   `backend-agnostic-ir`) that needs a runtime parser.
+2. **It surfaces interaction bugs test262 cannot** — already proven and
+   **already fixed**: #1679 (`new this(...)`), #1690 (global-array-ref
+   index-shift in `f64.lt`), #1690b (`var` shadowing a module global) are all
+   `done`. Each was a real compiler defect found *only* at full-module scale —
+   which is the whole point of the dogfood. With those three cleared, the next
+   lap needs a harness to find what remains.
+3. **It has a built-in oracle** — node-acorn. Differential testing against the
+   reference parser on the same input gives a crisp, automatable pass/fail for
+   runtime correctness, not just "compiles to valid Wasm".
+
+This goal is **iterative**: attempt to compile acorn → capture the failure
+surface (compile errors + runtime divergences vs node-acorn) → triage into
+concrete sized issues → fix → re-attempt. The acceptance milestone is a green
+differential test, not a green compile.
+
+## Approach
+
+1. **Harness** (#1710) — a reproducible, in-repo harness that compiles each
+   acorn module, validates the binary, runs it in standalone + JS-host mode,
+   and diffs its AST output against node-acorn on a fixture corpus. Captures
+   the failure surface as structured data (compile-error category, validation
+   error, runtime divergence) so triage is mechanical.
+2. **Prior blockers** (#1679, #1690, #1690b) — all `done`; the harness must
+   regression-guard them so they cannot silently come back.
+3. **Triage milestone** (#1711) — run the harness, bucket the surface, file
+   one sized child issue per distinct gap. This is the issue that converts the
+   harness output into the backlog.
+4. **Acceptance milestone** (#1712) — compiled acorn parses a representative
+   `.js` file and emits a structurally-equal AST to node-acorn. This is the
+   goal's definition of done for the first dogfood lap.
+
+## Issues
+
+| # | Title | Sprint | Status | Priority |
+|---|-------|--------|--------|----------|
+| **1679** | acorn: `new this(...)` dynamic constructor | Backlog | done | medium |
+| **1690** | acorn.mjs invalid Wasm: f64.lt reads global array ref (index-shift) | Backlog | done | high |
+| **1690b** | inner `var x` aliases module-level global (scoping) | Backlog | done | high |
+| **1710** | acorn dogfood harness: compile + validate + differential-AST vs node-acorn | 57 | ready | high |
+| **1711** | acorn failure-surface triage: bucket + file sized child issues | 57 | ready | high |
+| **1712** | acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn | 57 | backlog | high |
+
+## Success criteria
+
+- A reproducible harness exists in-repo (not `.tmp/` scratch) that any agent
+  can run to reproduce the acorn failure surface.
+- The failure surface is triaged into sized, independently-dispatchable issues.
+- The acceptance milestone (#1712) passes: compiled acorn, run on a fixture
+  `.js` source, produces an AST structurally equal to node-acorn's.
+- Every distinct gap acorn exposes is captured as an issue (not lost in a
+  scratch buffer), feeding the conformance backlog with real-world-weighted
+  priorities.

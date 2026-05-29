@@ -11,10 +11,10 @@ reasoning_effort: medium
 task_type: bugfix
 area: codegen, identifier-resolution, scoping
 language_feature: var-hoisting, function-scope, shadowing
-goal: real-world-compat
+goal: self-hosting-dogfood
 sprint: Backlog
 parent: 1690
-related: [1690]
+related: [1690, 1710, 1711, 1712]
 note: "Carved from #1690 — root-cause work on the acorn.mjs stress test surfaced two distinct defects. Defect #1 (this issue) is a runtime-semantics scoping bug independent of the f64/array-ref Wasm-validation issue tracked under #1690 itself."
 ---
 # #1690b — Inner `var x` aliases module-level `__mod_x` global (identifier-resolution layer)

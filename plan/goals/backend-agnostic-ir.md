@@ -1,0 +1,111 @@
+# Goal: backend-agnostic-ir
+
+**The typed middle-end IR (`src/ir/`) is decoupled from any single backend, so it can lower to (1) WasmGC today, (2) linear memory, and (3) a future bytecode interpreter — without the IR presuming WasmGC.**
+
+- **Status**: Active
+- **Track**: Supporting / architecture track (parallel to conformance)
+- **Target**: A documented backend-trait seam in `src/ir/lower.ts`; at least one node kind lowered through that seam to two backends; one proof point of a non-WasmGC backend.
+- **Dependencies**: `compiler-architecture` (activatable). Builds on #1131 (SSA IR), #1527/codegen-axes doc, #1530 (phase out the warning fallback).
+
+## Why
+
+The codegen-axes doc (`docs/architecture/codegen-axes.md`) names two orthogonal
+axes and makes one explicit admission:
+
+> Today, IR adoption gives you a typed front-end on a **WasmGC backend**. The
+> architecture admits an IR adoption on the linear backend (a
+> `lower-linear.ts` sibling), but no AST node kind has demanded it yet.
+
+In other words: the IR's `lower.ts` (~2,460 lines) emits `struct.new`,
+`struct.get`, `array.get`, `ref.cast` *inline in its node switch*. There is no
+backend boundary — the IR-node→Wasm-op mapping is hardcoded to WasmGC. The doc
+itself lists the exact leak points (the "Current hidden bias" table). This is
+acceptable as a one-backend-old state, but it blocks two strategic directions:
+
+1. **The bytecode interpreter (#1584)** needs the IR to be lowerable to a
+   *non-Wasm* target (a bytecode opcode stream executed by a dispatch loop).
+   That is impossible while lowering is hardwired to emit Wasm GC ops.
+2. **IR adoption on the linear backend** — `src/codegen-linear/` reads the AST
+   directly today, duplicating front-end work the IR already does. Routing
+   linear lowering through the IR removes that duplication for the node kinds
+   where the front-end concern is identical and only the *op emission* differs.
+
+The user's intent is to make the IR's instruction contract **backend-agnostic**
+so a backend is a *visitor over IR nodes*, not a hardcoded switch arm. The IR
+declares *what* (build a closure cell, read a vec element, box a scalar); the
+backend decides *how* (WasmGC struct vs linear-memory offset vs bytecode op).
+
+## Approach
+
+This is a multi-sprint goal. Sprint 57 lands the first three issues — the
+audit/seam, one two-backend proof, and a minimal bytecode proof point:
+
+1. **Audit + seam definition** (#1713, `feasibility: hard`, needs architect
+   spec) — enumerate every WasmGC-specific emission in `lower.ts` against the
+   codegen-axes "hidden bias" table; define a `BackendEmitter` trait (the set
+   of operations a backend must implement: `emitStructNew`, `emitFieldGet`,
+   `emitArrayGet`, `emitBoxScalar`, `emitCallRef`, …) that captures the
+   *intent* of each emission without naming Wasm ops. Deliver the trait
+   interface + a `WasmGcEmitter` implementation that is behavior-identical to
+   today's inline emission (pure refactor, zero conformance delta).
+2. **Two-backend proof** (#1714) — pick ONE already-IR-owned, structurally
+   simple node kind (recommend the vec/array length+element-read path, which
+   `lower.ts` already lowers and which has a clean linear analogue) and lower
+   it through the trait to BOTH the WasmGC emitter and a new
+   `src/ir/lower-linear.ts` emitter. Prove the same IR node produces correct
+   output on both backends via a focused equivalence test. This is the first
+   node kind to "demand" the linear lift the codegen-axes doc anticipates.
+3. **Bytecode proof point** (#1715) — a minimal bytecode emitter + TS dispatch
+   loop for a *tiny* IR subset (arithmetic + locals + return + one branch),
+   proving the trait can target a non-Wasm backend. This is the de-risking
+   first slice of #1584's Phase 1, scoped down to "does the seam admit a
+   bytecode backend at all" — NOT the full interpreter.
+4. **#1530 alignment** (tracked, not a sprint-57 issue) — driving IR-owned
+   node kinds forward feeds backend-agnosticism: a kind can only be lowered by
+   multiple backends once it is IR-owned end-to-end.
+
+## The bytecode-vs-extend-linear decision
+
+Both #1714 (extend linear coverage via the trait) and #1715 (bytecode proof)
+are in scope for Sprint 57 because they de-risk *different* claims:
+
+- **#1714 (linear-via-trait)** proves the trait abstracts a backend that
+  *already exists and is exercised by WASI*. Low risk, high architectural
+  payoff, directly retires front-end duplication. This is the **primary**
+  proof point — it must land.
+- **#1715 (bytecode)** proves the trait can target a backend with a
+  *fundamentally different execution model* (dispatch loop, not structured
+  Wasm). Higher risk, scoped to a throwaway-grade minimal subset, gated behind
+  #1713. This is the **stretch** proof point — it validates the #1584
+  direction before that 8–12 week investment is committed.
+
+Reasoning: extending the linear backend is the higher-value *first* proof
+because it is grounded in a real, shipping target (WASI) and immediately
+removes duplicated front-end work, whereas the bytecode interpreter is a large
+speculative investment. But doing a *minimal* bytecode slice in the same sprint
+is cheap insurance: if the trait cannot cleanly express a bytecode target, we
+learn that for ~1 issue of effort instead of discovering it 8 weeks into #1584.
+
+## Issues
+
+| # | Title | Sprint | Status | Priority |
+|---|-------|--------|--------|----------|
+| **1124** | Audit current codegen IR / define minimal SSA middle-end | 42 | done | high |
+| **1131** | Middle-end SSA IR: implementation plan | 43 | ready | high |
+| **1530** | Phase out the IR demote-to-warning fallback channel | Backlog | ready | high |
+| **1584** | Wasm-GC-native bytecode interpreter (acorn + eval) | Backlog | ready | medium |
+| **1713** | IR backend-trait: audit WasmGC bias + define BackendEmitter seam | 57 | ready | high |
+| **1714** | Lower one IR node kind through the trait to BOTH WasmGC and linear | 57 | backlog | high |
+| **1715** | Minimal bytecode emitter + dispatch loop for an IR subset (proof point) | 57 | backlog | medium |
+
+## Success criteria
+
+- `lower.ts` no longer emits WasmGC ops inline for the audited node kinds;
+  emission goes through a `BackendEmitter` trait whose `WasmGcEmitter`
+  implementation is behavior-identical (zero conformance delta).
+- At least one node kind is provably lowered to two backends (WasmGC + linear)
+  from the same IR.
+- A minimal bytecode backend exists as a proof point, executing a tiny IR
+  subset through a dispatch loop, validating the #1584 direction.
+- The codegen-axes "hidden bias" table is updated to reflect which leaks are
+  now behind the trait.
