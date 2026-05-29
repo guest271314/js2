@@ -414,6 +414,32 @@ read-back subset.
 `15.2.3.7-5/6-*` defineProperties coalescing clusters pass. This is the
 "descriptor *input* parsing" half; S1 was the "descriptor *output*" half.
 
+> **S2 STATUS — partial DONE (2026-05-29, dev-b).** Landed in `src/runtime.ts`
+> `__defineProperties`:
+> 1. **Two-pass** per ES §20.1.2.3.1 — the struct-descsObj path now gathers
+>    `ToPropertyDescriptor` for *all* keys (pass 1) before applying any via
+>    DefinePropertyOrThrow (pass 2). A bad-shape descriptor on a later key now
+>    aborts before earlier keys install (observable for primitive/bad-shape
+>    descriptors: `property-description-must-be-an-object-not-*`). Note:
+>    DefinePropertyOrThrow validation (e.g. non-configurable redefine) correctly
+>    stays in-order in pass 2, so an earlier valid key *is* installed before a
+>    later DefinePropertyOrThrow throws — that is spec-correct (V8 matches).
+> 2. **wrap-callable wired** into both `_toPropertyDescriptorValidate` call sites
+>    so struct closure get/set surface to the spec `typeof === "function"`
+>    checks, matching the single-key `__defineProperty` handler.
+> Tests: `tests/issue-1629-S2.test.ts`.
+>
+> **Gated on closure-readability (S3).** The value+get TypeError and bad-shape
+> abort are NOT observable when the offending per-property descriptor is itself
+> a WasmGC struct whose `get`/`set` is a Wasm closure (or whose `value` is a
+> closure): `getField`/`__sget_` cannot read a closure out of an arbitrary
+> struct field, so `_toPropertyDescriptorValidate` sees it as absent and the
+> conflict can't fire. This is the same root as S1's `ds.a` dot-access gap and
+> belongs to **S3** (accessor-aware compiled read/write path). The two-pass +
+> wrap-callable structure is correct and will start surfacing those wins the
+> moment S3 lands closure-field readability. The HasProperty-vs-Get
+> trap-ordering bullet is also deferred to S3 (needs the same reader).
+
 **Files**: `src/runtime.ts` (`_toPropertyDescriptorValidate`, 851;
 `_validatePropertyDescriptor`, 792), `src/codegen/object-ops.ts`
 (`compileObjectDefineProperties`, the dynamic fallback at ~2597).

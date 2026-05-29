@@ -5643,15 +5643,36 @@ assert._isSameValue = isSameValue;
             }
             return v;
           };
+          // (#1629 S2) When a per-property descriptor is itself a WasmGC struct,
+          // its `get`/`set` fields arrive as Wasm-closure structs, not JS
+          // callables. Wrap them so ToPropertyDescriptor's spec `typeof ===
+          // "function"` checks fire — this is what makes the value+get / value+set
+          // "cannot both specify accessors and a value" TypeError detectable in
+          // the plural path, matching the single-key __defineProperty handler.
+          const wrap = (v: any, arity: number) => _maybeWrapCallable(v, arity, callbackState);
           // If descsObj is a WasmGC struct, native Object.defineProperties sees it as empty
           // and silently no-ops. Apply descriptors directly instead.
+          //
+          // (#1629 S2) Two-pass per ES §20.1.2.3.1 ObjectDefineProperties:
+          // step 4 runs ToPropertyDescriptor for *every* enumerable own key and
+          // collects them into a `descriptors` list; step 5 then applies each via
+          // DefinePropertyOrThrow. So all input-parsing (ToPropertyDescriptor,
+          // which throws on bad shape) happens before *any* mutation — a later
+          // key's TypeError must not leave earlier keys installed.
           if (_isWasmStruct(descsObj)) {
             const keys = getKeys(descsObj);
             const isObjWasm = _isWasmStruct(obj);
             const sDescs = isObjWasm ? _getSidecarDescs(obj) : null;
+            // Pass 1 — gather + ToPropertyDescriptor for all keys (may throw).
+            const gathered: { key: string | symbol; desc: PropertyDescriptor }[] = [];
             for (const key of keys) {
               const rawDesc = getField(descsObj, key as string);
-              const desc = _toPropertyDescriptorValidate(rawDesc, getField);
+              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap) });
+            }
+            // Pass 2 — apply each (DefinePropertyOrThrow). Validation against an
+            // existing non-configurable property may still throw here, matching
+            // the spec's step-5 DefinePropertyOrThrow ordering.
+            for (const { key, desc } of gathered) {
               if (isObjWasm) {
                 const nKey = _normalizeDescKey(key as string);
                 const existingVal2 = _sidecarGet(obj, key as string);
@@ -5677,7 +5698,7 @@ assert._isSameValue = isSameValue;
                 const validated: { key: string | symbol; desc: PropertyDescriptor }[] = [];
                 for (const key of keys) {
                   const rawDesc = getField(descsObj, key as string);
-                  const desc = _toPropertyDescriptorValidate(rawDesc, getField);
+                  const desc = _toPropertyDescriptorValidate(rawDesc, getField, wrap);
                   validated.push({ key: key as string, desc });
                 }
                 for (const { key, desc } of validated) {
