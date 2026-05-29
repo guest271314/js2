@@ -1760,6 +1760,36 @@ function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: 
   fctx.body.push({ op: "i32.sub" } as Instr);
   fctx.body.push({ op: "local.set", index: capLocal });
 
+  // #1723: grow linear memory so the read staging buffer
+  // [WASI_STDIN_BUF_START .. WASI_STDIN_BUF_START+capacity) fits. The module
+  // reserves only 3 pages by default; a single large read (e.g. a ~1 MiB
+  // Native Messaging body read into one buffer) would otherwise write past the
+  // end of memory in fd_read and trap. neededPages = ceil((STDIN_BUF_START +
+  // capacity) / 65536) == (STDIN_BUF_START + capacity + 65535) >> 16.
+  const needPagesLocal = allocLocal(fctx, `__stdin_needPages_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
+  fctx.body.push({ op: "local.get", index: capLocal } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
+  fctx.body.push({ op: "i32.shr_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "memory.size" } as Instr);
+  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: needPagesLocal } as Instr,
+      { op: "memory.size" } as Instr,
+      { op: "i32.sub" } as Instr,
+      { op: "memory.grow" } as Instr,
+      { op: "drop" } as Instr,
+    ],
+  } as Instr);
+
   // iovec.buf = WASI_STDIN_BUF_START at memory[0]
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
@@ -1905,10 +1935,18 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const compiled = compileExpression(ctx, fctx, argExpr);
         flushLateImportShifts(ctx, fctx);
         if (compiled && ctx.nativeStrTypeIdx >= 0) {
+          // #1723: do NOT downcast to NativeString here. The argument may be a
+          // ConsString (rope) — e.g. `process.stdout.write(`{"received":${x}}`)`
+          // in the Native Messaging host — and `ref.cast` to the concrete
+          // NativeString type TRAPS ("illegal cast") for a rope. The value
+          // trapped at the call BEFORE ever reaching the flattening helper, so
+          // the host worked only for tiny single-segment (still-flat) responses.
+          // `__wasi_write_any_string` now takes the AnyString supertype, which a
+          // NativeString or ConsString satisfies directly; it flattens any rope
+          // internally. We only assert non-null for a nullable ref so the value
+          // matches the helper's non-null param without changing its (sub)type.
           if (compiled.kind === "ref_null") {
-            fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
-          } else if (compiled.kind === "ref" && "typeIdx" in compiled && compiled.typeIdx !== ctx.nativeStrTypeIdx) {
-            fctx.body.push({ op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx } as Instr);
+            fctx.body.push({ op: "ref.as_non_null" } as Instr);
           }
           const writeStrIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
           if (writeStrIdx >= 0) {

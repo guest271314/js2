@@ -1,0 +1,109 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// WasmGcEmitter (#1713) -- the behaviour-identical first BackendEmitter.
+//
+// Each method is the LITERAL `out.push(...)` from the audited `lower.ts`
+// emission site, moved 1:1. The emitted `Instr` stream for every routed
+// node kind is byte-identical to the pre-refactor inline emission -- this
+// is guaranteed by construction (mechanical move of the exact object
+// literal) and validated by the equivalence suite + the golden-Instr
+// snapshot test.
+//
+// Phase 1 routes the pass-through group (locals / globals / const /
+// arithmetic / control flow) and the vec group. The remaining
+// (aggregate / union / closure / ref-coercion) primitives stay inline in
+// lower.ts for now (issue Scope permits a partial-but-clean seam); they
+// are added here as their group gets wired.
+
+import { emitConstInstr } from "../lower.js";
+import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
+import type { BlockType, Instr } from "../types.js";
+import type { IrVecLowering } from "./handles.js";
+import type { BackendEmitter } from "./emitter.js";
+
+export class WasmGcEmitter implements BackendEmitter {
+  // ---- vec (array) ----------------------------------------------------
+
+  emitVecLen(layout: IrVecLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.lengthFieldIdx });
+  }
+
+  emitVecDataPtr(layout: IrVecLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.dataFieldIdx });
+  }
+
+  emitElemGet(layout: IrVecLowering, out: Instr[]): void {
+    out.push({ op: "array.get", typeIdx: layout.arrayTypeIdx });
+  }
+
+  // ---- scalars / locals / globals / control flow ----------------------
+
+  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: Instr[]): void {
+    // Delegate to the shared free function (unchanged) so the const-lowering
+    // logic stays in one place. The arg order is the free fn's
+    // `(instr, out, funcName)` -- the trait method's order is
+    // `(instr, funcName, out)` to keep `out` last like every other method.
+    emitConstInstr(instr, out, funcName);
+  }
+
+  // The cast mirrors lower.ts's documented `as Instr` pattern: `IrBinop`/`IrUnop`
+  // are a superset of the bare-op `Instr` variants (they also name the
+  // composite `js.*` bitwise ops). Those `js.*` ops are lowered to a multi-op
+  // sequence in lower.ts and NEVER reach emitBinary, so the runtime value is
+  // always a valid `Instr` -- the cast just states what the call site proves.
+  emitBinary(op: IrBinop, out: Instr[]): void {
+    out.push({ op } as Instr);
+  }
+
+  emitUnary(op: IrUnop, out: Instr[]): void {
+    out.push({ op } as Instr);
+  }
+
+  emitLocalGet(index: number, out: Instr[]): void {
+    out.push({ op: "local.get", index });
+  }
+
+  emitLocalSet(index: number, out: Instr[]): void {
+    out.push({ op: "local.set", index });
+  }
+
+  emitLocalTee(index: number, out: Instr[]): void {
+    out.push({ op: "local.tee", index });
+  }
+
+  emitGlobalGet(index: number, out: Instr[]): void {
+    out.push({ op: "global.get", index });
+  }
+
+  emitGlobalSet(index: number, out: Instr[]): void {
+    out.push({ op: "global.set", index });
+  }
+
+  emitDrop(out: Instr[]): void {
+    out.push({ op: "drop" });
+  }
+
+  emitSelect(out: Instr[]): void {
+    out.push({ op: "select" });
+  }
+
+  emitReturn(out: Instr[]): void {
+    out.push({ op: "return" });
+  }
+
+  emitUnreachable(out: Instr[]): void {
+    out.push({ op: "unreachable" });
+  }
+
+  emitIf(blockType: BlockType, then: Instr[], els: Instr[], out: Instr[]): void {
+    out.push({ op: "if", blockType, then, else: els });
+  }
+
+  emitBr(depth: number, out: Instr[]): void {
+    out.push({ op: "br", depth });
+  }
+
+  emitBrIf(depth: number, out: Instr[]): void {
+    out.push({ op: "br_if", depth });
+  }
+}
