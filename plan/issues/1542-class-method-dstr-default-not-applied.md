@@ -1,13 +1,13 @@
 ---
 id: 1542
 title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" instead"
-status: needs-architect-spec
+status: ready
 created: 2026-05-20
-updated: 2026-05-28
+updated: 2026-05-29
 priority: high
 feasibility: hard
 goal: test262-conformance
-sprint: Backlog
+sprint: 57
 parent: 820
 test262_fail: 134
 ---
@@ -99,6 +99,319 @@ The proper sequence is:
    the implementation isn't another guess-and-revert.
 
 Marked `status: needs-architect-spec` and reprioritized off sprint 52.
+
+## Implementation Plan (respec 2026-05-29)
+
+> This supersedes the "Fix #1 (coerceType externref→vec)" plan at the bottom
+> of this file — that hypothesis was already proven wrong (the vec path is not
+> the bug; see the 2026-05-28 note above). This respec targets the **confirmed**
+> root cause: funcMap-population order at the *eager* class-body compile site,
+> and it is deliberately designed to NOT reproduce the −1219 cascade that
+> reverted PR #440.
+
+### Confirmed root cause (verified against current `src/codegen/declarations.ts`)
+
+Module-level compilation runs in this order inside `compileDeclarations`
+(`src/codegen/declarations.ts`):
+
+1. **L3346** — `compileClassesFromStatements(sourceFile.statements)` walks the
+   tree and **eagerly** calls `compileClassBodies` for every class it reaches
+   whose `insideFunction` flag is `false` (L3223-3235). Crucially, the recursive
+   descents into `if`/`block`/`for`/`while`/`switch`/`try`/labeled (L3257-3293)
+   **do NOT pass `insideFunction`**, so a class nested in any control-flow
+   construct *inside a function* is treated as module-level and compiled here,
+   eagerly, at module-pass time.
+2. **L3452** — the top-level function-declaration body loop runs. Only here,
+   when an enclosing function body is compiled via `compileFunctionBody`
+   (`src/codegen/function-body.ts:880`/`951`), does
+   `hoistFunctionDeclarations` register *control-flow-nested* sibling
+   `function`/`function*` declarations into `ctx.funcMap`. (The module-level
+   `collectDeclarations` loop at L2327-2328 only registers **top-level**
+   function declarations — nested ones are lazy-hoisted.)
+
+So when step 1 eagerly compiles the body of a control-flow-nested class whose
+method has a param default referencing a sibling generator
+(`method([,] = g())` where `function* g(){}` is a sibling in the same block),
+`g` is **not yet in `funcMap`** (it only lands there in step 2). The
+call-expression compiler emits its graceful `ref.null.extern` fallback, the
+guarded `local.set` stores null, and `destructureParamArray` hits its
+`ref.is_null` guard → "Cannot destructure 'null' or 'undefined'".
+
+**Shape registration is NOT the problem.** `collectClassesFromStatements`
+(L2203-2272) recurses unconditionally into every control-flow construct and
+registers the struct + method stubs in `ctx.structMap` / `ctx.funcMap`
+regardless of nesting. The struct type and the method *stub* (function index)
+always exist. Only the **param-default lookup of the sibling generator** is
+order-dependent.
+
+### Why PR #440 cascaded to −1219 (the landmine the respec must dodge)
+
+PR #440 fixed the symptom by propagating `insideFunction` through every
+recursive descent in `compileClassesFromStatements`, which flipped those
+control-flow-nested classes from **eager** (step 1) to **deferred** (added to
+`ctx.deferredClassBodies`, L3227/3240). A deferred class body is only compiled
+later, when `compileNestedClassDeclaration` (`statements/nested-declarations.ts:75`)
+is reached during the enclosing function's body traversal via
+`compileStatement` (`statements.ts:225`).
+
+The fatal gap: **`ctx.deferredClassBodies` is never flushed.** It is keyed by
+class *name*, added when `insideFunction`, and removed (L143) only when
+`compileNestedClassDeclaration` actually fires. The set of classes
+`compileClassesFromStatements` *marks deferred* (its broad structural descent)
+is **larger** than the set `compileStatement` *reaches during body compile*
+(the actual runtime statement traversal — which skips dead branches, differs
+for arrow/function-expression bodies handled by `compileClassesFromFunctionBody`,
+and never runs for functions whose bodies aren't compiled). Every class in the
+difference is **orphaned**: shape + method stubs exist, but the method/ctor
+**bodies are never emitted**. Downstream `call`/`call_ref` sites and static
+member references then point at empty function bodies → the **691 wasm_compile**
+failures. (The other revert buckets — runtime_error 279, assertion_fail 275,
+type_error 42 — are the same orphaned-body defect surfacing as wrong runtime
+behaviour rather than a hard validation error.)
+
+So the binary "eager vs deferred by syntactic nesting" is the wrong lever: it
+silently drops bodies whenever the marking traversal and the compiling
+traversal diverge.
+
+### Chosen approach: keep bodies EAGER, fix only the funcMap order
+
+**Do NOT defer.** Keep every class body compiled eagerly at step 1 exactly as
+today — this preserves the load-bearing eager path byte-for-byte and is what
+makes this respec cascade-proof: **no body changes from eager→deferred, so the
+orphaned-body failure mode is structurally impossible.** The only change is to
+make the sibling function declarations *visible in `funcMap`* before the eager
+class body is compiled.
+
+Concretely: when `compileClassesFromStatements` is about to eagerly compile a
+class body that lives in a statement list, **first hoist the sibling
+function/function* declarations from that same statement list into `funcMap`**,
+using the existing module-level function-registration path (NOT
+`hoistFunctionDeclarations`, which needs an `fctx` we don't have at module
+pass — see "Why not hoistFunctionDeclarations" below).
+
+This is approach #2 from the 2026-05-28 note ("hoist sibling function decls
+into funcMap BEFORE compiling nested-class method bodies, while keeping shape
+registration eager") — selected because it touches the **smallest** surface and
+leaves the eager/deferred contract untouched.
+
+### Changes
+
+**File: `src/codegen/declarations.ts`**
+
+1. **`compileClassesFromStatements` (L3214-3297)** — add a sibling-function
+   pre-hoist. At the **top of the `for (const stmt of stmts)` loop body**
+   (before the class-declaration branch at L3223), when the *current statement
+   list* contains a class declaration / class-expression var that will be
+   compiled eagerly in this call (i.e. `!insideFunction`), first ensure every
+   sibling `ts.isFunctionDeclaration(s) && s.body && !hasDeclareModifier(s)` in
+   `stmts` is registered in `ctx.funcMap`.
+
+   Implementation shape — factor a helper `ensureSiblingFunctionsRegistered(stmts)`
+   that, for each function-declaration statement in `stmts` whose name is not
+   already in `ctx.funcMap`, runs the **same registration** that the top-level
+   loop at L2327-2328 → L2563 (`ctx.funcMap.set(name, funcIdx)`) performs:
+   allocate the `WasmFunction` entry (signature, generator/async flags via the
+   existing `collectDeclarations` helpers) and `ctx.funcMap.set(name, funcIdx)`.
+   The cleanest path is to extract the per-statement function-registration body
+   of the L2327 loop into a reusable `registerFunctionDeclaration(ctx, stmt,
+   sourceFile)` and call it from both sites. Then the body is filled in later by
+   the step-2 loop (L3452) / `hoistFunctionDeclarations` as today — we only need
+   the **index + signature** in `funcMap` for the param-default call-expression
+   compiler to resolve `g()` to a `call`/`call_ref`, not the body.
+
+   Call `ensureSiblingFunctionsRegistered(stmts)` **once per `stmts` list**
+   (guard with a `WeakSet<readonly ts.Statement[]>` of already-processed lists,
+   or simply call it at the top of each `compileClassesFromStatements` invocation
+   before the loop) so its cost is O(statements) not O(statements²).
+
+   IMPORTANT: do this for the statement list **only when it actually contains a
+   class that will be eagerly compiled** — i.e. when `!insideFunction`. When
+   `insideFunction` is true the eager branch is not taken (those would be
+   deferred), so the pre-hoist is unnecessary and must be skipped to avoid
+   double-registering nested functions that the step-2 hoist owns.
+
+2. **DO NOT change the recursive-descent calls (L3257-3293) to pass
+   `insideFunction`.** That is the exact PR #440 change that cascaded. Leave the
+   descents calling `compileClassesFromStatements(...)` with the default
+   `insideFunction = false`. The control-flow-nested class stays **eager**; the
+   pre-hoist (change 1) on each descended statement list makes its sibling `g()`
+   resolvable.
+
+   (Because the descents recurse into the inner statement lists with
+   `insideFunction = false`, change 1's `ensureSiblingFunctionsRegistered` runs
+   on each inner block's statement list too — which is exactly where the sibling
+   `function* g` lives relative to the nested class. That is the mechanism that
+   fixes the repro.)
+
+#### Why not just call `hoistFunctionDeclarations`?
+
+`hoistFunctionDeclarations` (`statements/nested-declarations.ts:717`) requires a
+live `FunctionContext` (`fctx`) and emits the function body immediately via
+`compileNestedFunctionDeclaration`. At module-pass time (step 1) there is no
+enclosing `fctx` for these siblings, and forcing body compilation here would
+duplicate work the step-2 loop already does and risk index-shift fights with
+`addUnionImports`/string-constant globals. We only need the **funcMap index +
+signature**, which the lightweight `collectDeclarations`-style registration
+provides without compiling a body. The body is compiled later by the existing
+machinery.
+
+#### Generator/async-generator sibling specifics
+
+The repro's sibling is a `function* g(){}`. Registration must set the same
+metadata the top-level loop sets: `ctx.generatorFunctions.add(name)`,
+`ctx.generatorYieldType.set(...)`, and (for async) `ctx.asyncFunctions`. Reuse
+the exact branch at L2359-2371 — do not hand-roll a subset, or the call-site
+lowering of `g()` will pick the wrong return-shape and re-introduce a coercion
+mismatch.
+
+### Phase ordering — before vs after
+
+```
+BEFORE (current main):
+  compileDeclarations:
+    L3346  compileClassesFromStatements(top-level)
+             └─ eagerly compileClassBodies(control-flow-nested class C)
+                  └─ param default g() lookup → funcMap MISS  ❌  (g not yet hoisted)
+                  └─ ref.null.extern fallback → destructure throws
+    L3452  top-level function bodies
+             └─ hoistFunctionDeclarations registers sibling g  (too late)
+
+AFTER (this respec):
+  compileDeclarations:
+    L3346  compileClassesFromStatements(top-level)
+             ├─ ensureSiblingFunctionsRegistered(stmts)         ✅ NEW
+             │     └─ ctx.funcMap.set("g", idx) (+gen/async metadata), body deferred
+             ├─ (recurse into block/if/try/loop with insideFunction=false, each
+             │    descent runs ensureSiblingFunctionsRegistered on its own stmts)
+             └─ eagerly compileClassBodies(control-flow-nested class C)
+                  └─ param default g() lookup → funcMap HIT     ✅
+                  └─ proper call/call_ref → destructure runs against materialised value
+    L3452  top-level function bodies
+             └─ hoistFunctionDeclarations: g already in funcMap → no-op for g,
+                bodies of g and C's methods compiled as before
+```
+
+Nothing moves from eager→deferred; the only delta is that `funcMap` learns the
+sibling function indices one phase earlier.
+
+### Wasm IR
+
+No new IR shapes. The fix simply makes the existing param-default lowering emit
+the *correct* path it already emits when `g` is in `funcMap`:
+
+```wasm
+;; param default `= g()` once g is resolvable:
+call $g                 ;; was: ref.null.extern  (the bug)
+;; → externref Generator object; existing materialisation/destructure runs
+```
+
+### Edge cases the dev MUST cover
+
+- **Sibling fn declared AFTER the class textually** — JS hoists function
+  declarations, so `class C { m([,]=g()){} }` then `function* g(){}` in the
+  same block must also resolve. `ensureSiblingFunctionsRegistered` iterates the
+  whole `stmts` list up front, so textual order is irrelevant. Add a test for
+  the after-declaration case.
+- **Name collision with a top-level function** — if `g` is already in
+  `funcMap` (top-level), the `!ctx.funcMap.has(name)` guard skips re-registration.
+  Do not overwrite.
+- **Async generator sibling** (`async function* g(){}`) — set both
+  `asyncFunctions` exclusion and `generatorFunctions` per the L2359-2371 logic.
+  Covered by `async-gen-meth-*` / `async-private-gen-meth-*` test262 families.
+- **Private methods** (`#m([,]=g())`) lower to `C___priv_method` stubs through
+  the *same* `compileClassBodies` path — no extra site; verify the
+  `C___priv_method` bucket (38 fails) clears.
+- **Anonymous class expressions** reached via `compileAnonymousClassBodiesInNode`
+  (`forEachChild`, L3329-3344) — these are ALSO eager and ALSO bypass the
+  per-stmt-list pre-hoist (forEachChild doesn't go through
+  `compileClassesFromStatements`). The `__anonClass_0___priv_method` bucket (24
+  fails) lives here. The pre-hoist must therefore ALSO run for the statement
+  list that *contains* the anon-class-bearing statement. Since
+  `compileAnonymousClassBodiesInNode(stmt)` is called per-`stmt` inside the
+  `compileClassesFromStatements` loop (L3295), the per-stmt-list pre-hoist at
+  the top of that loop already covers the sibling functions for anon classes in
+  the same list. Verify with a `new (class { #m([,]=g()){} })()` + sibling
+  `function* g` repro.
+- **`local`/`const`-captured sibling** — if the "function" is actually a
+  `const g = function*(){}` (function *expression* in a var), it is NOT a
+  `ts.FunctionDeclaration` and is hoisted differently (closure capture). Out of
+  scope for this fix (separate path); document as a known non-goal in the test
+  file. The 134-fail bucket is all `function*` *declarations*.
+
+### Test plan
+
+**A. The original repro MUST pass** (`tests/issue-1542.test.ts` — re-add the
+4 cases PR #440 added, which the revert deleted):
+1. `function* g(){yield;} class C { method([,]=g()){return 'ok';} } new C().method()` → `'ok'`
+2. `class C { method({x=1}={}){return x;} } new C().method()` → `1`
+3. Private: `class C { #m([,]=g()){return 'ok';} run(){return this.#m();} }` with sibling `function* g`
+4. Static: `class C { static m({x=5}={x:10}){return x;} }` → `5`
+5. **NEW (forward-reference)** — class textually BEFORE its sibling generator,
+   both in a `{ ... }` block inside a function, then the function is called.
+6. **NEW (anon class)** — `new (class { method([,]=g()){return 'ok';} })()`
+   with sibling `function* g`.
+
+**B. Regression guard for the 691-wasm_compile cascade** — spot-check that
+control-flow-nested classes whose **shapes/methods are used downstream** still
+compile their bodies. The dev must compile-and-run (not just compile) each of:
+- class nested in an `if`-block, instantiated and a method called from
+  module-level AND from inside the same function;
+- class nested in a `try`-block, used in a `catch`;
+- class nested in a `for`-loop body, instantiated each iteration;
+- class nested in a `switch`-case;
+- a class whose method is referenced via `C.prototype.m` and via `instance.m`
+  (the `classExprNameMap` dual-registration path, see L2276-2302) — assert
+  `c.m === C.prototype.m`.
+
+Add these as a dedicated `tests/issue-1542-nested-shape-guard.test.ts`. Because
+this respec keeps bodies eager, all of these should be **unchanged from
+current main** — the guard exists to *prove* no body went missing.
+
+**C. Targeted test262 categories** (run via the runner with a path filter, do
+NOT rely on the full suite for the signal):
+- `language/statements/class/dstr/meth-dflt-*`, `gen-meth-*`, `async-gen-meth-*`
+- `language/statements/class/dstr/private-meth-*`, `private-gen-meth-*`
+- `language/expressions/class/dstr/*` (anon/private families)
+
+### Risk section — this issue has a −1219 landmine
+
+- **Highest risk: silent body loss.** The whole point of keeping bodies eager
+  is to make body-loss impossible. The dev MUST NOT, under any circumstance,
+  add `insideFunction` to the recursive-descent calls (the PR #440 change). If a
+  reviewer sees `compileClassesFromStatements(stmt.X.statements, insideFunction)`
+  in the diff, reject it — that is the reverted approach.
+- **Index-shift risk.** Registering function indices in `funcMap` at module-pass
+  time interacts with `addUnionImports` / string-constant import globals which
+  shift function indices later. The dev must register using the SAME mechanism
+  the existing L2327 top-level loop uses (which is already correct under those
+  shifts), not a bespoke index calculation. If the existing loop's registration
+  cannot be cleanly extracted, prefer moving the **nested sibling function
+  registration into the existing `collectDeclarations` pass** (recurse into
+  control-flow bodies there, registering indices but not bodies) over
+  hand-rolling registration in `compileClassesFromStatements`.
+- **Double-registration.** Guard every registration with
+  `!ctx.funcMap.has(name)`; the step-2 `hoistFunctionDeclarations` already
+  guards the same way (`nested-declarations.ts:724`), so the two passes coexist.
+- **Mandatory full-CI net read before merge.** This issue carries a confirmed
+  −1219 history. The dev **MUST NOT self-merge on a local hunch or on the
+  targeted-category signal alone.** Required gate before merge:
+  - Full sharded CI `net_per_test > 0`, total regressions ≤ 10, no single bucket
+    > 50 (per `/dev-self-merge`), AND
+  - **specifically inspect the `wasm_compile` bucket delta** — it must be ≥ 0
+    (ideally +0; any positive `wasm_compile` regression is the cascade
+    re-appearing and is an automatic ESCALATE-to-tech-lead, not a self-merge).
+  - Cross-check the `runtime_error` / `assertion_fail` buckets (the 279/275
+    revert buckets) for any cluster matching the orphaned-body signature.
+  - If `wasm_compile` regresses at all, revert and escalate; do not iterate
+    blindly.
+
+### Estimated impact
+
+~134 official test262 fails in the `Cannot destructure 'null' or 'undefined'
+[in C_method/C___priv_method/__anonClass_*___priv_method]` families flip to
+pass, with **zero** expected movement in any other bucket (bodies stay eager).
+A positive net that is *not* ≈+134-and-nothing-else is a signal to investigate
+before merge.
 
 ## Suspended Work
 ## Suspended Work
