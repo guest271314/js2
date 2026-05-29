@@ -56,129 +56,29 @@ import {
 } from "./nodes.js";
 import { isSideEffecting } from "./passes/dead-code.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
-
-/**
- * Information about a tagged-union struct type emitted into the WasmGC module.
- * See `passes/tagged-union-types.ts` for the registry that produces these.
- */
-export interface IrUnionLowering {
-  /** WasmGC type index of the `$union_<members>` struct. */
-  readonly typeIdx: number;
-  /** Field index of the `$tag` i32 discriminator. */
-  readonly tagFieldIdx: number;
-  /** Field index of the `$val` field carrying the member scalar. */
-  readonly valFieldIdx: number;
-  /** Canonical tag value (i32 constant) for each ValType kind. */
-  tagFor(member: ValType): number;
-}
-
-/**
- * Information about a heap-allocated scalar box — see
- * `IrType { kind: "boxed", inner }`. Resolved lazily by the lowering pass.
- */
-export interface IrBoxedLowering {
-  /** WasmGC type index of the `$box_<inner>` struct. */
-  readonly typeIdx: number;
-  /** Field index of the inner `$val`. */
-  readonly valFieldIdx: number;
-}
-
-/**
- * Information about a registered WasmGC struct that backs an
- * `IrType.object` shape. The resolver memoizes one of these per shape.
- *
- * `fieldIdx(name)` returns the WasmGC struct's field index for the given
- * shape field name (in the shape's canonical order). It throws when the
- * name is not a member of the shape — the lowerer catches via the
- * surrounding try/catch and emits a clean fall-back error.
- */
-export interface IrObjectStructLowering {
-  /** WasmGC type index of the registered struct. */
-  readonly typeIdx: number;
-  /** Field index for each field name in the shape's canonical order. */
-  fieldIdx(name: string): number;
-}
-
-/**
- * Slice 3 (#1169c): WasmGC type info for a closure value. Two structs
- * are involved per closure construction site:
- *   - The SUPERTYPE struct (`structTypeIdx`): contains only the funcref
- *     field. Carried by the IrType.closure ValType so all closures
- *     sharing a signature have the same Wasm-level type.
- *   - The SUBTYPE struct (resolved via `resolveClosureSubtype`): adds
- *     the capture fields. Constructed at the closure's creation site
- *     (`struct.new <subtype>`) and `ref.cast`-ed inside the lifted
- *     body to read captures.
- *
- * `funcTypeIdx` is the lifted function's Wasm func type
- * `(ref $base, ...sig.params) -> sig.returnType` — used by `call_ref`
- * at the call site.
- */
-export interface IrClosureLowering {
-  readonly structTypeIdx: number;
-  readonly funcFieldIdx: number;
-  /** Field index for capture position `i` (0-based). Valid only for subtype lowerings. */
-  capFieldIdx(index: number): number;
-  readonly funcTypeIdx: number;
-}
-
-/**
- * Slice 3 (#1169c): WasmGC type info for a ref cell over a primitive
- * value type. Single-field struct `(struct (field $value (mut T)))`.
- */
-export interface IrRefCellLowering {
-  readonly typeIdx: number;
-  readonly fieldIdx: number;
-}
-
-/**
- * Slice 6 (#1169e): WasmGC type info for a vec struct (the runtime layout
- * for `Array<T>` / tuple types). The struct is `{ length: i32, data: (ref
- * $arr) }` where `$arr` is the element array type. This interface is the
- * lowerer's contract for emitting `vec.len` and `vec.get` against a known
- * vec value's IrType.
- *
- *   - `vecStructTypeIdx`   Wasm struct type index of the vec.
- *   - `lengthFieldIdx`     field index of the i32 length (typically 0).
- *   - `dataFieldIdx`       field index of the data array ref (typically 1).
- *   - `arrayTypeIdx`       Wasm array type index of the data array.
- *   - `elementValType`     element ValType — used by `vec.get` to lower
- *                           the result and (recursively, via the resolver)
- *                           to widen the element to the loop variable's
- *                           declared type when needed.
- */
-export interface IrVecLowering {
-  readonly vecStructTypeIdx: number;
-  readonly lengthFieldIdx: number;
-  readonly dataFieldIdx: number;
-  readonly arrayTypeIdx: number;
-  readonly elementValType: ValType;
-}
-
-/**
- * Slice 4 (#1169d): WasmGC type info for a class declared in the
- * compilation unit. The class's struct + constructor + method funcs
- * are all registered by the legacy `collectClassDeclaration` pass before
- * the IR runs; this interface just exposes them by name.
- *
- *   - `structTypeIdx`        Wasm struct type index for the class
- *   - `fieldIdx(name)`       Wasm struct field index for a user field name
- *                             (the legacy `__tag` prefix at field 0 is
- *                             accounted for here so the IR doesn't need to
- *                             reason about it).
- *   - `constructorFuncName`  legacy-registered name of the constructor
- *                             function (`<className>_new`); the resolver's
- *                             `resolveFunc` maps it to the funcIdx.
- *   - `methodFuncName(name)` legacy-registered name of an instance method
- *                             (`<className>_<methodName>`); the resolver's
- *                             `resolveFunc` maps it to the funcIdx.
- */
-export interface IrClassLowering {
-  readonly structTypeIdx: number;
-  fieldIdx(name: string): number;
-  readonly constructorFuncName: string;
-  methodFuncName(name: string): string;
-}
+// #1713: BackendEmitter trait seam. The layout-handle types this file
+// historically declared now live in `backend/handles.js` and are re-exported
+// below for backwards compatibility.
+import type { BackendEmitter } from "./backend/emitter.js";
+import { WasmGcEmitter } from "./backend/wasmgc-emitter.js";
+import type {
+  IrBoxedLowering,
+  IrClassLowering,
+  IrClosureLowering,
+  IrObjectStructLowering,
+  IrRefCellLowering,
+  IrUnionLowering,
+  IrVecLowering,
+} from "./backend/handles.js";
+export type {
+  IrBoxedLowering,
+  IrClassLowering,
+  IrClosureLowering,
+  IrObjectStructLowering,
+  IrRefCellLowering,
+  IrUnionLowering,
+  IrVecLowering,
+};
 
 export interface IrLowerResolver {
   resolveFunc(ref: IrFuncRef): number;
@@ -332,7 +232,14 @@ export interface IrLowerResult {
   readonly func: WasmFunction;
 }
 
-export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolver): IrLowerResult {
+export function lowerIrFunctionToWasm(
+  func: IrFunction,
+  resolver: IrLowerResolver,
+  // #1713: the active backend. Defaults to WasmGcEmitter so every existing
+  // caller (integration.ts) is unchanged and Phase 1 stays zero-delta.
+  // #1714/#1715 pass an explicit emitter selected by compile target.
+  emitter: BackendEmitter = new WasmGcEmitter(),
+): IrLowerResult {
   if (func.blocks.length === 0) {
     throw new Error(`ir/lower: function ${func.name} has no blocks`);
   }
@@ -704,7 +611,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
   const emitInstrTree = (instr: IrInstr, out: Instr[]): void => {
     switch (instr.kind) {
       case "const":
-        emitConst(instr, out, func.name);
+        emitter.emitConst(instr, func.name, out);
         return;
       case "call": {
         for (const a of instr.args) emitValue(a, out);
@@ -712,11 +619,11 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         return;
       }
       case "global.get":
-        out.push({ op: "global.get", index: resolver.resolveGlobal(instr.target) });
+        emitter.emitGlobalGet(resolver.resolveGlobal(instr.target), out);
         return;
       case "global.set":
         emitValue(instr.value, out);
-        out.push({ op: "global.set", index: resolver.resolveGlobal(instr.target) });
+        emitter.emitGlobalSet(resolver.resolveGlobal(instr.target), out);
         return;
       case "binary": {
         const isJsBitwise =
@@ -813,12 +720,12 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
           }
           return;
         }
-        out.push({ op: instr.op });
+        emitter.emitBinary(instr.op, out);
         return;
       }
       case "unary":
         emitValue(instr.rand, out);
-        out.push({ op: instr.op });
+        emitter.emitUnary(instr.op, out);
         return;
       case "select":
         // Wasm `select` pops [val1, val2, cond] and pushes val1 if cond != 0
@@ -827,7 +734,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitValue(instr.whenTrue, out);
         emitValue(instr.whenFalse, out);
         emitValue(instr.condition, out);
-        out.push({ op: "select" });
+        emitter.emitSelect(out);
         return;
       case "if": {
         // (#1392) Value-producing short-circuiting if/else. Lowers to:
@@ -879,12 +786,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitValue(instr.elseValue, elseBody);
 
         // 4. Wrap in `if (result T) ... else ... end`.
-        out.push({
-          op: "if",
-          blockType,
-          then: thenBody,
-          else: elseBody,
-        });
+        emitter.emitIf(blockType, thenBody, elseBody, out);
         return;
       }
       case "raw.wasm":
@@ -1201,8 +1103,10 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         const vec = resolver.resolveVec?.(vecT);
         if (!vec) throw new Error(`ir/lower: resolver cannot lower vec for vec.len (${func.name})`);
         emitValue(instr.vec, out);
-        out.push({ op: "struct.get", typeIdx: vec.vecStructTypeIdx, fieldIdx: vec.lengthFieldIdx });
+        emitter.emitVecLen(vec, out);
         // IR-level result is f64 (matches JS Number semantics) — promote.
+        // The f64.convert is an IR-result-type coercion, not a backend op,
+        // so it stays in the caller (#1713 spec section 3).
         out.push({ op: "f64.convert_i32_s" });
         return;
       }
@@ -1213,9 +1117,9 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         if (!vec) throw new Error(`ir/lower: resolver cannot lower vec for vec.get (${func.name})`);
         // Stack: dataArray, index → element
         emitValue(instr.vec, out);
-        out.push({ op: "struct.get", typeIdx: vec.vecStructTypeIdx, fieldIdx: vec.dataFieldIdx });
+        emitter.emitVecDataPtr(vec, out);
         emitValue(instr.index, out);
-        out.push({ op: "array.get", typeIdx: vec.arrayTypeIdx });
+        emitter.emitElemGet(vec, out);
         return;
       }
       // Slice 7a/7b (#1169f): generator ops.
@@ -1310,12 +1214,12 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
 
         // length = vec.length
         out.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
-        out.push({ op: "struct.get", typeIdx: vec.vecStructTypeIdx, fieldIdx: vec.lengthFieldIdx });
+        emitter.emitVecLen(vec, out);
         out.push({ op: "local.set", index: slotWasmIdx(instr.lengthSlot) });
 
         // data = vec.data
         out.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
-        out.push({ op: "struct.get", typeIdx: vec.vecStructTypeIdx, fieldIdx: vec.dataFieldIdx });
+        emitter.emitVecDataPtr(vec, out);
         out.push({ op: "local.set", index: slotWasmIdx(instr.dataSlot) });
 
         // counter = 0
@@ -1333,7 +1237,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         // element = data[counter]
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.dataSlot) });
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
-        loopBody.push({ op: "array.get", typeIdx: vec.arrayTypeIdx });
+        emitter.emitElemGet(vec, loopBody);
         loopBody.push({ op: "local.set", index: slotWasmIdx(instr.elementSlot) });
 
         // Body instrs
@@ -1958,7 +1862,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
       const useCount = totalUses.get(instr.result) ?? 0;
       if (useCount === 0 && isSideEffecting(instr)) {
         emitInstrTree(instr, out);
-        out.push({ op: "drop" });
+        emitter.emitDrop(out);
       }
       // Intra-block-only with at least one use: single-use inlines at
       // use site, multi-use uses the lazy-tee pattern at first
@@ -1969,7 +1873,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
     switch (t.kind) {
       case "return":
         for (const v of t.values) emitValue(v, out);
-        out.push({ op: "return" });
+        emitter.emitReturn(out);
         return;
       case "br_if": {
         if (t.ifTrue.args.length !== 0 || t.ifFalse.args.length !== 0) {
@@ -1986,7 +1890,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         emitBlockBody(thenBlock, thenOps);
         emitBlockBody(elseBlock, elseOps);
         const blockType: BlockType = { kind: "empty" };
-        out.push({ op: "if", blockType, then: thenOps, else: elseOps });
+        emitter.emitIf(blockType, thenOps, elseOps, out);
         return;
       }
       case "br": {
@@ -2007,7 +1911,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
         return;
       }
       case "unreachable":
-        out.push({ op: "unreachable" });
+        emitter.emitUnreachable(out);
         return;
     }
   };
@@ -2020,7 +1924,7 @@ export function lowerIrFunctionToWasm(func: IrFunction, resolver: IrLowerResolve
   // and satisfies that contract without emitting a real value.
   const last = body[body.length - 1];
   if (!last || last.op !== "return") {
-    body.push({ op: "unreachable" });
+    emitter.emitUnreachable(body);
   }
 
   const paramTypes: ValType[] = func.params.map((p) => lowerIrTypeToValType(p.type, resolver, func.name));
@@ -2421,7 +2325,9 @@ function emitJsToInt32(out: Instr[], tmpLocalIdx: number): void {
   // Stack: [i32]
 }
 
-function emitConst(instr: Extract<IrInstr, { kind: "const" }>, out: Instr[], funcName: string): void {
+// #1713: exported as `emitConstInstr` so `WasmGcEmitter.emitConst` can delegate
+// to this single const-lowering implementation (kept here, not duplicated).
+export function emitConstInstr(instr: Extract<IrInstr, { kind: "const" }>, out: Instr[], funcName: string): void {
   const v = instr.value;
   switch (v.kind) {
     case "i32":
