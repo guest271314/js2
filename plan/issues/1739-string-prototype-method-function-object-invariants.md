@@ -1,5 +1,5 @@
 ---
-id: 1732
+id: 1739
 title: "String.prototype methods fail not-a-constructor (A7) + .length-DontEnum (A8) invariants across the suite"
 status: ready
 created: 2026-05-29
@@ -15,7 +15,7 @@ es_edition: 5
 test262_fail: ~40
 related: [930, 1632, 1731]
 ---
-# #1732 — String.prototype method function-object invariants (A7 not-a-constructor, A8 .length DontEnum)
+# #1739 — String.prototype method function-object invariants (A7 not-a-constructor, A8 .length DontEnum)
 
 ## Problem
 

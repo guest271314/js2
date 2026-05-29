@@ -1,5 +1,5 @@
 ---
-id: 1728
+id: 1736
 title: "ArrayBuffer.prototype.byteLength returns NaN in JS-host mode"
 status: backlog
 created: 2026-05-29
@@ -12,7 +12,7 @@ goal: test262-conformance
 sprint: Backlog
 related: [1717, 1700, 1350]
 ---
-# #1728 — ArrayBuffer byteLength returns NaN in JS-host mode
+# #1736 — ArrayBuffer byteLength returns NaN in JS-host mode
 
 ## Problem
 
