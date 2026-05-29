@@ -5,7 +5,7 @@ status: done
 completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
-child_issues: [1724]
+child_issues: [1725]
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -93,24 +93,24 @@ runtime-divergence (AST) data is reachable until it clears.
 
 | # | Surface entry | Class | Count | Root cause | Tracking | Size | RW weight |
 |---|---------------|-------|------:|-----------|----------|------|-----------|
-| 1 | `WebAssembly.compile(): __fnctor_Parser_new failed: any.convert_extern[0] expected externref, found ref.cast null of type (ref null 94)` | codegen-acceptance (invalid Wasm) | 1 (blocks all) | functor-constructor body emits `any.convert_extern` on a `ref.cast`-narrowed struct ref instead of `extern.convert_any` from anyref | **NEW → #1724** | M | **HIGH** (Parser ctor = acorn hot path; gates everything) |
+| 1 | `WebAssembly.compile(): __fnctor_Parser_new failed: any.convert_extern[0] expected externref, found ref.cast null of type (ref null 94)` | codegen-acceptance (invalid Wasm) | 1 (blocks all) | functor-constructor body emits `any.convert_extern` on a `ref.cast`-narrowed struct ref instead of `extern.convert_any` from anyref | **NEW → #1725** | M | **HIGH** (Parser ctor = acorn hot path; gates everything) |
 | 2 | `Property 'X' does not exist on type 'Y'` | ts-property-noise | 464 | untyped JS through TS checker | not filed — known noise (#1679/#1690) | — | — |
 | 3 | `Object is possibly 'undefined'` | ts-possibly-null | 3 | same untyped-JS checker noise | not filed — known noise | — | — |
 | 4 | `comparison … types 'number' and 'string' have no overlap` (1); `body of statement cannot be the empty statement` (1); `Operator 'X' cannot be applied to types 'X' and 'X'` (2) | "other" diagnostics | 4 | TS-checker diagnostics on untyped acorn JS; **not** `success:false` errors (compile succeeded) | not filed — non-blocking diagnostics | — | — |
-| 5 | runtime AST divergence (per-node, per-option) | runtime-divergence | 0 observed | **unreachable** — binary invalid, run+diff skipped | re-run after #1724 lands | — | — |
+| 5 | runtime AST divergence (per-node, per-option) | runtime-divergence | 0 observed | **unreachable** — binary invalid, run+diff skipped | re-run after #1725 lands | — | — |
 
 ### Conclusions
 
-- **One** genuine, un-tracked root cause → filed as **#1724** (functor
+- **One** genuine, un-tracked root cause → filed as **#1725** (functor
   constructor `any.convert_extern` on non-extern ref). It is the sole gate on
   the entire acorn surface.
 - The prior two acorn blockers are **closed**: #1679 (`new this(...)`) and
-  #1690 (`isInAstralSet` stale module-global index). #1724 is the third in the
+  #1690 (`isInAstralSet` stale module-global index). #1725 is the third in the
   sequence, distinct from both (different function, different validator error).
 - **No runtime-divergence (AST) gaps are observable yet** — they are the
   higher-value, harder-to-find class (acceptance #3), but they only become
-  reachable once #1724 makes the binary validate. This issue is re-run each
-  dogfood lap; the next run after #1724 lands is expected to expose the AST
+  reachable once #1725 makes the binary validate. This issue is re-run each
+  dogfood lap; the next run after #1725 lands is expected to expose the AST
   layer for the 5 fixtures (`arith/class/control/fn/strings`).
 - The oracle self-check passed (`identicalSourcesEqual && differingSourcesDivergent`),
   so the diff harness itself is sound — the skip is purely the red binary.

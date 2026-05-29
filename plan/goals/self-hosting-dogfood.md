@@ -63,7 +63,7 @@ differential test, not a green compile.
 | **1710** | acorn dogfood harness: compile + validate + differential-AST vs node-acorn | 57 | ready | high |
 | **1711** | acorn failure-surface triage: bucket + file sized child issues | 57 | done | high |
 | **1712** | acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn | 57 | backlog | high |
-| **1724** | acorn: `__fnctor_<Ctor>_new` emits `any.convert_extern` on a `ref.cast`-null struct ref → invalid Wasm (next blocker, from #1711 triage) | Backlog | ready | high |
+| **1725** | acorn: `__fnctor_<Ctor>_new` emits `any.convert_extern` on a `ref.cast`-null struct ref → invalid Wasm (next blocker, from #1711 triage) | Backlog | ready | high |
 
 ## Triage lap 1 (#1711, 2026-05-29)
 
@@ -72,9 +72,9 @@ the binary fails `WebAssembly.compile()` at `__fnctor_Parser_new`
 (`any.convert_extern[0] expected externref, found ref.cast null of type
 (ref null 94)`). This is the **third** acorn blocker in sequence (after #1679,
 #1690) and the sole gate on the surface — all 5 AST-diff fixtures are skipped
-because the binary is invalid. Filed as **#1724** (codegen-acceptance, HIGH
+because the binary is invalid. Filed as **#1725** (codegen-acceptance, HIGH
 real-world weight: it's the `Parser` constructor on acorn's hot path). No
-runtime-AST-divergence gaps are observable until #1724 lands; re-run the
+runtime-AST-divergence gaps are observable until #1725 lands; re-run the
 harness then for lap 2. Full triage table in #1711.
 
 ## Success criteria

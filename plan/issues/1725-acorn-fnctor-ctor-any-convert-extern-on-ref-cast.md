@@ -1,5 +1,5 @@
 ---
-id: 1724
+id: 1725
 title: "acorn dogfood: __fnctor_<Ctor>_new emits any.convert_extern on a ref.cast-null struct ref → invalid Wasm"
 status: ready
 created: 2026-05-29
@@ -15,7 +15,7 @@ sprint: Backlog
 parent: 1711
 related: [1690, 1679, 1710, 1284, 1298]
 ---
-# #1724 — acorn functor constructor emits `any.convert_extern` on a non-extern ref → invalid Wasm
+# #1725 — acorn functor constructor emits `any.convert_extern` on a non-extern ref → invalid Wasm
 
 ## Problem
 
