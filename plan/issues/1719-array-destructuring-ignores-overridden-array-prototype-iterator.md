@@ -763,3 +763,48 @@ sign off on the `ctx.protoOverrides` table shape + the well-known-key whitelist
 before implementation, since it becomes the shared substrate for the cluster.
 
 No code landed by this design pass; worktree clean (gitignored `.tmp/` probes only).
+
+## CPR build plan + progress (senior-dev sdev-cpr, 2026-05-30)
+
+**Prerequisite DONE**: #1742 the `this`-receiver runtime-test guard — PR #961
+(branch issue-1719-cpr2). The override body's `this[i]`/`this.length` now read the
+compiled vec via a runtime `ref.test` chain instead of trapping "illegal cast".
+Zero equivalence regressions (failure set byte-identical to base).
+
+**Tech-lead decision: option (a)** — normalise the typed vec (`$vec_f64`/`$vec_i32`)
+→ the canonical externref-vec at the dstr/for-of/spread gate BEFORE driving the
+override. Single canonical representation; fires the override exactly ONCE at the
+observation boundary; internal array iterations stay on the typed-vec fast path
+(no global re-route) → avoids the systemic re-entrancy that killed the first attempt.
+GATE STRICTLY behind the S1 brand (`arrayIteratorMaybeOverridden` + `protoOverrides.has`)
+so output is byte-identical when no override exists (diff the wasm to confirm).
+
+Build order (each step a commit; gate-on-brand throughout):
+
+1. **CPR-1 write-arm** — in `compileElementAssignment` (assignment.ts ~2451), detect
+   `Array.prototype[Symbol.iterator] = fn` / `Array.prototype.values = fn` (the LHS
+   shape `sourceOverridesArrayIterator` already recognises). Lift the RHS closure via
+   `compileArrowAsClosure` (handles `function*` generators), recover its
+   `__closure_N` funcIdx + funcTypeIdx (from `ctx.closureInfoByTypeIdx` / closureMap),
+   and store into `ctx.protoOverrides.get("Array").set("@@iterator"|"values", {funcIdx,
+   funcTypeIdx})`. Force-emit + root the closure so DCE doesn't drop it (it's otherwise
+   only referenced from the table, not the wasm body).
+2. **Runtime drain** — a generic iterator next()-protocol helper (`__iterator_next`-style)
+   that, given the override-produced iterator externref, calls `.next()` and unpacks
+   `{value, done}` — handling BOTH a `function*` (compiled generator → its own next)
+   and a plain `{ next(){…} }` override object. Reuse #1620's multi-value
+   `__iterator_next` if it covers both; else extend.
+3. **CPR-1 read-drive** — at the dstr gate (destructuring.ts ~892), when
+   `arrayDstrNeedsIdentity(ctx,isStringRHS)` AND `ctx.protoOverrides` has the Array
+   `@@iterator` override: normalise the typed-vec RHS → canonical externref-vec, call
+   the stored override funcref with that as `this` via `__call_fn_method_0`, then drain
+   via the next()-protocol into the binding elements. PROVE `[a,b,z]=arr` with an
+   override yielding 42 at slot 3 → z===42, terminates.
+4. **CPR-2** — `Array.prototype.values` alias (same table key family) + for-of
+   (loops.ts ~1060) + spread read-consults of the same protoOverrides table.
+
+Guardrails: this is the array hot path (#1016/#1021/#1320). If the normalise step
+sprawls beyond the gate sites, STOP + ping tech-lead. Diff wasm on an override-free
+module to confirm byte-identical.
+
+**Status**: #1742 prerequisite landed (PR #961). Starting CPR-1 write-arm.
