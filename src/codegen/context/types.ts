@@ -454,7 +454,7 @@ export interface CodegenContext {
    * own-property descriptors (`_wasmStructAccessors` / #1629), which live on
    * values, not prototypes.
    */
-  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number }>>;
+  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number; globalIdx: number }>>;
   /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
