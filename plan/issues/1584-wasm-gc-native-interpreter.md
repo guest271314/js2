@@ -419,26 +419,34 @@ loop. This slice proves the OTHER half of the Component-3 claim — *"the dispat
 loop is itself compiled by js2wasm to Wasm-GC"* — by compiling the interpreter
 through the real `compile()` and showing its execution matches.
 
-### What landed (branch `issue-1584-wasmgc-vm`, disjoint from the emitter slice)
-- `src/ir/backend/bytecode-vm-source.ts` — the dispatch loop authored in the
-  js2wasm-compilable subset, held as `BYTECODE_VM_DISPATCH_SRC` (source text for
-  `compile()`), plus `buildBytecodeVmModule(...)` which wraps it with an exported
-  entry that builds `code`/`constPool`/`locals` in-module. Semantically identical
-  to `runBytecode` in `bytecode-vm.ts` (same opcodes, same stack machine, same
-  JZ/JMP). Opcode literals are restated inline and **pinned to the `OP` enum by
-  an assertion** (a compiled Wasm module can't import the host enum).
-- `tests/ir-bytecode-wasmgc-vm.test.ts` — **quadruple-equivalence** extending
-  #1715's triple: for `f(a,b)=a+b`, `g(a)={let x=a*2;return x}`, `h(a,b)=a>0?a+b:a-b`,
-  asserts `host-TS VM (runSink) == Wasm-GC-compiled VM == WasmGC-compiled source
-  == plain JS`. Plus NEG + every CMP_* opcode driven through the compiled VM, the
-  contract-pin assertion, and malformed-stream sentinel checks. **8 tests green.**
-  The bytecode for both VM arms comes from the SAME `BytecodeEmitter` #1715 uses
-  (consumed read-only).
+### What landed (branch `issue-1584-wasmgc-vm`, slice (b) per PR #955 contract)
+- `tests/ir-bytecode-wasmgc-vm.test.ts` (ONE new file) — proves slice (b)'s
+  acceptance criterion: the dispatch loop **compiled BY js2wasm** runs the same
+  bytecode and equals the TS VM. Quadruple equivalence extending #1715's triple:
+  for `f(a,b)=a+b`, `g(a)={let x=a*2;return x}`, `h(a,b)=a>0?a+b:a-b`, asserts
+  `host-TS VM (runSink) == Wasm-GC-compiled VM == WasmGC-compiled source == JS`,
+  plus NEG + every CMP_* opcode through the compiled VM. **5 tests green.**
+- **Crucially, the Wasm-GC VM arm compiles the ACTUAL `src/ir/backend/bytecode-vm.ts`
+  file** (per the contract's slice-(b) acceptance test #2), not a hand-kept copy.
+  `compileVmModule()` reads that file at test time and applies only mechanical
+  transforms (drop the host `import`, inline `OP.*` numbers, drop the
+  `BytecodeSink`-typed `runSink`, append an in-module-build entry for the #1700
+  export-ABI gap). The dispatch-loop body is compiled verbatim — if anyone edits
+  `bytecode-vm.ts`, the test compiles the edited loop. **No second copy to drift.**
+  (An earlier increment held a `bytecode-vm-source.ts` string copy; removed in
+  favor of compiling the real file, which is the stronger, drift-free proof.)
+- The bytecode for both VM arms comes from the SAME `BytecodeEmitter` #1715 uses
+  (the `OP` enum + `BytecodeSink` consumed READ-ONLY from sdev-emitter's
+  `bytecode-emitter.ts`, per the #1584 one-owner contract).
 
-**Zero conformance delta:** two NEW files only. `lower.ts`, `WasmGcEmitter`,
-`bytecode-emitter.ts`, `bytecode-vm.ts`, and the default compile pipeline are
-untouched; the VM source is reached solely by this test. `tsc` clean, `biome`
-clean.
+**Zero conformance delta:** ONE new test file; `bytecode-vm.ts` itself, `lower.ts`,
+the emitters, and the default pipeline are untouched (the test only *reads* the
+VM file). `tsc` clean, `biome` clean.
+
+**Encoding:** STACK machine, per the contract's §1a staging note ("build on the
+#1715 stack shapes first; the reg+acc flip is a later coordinated bump owned by
+slice (a)"). The reg+acc switch lands as one coordinated commit with sdev-emitter,
+NOT raced independently.
 
 ### The load-bearing findings (what #1584 Phase 1 must carry forward)
 

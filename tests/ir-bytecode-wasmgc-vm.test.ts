@@ -1,46 +1,92 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
-import {
-  BYTECODE_VM_DISPATCH_SRC,
-  VM_ERR_BAD_OPCODE,
-  VM_ERR_STEP_BUDGET,
-  buildBytecodeVmModule,
-} from "../src/ir/backend/bytecode-vm-source.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
 import { buildImports } from "../src/runtime.js";
 
-// #1584 — Wasm-GC-native dispatch loop (the VM slice).
+// #1584 slice (b) — the Wasm-GC-native dispatch loop.
 //
 // #1715 proved the #1713 backend seam can target a bytecode stream run by a
-// dispatch loop written in HOST TypeScript. This file proves the OTHER half of
-// #1584's claim: the dispatch loop, compiled BY js2wasm to Wasm-GC, runs the
-// same bytecode and produces the same result. So we extend #1715's triple to a
-// QUADRUPLE equivalence, for the same source function:
+// HOST-TS dispatch loop (triple equivalence: runSink == WasmGC-src == JS). This
+// file proves slice (b)'s acceptance criterion from the #1584 contract (PR #955
+// §"Slice (b)"): the dispatch loop, **compiled BY js2wasm to Wasm-GC**, runs the
+// same bytecode and equals the TS-interpreted VM. That makes the equivalence a
+// QUADRUPLE:
 //
 //     host-TS VM  ==  Wasm-GC-compiled VM  ==  WasmGC-compiled source  ==  JS
-//     (runSink)       (compile(vmModule))      (compile(src))             (eval)
+//     (runSink)       (compile(bytecode-vm.ts))  (compile(src))          (eval)
 //
-//   * host-TS VM        — `runSink` over the emitter's opcode stream (#1715).
-//   * Wasm-GC VM        — `bytecode-vm-source.ts` compiled via real compile(),
-//                         executing the SAME opcode stream in-module.
-//   * WasmGC source     — the original TS function compiled via real compile()
-//                         (the production AOT lowering, pins the bytecode result
-//                         against the WasmGC backend, exactly as #1715 did).
-//   * JS                — the reference semantics.
+// Critically — per the contract's slice-(b) acceptance test #2 — the Wasm-GC VM
+// arm compiles **the actual `src/ir/backend/bytecode-vm.ts` file**, not a hand-
+// kept copy. `compileVmModule()` reads that file at test time and applies only
+// the minimal mechanical transforms a "compile the dispatch loop itself" step
+// needs (drop the host `import`, inline the `OP.*` numbers, drop the
+// `BytecodeSink`-typed `runSink` helper which is out of the numeric subset, and
+// append an in-module-build entry because `number[]` can't cross the export ABI
+// — the #1700 gap). The dispatch-loop body itself is compiled verbatim, so if
+// anyone edits `bytecode-vm.ts`, THIS test compiles the edited loop — there is
+// no second copy to drift.
 //
-// The bytecode stream for both VM arms is produced by the SAME `BytecodeEmitter`
-// the #1715 proof uses (contract discipline: we consume it read-only). The arms
-// are hand-lowered exactly as `lower.ts` would drive the emitter (operands
-// first, then the terminal op) — wiring real `lower.ts` to a generic sink is
-// the emitter slice's job (#1584 task; see bytecode-emitter.ts header), not the
-// VM's.
+// Contract discipline (#1584 one-owner rule): the `OP` enum + `BytecodeSink` are
+// owned by sdev-emitter in `bytecode-emitter.ts`; this slice imports them
+// READ-ONLY. The bytecode for the VM arms is produced by the SAME
+// `BytecodeEmitter` the #1715 proof uses. Encoding is the #1715 STACK machine
+// (the contract's §1a staging note: build on stack first; the reg+acc flip is a
+// later coordinated bump owned by slice (a)).
 
 const E = new BytecodeEmitter();
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const VM_FILE = resolve(__dirname, "../src/ir/backend/bytecode-vm.ts");
+
+/**
+ * Read the real `bytecode-vm.ts` and turn it into a self-contained module that
+ * `compile()` can lower, WITHOUT copying the dispatch-loop body. The four
+ * transforms are exactly what a "compile the dispatch loop itself" step needs;
+ * none touches the loop logic:
+ *   1. drop the `import` line — a compiled Wasm module has no host TS to import.
+ *   2. inline `OP.NAME` -> its numeric value (from the imported enum) so the
+ *      switch arms are integer-literal cases.
+ *   3. drop `runSink` — it is typed against `BytecodeSink` (an object), outside
+ *      the numeric subset; the VM entry under test is `runBytecode`.
+ *   4. append an exported entry that builds `code` / `constPool` / `args`
+ *      in-module (the #1700 export-ABI constraint: `number[]` can't be a param).
+ */
+function compileVmModule(
+  entryParams: readonly string[],
+  code: readonly number[],
+  constPool: readonly number[],
+  argInit: readonly string[],
+): string {
+  let src = readFileSync(VM_FILE, "utf8");
+  // 1. drop every import line (host-only).
+  src = src.replace(/^import\b[^\n]*\n/gm, "");
+  // 2. inline OP.NAME numeric values.
+  for (const [name, value] of Object.entries(OP)) {
+    src = src.replaceAll(`OP.${name}`, String(value));
+  }
+  // 3. drop the runSink convenience (BytecodeSink-typed -> out of subset). It is
+  //    the trailing exported helper; cut from its doc-comment to EOF.
+  src = src.replace(/\/\*\* Convenience[\s\S]*$/m, "");
+  // 4. append the in-module-build entry.
+  const params = entryParams.map((p) => `${p}: number`).join(", ");
+  const entry = `
+export function run(${params}): number {
+  const code: number[] = [${code.join(", ")}];
+  const constPool: number[] = [${constPool.join(", ")}];
+  const args: number[] = [${argInit.join(", ")}];
+  return runBytecode(code, constPool, args);
+}
+`;
+  return src + entry;
+}
+
 // ── Compile + run a WasmGC export taking only number params ────────────────
 async function runWasm(src: string, fn: string, args: number[]): Promise<number> {
-  const r = compile(src, { fileName: "test.ts" });
+  const r = compile(src, { fileName: "vm.ts" });
   if (!r.success) throw new Error(`compile error: ${r.errors[0]?.message}`);
   const imports = buildImports(r.imports, undefined, r.stringPool);
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
@@ -52,43 +98,12 @@ async function runWasm(src: string, fn: string, args: number[]): Promise<number>
   return f(...args);
 }
 
-describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () => {
-  // ── Contract alignment: the VM source's opcode literals == the OP enum ────
-  // The VM source restates the opcode numbers inline (a compiled Wasm module
-  // can't import the host enum). If the emitter changes an opcode value, this
-  // fails loudly — the intended early warning per the one-owner contract.
-  it("VM source opcode literals match the OP enum (contract pin)", () => {
-    const want: Record<string, number> = {
-      OP_CONST: OP.CONST,
-      OP_LOAD: OP.LOAD,
-      OP_STORE: OP.STORE,
-      OP_ADD: OP.ADD,
-      OP_SUB: OP.SUB,
-      OP_MUL: OP.MUL,
-      OP_CMP_GT: OP.CMP_GT,
-      OP_CMP_LT: OP.CMP_LT,
-      OP_CMP_GE: OP.CMP_GE,
-      OP_CMP_LE: OP.CMP_LE,
-      OP_CMP_EQ: OP.CMP_EQ,
-      OP_NEG: OP.NEG,
-      OP_JZ: OP.JZ,
-      OP_JMP: OP.JMP,
-      OP_RET: OP.RET,
-    };
-    for (const [name, value] of Object.entries(want)) {
-      const re = new RegExp(`const\\s+${name}\\s*=\\s*(\\d+);`);
-      const m = BYTECODE_VM_DISPATCH_SRC.match(re);
-      expect(m, `VM source must declare ${name}`).not.toBeNull();
-      expect(Number(m![1]), `${name} literal must equal OP.${name.slice(3)}`).toBe(value);
-    }
-  });
-
+describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalence)", () => {
   // ── f(a, b) = a + b ───────────────────────────────────────────────────────
   it("arithmetic: host-VM == WasmGC-VM == WasmGC-src == JS for f(a,b)=a+b", async () => {
     const src = `export function f(a: number, b: number): number { return a + b; }`;
     const js = (a: number, b: number): number => a + b;
 
-    // hand-lower: LOAD 0, LOAD 1, ADD, RET
     const sink = (): BytecodeSink => {
       const s = new BytecodeSink();
       E.emitLocalGet(0, s);
@@ -98,7 +113,7 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       return s;
     };
     const s0 = sink();
-    const vmMod = buildBytecodeVmModule("run", ["a", "b"], s0.code, s0.constPool, ["a", "b"]);
+    const vmMod = compileVmModule(["a", "b"], s0.code, s0.constPool, ["a", "b"]);
 
     for (const [a, b] of [
       [2, 3],
@@ -107,12 +122,9 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       [100, -100],
     ]) {
       const expected = js(a, b);
-      const hostVm = runSink(sink(), [a, b]);
-      const wasmVm = await runWasm(vmMod, "run", [a, b]);
-      const wasmSrc = await runWasm(src, "f", [a, b]);
-      expect(hostVm).toBe(expected);
-      expect(wasmVm).toBe(expected);
-      expect(wasmSrc).toBe(expected);
+      expect(runSink(sink(), [a, b])).toBe(expected);
+      expect(await runWasm(vmMod, "run", [a, b])).toBe(expected);
+      expect(await runWasm(src, "f", [a, b])).toBe(expected);
     }
   });
 
@@ -124,7 +136,6 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       return x;
     };
 
-    // hand-lower: LOAD 0, CONST 2, MUL, STORE 1, LOAD 1, RET (locals: [a, x])
     const sink = (): BytecodeSink => {
       const s = new BytecodeSink();
       E.emitLocalGet(0, s);
@@ -136,8 +147,8 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       return s;
     };
     const s0 = sink();
-    // locals[0] = a (param), locals[1] = x (declared, zero-init)
-    const vmMod = buildBytecodeVmModule("run", ["a"], s0.code, s0.constPool, ["a", "0"]);
+    // args[0] = a (param), args[1] = x (declared local, zero-init)
+    const vmMod = compileVmModule(["a"], s0.code, s0.constPool, ["a", "0"]);
 
     for (const a of [3, -4, 0, 1.5, 1000]) {
       const expected = js(a);
@@ -147,7 +158,7 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
     }
   });
 
-  // ── h(a, b) = a > 0 ? a + b : a - b (the conditional branch + JZ/JMP) ─────
+  // ── h(a, b) = a > 0 ? a + b : a - b (conditional branch + JZ/JMP) ─────────
   it("branch: host-VM == WasmGC-VM == WasmGC-src == JS for h(a,b)=a>0?a+b:a-b", async () => {
     const src = `export function h(a: number, b: number): number { return a > 0 ? a + b : a - b; }`;
     const js = (a: number, b: number): number => (a > 0 ? a + b : a - b);
@@ -176,7 +187,7 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       return s;
     };
     const s0 = sink();
-    const vmMod = buildBytecodeVmModule("run", ["a", "b"], s0.code, s0.constPool, ["a", "b"]);
+    const vmMod = compileVmModule(["a", "b"], s0.code, s0.constPool, ["a", "b"]);
 
     for (const [a, b] of [
       [5, 3],
@@ -192,22 +203,21 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
     }
   });
 
-  // ── NEG + the remaining compare opcodes, exercised through the compiled VM ─
-  // These opcodes are in the subset but not hit by f/g/h; cover them directly
-  // so the Wasm-GC dispatch arm is exercised end-to-end for every opcode.
+  // ── NEG + the remaining compare opcodes through the compiled VM ──────────
+  // f/g/h don't hit NEG or CMP_LT/GE/LE/EQ; exercise them so the Wasm-GC
+  // dispatch arm covers every opcode `bytecode-vm.ts` implements.
   it("WasmGC-VM covers NEG and all CMP_* opcodes", async () => {
-    // k(a) = -(a)        ; LOAD 0, NEG, RET
+    // k(a) = -a ; LOAD 0, NEG, RET
     const negSink = new BytecodeSink();
     E.emitLocalGet(0, negSink);
     E.emitUnary("f64.neg", negSink);
     E.emitReturn(negSink);
-    const negMod = buildBytecodeVmModule("run", ["a"], negSink.code, negSink.constPool, ["a"]);
+    const negMod = compileVmModule(["a"], negSink.code, negSink.constPool, ["a"]);
     for (const a of [3, -4, 0, 1.5]) {
       expect(runSink(negSink, [a])).toBe(-a);
       expect(await runWasm(negMod, "run", [a])).toBe(-a);
     }
 
-    // For each compare op: cmp(a,b) = (a OP b) ? 1 : 0 ; LOAD 0, LOAD 1, CMP, RET
     const compares: Array<[Parameters<typeof E.emitBinary>[0], (a: number, b: number) => number]> = [
       ["f64.lt", (a, b) => (a < b ? 1 : 0)],
       ["f64.ge", (a, b) => (a >= b ? 1 : 0)],
@@ -220,7 +230,7 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
       E.emitLocalGet(1, s);
       E.emitBinary(op, s);
       E.emitReturn(s);
-      const mod = buildBytecodeVmModule("run", ["a", "b"], s.code, s.constPool, ["a", "b"]);
+      const mod = compileVmModule(["a", "b"], s.code, s.constPool, ["a", "b"]);
       for (const [a, b] of [
         [1, 2],
         [2, 2],
@@ -228,33 +238,16 @@ describe("#1584 — Wasm-GC-native dispatch loop (quadruple equivalence)", () =>
         [-1, -1],
       ]) {
         const expected = ref(a, b);
-        expect(runSink(s, [a, b]), `host VM ${op}(${a},${b})`).toBe(expected);
-        expect(await runWasm(mod, "run", [a, b]), `wasm VM ${op}(${a},${b})`).toBe(expected);
+        expect(runSink(s, [a, b]), `host ${op}(${a},${b})`).toBe(expected);
+        expect(await runWasm(mod, "run", [a, b]), `wasm ${op}(${a},${b})`).toBe(expected);
       }
     }
-  });
-
-  // ── The compiled VM surfaces malformed streams as sentinels, not a hang ────
-  // Standalone Wasm has no host exception to throw a string across, so the
-  // Wasm-GC VM returns sentinel values (the host VM throws — both are a clean,
-  // non-hanging failure). RET-less stream → runs off the end → bad-opcode
-  // sentinel (reading past the array yields a value the switch rejects).
-  it("WasmGC-VM returns the bad-opcode sentinel for an unknown opcode", async () => {
-    // A single unknown opcode (99) then nothing.
-    const mod = buildBytecodeVmModule("run", [], [99], [], []);
-    expect(await runWasm(mod, "run", [])).toBe(VM_ERR_BAD_OPCODE);
-  });
-
-  it("WasmGC-VM returns the step-budget sentinel for an infinite loop", async () => {
-    // JMP 0 forever (target index 0 = the JMP itself) → trips the step budget.
-    const mod = buildBytecodeVmModule("run", [], [OP.JMP, 0], [], []);
-    expect(await runWasm(mod, "run", [])).toBe(VM_ERR_STEP_BUDGET);
   });
 
   // ── Sanity: the host VM still rejects out-of-subset / malformed (as #1715) ─
   it("host VM rejects malformed + out-of-subset (unchanged from #1715)", () => {
     const s = new BytecodeSink();
-    E.emitConst(1, s); // never RET → off the end
+    E.emitConst(1, s); // never RET → runs off the end
     expect(() => runSink(s, [])).toThrow(/unknown opcode/);
     expect(() => E.emitBinary("f64.div", s)).toThrow(/not supported in proof/);
   });
