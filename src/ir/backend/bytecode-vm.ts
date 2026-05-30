@@ -56,6 +56,30 @@ export interface FuncEntry {
    * slots are lazily 0-init on first `LOAD` (same contract as `runBytecode`).
    */
   nLocals: number;
+  /**
+   * #1584 a4 try-throw: the STATIC per-function exception table (table-scan
+   * model). `THROW` scans it for the innermost entry whose `[tryStart, tryEnd)`
+   * covers the throwing pc, then truncates the value stack to `spAtEntry`, pushes
+   * the exn, and jumps to `catchTarget`. `TRY_START`/`TRY_END` are runtime
+   * no-ops (the table is authoritative). Array-of-objects with number-only
+   * fields (no `readonly`/nested-struct — same js2wasm-codegen accommodation as
+   * the FuncEntry array fields). `spAtEntry` is always 0 today (`try` is a
+   * statement-level node with an empty operand stack at entry), but it travels
+   * in the entry for correctness if a non-statement `try` ever appears.
+   */
+  exceptionTable: ExcEntry[];
+}
+
+/** One protected region in a {@link FuncEntry}'s {@link FuncEntry.exceptionTable}. */
+export interface ExcEntry {
+  /** Absolute code index of the region start (inclusive). */
+  tryStart: number;
+  /** Absolute code index of the region end (exclusive). */
+  tryEnd: number;
+  /** Absolute code index of the catch arm to jump to on a covered throw. */
+  catchTarget: number;
+  /** Value-stack depth at try-entry; the stack is truncated to this on catch. */
+  spAtEntry: number;
 }
 
 /**
@@ -123,6 +147,14 @@ export function runProgram(program: Program, args: readonly number[]): number {
     // array nested as a struct field traps when this VM is js2wasm-compiled.
     code: number[];
     constPool: number[];
+    // The function's exception table travels per-frame too, so a THROW that
+    // unwinds into a caller scans THAT caller's table (#1584 a4).
+    excTable: ExcEntry[];
+    // The call-site pc (the CALL/CALL_REF opcode index) in the caller. When a
+    // THROW unwinds into this caller, the region check uses the call-site — NOT
+    // the saved return `pc` (which is one-past the call, outside `[tryStart,
+    // tryEnd)`). Width-agnostic across CALL (2 slots) / CALL_REF (2 slots).
+    callSite: number;
   }
   const frames: Frame[] = [];
 
@@ -133,6 +165,9 @@ export function runProgram(program: Program, args: readonly number[]): number {
   }
   let code = entryFn.code;
   let constPool = entryFn.constPool;
+  // The currently-executing function's exception table (#1584 a4). Swapped on
+  // CALL/CALL_REF + restored on RET, just like `code`/`constPool`.
+  let excTable = entryFn.exceptionTable;
   // Entry locals: args copied into slots 0..arity-1 (the #1715 contract — the
   // entry behaves like `runBytecode(args)`); slots above args.length are lazily
   // 0-init on first LOAD.
@@ -239,6 +274,7 @@ export function runProgram(program: Program, args: readonly number[]): number {
         locals = caller.locals;
         code = caller.code;
         constPool = caller.constPool;
+        excTable = caller.excTable;
         stack.push(result);
         break;
       }
@@ -298,12 +334,21 @@ export function runProgram(program: Program, args: readonly number[]): number {
         if (callee === undefined) {
           throw new Error(`bytecode-vm: CALL funcIdx ${funcIdx} out of range at pc ${pc - 2}`);
         }
-        // Save the caller, install the callee.
-        frames.push({ pc, locals, code, constPool });
+        // Save the caller, install the callee. callSite = the CALL opcode index
+        // (`pc - 2`: opcode + 1 inline operand have been consumed).
+        frames.push({
+          pc,
+          locals,
+          code,
+          constPool,
+          excTable,
+          callSite: pc - 2,
+        });
         const calleeLocals = popArgsIntoLocals(callee, stack);
         locals = calleeLocals;
         code = callee.code;
         constPool = callee.constPool;
+        excTable = callee.exceptionTable;
         pc = 0;
         break;
       }
@@ -322,11 +367,21 @@ export function runProgram(program: Program, args: readonly number[]): number {
         if (callee === undefined) {
           throw new Error(`bytecode-vm: CALL_REF funcref ${idx} out of range at pc ${pc - 2}`);
         }
-        frames.push({ pc, locals, code, constPool });
+        // callSite = the CALL_REF opcode index (`pc - 2`: opcode + 1 inline
+        // typeIdx operand consumed; the funcref came off the stack).
+        frames.push({
+          pc,
+          locals,
+          code,
+          constPool,
+          excTable,
+          callSite: pc - 2,
+        });
         const calleeLocals = popArgsIntoLocals(callee, stack);
         locals = calleeLocals;
         code = callee.code;
         constPool = callee.constPool;
+        excTable = callee.exceptionTable;
         pc = 0;
         break;
       }
@@ -368,6 +423,71 @@ export function runProgram(program: Program, args: readonly number[]): number {
         }
         const obj = heap[ref | 0]!;
         obj.fields[fieldIdx] = value;
+        break;
+      }
+      // ── #1584 a4 try-throw family (THROW / TRY_START / TRY_END) ──
+      // table-scan model: TRY_START/TRY_END are runtime no-ops (the per-function
+      // exceptionTable is authoritative); THROW unwinds to the innermost covering
+      // handler, popping call frames until a handler matches.
+      case OP.TRY_START:
+        // TRY_START <catchTarget>: no-op region marker; skip the inline operand.
+        pc++;
+        break;
+      case OP.TRY_END:
+        // TRY_END: no-op region marker (normal-exit boundary).
+        break;
+      case OP.THROW: {
+        // Pop the exception value, then unwind. The THROW opcode's own index is
+        // `pc - 1` (op was read with `code[pc++]`), and that is the pc used for
+        // region coverage. Walk: scan the current fn's exceptionTable for the
+        // INNERMOST covering entry (smallest [tryStart,tryEnd) with
+        // tryStart ≤ throwPc < tryEnd); on a hit, truncate the value stack to
+        // that region's spAtEntry, push the exn, jump to catchTarget. On a miss,
+        // pop the call frame (restoring the caller's pc/locals/code/constPool/
+        // excTable) and rescan the caller's table at its saved call-site pc.
+        // If the frame stack empties with no handler, the throw escapes the
+        // program: re-throw a host Error carrying the value (`runProgram` aborts).
+        const exn = stack.pop()!;
+        let throwPc = pc - 1; // index of the THROW (or the call-site after a pop)
+        for (;;) {
+          // Find the innermost covering handler in the current excTable.
+          let bestIdx = -1;
+          let bestSpan = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < excTable.length; i++) {
+            const e = excTable[i]!;
+            if (e.tryStart <= throwPc && throwPc < e.tryEnd) {
+              const span = e.tryEnd - e.tryStart;
+              if (span < bestSpan) {
+                bestSpan = span;
+                bestIdx = i;
+              }
+            }
+          }
+          if (bestIdx >= 0) {
+            const handler = excTable[bestIdx]!;
+            // Truncate the value stack to the try-entry depth (spAtEntry), then
+            // push the exn for the catch arm to bind via STORE.
+            stack.length = handler.spAtEntry;
+            stack.push(exn);
+            pc = handler.catchTarget;
+            break;
+          }
+          // No handler here — unwind one frame.
+          if (frames.length === 0) {
+            throw new Error(`bytecode-vm: uncaught throw (value ${exn})`);
+          }
+          const caller = frames.pop()!;
+          // Restore the caller. The rescan uses the CALL-SITE pc (the index of
+          // the CALL/CALL_REF that entered the popped frame), which lies inside
+          // any covering try region — NOT the saved return `pc` (one-past the
+          // call, i.e. == tryEnd, which would fail the half-open coverage test).
+          locals = caller.locals;
+          code = caller.code;
+          constPool = caller.constPool;
+          excTable = caller.excTable;
+          throwPc = caller.callSite;
+          pc = caller.pc;
+        }
         break;
       }
       default:
@@ -413,6 +533,8 @@ export function runBytecode(code: readonly number[], constPool: readonly number[
         constPool: constPool.slice(),
         arity: args.length,
         nLocals: args.length,
+        // No try regions in the single-function #1715 numeric proof path.
+        exceptionTable: [],
       },
     ],
     entry: 0,
