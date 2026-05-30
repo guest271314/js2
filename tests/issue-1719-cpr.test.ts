@@ -112,6 +112,23 @@ describe("#1719 CPR — array destructuring drives the overridden Array.prototyp
     expect(ex.test()).toBe(66);
   });
 
+  it("parameter array destructuring drives the override (CPR-2)", async () => {
+    const ex = await run(
+      `
+      Array.prototype[Symbol.iterator] = function* () {
+        yield this[0];
+        yield this[1];
+        yield 42;
+      };
+      function take([a, b, z]) { return z; }
+      function test() { return take([1, 2, 3]); }
+      export { test };
+      `,
+      { fileName: "t.js" },
+    );
+    expect(ex.test()).toBe(42);
+  });
+
   it("override-free array destructuring still reads the backing store", async () => {
     const ex = await run(
       `
