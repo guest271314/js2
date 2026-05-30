@@ -1,9 +1,10 @@
 ---
 id: 1739
 title: "String.prototype methods fail not-a-constructor (A7) + .length-DontEnum (A8) invariants across the suite"
-status: ready
+status: done
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-05-30
+completed: 2026-05-30
 priority: medium
 feasibility: medium
 task_type: bugfix
@@ -66,3 +67,44 @@ specified), §17 (built-in function `length`/`name` are non-enumerable).
 Filed by #259 conformance-triage 2026-05-29. The value-semantics half of the
 substring/slice clusters is the localized #1731 (shipped); this issue tracks
 the cross-method function-object invariant half.
+
+---
+
+## 2026-05-30 — Smoke-test verdict: ALREADY GREEN on main (stale baseline). DONE.
+
+**Status: done — stale-baseline close, not a code fix.** Per the smoke-first
+directive, ran the `S15.5.4.*_A7` (not-a-constructor → TypeError) and `_A8`
+(`.length` own + non-enumerable) invariants against current `main` (HEAD
+`518d55808`) at the compiler level. BOTH rows are already green:
+
+- **A7 — 21/21 pass.** `var f = String.prototype.<m>; new f` throws a real
+  `TypeError` instance for every sampled method (indexOf, lastIndexOf, charAt,
+  charCodeAt, slice, substring, substr, toLowerCase, toUpperCase, concat,
+  includes, split, trim, valueOf, …). The not-a-constructor work already closed
+  this: `resolvesToNonConstructableValue` in
+  `src/codegen/expressions/new-super.ts` detects a `<x>.prototype.<method>`
+  initializer and routes `new f` through the `__construct` IsConstructor guard,
+  which throws a TypeError (#930 + #1528 + #1732-S1 new-site check).
+- **A8 — 14/14 pass.** `String.prototype.<m>.hasOwnProperty('length')` is true,
+  `propertyIsEnumerable('length')` is false, and `for-in` does not surface
+  `length`. The `test262_fail: ~40` count in the frontmatter was a **stale
+  jsonl baseline** entry.
+
+**Investigation note (false alarm avoided):** an early probe reported A7 as
+failing, but that was a *probe artifact* — it used
+`(String.prototype as any).indexOf` (an inner `as any` cast added to satisfy
+TS), and that wrapped shape defeats the `.prototype` detection in
+`resolvesToNonConstructableValue` (it sees an `AsExpression`, not a
+`PropertyAccessExpression` whose object is `<x>.prototype`). The real test262
+form — `var f = String.prototype.<m>` with no inner cast — passes. (If a future
+issue wants the cast-wrapped form to also reject, that is the same family as
+this guard's unwrap list, a small follow-up — but it is NOT what the A7 suite
+exercises, so it is out of scope here.)
+
+### What landed
+- `tests/issue-1739.test.ts` — a 28-case pin (14 A7 + 14 A8) mirroring the exact
+  test262 assertion shapes, LOCKING the green state against regression. No
+  compiler change.
+
+The `test262_fail: ~40` entry self-corrects on the next `promote-baseline` CI
+run (push to main); the pin guards the behaviour in the meantime.
