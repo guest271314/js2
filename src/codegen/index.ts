@@ -31,6 +31,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
+import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1338,6 +1339,11 @@ export function generateModule(
     emitClosureMethodCallExportN(ctx, 0);
     emitClosureMethodCallExportN(ctx, 1);
     emitClosureMethodCallExportN(ctx, 2);
+
+    // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
+    // body now that `__call_fn_method_0` is registered. No-op when no read-drive
+    // site reserved a driver (brand clear / no Array.prototype @@iterator override).
+    fillProtoIteratorDriver(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -3041,6 +3047,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     name: exportName,
     desc: { kind: "func", index: funcIdx },
   });
+
+  // (#1719 CPR) Register in funcMap so the in-Wasm `__drive_proto_iterator`
+  // driver (filled in post-processing) can resolve `__call_fn_method_0` by name
+  // and `call` it to drive a captured `Array.prototype[@@iterator]` override.
+  // No-op for existing JS-host callers (they dispatch by export name).
+  ctx.funcMap.set(exportName, funcIdx);
 }
 
 /**

@@ -873,3 +873,68 @@ resolve the driver's funcIdx by name at emit time. Resolution needs ONE of:
   3× (dstr/for-of/spread); the closure's funcTypeIdx varies → sprawl.
 
 Recommend (a). Awaiting confirmation before adding the driver fn (array hot path).
+
+## CPR read-drive — finish-pass progress (sendev sdev-cpr2, 2026-05-30, branch issue-1719-cpr2-finish)
+
+Resumed off `bb2afb0e9` (CPR-1 write-arm) + clean `origin/main` merge (= the #1742 guard via #961). Tech-lead confirmed **option (a)** driver. Verified state + landed two foundational edits; the rest of the read-drive is the remaining work.
+
+### Verified (corrects two prior false-alarms)
+
+1. **CPR-1 write-arm WORKS in the real `compile()` pipeline.** Probed the canonical
+   shape (`Array.prototype[Symbol.iterator]=function*(){…yield 42}` + `[a,b,z]=[1,2,3]`):
+   brand fires, `maybeCaptureArrayProtoOverride` lifts the generator closure and pushes
+   the rooted `__array_proto_iterator_override` externref global; `arrayIteratorOverrideGlobalIdx`
+   returns it. The earlier "global absent" reading was a **grep-for-name false alarm** —
+   WasmGC does **not** serialize global *names* into the binary; counting `ctx.mod.globals`
+   directly confirms the push. Pre-read-drive, `z===3` (fast path), terminates — correct baseline.
+2. **Double-capture wrinkle (cosmetic, fix in this PR):** `compileModuleInitBody()` runs
+   twice (`declarations.ts:3455` early-discovery + `:3540` final), so the write-arm pushes
+   the override global **twice** — one orphan (null-init, unreferenced, from the discarded
+   first body) + one live (referenced by the final `__module_init`). Correct but wasteful;
+   dedupe by making `maybeCaptureArrayProtoOverride` idempotent per `(token,memberKey)`
+   (reuse the existing global on the 2nd pass instead of pushing a new one — but still emit
+   the `global.set/get` into the live body).
+
+### Landed (foundational, committed on branch)
+
+- **`src/codegen/index.ts`** — `emitClosureMethodCallExportN` now `ctx.funcMap.set(exportName, funcIdx)`
+  so the in-Wasm driver (filled in post-processing) can resolve `__call_fn_method_0` by name.
+  No-op for existing JS-host callers (they dispatch by export name).
+- **`src/codegen/context/types.ts`** — added `protoIteratorDriverReserved?: boolean`. The
+  driver funcIdx lives in `funcMap` under `"__drive_proto_iterator"` (NOT a raw ctx number) —
+  load-bearing because `shiftLateImportIndices` patches both the funcMap entry AND the emitted
+  read-drive `call` by the same delta, so a late-import shift never desyncs the reservation.
+
+### Remaining build (the z=42 proof) — exact plan
+
+1. **Driver reservation + fill (option a)** in `proto-override.ts`:
+   - `reserveProtoIteratorDriver(ctx)` — on first read-drive site: push a placeholder
+     `WasmFunction` (sig `(externref this, externref closure)->externref`, `addFuncType`),
+     funcIdx = `ctx.numImportFuncs + mod.functions.length`, register `funcMap["__drive_proto_iterator"]`,
+     set `protoIteratorDriverReserved=true`. Body left `[]` (filled later).
+   - `fillProtoIteratorDriver(ctx)` — called in post-processing AFTER `emitClosureMethodCallExportN(0)`
+     (so `funcMap["__call_fn_method_0"]` exists): body = `local.get 0; local.get 1; call __call_fn_method_0; return`
+     (thin wrapper; reuses the proven re-entrancy-safe `__current_this` dispatch). Guard: if
+     `__call_fn_method_0` absent (no arity-0 closure), fill with `ref.null.extern` (driver unused anyway).
+2. **Read-drive at `destructuring.ts:892`** (the `_needsArrayObjIdentity` gate, currently a void no-op):
+   when `arrayDstrNeedsIdentity(ctx,isStringStruct)` AND `arrayIteratorOverrideGlobalIdx(ctx)!==undefined`:
+   stash-then `extern.convert_any` the vec RHS → array-as-`this` externref; `global.get` the override
+   closure; `call __drive_proto_iterator` → iterator externref (local); then **per binding element**
+   drain via `__iterator_next` (the `loops.ts:3576` shape: `(i32 done, externref value)`), assigning
+   `value` to each binding local (on `done`, apply default / undefined). `return` — skip the
+   backing-store fast path. The 71 `iter-val-array-prototype` tests are fixed-arity `[a,b,c]`
+   (no rest/nested), so per-element drain suffices for CPR-1; rest/nested = CPR-2 polish.
+3. **Prove z=42** end-to-end (`tests/issue-1719-cpr.test.ts`), assert termination (the brand only
+   fires at the dstr observation boundary, so internal array iterations stay on the typed-vec fast
+   path → no re-entrancy).
+4. **CPR-2**: `values` alias (already keyed) + for-of (`loops.ts:1060`) + spread — same read-drive.
+5. **Guard**: byte-identical wasm on an override-free module (the whole branch is behind
+   `arrayIteratorMaybeOverridden && globalIdx!==undefined`, both false in the common case). Run
+   `npm test -- tests/equivalence.test.ts` → 0 regressions before PR.
+
+**Open runtime risk to validate first in step 3:** the override is a `function*`; calling it via
+`__call_fn_method_0` yields a *compiled* generator object. Draining it via the host `__iterator_next`
+relies on its `__call_next`/`__gen_next` fallback (`runtime.ts:7786-7803`) recognising the compiled
+generator. If that drain returns empty/undefined, the override-produced iterator needs the Wasm-native
+generator-next path instead (a `__call_next` dispatch on the struct) — surface immediately, do not
+paper over. This is the one unproven link in the chain.
