@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
-import { runSink } from "../src/ir/backend/bytecode-vm.js";
+import { type FuncEntry, type Program, runProgram, runSink } from "../src/ir/backend/bytecode-vm.js";
 import type { BlockType } from "../src/ir/types.js";
 import { buildImports } from "../src/runtime.js";
 
@@ -85,8 +85,12 @@ function compileVmModule(
   let src = readFileSync(VM_FILE, "utf8");
   // 1. drop every import line (host-only).
   src = src.replace(/^import\b[^\n]*\n/gm, "");
-  // 2. inline OP.NAME numeric values.
-  for (const [name, value] of Object.entries(OP)) {
+  // 2. inline OP.NAME numeric values. Replace LONGER names first: some opcode
+  //    names are prefixes of others (e.g. `CALL` is a prefix of `CALL_REF`, and
+  //    `GLOBAL_GET`/`GLOBAL_SET` share `GLOBAL`), and `replaceAll` on the prefix
+  //    would corrupt the longer token (`OP.CALL_REF` -> `23_REF`). Descending
+  //    name length guarantees the longest match is substituted first.
+  for (const [name, value] of Object.entries(OP).sort((a, b) => b[0].length - a[0].length)) {
     src = src.replaceAll(`OP.${name}`, String(value));
   }
   // 3. drop the runSink convenience (BytecodeSink-typed -> out of subset). It is
@@ -103,6 +107,52 @@ export function run(${params}): number {
 }
 `;
   return src + entry;
+}
+
+/**
+ * Multi-function variant of {@link compileVmModule} (#1584 a1). Builds a
+ * `Program` (function table + entry) in-module and calls `runProgram`, so the
+ * compiled-VM arm exercises the CALL family. Same four transforms as
+ * `compileVmModule`; the appended entry constructs each `FuncEntry` literal and
+ * the `Program` wrapper inline (the #1700 export-ABI constraint: object/array
+ * params can't cross the boundary, so the program is built inside the module).
+ */
+function compileProgramModule(
+  entryParams: readonly string[],
+  functions: ReadonlyArray<{
+    code: readonly number[];
+    constPool: readonly number[];
+    arity: number;
+    nLocals: number;
+  }>,
+  entry: number,
+  argInit: readonly string[],
+): string {
+  let src = readFileSync(VM_FILE, "utf8");
+  src = src.replace(/^import\b[^\n]*\n/gm, "");
+  for (const [name, value] of Object.entries(OP).sort((a, b) => b[0].length - a[0].length)) {
+    src = src.replaceAll(`OP.${name}`, String(value));
+  }
+  // Drop the trailing BytecodeSink-typed convenience helper (out of subset).
+  src = src.replace(/\/\*\* Convenience[\s\S]*$/m, "");
+  const params = entryParams.map((p) => `${p}: number`).join(", ");
+  const fnLiterals = functions
+    .map(
+      (f) =>
+        `{ code: [${f.code.join(", ")}], constPool: [${f.constPool.join(", ")}], arity: ${f.arity}, nLocals: ${f.nLocals} }`,
+    )
+    .join(",\n    ");
+  const entrySrc = `
+export function run(${params}): number {
+  const functions: FuncEntry[] = [
+    ${fnLiterals}
+  ];
+  const program: Program = { functions: functions, entry: ${entry} };
+  const args: number[] = [${argInit.join(", ")}];
+  return runProgram(program, args);
+}
+`;
+  return src + entrySrc;
 }
 
 // ── Compile + run a WasmGC export taking only number params ────────────────
@@ -261,6 +311,410 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
         expect(runSink(s, [a, b]), `host ${op}(${a},${b})`).toBe(expected);
         expect(await runWasm(mod, "run", [a, b]), `wasm ${op}(${a},${b})`).toBe(expected);
       }
+    }
+  });
+
+  // ── #1584 production opcodes: DIV / CMP_NE / TEE / GLOBAL_GET/SET / SELECT /
+  // DROP, exercised through BOTH the host VM (runSink) and the compiled VM. ──
+  // These are the additive op-set #958 committed to the emitter; this confirms
+  // bytecode-vm.ts realizes each, with host-VM == Wasm-GC-VM equivalence.
+  it("WasmGC-VM == host-VM for DIV / CMP_NE / SELECT / TEE / DROP / GLOBAL_*", async () => {
+    // DIV: f(a,b) = a / b
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      E.emitLocalGet(1, s);
+      E.emitBinary("f64.div", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b"], s.code, s.constPool, ["a", "b"]);
+      for (const [a, b] of [
+        [6, 3],
+        [7, 2],
+        [-9, 3],
+        [1, 4],
+      ]) {
+        expect(runSink(s, [a, b]), `host div(${a},${b})`).toBe(a / b);
+        expect(await runWasm(mod, "run", [a, b]), `wasm div(${a},${b})`).toBe(a / b);
+      }
+    }
+    // CMP_NE: f(a,b) = (a != b) ? 1 : 0
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      E.emitLocalGet(1, s);
+      E.emitBinary("f64.ne", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b"], s.code, s.constPool, ["a", "b"]);
+      for (const [a, b] of [
+        [1, 1],
+        [1, 2],
+        [-3, -3],
+      ]) {
+        const exp = a !== b ? 1 : 0;
+        expect(runSink(s, [a, b]), `host ne(${a},${b})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a, b]), `wasm ne(${a},${b})`).toBe(exp);
+      }
+    }
+    // SELECT: f(a,b,c) = (c != 0) ? a : b. Operand order per OP.SELECT: a, b, cond.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s); // a
+      E.emitLocalGet(1, s); // b
+      E.emitLocalGet(2, s); // cond
+      s.emit(OP.SELECT);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b", "c"], s.code, s.constPool, ["a", "b", "c"]);
+      for (const [a, b, c] of [
+        [10, 20, 1],
+        [10, 20, 0],
+        [-5, 5, 7],
+      ]) {
+        const exp = c !== 0 ? a : b;
+        expect(runSink(s, [a, b, c]), `host select(${a},${b},${c})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a, b, c]), `wasm select(${a},${b},${c})`).toBe(exp);
+      }
+    }
+    // TEE: f(a) = { local1 = (a+1) [tee leaves it on stack]; return top * 2 }.
+    // sequence: LOAD a, CONST 1, ADD, TEE 1, CONST 2, MUL, RET → (a+1)*2.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(1, s);
+      E.emitBinary("f64.add", s);
+      E.emitLocalTee(1, s); // peek -> local1, leaves (a+1) on stack
+      emitNumberConst(2, s);
+      E.emitBinary("f64.mul", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a", "0"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        const exp = (a + 1) * 2;
+        expect(runSink(s, [a, 0]), `host tee(${a})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a]), `wasm tee(${a})`).toBe(exp);
+      }
+    }
+    // DROP: f(a) = { push a; push 99; DROP; return top } → a (99 discarded).
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(99, s);
+      E.emitDrop(s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        expect(runSink(s, [a]), `host drop(${a})`).toBe(a);
+        expect(await runWasm(mod, "run", [a]), `wasm drop(${a})`).toBe(a);
+      }
+    }
+    // GLOBAL_SET / GLOBAL_GET: f(a) = { global0 = a*3; return global0 }.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(3, s);
+      E.emitBinary("f64.mul", s);
+      E.emitGlobalSet(0, s);
+      E.emitGlobalGet(0, s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        expect(runSink(s, [a]), `host global(${a})`).toBe(a * 3);
+        expect(await runWasm(mod, "run", [a]), `wasm global(${a})`).toBe(a * 3);
+      }
+    }
+  });
+
+  // ── #1584 a1 call family: CALL (direct) + CALL_REF (indirect via funcref) ──
+  // The VM becomes a multi-frame call-stack machine over a function table.
+  // PROGRAM A drives a direct CALL between two functions through BOTH the host
+  // VM (runProgram) and the compiled VM (compileProgramModule), asserting
+  // host-VM == Wasm-GC-VM == JS. PROGRAM B drives CALL_REF over a synthesized
+  // funcref-on-stack; the null-funcref (f64(-1)) case must trap.
+  it("a1: CALL — host-VM == WasmGC-VM == JS for main(a,b)=add(a,b)", async () => {
+    // functions[1] = add(a,b) = a + b   →  LOAD 0; LOAD 1; ADD; RET
+    const add = new BytecodeSink();
+    E.emitLocalGet(0, add);
+    E.emitLocalGet(1, add);
+    E.emitBinary("f64.add", add);
+    E.emitReturn(add);
+    // functions[0] = main(a,b) = add(a,b)  →  LOAD 0; LOAD 1; CALL 1; RET
+    const main = new BytecodeSink();
+    E.emitLocalGet(0, main);
+    E.emitLocalGet(1, main);
+    main.emit(OP.CALL, 1); // CALL funcIdx 1 (add)
+    E.emitReturn(main);
+
+    const functions: FuncEntry[] = [
+      {
+        code: main.code.slice(),
+        constPool: main.constPool.slice(),
+        arity: 2,
+        nLocals: 2,
+      },
+      {
+        code: add.code.slice(),
+        constPool: add.constPool.slice(),
+        arity: 2,
+        nLocals: 2,
+      },
+    ];
+    const program: Program = { functions, entry: 0 };
+    const js = (a: number, b: number): number => a + b;
+
+    const vmMod = compileProgramModule(
+      ["a", "b"],
+      functions.map((f) => ({
+        code: f.code,
+        constPool: f.constPool,
+        arity: f.arity,
+        nLocals: f.nLocals,
+      })),
+      0,
+      ["a", "b"],
+    );
+
+    for (const [a, b] of [
+      [2, 3],
+      [-5, 10],
+      [0.5, 0.25],
+      [100, -100],
+    ]) {
+      const expected = js(a, b);
+      expect(runProgram(program, [a, b]), `host CALL add(${a},${b})`).toBe(expected);
+      expect(await runWasm(vmMod, "run", [a, b]), `wasm CALL add(${a},${b})`).toBe(expected);
+    }
+  });
+
+  it("a1: CALL_REF — host-VM dispatches funcref≡f64(tableIdx); null≡f64(-1) traps", async () => {
+    // functions[1] = add(a,b) = a + b. functions[0] = entry that pushes
+    // a, b, then the funcref f64(1) on top, then CALL_REF.
+    const add = new BytecodeSink();
+    E.emitLocalGet(0, add);
+    E.emitLocalGet(1, add);
+    E.emitBinary("f64.add", add);
+    E.emitReturn(add);
+
+    // entry: LOAD 0; LOAD 1; CONST f64(1) [funcref=tableIdx 1]; CALL_REF <typeIdx>; RET
+    const entry = new BytecodeSink();
+    E.emitLocalGet(0, entry);
+    E.emitLocalGet(1, entry);
+    emitNumberConst(1, entry); // funcref ≡ f64(1)
+    entry.emit(OP.CALL_REF, 0); // typeIdx operand is informational
+    E.emitReturn(entry);
+
+    const functions: FuncEntry[] = [
+      {
+        code: entry.code.slice(),
+        constPool: entry.constPool.slice(),
+        arity: 2,
+        nLocals: 2,
+      },
+      {
+        code: add.code.slice(),
+        constPool: add.constPool.slice(),
+        arity: 2,
+        nLocals: 2,
+      },
+    ];
+    const program: Program = { functions, entry: 0 };
+
+    for (const [a, b] of [
+      [2, 3],
+      [-5, 10],
+      [7, 7],
+    ]) {
+      expect(runProgram(program, [a, b]), `host CALL_REF add(${a},${b})`).toBe(a + b);
+    }
+
+    // null-funcref: push f64(-1) then CALL_REF → must trap.
+    const nullEntry = new BytecodeSink();
+    E.emitLocalGet(0, nullEntry);
+    E.emitLocalGet(1, nullEntry);
+    emitNumberConst(-1, nullEntry); // null funcref sentinel
+    nullEntry.emit(OP.CALL_REF, 0);
+    E.emitReturn(nullEntry);
+    const nullProgram: Program = {
+      functions: [
+        {
+          code: nullEntry.code.slice(),
+          constPool: nullEntry.constPool.slice(),
+          arity: 2,
+          nLocals: 2,
+        },
+        {
+          code: add.code.slice(),
+          constPool: add.constPool.slice(),
+          arity: 2,
+          nLocals: 2,
+        },
+      ],
+      entry: 0,
+    };
+    expect(() => runProgram(nullProgram, [1, 2]), "null funcref CALL_REF traps").toThrow(/null funcref/);
+  });
+
+  // ── #1584 a2 struct/object family: STRUCT_NEW / STRUCT_GET / STRUCT_SET ──
+  // Heap objects (VM-global), struct ref ≡ f64(heapIndex), null ≡ f64(-1).
+  // mk(a,b){ const o = {x:a, y:b}; return o.x + o.y } proves host-VM ==
+  // Wasm-GC-VM == JS for new + read; a STRUCT_SET round-trip and a null-struct
+  // trap round out the family.
+  it("a2: STRUCT_NEW/GET — host-VM == WasmGC-VM == JS for mk(a,b)={x:a,y:b}; x+y", async () => {
+    // field0 = x, field1 = y (canonical order). Sequence:
+    //   LOAD 0(a); LOAD 1(b); STRUCT_NEW 2 -> ref      ; STORE 2 (o)
+    //   LOAD 2; STRUCT_GET 0 (o.x)
+    //   LOAD 2; STRUCT_GET 1 (o.y)
+    //   ADD; RET
+    const s = new BytecodeSink();
+    E.emitLocalGet(0, s); // a  (field0 = x)
+    E.emitLocalGet(1, s); // b  (field1 = y)
+    s.emit(OP.STRUCT_NEW, 2); // -> struct ref on stack
+    E.emitLocalSet(2, s); // o = ref (local 2)
+    E.emitLocalGet(2, s);
+    s.emit(OP.STRUCT_GET, 0); // o.x
+    E.emitLocalGet(2, s);
+    s.emit(OP.STRUCT_GET, 1); // o.y
+    E.emitBinary("f64.add", s);
+    E.emitReturn(s);
+    const js = (a: number, b: number): number => {
+      const o = { x: a, y: b };
+      return o.x + o.y;
+    };
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 2,
+          nLocals: 3,
+        },
+      ],
+      entry: 0,
+    };
+    const vmMod = compileProgramModule(
+      ["a", "b"],
+      [{ code: s.code, constPool: s.constPool, arity: 2, nLocals: 3 }],
+      0,
+      ["a", "b", "0"], // args[0]=a, args[1]=b, args[2]=o (struct local, 0-init)
+    );
+    for (const [a, b] of [
+      [2, 3],
+      [-5, 10],
+      [0.5, 0.25],
+      [100, -100],
+    ]) {
+      const expected = js(a, b);
+      expect(runProgram(program, [a, b]), `host struct(${a},${b})`).toBe(expected);
+      expect(await runWasm(vmMod, "run", [a, b]), `wasm struct(${a},${b})`).toBe(expected);
+    }
+  });
+
+  it("a2: STRUCT_SET round-trip + null-struct (f64(-1)) traps", () => {
+    // set(a){ const o={x:0}; o.x = a*3; return o.x } → field0 = x.
+    //   CONST 0; STRUCT_NEW 1 -> ref; STORE 1 (o)
+    //   LOAD 1; LOAD 0; CONST 3; MUL; STRUCT_SET 0   (o.x = a*3; stack [ref,val])
+    //   LOAD 1; STRUCT_GET 0; RET
+    const s = new BytecodeSink();
+    emitNumberConst(0, s); // initial x = 0
+    s.emit(OP.STRUCT_NEW, 1);
+    E.emitLocalSet(1, s); // o (local 1)
+    E.emitLocalGet(1, s); // ref (deeper)
+    E.emitLocalGet(0, s); // a
+    emitNumberConst(3, s);
+    E.emitBinary("f64.mul", s); // a*3 (value on top)
+    s.emit(OP.STRUCT_SET, 0); // o.x = a*3
+    E.emitLocalGet(1, s);
+    s.emit(OP.STRUCT_GET, 0); // o.x
+    E.emitReturn(s);
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 1,
+          nLocals: 2,
+        },
+      ],
+      entry: 0,
+    };
+    for (const a of [3, -4, 0, 1.5]) {
+      expect(runProgram(program, [a]), `host struct-set(${a})`).toBe(a * 3);
+    }
+
+    // null-struct: push f64(-1) then STRUCT_GET → must trap.
+    const nullGet = new BytecodeSink();
+    emitNumberConst(-1, nullGet); // null struct ref
+    nullGet.emit(OP.STRUCT_GET, 0);
+    E.emitReturn(nullGet);
+    const nullProgram: Program = {
+      functions: [
+        {
+          code: nullGet.code.slice(),
+          constPool: nullGet.constPool.slice(),
+          arity: 0,
+          nLocals: 0,
+        },
+      ],
+      entry: 0,
+    };
+    expect(() => runProgram(nullProgram, []), "null struct STRUCT_GET traps").toThrow(/null struct/);
+  });
+
+  // ── #1584 a3 control-flow: JNZ (the exact dual of JZ; br_if maps here) ──
+  // block/loop/br/br_if add NO opcode — the emitter resolves them to
+  // JZ/JNZ/JMP + backpatched absolute targets. JNZ=28 is the only VM addition.
+  // count(n) = a post-test (do-while) loop that runs `i++` while i < n. The
+  // do-while shape (test at the BOTTOM, JNZ loop-back) is the natural fit for a
+  // single backward JNZ; a pre-test `while` would use a JZ-exit + JMP-back pair.
+  // For n>=1 it returns n; the JS reference mirrors the same do-while so they
+  // agree (n=1 → exactly one iter). The point is the JNZ backward loop-back.
+  //   CONST 0; STORE 1 (i=0)
+  //   header:  LOAD 1; CONST 1; ADD; STORE 1   (i++)
+  //            LOAD 1; LOAD 0; CMP_LT          (i < n ? 1 : 0)
+  //            JNZ header                       (loop back while i<n)
+  //   LOAD 1; RET                               (return i)
+  it("a3: JNZ loop — host-VM == WasmGC-VM == JS for count(n) (do i++ while i<n)", async () => {
+    const s = new BytecodeSink();
+    emitNumberConst(0, s); // i = 0
+    E.emitLocalSet(1, s); // STORE 1
+    const header = s.here(); // loop-header address (absolute)
+    E.emitLocalGet(1, s); // i
+    emitNumberConst(1, s);
+    E.emitBinary("f64.add", s); // i + 1
+    E.emitLocalSet(1, s); // i = i + 1
+    E.emitLocalGet(1, s); // i
+    E.emitLocalGet(0, s); // n
+    E.emitBinary("f64.lt", s); // i < n
+    s.emit(OP.JNZ, header); // if nonzero (i<n) → loop back to header
+    E.emitLocalGet(1, s); // i
+    E.emitReturn(s);
+
+    // Mirror the SAME do-while semantics (post-test) so the reference agrees.
+    const js = (n: number): number => {
+      let i = 0;
+      do {
+        i++;
+      } while (i < n);
+      return i;
+    };
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 1,
+          nLocals: 2,
+        },
+      ],
+      entry: 0,
+    };
+    const vmMod = compileProgramModule(
+      ["n"],
+      [{ code: s.code, constPool: s.constPool, arity: 1, nLocals: 2 }],
+      0,
+      ["n", "0"], // args[0]=n, args[1]=i (0-init)
+    );
+    for (const n of [1, 2, 5, 10, 100]) {
+      const expected = js(n);
+      expect(runProgram(program, [n]), `host count(${n})`).toBe(expected);
+      expect(await runWasm(vmMod, "run", [n]), `wasm count(${n})`).toBe(expected);
     }
   });
 

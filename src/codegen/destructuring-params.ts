@@ -32,6 +32,17 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
+import { arrayIteratorOverrideGlobalIdx } from "./expressions/proto-override.js";
+// (#1719 CPR-2) `arrayDstrNeedsIdentity` / `tryEmitArrayProtoIteratorReadDrive` /
+// `syncDestructuredLocalsToGlobals` live in statements/destructuring.ts, which
+// already imports `destructureParamArray` from here — a module cycle. ESM
+// resolves it because these references are used at call time (inside
+// `destructureParamArray`), never at module-init.
+import {
+  arrayDstrNeedsIdentity,
+  syncDestructuredLocalsToGlobals,
+  tryEmitArrayProtoIteratorReadDrive,
+} from "./statements/destructuring.js";
 
 /**
  * Detect array binding patterns that, per ECMA-262 §13.3.3.6, perform no
@@ -815,6 +826,24 @@ export function destructureParamArray(
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
   }
+
+  // (#1719 CPR-2) Parameter / externref-decl array destructuring: when the
+  // program overrode Array.prototype[@@iterator] and `paramType` is a real array
+  // (not a string), drive the captured override from the value local instead of
+  // the backing-store / __array_from_iter lane (§8.5.2). The typed-vec *decl*
+  // case never reaches here — `compileArrayDestructuring` runs its own drive and
+  // returns before delegating — so this covers exactly the parameter-dstr and
+  // externref-decl lanes. Strictly gated behind the brand + a captured override
+  // (both clear in the common case ⇒ byte-identical). The value lives in
+  // `paramIdx`, so feed the shared decl read-drive that local.
+  if (arrayDstrNeedsIdentity(ctx, false) && arrayIteratorOverrideGlobalIdx(ctx) !== undefined) {
+    ensureBindingLocals(ctx, fctx, pattern);
+    if (tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, paramType, paramIdx)) {
+      if (isDecl) syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+      return;
+    }
+  }
+
   if (paramType.kind !== "ref" && paramType.kind !== "ref_null") {
     // externref parameters: convert to vec struct before destructuring (#647)
     // The externref may wrap any vec type at runtime (e.g. __vec_f64 from [1,2,3]

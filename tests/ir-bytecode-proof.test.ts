@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { BytecodeEmitter, BytecodeSink } from "../src/ir/backend/bytecode-emitter.js";
+import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
+import type { IrObjectStructLowering } from "../src/ir/backend/handles.js";
 import { type IrFunction, type IrLowerResolver, asBlockId, asValueId, irVal } from "../src/ir/index.js";
 // #1584 (a0-tail): the REAL production lowerer, generic over the sink. The arm
 // at the bottom of this file drives it (not a hand-lowerer) through a
@@ -370,5 +371,339 @@ describe("#1584 (a0-tail) — REAL lower.ts drives the bytecode sink (triple equ
       expect(runSink(sink, [a, b])).toBe(js(a, b));
       expect(await runWasmGc(src, "h", [a, b])).toBe(js(a, b));
     }
+  });
+});
+
+// ── #1584 (a1) call family — real lower.ts emits OP.CALL / OP.CALL_REF ───────
+//
+// The full bytecode==WasmGC==JS round-trip for a multi-function program needs
+// the VM's program-wrapper + call-frame stack (sdev-vm's slice — `runProgram`).
+// This emitter-side test (my lane) asserts the REAL `lowerIrFunctionBody`
+// routes the `call` IR node and `closure.call`'s terminal through the typed
+// emitCall/emitCallRef primitives, so the BytecodeEmitter produces the right
+// opcode stream: `... CALL <funcIdx>` / `... CALL_REF <typeIdx>`. The locked
+// contract (sdev-vm): args on stack arg0-deepest, callee arity from the
+// function-table entry, funcref ≡ f64(tableIndex), null ≡ f64(-1).
+
+/** Resolver that maps any func ref to a fixed table index, for call lowering. */
+function callResolver(funcIdx: number): IrLowerResolver {
+  let nextTypeIdx = 0;
+  return {
+    resolveFunc: () => funcIdx,
+    resolveGlobal: () => {
+      throw new Error("resolveGlobal not used in the a1 call subset");
+    },
+    resolveType: () => {
+      throw new Error("resolveType not used in the a1 call subset");
+    },
+    internFuncType: () => nextTypeIdx++,
+  };
+}
+
+describe("#1584 (a1) — real lower.ts drives OP.CALL through the BytecodeEmitter", () => {
+  it("a `call` IR node lowers to `LOAD args…; CALL <funcIdx>; RET`", () => {
+    // main(a, b): return add(a, b)  where `add` resolves to table index 1.
+    //   %2 = call add(%0, %1)
+    //   return %2
+    const main: IrFunction = {
+      name: "main",
+      params: [
+        { value: asValueId(0), type: F64, name: "a" },
+        { value: asValueId(1), type: F64, name: "b" },
+      ],
+      resultTypes: [F64],
+      blocks: [
+        {
+          id: asBlockId(0),
+          blockArgs: [],
+          blockArgTypes: [],
+          instrs: [
+            {
+              kind: "call",
+              target: { kind: "func", name: "add" },
+              args: [asValueId(0), asValueId(1)],
+              result: asValueId(2),
+              resultType: F64,
+            },
+          ],
+          terminator: { kind: "return", values: [asValueId(2)] },
+        },
+      ],
+      exported: true,
+      valueCount: 3,
+    };
+
+    const sink = lowerIrFunctionBody<BytecodeSink>(main, callResolver(1), new BytecodeEmitter()).body;
+    // The call's result is single-use in the return, so it inlines: the body is
+    //   LOAD 0 ; LOAD 1 ; CALL 1 ; RET
+    expect(sink.code).toEqual([OP.LOAD, 0, OP.LOAD, 1, OP.CALL, 1, OP.RET]);
+  });
+
+  it("BytecodeEmitter.emitCall / emitCallRef emit OP.CALL / OP.CALL_REF with their inline operand", () => {
+    const E = new BytecodeEmitter();
+    const s1 = new BytecodeSink();
+    E.emitCall(7, s1);
+    expect(s1.code).toEqual([OP.CALL, 7]);
+
+    const s2 = new BytecodeSink();
+    E.emitCallRef(3, s2);
+    expect(s2.code).toEqual([OP.CALL_REF, 3]);
+  });
+
+  it("spliceArm relocates CALL / CALL_REF as single-operand opcodes", () => {
+    // An if-arm containing a CALL keeps its inline operand after splice.
+    const arm = new BytecodeSink();
+    arm.emit(OP.LOAD, 0);
+    arm.emit(OP.CALL, 5);
+    arm.emit(OP.CALL_REF, 2);
+    const dest = new BytecodeSink();
+    dest.spliceArm(arm);
+    expect(dest.code).toEqual([OP.LOAD, 0, OP.CALL, 5, OP.CALL_REF, 2]);
+  });
+});
+
+// ── #1584 (a2) struct/object family — STRUCT_NEW / STRUCT_GET / STRUCT_SET ──
+//
+// The full bytecode==WasmGC==JS round-trip for object.new/get/set needs the
+// VM's heap (sdev-vm's slice — struct ref ≡ f64(heapIndex)). These emitter-side
+// tests (my lane) assert the BytecodeEmitter realizes the (a2) trait primitives
+// as the right opcodes: STRUCT_NEW carries the field COUNT; STRUCT_GET/SET carry
+// the numeric field INDEX (lower.ts resolves name→fieldIdx via the layout).
+
+/** Minimal object-struct layout: field name → index in declaration order. */
+function objLayout(fields: string[]): IrObjectStructLowering {
+  return { typeIdx: 99, fieldIdx: (name: string) => fields.indexOf(name) };
+}
+
+describe("#1584 (a2) — BytecodeEmitter realizes the struct/object family", () => {
+  it("emitAggregateNew emits OP.STRUCT_NEW with the field count", () => {
+    const E = new BytecodeEmitter();
+    const s = new BytecodeSink();
+    E.emitAggregateNew(objLayout(["x", "y"]), 2, s);
+    expect(s.code).toEqual([OP.STRUCT_NEW, 2]);
+  });
+
+  it("emitFieldGet / emitFieldSet emit OP.STRUCT_GET / STRUCT_SET with the resolved field index", () => {
+    const E = new BytecodeEmitter();
+    const layout = objLayout(["x", "y", "z"]);
+    const g = new BytecodeSink();
+    E.emitFieldGet(layout, "y", g);
+    expect(g.code).toEqual([OP.STRUCT_GET, 1]);
+
+    const s = new BytecodeSink();
+    E.emitFieldSet(layout, "z", s);
+    expect(s.code).toEqual([OP.STRUCT_SET, 2]);
+  });
+
+  it("spliceArm relocates STRUCT_NEW / STRUCT_GET / STRUCT_SET as single-operand opcodes", () => {
+    const arm = new BytecodeSink();
+    arm.emit(OP.STRUCT_NEW, 2);
+    arm.emit(OP.STRUCT_GET, 0);
+    arm.emit(OP.STRUCT_SET, 1);
+    const dest = new BytecodeSink();
+    dest.spliceArm(arm);
+    expect(dest.code).toEqual([OP.STRUCT_NEW, 2, OP.STRUCT_GET, 0, OP.STRUCT_SET, 1]);
+  });
+});
+
+// ── #1584 (a3) control-flow family — block / loop / br / br_if → JZ/JNZ/JMP ──
+//
+// The structured `block`/`loop`/`br`/`br_if` family compiles AWAY in the
+// BytecodeEmitter to JZ/JNZ/JMP + backpatch labels (issue §1c/§2a; `emitIf`
+// already demonstrates the pattern for `if`). The only new VM opcode is JNZ —
+// the exact dual of JZ — so `br_if`'s "branch if truthy" needs no `eqz`+`JZ`.
+// `block`/`loop` add NO opcode (they resolve to backpatched targets at splice).
+//
+// These emitter-side tests (my lane) assert the lowering: `br`/`br_if` emit a
+// JMP/JNZ placeholder + a depth-tagged pending branch; `emitLoop` resolves a
+// depth-0 branch to the loop HEADER (back-edge / continue); `emitBlock` resolves
+// a depth-0 branch to the block EXIT (forward / break). The De Bruijn depth is
+// decremented as branches cross each enclosing construct outward. The matching
+// `OP.JNZ` VM dispatch arm is sdev-vm's slice (exercised in the VM unit tests).
+describe("#1584 (a3) — BytecodeEmitter realizes the control-flow family", () => {
+  it("emitBr / emitBrIf emit JMP / JNZ placeholders + record a depth-tagged pending branch", () => {
+    const E = new BytecodeEmitter();
+    const s = new BytecodeSink();
+    E.emitBr(0, s);
+    E.emitBrIf(2, s);
+    // Two placeholder jumps, both unpatched (-1) until an enclosing construct resolves them.
+    expect(s.code).toEqual([OP.JMP, -1, OP.JNZ, -1]);
+    expect(s.pendingBranches).toEqual([
+      { slot: 1, depth: 0 }, // the JMP operand slot
+      { slot: 3, depth: 2 }, // the JNZ operand slot
+    ]);
+  });
+
+  it("emitLoop resolves a depth-0 branch to the loop HEADER (back-edge / continue)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    E.emitBr(0, body); // `br 0` — continue, targets the loop header
+    const out = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, body, out);
+    // header = position the body begins = 0; the JMP back-edge patches to 0.
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // depth-0 fully resolved
+  });
+
+  it("emitBlock resolves a depth-0 branch to the block EXIT (forward / break)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    E.emitBrIf(0, body); // `br_if 0` — exit-if, targets the block end
+    body.emit(OP.LOAD, 1);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, body, out);
+    // exit = position past the spliced body = 4; the JNZ patches to 4.
+    expect(out.code).toEqual([OP.JNZ, 4, OP.LOAD, 1]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("the canonical loop `block{ loop{ cond; br_if 1; body; br 0 } }` backpatches both targets", () => {
+    // Mirrors the 4 fenced loop arms in lower.ts (forof.vec/iter/string, for/while).
+    const E = new BytecodeEmitter();
+    const loopBody = new BytecodeSink();
+    loopBody.emit(OP.LOAD, 0); // cond (truthy ⇒ exit)
+    E.emitBrIf(1, loopBody); // br_if 1 — exit the enclosing BLOCK
+    loopBody.emit(OP.LOAD, 1); // body
+    E.emitBr(0, loopBody); // br 0 — continue the LOOP
+
+    const loopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, loopBody, loopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, loopWrap, out);
+
+    // JNZ (br_if 1) → block exit = 8 (past the whole loop);
+    // JMP (br 0)    → loop header = 0 (back-edge to cond).
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 8, OP.LOAD, 1, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // every structured branch resolved
+  });
+
+  it("nested loops resolve each `br`/`br_if` to its own construct (De Bruijn depth)", () => {
+    // outer block{ loop{ inner block{ loop{ br_if 1(inner exit); br 0(inner cont) };
+    //                                   br 0(outer cont) } } }
+    // Validates depth decrement as branches cross constructs outward.
+    const E = new BytecodeEmitter();
+
+    const innerBody = new BytecodeSink();
+    innerBody.emit(OP.LOAD, 0);
+    E.emitBrIf(1, innerBody); // exit inner block
+    E.emitBr(0, innerBody); // continue inner loop
+    const innerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, innerBody, innerLoopWrap);
+    const innerBlockOut = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, innerLoopWrap, innerBlockOut);
+    // After inner block fully resolves, no pending branches escape it.
+    expect(innerBlockOut.pendingBranches).toEqual([]);
+
+    // Now wrap the inner block in the outer loop, appending an outer `br 0`.
+    const outerBody = new BytecodeSink();
+    outerBody.spliceArm(innerBlockOut);
+    E.emitBr(0, outerBody); // continue outer loop
+    const outerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, outerBody, outerLoopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, outerLoopWrap, out);
+
+    // inner: LOAD 0; JNZ → inner-block exit (6); JMP → inner-loop header (0)
+    // outer: JMP → outer-loop header (0); outer-block exit unused here
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 6, OP.JMP, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("spliceArm carries an UNPATCHED structured branch outward (relocated) but still rejects a stray unpatched jump", () => {
+    // A pending br to an as-yet-unseen enclosing construct survives a splice.
+    const E = new BytecodeEmitter();
+    const inner = new BytecodeSink();
+    inner.emit(OP.LOAD, 9);
+    E.emitBr(3, inner); // depth 3 — far outer construct, stays pending
+    const mid = new BytecodeSink();
+    mid.emit(OP.DROP);
+    mid.spliceArm(inner);
+    // The JMP relocated by +base (base=1 ⇒ operand slot 3) and its depth survives.
+    expect(mid.code).toEqual([OP.DROP, OP.LOAD, 9, OP.JMP, -1]);
+    expect(mid.pendingBranches).toEqual([{ slot: 4, depth: 3 }]);
+
+    // A non-structured unpatched jump (no pending-branch record) is still an error.
+    const bad = new BytecodeSink();
+    bad.code.push(OP.JZ, -1); // hand-forged unpatched JZ, not recorded
+    const dest = new BytecodeSink();
+    expect(() => dest.spliceArm(bad)).toThrow(/unpatched jump/);
+  });
+});
+
+// ── #1584 (a4) try-throw family — THROW + TRY_START/TRY_END + exceptionTable ──
+//
+// The exception ops (throw / try / rethrow) realize via a per-function STATIC
+// `exceptionTable` (table-scan model, sdev-vm-locked): THROW unwinds to the
+// innermost covering entry (walking call frames); TRY_START/TRY_END are runtime
+// no-op region markers (the table is authoritative). The thrown value is a
+// single boxed JSValue on the stack; rethrow = re-push + THROW; finally is
+// compiled away in lower.ts. These emitter-side tests (my lane) assert the
+// BytecodeEmitter lowering; the OP.THROW/TRY_* VM dispatch is sdev-vm's slice.
+describe("#1584 (a4) — BytecodeEmitter realizes the try-throw family", () => {
+  it("emitThrow / emitRethrow emit OP.THROW (rethrow = re-push caught value + THROW)", () => {
+    const E = new BytecodeEmitter();
+    const t = new BytecodeSink();
+    E.emitThrow(7, t); // tagIdx is informational (single __exn tag)
+    expect(t.code).toEqual([OP.THROW]);
+
+    const r = new BytecodeSink();
+    E.emitRethrow(0, r);
+    expect(r.code).toEqual([OP.THROW]);
+  });
+
+  it("emitTry (catch) lowers to TRY_START/body/TRY_END/JMP-end/catchTarget + a table entry", () => {
+    // try { LOAD 0 } catch (x) { STORE 1; LOAD 1 }
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    const catchBody = new BytecodeSink();
+    catchBody.emit(OP.STORE, 1); // bind payload
+    catchBody.emit(OP.LOAD, 1);
+    const out = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, body, [{ tagIdx: 5, body: catchBody }], undefined, out);
+
+    // TRY_START<catchTarget=7>; LOAD 0; TRY_END; JMP<end=11>; STORE 1; LOAD 1
+    expect(out.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 11, OP.STORE, 1, OP.LOAD, 1]);
+    // Protected region [tryStart=2, tryEnd=4) = the spliced body; spAtEntry=0.
+    expect(out.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+  });
+
+  it("emitTry (finally-only / catchAll) routes the catchAll arm as the handler", () => {
+    // try { LOAD 0 } finally { LOAD 9; rethrow }  → catchAll = [LOAD 9, THROW]
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    const catchAll = new BytecodeSink();
+    catchAll.emit(OP.LOAD, 9);
+    E.emitRethrow(0, catchAll); // finally re-throws on the leak path
+    const out = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, body, [], catchAll, out);
+
+    expect(out.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 10, OP.LOAD, 9, OP.THROW]);
+    expect(out.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+  });
+
+  it("spliceArm relocates a nested try's code AND its exceptionTable by +base", () => {
+    // An inner try built into its own sink, then spliced into a larger sink:
+    // its TRY_START<catchTarget> operand + its table entries all shift by +base.
+    const E = new BytecodeEmitter();
+    const innerBody = new BytecodeSink();
+    innerBody.emit(OP.LOAD, 0);
+    const innerCatch = new BytecodeSink();
+    innerCatch.emit(OP.DROP);
+    const arm = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, innerBody, [{ tagIdx: 5, body: innerCatch }], undefined, arm);
+    // arm: [TRY_START,7, LOAD,0, TRY_END, JMP,8, DROP], table {2,4,7,0}
+    expect(arm.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 8, OP.DROP]);
+    expect(arm.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+
+    const dest = new BytecodeSink();
+    dest.emit(OP.LOAD, 3); // base = 2 before the splice
+    dest.spliceArm(arm);
+    // Code relocated by +2: TRY_START operand 7→9, JMP operand 8→10.
+    expect(dest.code).toEqual([OP.LOAD, 3, OP.TRY_START, 9, OP.LOAD, 0, OP.TRY_END, OP.JMP, 10, OP.DROP]);
+    // Table entry relocated by +2.
+    expect(dest.exceptionTable).toEqual([{ tryStart: 4, tryEnd: 6, catchTarget: 9, spAtEntry: 0 }]);
   });
 });

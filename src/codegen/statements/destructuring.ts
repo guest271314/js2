@@ -90,20 +90,27 @@ export function arrayDstrNeedsIdentity(ctx: CodegenContext, isStringRHS: boolean
  * array iterations inside the override body stay on the typed-vec fast path — no
  * re-entrancy / no infinite loop.
  */
-function tryEmitArrayProtoIteratorReadDrive(
+export function tryEmitArrayProtoIteratorReadDrive(
   ctx: CodegenContext,
   fctx: FunctionContext,
   pattern: ts.ArrayBindingPattern,
   resultType: ValType,
+  /**
+   * (#1719 CPR-2) When provided, the array value is read from this local instead
+   * of consumed from the stack — lets the for-of-head / parameter dstr sites
+   * (whose value lives in a local) reuse this exact drive+drain. `undefined` ⇒
+   * the decl-dstr caller's convention (vec ref already on the stack).
+   */
+  srcLocal?: number,
 ): boolean {
   const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
   if (overrideGlobalIdx === undefined) return false;
 
-  // CPR-1 shape gate: only plain identifiers (+ optional default) and elisions.
+  // CPR shape gate: only plain identifiers (+ optional default) and elisions.
   for (const el of pattern.elements) {
     if (ts.isOmittedExpression(el)) continue;
-    if (el.dotDotDotToken) return false; // rest → CPR-2
-    if (!ts.isIdentifier(el.name)) return false; // nested → CPR-2
+    if (el.dotDotDotToken) return false; // rest → follow-up
+    if (!ts.isIdentifier(el.name)) return false; // nested → follow-up
   }
 
   // Pre-register __iterator_next (the for-of multi-value drain shape) BEFORE
@@ -118,60 +125,94 @@ function tryEmitArrayProtoIteratorReadDrive(
   flushLateImportShifts(ctx, fctx);
   if (nextIdx === undefined) return false;
 
-  // Stash the vec ref, then drive the override into an iterator local.
-  const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
-  fctx.body.push({ op: "local.set", index: vecLocal });
-  fctx.body.push({ op: "local.get", index: vecLocal });
+  // Put the array value on the stack: from `srcLocal` (for-of / param convention)
+  // or from a fresh stash of the already-on-stack vec ref (decl convention). The
+  // value may be a vec ref OR an externref (for-of elements are often externref);
+  // `emitArrayProtoIteratorDrive` does `extern.convert_any`, which only accepts
+  // an anyref/(ref any) — so an externref source must be converted first.
+  if (srcLocal !== undefined) {
+    const srcType = getLocalType(fctx, srcLocal) ?? ({ kind: "externref" } as ValType);
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    if (srcType.kind === "externref") {
+      // externref → anyref so the drive's `extern.convert_any` (any→extern) is
+      // the right direction. (#1719 CPR-2)
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+    }
+  } else {
+    const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
+    fctx.body.push({ op: "local.set", index: vecLocal });
+    fctx.body.push({ op: "local.get", index: vecLocal });
+  }
   const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
   const doneLocal = allocLocal(fctx, `__cpr_done_${fctx.locals.length}`, { kind: "i32" });
   const valLocal = allocLocal(fctx, `__cpr_val_${fctx.locals.length}`, { kind: "externref" });
 
-  for (const el of pattern.elements) {
-    // Advance the iterator: (done, value) = __iterator_next(iter).
-    fctx.body.push({ op: "local.get", index: iterLocal });
-    fctx.body.push({ op: "call", funcIdx: nextIdx });
-    fctx.body.push({ op: "local.set", index: valLocal }); // value (top)
-    fctx.body.push({ op: "local.set", index: doneLocal }); // done (below)
+  // Build the per-element drain into a buffer, then guard it on a non-null
+  // iterator. If the override drive returns null (e.g. the closure dispatch
+  // couldn't resolve the override — a TS-cast `(Array.prototype as any)[…]`
+  // generator whose compiled shape the arity-0 dispatcher doesn't match), the
+  // bindings stay at their TDZ/zero defaults rather than trapping on
+  // `__iterator_next(null)`. The 71 `.js` test262 cases resolve a real iterator;
+  // this guard only makes the unresolved-override edge degrade gracefully.
+  const drainInstrs: Instr[] = collectInstrs(fctx, () => {
+    for (const el of pattern.elements) {
+      // Advance the iterator: (done, value) = __iterator_next(iter).
+      fctx.body.push({ op: "local.get", index: iterLocal });
+      fctx.body.push({ op: "call", funcIdx: nextIdx });
+      fctx.body.push({ op: "local.set", index: valLocal }); // value (top)
+      fctx.body.push({ op: "local.set", index: doneLocal }); // done (below)
 
-    if (ts.isOmittedExpression(el) || !ts.isIdentifier(el.name)) continue; // elision: just advance
+      if (ts.isOmittedExpression(el) || !ts.isIdentifier(el.name)) continue; // elision: just advance
 
-    const name = el.name.text;
-    const localIdx = fctx.localMap.get(name);
-    if (localIdx === undefined) continue;
-    const localType = getLocalType(fctx, localIdx) ?? ({ kind: "externref" } as ValType);
+      const name = el.name.text;
+      const localIdx = fctx.localMap.get(name);
+      if (localIdx === undefined) continue;
+      const localType = getLocalType(fctx, localIdx) ?? ({ kind: "externref" } as ValType);
 
-    // value-present arm: coerce `value` externref → the binding's local type.
-    const assignFromValue: Instr[] = collectInstrs(fctx, () => {
-      fctx.body.push({ op: "local.get", index: valLocal });
-      coerceType(ctx, fctx, { kind: "externref" }, localType);
-      fctx.body.push({ op: "local.set", index: localIdx });
-    });
-
-    // done / default arm: if the element has `= init`, evaluate it; else leave
-    // the local at its zero/undefined default (already TDZ-initialised upstream).
-    let defaultArm: Instr[] = [];
-    if (el.initializer) {
-      defaultArm = collectInstrs(fctx, () => {
-        const initType = compileExpression(ctx, fctx, el.initializer!);
-        if (initType) {
-          if (!valTypesMatch(initType, localType)) coerceType(ctx, fctx, initType, localType);
-          fctx.body.push({ op: "local.set", index: localIdx });
-        }
+      // value-present arm: coerce `value` externref → the binding's local type.
+      const assignFromValue: Instr[] = collectInstrs(fctx, () => {
+        fctx.body.push({ op: "local.get", index: valLocal });
+        coerceType(ctx, fctx, { kind: "externref" }, localType);
+        fctx.body.push({ op: "local.set", index: localIdx });
       });
+
+      // done / default arm: if the element has `= init`, evaluate it; else leave
+      // the local at its zero/undefined default (already TDZ-initialised upstream).
+      let defaultArm: Instr[] = [];
+      if (el.initializer) {
+        defaultArm = collectInstrs(fctx, () => {
+          const initType = compileExpression(ctx, fctx, el.initializer!);
+          if (initType) {
+            if (!valTypesMatch(initType, localType)) coerceType(ctx, fctx, initType, localType);
+            fctx.body.push({ op: "local.set", index: localIdx });
+          }
+        });
+      }
+      // ECMA-262 §8.5.2: when the iterator step is done, the value is `undefined`
+      // and the binding takes its default if present. We model that with the
+      // `done` flag: done ⇒ default arm, else ⇒ assign drained value. (A
+      // present-but-`undefined` value also triggers the default per dstr-binding
+      // semantics; CPR-2 folds that in — the 71 tests yield concrete values.)
+      fctx.body.push({ op: "local.get", index: doneLocal });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: defaultArm,
+        else: assignFromValue,
+      } as Instr);
     }
-    // ECMA-262 §8.5.2: when the iterator step is done, the value is `undefined`
-    // and the binding takes its default if present. We model that with the
-    // `done` flag: done ⇒ default arm, else ⇒ assign drained value. (A
-    // present-but-`undefined` value also triggers the default per dstr-binding
-    // semantics; CPR-2 folds that in — the 71 tests yield concrete values.)
-    fctx.body.push({ op: "local.get", index: doneLocal });
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: defaultArm,
-      else: assignFromValue,
-    } as Instr);
-  }
+  });
+
+  // if (iter !== null) { drain }
+  fctx.body.push({ op: "local.get", index: iterLocal });
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: drainInstrs,
+    else: [],
+  } as Instr);
   return true;
 }
 
