@@ -657,6 +657,67 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
     expect(() => runProgram(nullProgram, []), "null struct STRUCT_GET traps").toThrow(/null struct/);
   });
 
+  // ── #1584 a3 control-flow: JNZ (the exact dual of JZ; br_if maps here) ──
+  // block/loop/br/br_if add NO opcode — the emitter resolves them to
+  // JZ/JNZ/JMP + backpatched absolute targets. JNZ=28 is the only VM addition.
+  // count(n) = a post-test (do-while) loop that runs `i++` while i < n. The
+  // do-while shape (test at the BOTTOM, JNZ loop-back) is the natural fit for a
+  // single backward JNZ; a pre-test `while` would use a JZ-exit + JMP-back pair.
+  // For n>=1 it returns n; the JS reference mirrors the same do-while so they
+  // agree (n=1 → exactly one iter). The point is the JNZ backward loop-back.
+  //   CONST 0; STORE 1 (i=0)
+  //   header:  LOAD 1; CONST 1; ADD; STORE 1   (i++)
+  //            LOAD 1; LOAD 0; CMP_LT          (i < n ? 1 : 0)
+  //            JNZ header                       (loop back while i<n)
+  //   LOAD 1; RET                               (return i)
+  it("a3: JNZ loop — host-VM == WasmGC-VM == JS for count(n) (do i++ while i<n)", async () => {
+    const s = new BytecodeSink();
+    emitNumberConst(0, s); // i = 0
+    E.emitLocalSet(1, s); // STORE 1
+    const header = s.here(); // loop-header address (absolute)
+    E.emitLocalGet(1, s); // i
+    emitNumberConst(1, s);
+    E.emitBinary("f64.add", s); // i + 1
+    E.emitLocalSet(1, s); // i = i + 1
+    E.emitLocalGet(1, s); // i
+    E.emitLocalGet(0, s); // n
+    E.emitBinary("f64.lt", s); // i < n
+    s.emit(OP.JNZ, header); // if nonzero (i<n) → loop back to header
+    E.emitLocalGet(1, s); // i
+    E.emitReturn(s);
+
+    // Mirror the SAME do-while semantics (post-test) so the reference agrees.
+    const js = (n: number): number => {
+      let i = 0;
+      do {
+        i++;
+      } while (i < n);
+      return i;
+    };
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 1,
+          nLocals: 2,
+        },
+      ],
+      entry: 0,
+    };
+    const vmMod = compileProgramModule(
+      ["n"],
+      [{ code: s.code, constPool: s.constPool, arity: 1, nLocals: 2 }],
+      0,
+      ["n", "0"], // args[0]=n, args[1]=i (0-init)
+    );
+    for (const n of [1, 2, 5, 10, 100]) {
+      const expected = js(n);
+      expect(runProgram(program, [n]), `host count(${n})`).toBe(expected);
+      expect(await runWasm(vmMod, "run", [n]), `wasm count(${n})`).toBe(expected);
+    }
+  });
+
   // ── Sanity: the host VM still rejects malformed; the emitter rejects ops ──
   // outside the #1584 production subset. (The subset has grown with #958:
   // f64.div / f64.ne are now IN-subset, so the out-of-subset probe uses ops the
