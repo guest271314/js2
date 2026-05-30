@@ -211,6 +211,14 @@ export function runProgram(program: Program, args: readonly number[]): number {
         if (stack.pop() === 0) pc = target;
         break;
       }
+      // #1584 a3 control-flow: JNZ is the exact dual of JZ (emitter resolves
+      // block/loop/br/br_if to JZ/JNZ/JMP + backpatched absolute targets; the VM
+      // only ever sees the conditional/unconditional jumps). `br_if` maps here.
+      case OP.JNZ: {
+        const target = code[pc++]!;
+        if (stack.pop() !== 0) pc = target;
+        break;
+      }
       case OP.JMP:
         pc = code[pc++]!;
         break;
