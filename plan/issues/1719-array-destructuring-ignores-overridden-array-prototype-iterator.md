@@ -852,3 +852,24 @@ is defined:
 Termination: internal array iterations inside the override body stay on the typed-vec
 fast path (the brand gate only fires at dstr/for-of/spread observation sites, not on
 every `arr[i]`), so no global re-route → no re-entrancy.
+
+### Read-drive dispatch — timing analysis (sdev-cpr, awaiting tech-lead a/b/c)
+
+Verified `emitClosureMethodCallExportN(0)` (index.ts ~2815): its body is the exact
+re-entrancy-safe driver we need (convert closure externref→anyref; save/install/restore
+`__current_this`; ref.test the base-wrapper struct; extract funcref field 0; dispatch
+over registered funcref types via ref.test/ref.cast/call_ref; box result→externref).
+BUT two timing facts shape the dispatch mechanism:
+1. It iterates `ctx.closureInfoByTypeIdx`, populated DURING body compilation — so it
+   MUST run in post-processing (after all closures registered), like `__call_fn_method_N`.
+2. It does NOT register in `ctx.funcMap` (only pushes mod.functions + mod.exports).
+
+So the dstr read-drive (emitted during body compilation, BEFORE post-processing) cannot
+resolve the driver's funcIdx by name at emit time. Resolution needs ONE of:
+- (a) emit a dedicated `__drive_proto_iterator` in post-processing AND reserve its funcIdx
+  up-front (a stable pre-allocated index the dstr `call` targets) — small, self-contained.
+- (b) thread a forward-funcref/patch for `__call_fn_method_0` — reuses code, more plumbing.
+- (c) inline call_ref per read-drive site — needs the full funcref-type dispatch duplicated
+  3× (dstr/for-of/spread); the closure's funcTypeIdx varies → sprawl.
+
+Recommend (a). Awaiting confirmation before adding the driver fn (array hot path).
