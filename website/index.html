@@ -1529,7 +1529,7 @@
 
       <section class="section-pad" id="goals">
         <div class="intro">
-          <h2>Goal: 100% JavaScript compatibility.</h2>
+          <h2>Goal: 100% ECMAScript compatibility.</h2>
           <p>
             Which JS language features compile to WebAssembly today, which still rely on host support, and which are
             still on the roadmap. Status is derived from ECMAScript Test262 pass rates and known compiler limitations.
@@ -3198,6 +3198,12 @@ match (value) {
           <p>
             When running outside of a JS engine like found in browsers or Node.js, compatibility today typically means
             embedding a JS interpreter inside the WebAssembly module. This increases module size and slows execution.
+          </p>
+          <p class="bench-disclaimer">
+            These are microbenchmarks — small single-kernel programs (tight numeric loops, string hashing, array and
+            object operations) that each isolate one class of operation. They indicate where ahead-of-time compilation
+            helps or hurts at the kernel level; they are not full-application workloads, so the ratios shouldn't be read
+            as a general speedup. Each figure is the median of multiple measured rounds taken after warm-up.
           </p>
         </div>
 
