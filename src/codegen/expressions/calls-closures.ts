@@ -89,7 +89,23 @@ export function compileClosureCall(
     if (effectiveLocalIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: effectiveLocalIdx });
     } else {
-      fctx.body.push({ op: "global.get", index: moduleIdx! });
+      // (#1730) Re-resolve the module-global index from `ctx.moduleGlobals` on
+      // every push instead of reusing the `const moduleIdx` captured at entry.
+      // A late string-constant import added while compiling the call arguments
+      // (between the receiver push at the top and this funcref-re-resolution
+      // push) shifts every module-global index by +1 and rewrites the
+      // ALREADY-EMITTED `global.get` in `fctx.body` via `fixupModuleGlobalIndices`
+      // (which also updates the `ctx.moduleGlobals` map). The stale captured
+      // `moduleIdx` would emit a NEW `global.get` with the pre-shift index
+      // AFTER the shift already ran, so the shifter never visits it — the
+      // index then points at the late-added string-constant import global and
+      // `ref.cast` of that externref to the closure struct traps "illegal cast"
+      // (a module-level `const`-bound arrow called internally, #1730). Reading
+      // the live map mirrors why `g = f; g(21)` works: the intermediate-local
+      // path resolves through a local whose load lands in the outer body the
+      // shifter does visit.
+      const liveModuleIdx = ctx.moduleGlobals.get(varName) ?? moduleIdx!;
+      fctx.body.push({ op: "global.get", index: liveModuleIdx });
     }
     // Null-check → TypeError instead of trap on struct.get (#728, #441)
     emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: info.structTypeIdx });

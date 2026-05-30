@@ -1,9 +1,10 @@
 ---
 id: 1730
 title: "internal call to a module-level `const` arrow traps with illegal cast"
-status: ready
+status: done
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-05-30
+completed: 2026-05-30
 priority: medium
 task_type: bugfix
 area: codegen
@@ -186,3 +187,49 @@ avoids a double-shift risk from a wrong savedBodies registration.
 Status: handed back — sdev-vm pivoted to the #1584 VM op-family dispatch (higher
 priority; sdev-emitter2's families landing). No code change committed; the
 refined root-cause + WAT above is the resume point.
+
+## FIXED (senior-dev sdev-cpr2, 2026-05-30, branch issue-1730-const-arrow)
+
+The trapping site is `compileClosureCall` in
+`src/codegen/expressions/calls-closures.ts` (NOT the `emitCachedFuncClosureAccess`
+cache path, NOT the `calls.ts` callable-param ladder). For a module-`const`-bound
+arrow whose `__mod_<name>` global stores a **typed closure ref** (`(ref null
+$struct)`, not externref), `effectiveLocalIdx` stays undefined, so the inner
+`pushClosureRef` helper emits `global.get moduleIdx` directly. `pushClosureRef`
+is called **twice** — once for the receiver/self (before args) and once for the
+funcref re-resolution (after args).
+
+`moduleIdx` was captured **once** as a `const` at function entry
+(`calls-closures.ts:34`). While the call arguments compile (between the two
+pushes), a late string-constant import is added — for this repro the function
+name `f` itself becomes a `string_constants` import — which runs
+`fixupModuleGlobalIndices` (`registry/imports.ts:129`). That shifter:
+- bumps every module-global index by +1, INCLUDING rewriting the
+  already-emitted receiver `global.get` in `fctx.body` (3→4 ✓), and
+- updates the `ctx.moduleGlobals` map (3→4 ✓).
+
+But the **second** `pushClosureRef` then emits a NEW `global.get` using the
+**stale captured `const moduleIdx`** (still 3), AFTER the shift already ran, so
+the shifter never visits it. Index 3 now points at the late string-constant
+import global (an externref), and the subsequent funcref-extract / `ref.cast`
+of that value to the closure struct traps `illegal cast`. WAT confirmed:
+pre-fix the funcref-resolution `global.get 3` vs the receiver `global.get 4`;
+post-fix both are `global.get 4`.
+
+`g = f; g(21)` works because the intermediate-local store loads `__mod_f` into
+an outer-body local once (which the shifter does visit), so the call dispatches
+through the local — never re-resolving the global a second time post-shift.
+
+**Fix (the safer of the two directions above, generalized):** re-read
+`ctx.moduleGlobals.get(varName)` on **every** `pushClosureRef` instead of reusing
+the captured `const moduleIdx` (`?? moduleIdx!` as a fallback for the rare case
+the name left the map). One-site change; reads the live, already-shifted map so
+the index is always current. No new savedBodies registration → no double-shift
+risk.
+
+**Verified:** `const f=(x:number):number=>x*2; main(){return f(21)}` → 42 (was
+trap); async variant `const double = async (x)=>x*2; main(){return double(21)}`
+→ 42 (the originally-skipped `tests/equivalence/async-function.test.ts` case,
+now un-skipped); two distinct module-const arrows + multi-call cases → correct;
+`g=f; g(21)` control still 42. Regression test `tests/issue-1730.test.ts`
+(5 cases). Full `tests/equivalence/` suite + tsc clean.
