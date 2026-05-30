@@ -162,9 +162,7 @@ export class BytecodeSink {
    * Emit a jump whose target is not yet known; returns the code index of the
    * *operand slot* to backpatch once the target is known.
    */
-  emitJumpPlaceholder(
-    op: typeof OP.JZ | typeof OP.JMP | typeof OP.JNZ,
-  ): number {
+  emitJumpPlaceholder(op: typeof OP.JZ | typeof OP.JMP | typeof OP.JNZ): number {
     this.code.push(op, -1); // -1 = unpatched
     return this.code.length - 1; // index of the operand slot
   }
@@ -211,10 +209,7 @@ export class BytecodeSink {
       switch (op) {
         case OP.CONST: {
           const localPoolIdx = code[i++]!;
-          this.code.push(
-            OP.CONST,
-            this.internConst(arm.constPool[localPoolIdx]!),
-          );
+          this.code.push(OP.CONST, this.internConst(arm.constPool[localPoolIdx]!));
           break;
         }
         case OP.JZ:
@@ -226,9 +221,7 @@ export class BytecodeSink {
           if (target < 0) {
             const depth = armPending.get(slot);
             if (depth === undefined) {
-              throw new Error(
-                "BytecodeSink.spliceArm: arm contains an unpatched jump (internal error)",
-              );
+              throw new Error("BytecodeSink.spliceArm: arm contains an unpatched jump (internal error)");
             }
             // Carry the structured branch outward, relocated into this sink.
             this.code.push(op, -1);
@@ -312,8 +305,7 @@ function binopToOpcode(op: IrBinop): Opcode {
 function unopToOpcode(op: IrUnop): Opcode {
   if (op === "f64.neg") return OP.NEG;
   throw new Error(
-    `BytecodeEmitter: unary '${op}' not in the #1584 production subset (f64.neg). ` +
-      `See plan/issues/1584 §2a.`,
+    `BytecodeEmitter: unary '${op}' not in the #1584 production subset (f64.neg). ` + `See plan/issues/1584 §2a.`,
   );
 }
 
@@ -353,11 +345,7 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     );
   }
 
-  emitConst(
-    instr: Extract<IrInstr, { kind: "const" }>,
-    funcName: string,
-    out: BytecodeSink,
-  ): void {
+  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: BytecodeSink): void {
     const v = instr.value;
     switch (v.kind) {
       case "i32":
@@ -371,9 +359,7 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
       case "i64":
       case "null":
       case "undefined":
-        throw new Error(
-          `BytecodeEmitter: const '${v.kind}' not in the #1584 numeric subset (${funcName})`,
-        );
+        throw new Error(`BytecodeEmitter: const '${v.kind}' not in the #1584 numeric subset (${funcName})`);
     }
   }
 
@@ -439,12 +425,7 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
    * `blockType` is ignored (the bytecode VM is untyped over boxed values); it is
    * part of the trait signature for the WasmGC realization.
    */
-  emitIf(
-    _blockType: BlockType,
-    then: BytecodeSink,
-    els: BytecodeSink,
-    out: BytecodeSink,
-  ): void {
+  emitIf(_blockType: BlockType, then: BytecodeSink, els: BytecodeSink, out: BytecodeSink): void {
     const toElse = out.emitJumpPlaceholder(OP.JZ);
     out.spliceArm(then);
     const toEnd = out.emitJumpPlaceholder(OP.JMP);
@@ -483,11 +464,7 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
    * (the VM is untyped over boxed values) — it is part of the trait signature
    * for the WasmGC realization.
    */
-  emitBlock(
-    _blockType: BlockType,
-    body: BytecodeSink,
-    out: BytecodeSink,
-  ): void {
+  emitBlock(_blockType: BlockType, body: BytecodeSink, out: BytecodeSink): void {
     const firstNew = out.pendingBranches.length;
     out.spliceArm(body);
     this.resolveSplicedBranches(out, firstNew, out.here());
@@ -512,11 +489,7 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
    * each deeper branch so the next-outer construct resolves it. Entries added
    * before `firstNew` (already-pending outer branches) are untouched.
    */
-  private resolveSplicedBranches(
-    out: BytecodeSink,
-    firstNew: number,
-    selfTarget: number,
-  ): void {
+  private resolveSplicedBranches(out: BytecodeSink, firstNew: number, selfTarget: number): void {
     const migrated = out.pendingBranches.splice(firstNew);
     for (const pb of migrated) {
       if (pb.depth === 0) {
@@ -548,44 +521,26 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
   // STRUCT_NEW carries the field COUNT (the untyped VM needs no typeIdx, only
   // how many to pop); STRUCT_GET/SET carry the numeric field INDEX (lower.ts
   // resolves name→fieldIdx via the layout, so the VM gets the index directly).
-  emitAggregateNew(
-    _layout: IrObjectStructLowering,
-    fieldCount: number,
-    out: BytecodeSink,
-  ): void {
+  emitAggregateNew(_layout: IrObjectStructLowering, fieldCount: number, out: BytecodeSink): void {
     out.emit(OP.STRUCT_NEW, fieldCount);
   }
 
-  emitFieldGet(
-    layout: IrObjectStructLowering | IrClassLowering,
-    name: string,
-    out: BytecodeSink,
-  ): void {
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: BytecodeSink): void {
     out.emit(OP.STRUCT_GET, layout.fieldIdx(name));
   }
 
-  emitFieldSet(
-    layout: IrObjectStructLowering | IrClassLowering,
-    name: string,
-    out: BytecodeSink,
-  ): void {
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: BytecodeSink): void {
     out.emit(OP.STRUCT_SET, layout.fieldIdx(name));
   }
 
   // ---- vec (array) primitives — out of the #1584 numeric subset -----------
   emitVecLen(): void {
-    throw new Error(
-      "BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.",
-    );
+    throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
   emitVecDataPtr(): void {
-    throw new Error(
-      "BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.",
-    );
+    throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
   emitElemGet(): void {
-    throw new Error(
-      "BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.",
-    );
+    throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
 }

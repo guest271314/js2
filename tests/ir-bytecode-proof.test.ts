@@ -1,19 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import {
-  BytecodeEmitter,
-  BytecodeSink,
-  OP,
-} from "../src/ir/backend/bytecode-emitter.js";
+import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
 import type { IrObjectStructLowering } from "../src/ir/backend/handles.js";
-import {
-  type IrFunction,
-  type IrLowerResolver,
-  asBlockId,
-  asValueId,
-  irVal,
-} from "../src/ir/index.js";
+import { type IrFunction, type IrLowerResolver, asBlockId, asValueId, irVal } from "../src/ir/index.js";
 // #1584 (a0-tail): the REAL production lowerer, generic over the sink. The arm
 // at the bottom of this file drives it (not a hand-lowerer) through a
 // BytecodeEmitter for the #1715 three functions — the (a0) acceptance criterion.
@@ -46,26 +36,15 @@ import { buildImports } from "../src/runtime.js";
 // The WasmGC arm DOES go through the real compiler (`compile()`), so the
 // equivalence pins the bytecode result against production WasmGC lowering.
 
-async function runWasmGc(
-  src: string,
-  fn: string,
-  args: number[],
-): Promise<number> {
+async function runWasmGc(src: string, fn: string, args: number[]): Promise<number> {
   const r = compile(src, { fileName: "test.ts" });
   if (!r.success) throw new Error(`compile error: ${r.errors[0]?.message}`);
   const imports = buildImports(r.imports, undefined, r.stringPool);
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  if (
-    typeof (imports as { setExports?: (e: unknown) => void }).setExports ===
-    "function"
-  ) {
-    (imports as { setExports: (e: unknown) => void }).setExports(
-      instance.exports,
-    );
+  if (typeof (imports as { setExports?: (e: unknown) => void }).setExports === "function") {
+    (imports as { setExports: (e: unknown) => void }).setExports(instance.exports);
   }
-  const f = (instance.exports as Record<string, (...a: number[]) => number>)[
-    fn
-  ];
+  const f = (instance.exports as Record<string, (...a: number[]) => number>)[fn];
   return f(...args);
 }
 
@@ -174,16 +153,12 @@ describe("#1584 — bytecode-emitter triple equivalence (production trait surfac
   it("out-of-subset ops throw with a clear #1584 message", () => {
     const s = new BytecodeSink();
     // js-bitwise / i32 logical families have not migrated behind the trait yet.
-    expect(() => E.emitBinary("js.bitor", s)).toThrow(
-      /not in the #1584 production subset/,
-    );
-    expect(() => E.emitUnary("i32.eqz", s)).toThrow(
-      /not in the #1584 production subset/,
-    );
+    expect(() => E.emitBinary("js.bitor", s)).toThrow(/not in the #1584 production subset/);
+    expect(() => E.emitUnary("i32.eqz", s)).toThrow(/not in the #1584 production subset/);
     // The raw-Instr escape hatch rejects an Instr for an unrealized op family.
-    expect(() =>
-      E.pushRaw(s, { op: "struct.get", typeIdx: 0, fieldIdx: 0 }),
-    ).toThrow(/out of the #1584 production subset/);
+    expect(() => E.pushRaw(s, { op: "struct.get", typeIdx: 0, fieldIdx: 0 })).toThrow(
+      /out of the #1584 production subset/,
+    );
   });
 });
 
@@ -220,11 +195,7 @@ function numericResolver(): IrLowerResolver {
 
 /** Lower a hand-built IR function to a bytecode sink via the REAL lowerer. */
 function lowerToBytecode(fn: IrFunction): BytecodeSink {
-  return lowerIrFunctionBody<BytecodeSink>(
-    fn,
-    numericResolver(),
-    new BytecodeEmitter(),
-  ).body;
+  return lowerIrFunctionBody<BytecodeSink>(fn, numericResolver(), new BytecodeEmitter()).body;
 }
 
 describe("#1584 (a0-tail) — REAL lower.ts drives the bytecode sink (triple equivalence)", () => {
@@ -462,11 +433,7 @@ describe("#1584 (a1) — real lower.ts drives OP.CALL through the BytecodeEmitte
       valueCount: 3,
     };
 
-    const sink = lowerIrFunctionBody<BytecodeSink>(
-      main,
-      callResolver(1),
-      new BytecodeEmitter(),
-    ).body;
+    const sink = lowerIrFunctionBody<BytecodeSink>(main, callResolver(1), new BytecodeEmitter()).body;
     // The call's result is single-use in the return, so it inlines: the body is
     //   LOAD 0 ; LOAD 1 ; CALL 1 ; RET
     expect(sink.code).toEqual([OP.LOAD, 0, OP.LOAD, 1, OP.CALL, 1, OP.RET]);
@@ -535,14 +502,7 @@ describe("#1584 (a2) — BytecodeEmitter realizes the struct/object family", () 
     arm.emit(OP.STRUCT_SET, 1);
     const dest = new BytecodeSink();
     dest.spliceArm(arm);
-    expect(dest.code).toEqual([
-      OP.STRUCT_NEW,
-      2,
-      OP.STRUCT_GET,
-      0,
-      OP.STRUCT_SET,
-      1,
-    ]);
+    expect(dest.code).toEqual([OP.STRUCT_NEW, 2, OP.STRUCT_GET, 0, OP.STRUCT_SET, 1]);
   });
 });
 
