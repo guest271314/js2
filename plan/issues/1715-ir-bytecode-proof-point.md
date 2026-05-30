@@ -178,3 +178,64 @@ Concretely for #1584:
   through a `BytecodeEmitter` end-to-end (drops the hand-lowering).
 - Extend the opcode set toward the #1584 register+accumulator VM + the broader
   IR surface (calls, aggregates).
+
+---
+
+## 2026-05-30 — Production emitter slice (senior-dev, #1584). Real front-end IR, hand-lowering dropped.
+
+The first #1584 follow-up above is **landed** (branch `issue-1584-prod-emitter`).
+The bytecode emitter is now driven by the **real front-end IR** — the same
+`lowerFunctionAstToIr` output the WasmGC backend consumes — not hand-lowered IR.
+
+### What landed (NEW files under `src/ir/backend/bytecode/`, zero changes to existing files)
+- `opcodes.ts` — the **production opcode set** (`OP`) + `BytecodeSink`. SINGLE
+  SOURCE OF TRUTH; the VM (sdev-vm track) imports it read-only. Grows the proof's
+  set with `DIV`, `CMP_NE`, `TEE`, `GLOBAL_GET/SET`, `SELECT`, `DROP`,
+  `UNREACHABLE`, and a `spliceArm` that rebases nested-`if` jump targets +
+  remaps const-pool indices when splicing arm buffers.
+- `emitter.ts` — production `BytecodeEmitter`: mirrors the `BackendEmitter` trait
+  **primitive signatures** (so the real lowering walk drives it exactly as
+  `lower.ts` drives `WasmGcEmitter`) over a `BytecodeSink`.
+- `vm.ts` — production stack dispatch loop (`runBytecode`), plain-TS in the
+  js2wasm-compilable subset so #1584 can lower the loop itself.
+- `lower-bytecode.ts` — the **production lowering driver**. Walks the real
+  `IrFunction` (SSA def maps, use-count → tee-materialisation, structured `if` /
+  `select` / `br_if` / `br` / `return`), mirroring `lower.ts`'s `emitValue` /
+  `emitInstrTree` / `emitBlockBody` contract. Any out-of-subset node throws a
+  clear `not in the #1584 production subset` error.
+- `tests/ir-bytecode-production.test.ts` — triple equivalence driven by REAL IR:
+  parses source → `lowerFunctionAstToIr` → bytecode → run; asserts
+  `bytecode(real IR) == WasmGC(real compile()) == JS` for `a+b`, `let x=a*2`,
+  `a>0?a+b:a-b`, `(a+b)*(a-b)`, plus an out-of-subset rejection (`a|0`). **5 green.**
+
+### Why a parallel driver instead of making `BackendEmitter<S>` generic (the key decision)
+Threading a generic sink type through the `BackendEmitter` trait would force
+`lowerIrFunctionToWasm` to be generic too — but that function has **166 inline
+`out.push({ op })` sites** (call, struct.get/new/set, try/throw/rethrow,
+loop/block/br_if, the js-bitwise scratch dance, ref-coercion) that are NOT routed
+through the trait and hard-require `S = Instr[]`. Making lower.ts generic over
+those would either break their type-checking or demand migrating all 166 first —
+a large, conformance-risky refactor that is #1584's **per-op-group** later slices,
+not this one. So the production emitter mirrors the trait's primitive *signatures*
+(identical drive shape) without claiming `implements BackendEmitter` (whose `out`
+is `Instr[]`), and the lowering driver covers exactly the routed subset, throwing
+loudly at the not-yet-migrated boundary. This keeps the PR contained + zero
+conformance risk while genuinely moving from hand-lowered IR to real compiler IR.
+
+### Encoding confirmed: STACK MACHINE (still the #1584 ADR input)
+Unchanged from the proof and re-validated against real IR. Reg+accumulator
+remains a free choice strictly below the seam — if the architect's #1584 contract
+pins it, `opcodes.ts` + `vm.ts` change and the lowering driver follows; the
+seam (real IR → sink) does not move.
+
+### The remaining #1584 migration ladder (now the only follow-ups)
+The seam is proven end-to-end on real IR. What's left is **breadth**, one op group
+per slice, each: (1) route the group behind the trait in `lower.ts` (retiring its
+inline `out.push` sites), (2) add its opcode(s) to `opcodes.ts`, (3) add its VM
+dispatch (sdev-vm), (4) extend `lower-bytecode.ts` to stop throwing for it. The
+166-site inventory is the migration backlog. Groups in rough dependency order:
+globals (resolver index wiring) → calls → aggregates (struct.get/new/set) →
+closures/ref-cells → exceptions (try/throw) → loops (block/loop/br_if multi-block)
+→ strings. Cross-arm/cross-block multi-use materialisation (`lower.ts`'s
+`crossBlock` hoist) must port alongside the multi-block (loops) group — until then
+`lower-bytecode.ts` detects and rejects the hazard rather than mis-lowering.
