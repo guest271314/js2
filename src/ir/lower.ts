@@ -698,11 +698,10 @@ export function lowerIrFunctionBody<S>(
         emitter.emitConst(instr, func.name, out);
         return;
       case "call": {
+        // (a1) call family (#1584 §2a): route through the typed emitCall
+        // primitive — byte-identical {op:"call"} on WasmGC, OP.CALL on bytecode.
         for (const a of instr.args) emitValue(a, out);
-        emitter.pushRaw(out, {
-          op: "call",
-          funcIdx: resolver.resolveFunc(instr.target),
-        });
+        emitter.emitCall(resolver.resolveFunc(instr.target), out);
         return;
       }
       case "global.get":
@@ -997,8 +996,10 @@ export function lowerIrFunctionBody<S>(
         // shape.fields, which is also the WasmGC struct's declared field
         // order. The builder enforces value-count parity with shape arity,
         // so this loop always produces the right stack shape.
+        // (a2) struct/object family (#1584 §2a): route through emitAggregateNew
+        // — byte-identical {op:"struct.new"} on WasmGC, OP.STRUCT_NEW on bytecode.
         for (const v of instr.values) emitValue(v, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: obj.typeIdx });
+        emitter.emitAggregateNew(obj, instr.values.length, out);
         return;
       }
       case "object.get": {
@@ -1012,12 +1013,10 @@ export function lowerIrFunctionBody<S>(
         if (!obj) {
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(valueIrType.shape)}> (${func.name})`);
         }
+        // (a2): route through emitFieldGet — byte-identical {op:"struct.get"}
+        // on WasmGC, OP.STRUCT_GET <fieldIdx> on bytecode.
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: obj.typeIdx,
-          fieldIdx: obj.fieldIdx(instr.name),
-        });
+        emitter.emitFieldGet(obj, instr.name, out);
         return;
       }
       case "object.set": {
@@ -1031,13 +1030,11 @@ export function lowerIrFunctionBody<S>(
         if (!obj) {
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(valueIrType.shape)}> (${func.name})`);
         }
+        // (a2): route through emitFieldSet — byte-identical {op:"struct.set"}
+        // on WasmGC, OP.STRUCT_SET <fieldIdx> on bytecode.
         emitValue(instr.value, out);
         emitValue(instr.newValue, out);
-        emitter.pushRaw(out, {
-          op: "struct.set",
-          typeIdx: obj.typeIdx,
-          fieldIdx: obj.fieldIdx(instr.name),
-        });
+        emitter.emitFieldSet(obj, instr.name, out);
         return;
       }
       // Slice 3 (#1169c): closure / ref-cell ops.
@@ -1101,8 +1098,12 @@ export function lowerIrFunctionBody<S>(
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
+        // The struct.get (a2 struct family) + ref.cast (a5 ref-coercion) before
+        // this stay on pushRaw until their families migrate; only the terminal
+        // call_ref is the (a1) call family → typed emitCallRef (byte-identical
+        // {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
         emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
-        emitter.pushRaw(out, { op: "call_ref", typeIdx: cl.funcTypeIdx });
+        emitter.emitCallRef(cl.funcTypeIdx, out);
         return;
       }
       case "refcell.new": {
@@ -1406,7 +1407,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.lengthSlot),
         });
         loopBody.push({ op: "i32.ge_s" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // element = data[counter]
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.dataSlot) });
@@ -1450,20 +1452,12 @@ export function lowerIrFunctionBody<S>(
         });
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // Wrap in block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // Wrap in block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // Slice 6 part 3 (#1182) — coercion + iterator protocol ops.
@@ -1546,7 +1540,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         }); // externref value (top)
         // if (done) br 1 (exit) — done (i32) is now on top of the stack
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // Body instrs (same materialisation pattern as forof.vec).
         for (const bodyInstr of instr.body) {
@@ -1563,20 +1558,12 @@ export function lowerIrFunctionBody<S>(
         }
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
 
         // Normal-exit close: iter.return(iter). Note this runs only on
         // normal loop exit (done=true). Abrupt exits (break/return)
@@ -1766,7 +1753,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.lengthSlot),
         });
         loopBody.push({ op: "i32.ge_s" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // element = __str_charAt(str, counter)
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.strSlot) });
@@ -1807,20 +1795,12 @@ export function lowerIrFunctionBody<S>(
         });
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // Slice 10 (#1169i) — extern class ops. All five forms delegate to
@@ -1924,9 +1904,10 @@ export function lowerIrFunctionBody<S>(
         emitBodyBuffer(instr.cond, loopBody);
 
         // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+        //    #1584 (a3): the control-flow ops route through the trait.
         emitValue(instr.condValue, loopBody as unknown as S);
         loopBody.push({ op: "i32.eqz" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // 3. Body instructions.
         emitBodyBuffer(instr.body, loopBody);
@@ -1937,20 +1918,12 @@ export function lowerIrFunctionBody<S>(
         }
 
         // 5. Continue back to the loop header.
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // 6. Wrap in `block { loop { ... } }`.
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // 6. Wrap in `block { loop { ... } }` via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // (#1373b Phase C Slice 1) Async / await IR node lowering.

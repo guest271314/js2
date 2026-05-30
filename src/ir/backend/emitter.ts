@@ -123,6 +123,21 @@ export interface BackendEmitter<S = Instr[]> {
   emitBr(depth: number, out: S): void;
   emitBrIf(depth: number, out: S): void;
 
+  // ---- (a3) control-flow family — MIGRATED behind the trait (#1584 §2a) ----
+  // The structured `block` / `loop` wrappers. The caller (real `lower.ts`)
+  // pre-lowers the wrapped region into its own sink (via `newSink()`), embedding
+  // any `br` / `br_if` whose `depth` counts block/loop nesting outward (De Bruijn).
+  // WasmGc realizes them as byte-identical `{op:"block",body}` / `{op:"loop",body}`
+  // — the WasmGC `Instr` stream is unchanged. Bytecode realizes them by splicing
+  // `body` and resolving its pending `br`/`br_if` jumps to `JZ`/`JNZ`/`JMP` with
+  // backpatched targets (block ⇒ forward exit label, loop ⇒ backward header
+  // label), exactly as `emitIf` already lowers structured `if` (issue §1c/§2a:
+  // "loop / block / br_if … lowered to JZ/JNZ/JMP + backpatch labels").
+  /** Wrap `body` in a structured block; `body` was built via `newSink()`. */
+  emitBlock(blockType: BlockType, body: S, out: S): void;
+  /** Wrap `body` in a structured loop; `body` was built via `newSink()`. */
+  emitLoop(blockType: BlockType, body: S, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
   // The following are part of the full seam the spec audited but are NOT
   // routed through the trait in Phase 1 (#1713). They remain inline in
@@ -130,10 +145,7 @@ export interface BackendEmitter<S = Instr[]> {
   // closure / ref-coercion) have a stable signature to migrate against and
   // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
   // need not implement them until its group is wired.
-  emitAggregateNew?(layout: IrObjectStructLowering, fieldCount: number, out: Instr[]): void;
   emitBox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitFieldGet?(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void;
-  emitFieldSet?(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void;
   emitUnbox?(layout: IrUnionLowering, out: Instr[]): void;
   emitTagLoad?(layout: IrUnionLowering, out: Instr[]): void;
   emitNull?(irType: IrType, out: Instr[]): void;
@@ -146,6 +158,27 @@ export interface BackendEmitter<S = Instr[]> {
   emitRefCellNew?(layout: IrRefCellLowering, out: Instr[]): void;
   emitRefCellGet?(layout: IrRefCellLowering, out: Instr[]): void;
   emitRefCellSet?(layout: IrRefCellLowering, out: Instr[]): void;
-  emitCall?(funcIdx: number, out: Instr[]): void;
-  emitCallRef?(funcTypeIdx: number, out: Instr[]): void;
+
+  // ---- (a1) call family — MIGRATED behind the trait (#1584 §2a) -----------
+  // The first op-family to move from inline `lower.ts` pushes to typed trait
+  // primitives. WasmGc/Linear realize them as byte-identical `{op:"call"}` /
+  // `{op:"call_ref"}`; Bytecode realizes `OP.CALL` / `OP.CALL_REF`. Generic
+  // over the sink `S` (the a0-tail seam) so both backends drive the same arms.
+  /** Direct call to compiled function `funcIdx`. Args already on the stack. */
+  emitCall(funcIdx: number, out: S): void;
+  /** Indirect call through a typed funcref already on the stack. */
+  emitCallRef(funcTypeIdx: number, out: S): void;
+
+  // ---- (a2) struct/object family — MIGRATED behind the trait (#1584 §2a) ---
+  // The object struct ops (object.new / object.get / object.set). WasmGc/Linear
+  // realize them as byte-identical `{op:"struct.new"}` / `{op:"struct.get"}` /
+  // `{op:"struct.set"}`; Bytecode realizes `OP.STRUCT_NEW` / `STRUCT_GET` /
+  // `STRUCT_SET` over a VM heap (struct ref ≡ f64(heapIndex), null ≡ f64(-1)).
+  /** Allocate an aggregate from `fieldCount` values already on the stack
+   * (canonical field order, field0 deepest); leaves the new struct ref. */
+  emitAggregateNew(layout: IrObjectStructLowering, fieldCount: number, out: S): void;
+  /** struct ref on stack -> the named field's value. */
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
+  /** struct ref + value on stack -> writes the named field (void). */
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
 }

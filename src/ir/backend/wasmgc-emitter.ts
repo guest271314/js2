@@ -18,8 +18,8 @@
 import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr } from "../types.js";
-import type { IrVecLowering } from "./handles.js";
 import type { BackendEmitter } from "./emitter.js";
+import type { IrClassLowering, IrObjectStructLowering, IrVecLowering } from "./handles.js";
 
 export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // #1584: sink = Instr[]. The factory returns a plain array and the raw escape
@@ -35,11 +35,19 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // ---- vec (array) ----------------------------------------------------
 
   emitVecLen(layout: IrVecLowering, out: Instr[]): void {
-    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.lengthFieldIdx });
+    out.push({
+      op: "struct.get",
+      typeIdx: layout.vecStructTypeIdx,
+      fieldIdx: layout.lengthFieldIdx,
+    });
   }
 
   emitVecDataPtr(layout: IrVecLowering, out: Instr[]): void {
-    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.dataFieldIdx });
+    out.push({
+      op: "struct.get",
+      typeIdx: layout.vecStructTypeIdx,
+      fieldIdx: layout.dataFieldIdx,
+    });
   }
 
   emitElemGet(layout: IrVecLowering, out: Instr[]): void {
@@ -116,4 +124,59 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   emitBrIf(depth: number, out: Instr[]): void {
     out.push({ op: "br_if", depth });
   }
+
+  // ---- (a3) control-flow family (#1584 §2a) — byte-identical to the prior
+  // inline `out.push({op:"block"...})` / `{op:"loop"...}` in lower.ts's fenced
+  // loop arms. The WasmGC stream is unchanged; this only moves the push behind
+  // the trait so the bytecode backend can realize the same intent as
+  // JZ/JNZ/JMP + backpatch labels.
+  emitBlock(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "block", blockType, body });
+  }
+
+  emitLoop(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "loop", blockType, body });
+  }
+
+  // ---- (a1) call family (#1584 §2a) — byte-identical to the prior inline
+  // `out.push({op:"call"...})` / `{op:"call_ref"...}` in lower.ts. The WasmGC
+  // stream is unchanged; this only moves the push behind the trait so the
+  // bytecode backend can realize the same intent as OP.CALL / OP.CALL_REF.
+  emitCall(funcIdx: number, out: Instr[]): void {
+    out.push({ op: "call", funcIdx });
+  }
+
+  emitCallRef(funcTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "call_ref", typeIdx: funcTypeIdx });
+  }
+
+  // ---- (a2) struct/object family (#1584 §2a) — byte-identical to the prior
+  // inline `out.push({op:"struct.new"/"struct.get"/"struct.set"...})` in the
+  // object.new/get/set arms of lower.ts. The WasmGC stream is unchanged; this
+  // moves the push behind the trait so the bytecode backend realizes the same
+  // intent as OP.STRUCT_NEW / STRUCT_GET / STRUCT_SET over a VM heap.
+  emitAggregateNew(layout: IrObjectStructLowering, _fieldCount: number, out: Instr[]): void {
+    out.push({ op: "struct.new", typeIdx: layout.typeIdx });
+  }
+
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void {
+    out.push({
+      op: "struct.get",
+      typeIdx: structTypeIdxOf(layout),
+      fieldIdx: layout.fieldIdx(name),
+    });
+  }
+
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void {
+    out.push({
+      op: "struct.set",
+      typeIdx: structTypeIdxOf(layout),
+      fieldIdx: layout.fieldIdx(name),
+    });
+  }
+}
+
+/** The WasmGC struct typeIdx for an object (`typeIdx`) or class (`structTypeIdx`). */
+function structTypeIdxOf(layout: IrObjectStructLowering | IrClassLowering): number {
+  return "typeIdx" in layout ? layout.typeIdx : layout.structTypeIdx;
 }
