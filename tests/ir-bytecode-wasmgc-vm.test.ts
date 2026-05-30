@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
+import type { BlockType } from "../src/ir/types.js";
 import { buildImports } from "../src/runtime.js";
 
 // #1584 slice (b) — the Wasm-GC-native dispatch loop.
@@ -38,6 +39,26 @@ import { buildImports } from "../src/runtime.js";
 // later coordinated bump owned by slice (a)).
 
 const E = new BytecodeEmitter();
+
+// The production `BytecodeEmitter.emitConst` (per the #1713/#1584 trait, landed
+// by the emitter slice) takes an IR `const` instr, not a bare number. For these
+// numeric proofs the only path needed is the f64 literal → a single
+// `CONST <poolIdx>`. This wrapper builds that IR const instr, mirroring the
+// emitter slice's own `emitNumberConst` so both test suites drive the production
+// signature identically. (Keeping this here, not in the VM, preserves the
+// VM-owns-only-bytecode-vm.ts boundary.)
+function emitNumberConst(value: number, out: BytecodeSink): void {
+  E.emitConst(
+    {
+      kind: "const",
+      result: null,
+      resultType: null,
+      value: { kind: "f64", value },
+    },
+    "proof",
+    out,
+  );
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VM_FILE = resolve(__dirname, "../src/ir/backend/bytecode-vm.ts");
@@ -139,7 +160,7 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
     const sink = (): BytecodeSink => {
       const s = new BytecodeSink();
       E.emitLocalGet(0, s);
-      E.emitConst(2, s);
+      emitNumberConst(2, s);
       E.emitBinary("f64.mul", s);
       E.emitLocalSet(1, s);
       E.emitLocalGet(1, s);
@@ -165,24 +186,23 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
 
     const sink = (): BytecodeSink => {
       const s = new BytecodeSink();
-      E.emitIf(
-        () => {
-          E.emitLocalGet(0, s);
-          E.emitConst(0, s);
-          E.emitBinary("f64.gt", s);
-        },
-        () => {
-          E.emitLocalGet(0, s);
-          E.emitLocalGet(1, s);
-          E.emitBinary("f64.add", s);
-        },
-        () => {
-          E.emitLocalGet(0, s);
-          E.emitLocalGet(1, s);
-          E.emitBinary("f64.sub", s);
-        },
-        s,
-      );
+      // cond: a > 0 — emitted into the outer sink, left on the stack for emitIf.
+      E.emitLocalGet(0, s);
+      emitNumberConst(0, s);
+      E.emitBinary("f64.gt", s);
+      // then arm: a + b — pre-lowered into its own child sink, as lower.ts builds
+      // each arm's body before handing it to the production emitIf.
+      const thenArm = E.newSink();
+      E.emitLocalGet(0, thenArm);
+      E.emitLocalGet(1, thenArm);
+      E.emitBinary("f64.add", thenArm);
+      // else arm: a - b
+      const elseArm = E.newSink();
+      E.emitLocalGet(0, elseArm);
+      E.emitLocalGet(1, elseArm);
+      E.emitBinary("f64.sub", elseArm);
+      const emptyBlock: BlockType = { kind: "empty" };
+      E.emitIf(emptyBlock, thenArm, elseArm, s);
       E.emitReturn(s);
       return s;
     };
@@ -244,11 +264,18 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
     }
   });
 
-  // ── Sanity: the host VM still rejects out-of-subset / malformed (as #1715) ─
-  it("host VM rejects malformed + out-of-subset (unchanged from #1715)", () => {
+  // ── Sanity: the host VM still rejects malformed; the emitter rejects ops ──
+  // outside the #1584 production subset. (The subset has grown with #958:
+  // f64.div / f64.ne are now IN-subset, so the out-of-subset probe uses ops the
+  // production emitter still rejects — a binary not in binopToOpcode and a unary
+  // that isn't f64.neg.)
+  it("host VM rejects malformed + out-of-subset ops", () => {
     const s = new BytecodeSink();
-    E.emitConst(1, s); // never RET → runs off the end
+    emitNumberConst(1, s); // never RET → runs off the end
     expect(() => runSink(s, [])).toThrow(/unknown opcode/);
-    expect(() => E.emitBinary("f64.div", s)).toThrow(/not supported in proof/);
+    // f64.min has no opcode in the production subset → emitter throws.
+    expect(() => E.emitBinary("f64.min", s)).toThrow(/not in the #1584/);
+    // Only f64.neg is a supported unary; i32.eqz is rejected.
+    expect(() => E.emitUnary("i32.eqz", s)).toThrow(/not in the #1584/);
   });
 });
