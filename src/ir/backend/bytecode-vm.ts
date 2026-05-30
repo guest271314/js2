@@ -14,7 +14,7 @@
 // 0.0 (matching the emitter's CMP_* ops and JS truthiness for the JZ branch).
 // All values are JS numbers (f64) — the #1715 subset is numeric only.
 
-import { OP, type BytecodeSink } from "./bytecode-emitter.js";
+import { type BytecodeSink, OP } from "./bytecode-emitter.js";
 
 /**
  * Run a compiled bytecode program.
@@ -27,6 +27,10 @@ import { OP, type BytecodeSink } from "./bytecode-emitter.js";
  */
 export function runBytecode(code: readonly number[], constPool: readonly number[], args: readonly number[]): number {
   const locals: number[] = args.slice();
+  // Module globals (GLOBAL_GET/SET), lazily 0-initialised on first access —
+  // mirrors the `locals` lazy-init contract. The #1715 numeric subset has no
+  // globals; this is here for the production op set.
+  const globals: number[] = [];
   const stack: number[] = [];
   let pc = 0;
 
@@ -112,6 +116,52 @@ export function runBytecode(code: readonly number[], constPool: readonly number[
         break;
       case OP.RET:
         return stack.pop()!;
+      // ── #1584 production additions (DIV..UNREACHABLE) — wired in lockstep with
+      // the emitter's OP enum (sdev-emitter owns OP; the VM realizes each). ──
+      case OP.DIV: {
+        const b = stack.pop()!;
+        const a = stack.pop()!;
+        stack.push(a / b);
+        break;
+      }
+      case OP.CMP_NE: {
+        const b = stack.pop()!;
+        const a = stack.pop()!;
+        stack.push(a !== b ? 1 : 0);
+        break;
+      }
+      case OP.TEE: {
+        // Peek top (do not pop) -> locals[idx]; leaves the value on the stack.
+        const idx = code[pc++]!;
+        locals[idx] = stack[stack.length - 1]!;
+        break;
+      }
+      case OP.GLOBAL_GET: {
+        const idx = code[pc++]!;
+        stack.push(globals[idx] ?? 0);
+        break;
+      }
+      case OP.GLOBAL_SET: {
+        const idx = code[pc++]!;
+        globals[idx] = stack.pop()!;
+        break;
+      }
+      case OP.SELECT: {
+        // pop cond, pop b, pop a -> push (cond != 0) ? a : b.
+        const cond = stack.pop()!;
+        const b = stack.pop()!;
+        const a = stack.pop()!;
+        stack.push(cond !== 0 ? a : b);
+        break;
+      }
+      case OP.DROP:
+        stack.pop();
+        break;
+      case OP.UNREACHABLE:
+        // Maps from Wasm `unreachable` — a malformed / dead-code path. Trap
+        // loudly (the standalone-Wasm analogue is `unreachable`; the host VM
+        // throws so the equivalence test sees a clean failure, not a hang).
+        throw new Error(`bytecode-vm: UNREACHABLE executed at pc ${pc - 1}`);
       default:
         throw new Error(`bytecode-vm: unknown opcode ${op} at pc ${pc - 1}`);
     }
