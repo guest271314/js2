@@ -808,3 +808,47 @@ sprawls beyond the gate sites, STOP + ping tech-lead. Diff wasm on an override-f
 module to confirm byte-identical.
 
 **Status**: #1742 prerequisite landed (PR #961). Starting CPR-1 write-arm.
+
+## CPR-1 write-arm — DONE (senior-dev sdev-cpr, 2026-05-30, commit ea66317fe)
+
+The override assignment was dropped at compile time (S2 diagnosis, above) because
+the **module-init statement filter** (`declarations.ts` ~3058) only keeps a
+top-level assignment when its root identifier is a module global — `Array` is a
+builtin, so `Array.prototype[@@iterator] = fn` was discarded before reaching
+codegen. Root cause of the "drop" found + fixed:
+
+1. The S1 brand (`arrayIteratorMaybeOverridden`) was set AFTER `collectDeclarations`
+   in both the single- and multi-module paths (index.ts ~1000 / ~4085). Moved the
+   brand-set BEFORE `collectDeclarations` so the filter sees it.
+2. Filter now KEEPS the `Array.prototype[@@iterator|values] = fn` statement when the
+   brand is set (`isArrayProtoIteratorAssignTarget`).
+3. `src/codegen/expressions/proto-override.ts` — `maybeCaptureArrayProtoOverride`
+   lifts the RHS closure (`compileArrowAsClosure`, handles `function*`), roots it in
+   a fresh `mut externref` module global (`__array_proto_iterator_override`,
+   DCE-safe), records `{globalIdx}` in `ctx.protoOverrides["Array"]["@@iterator"]`.
+   Wired into `compileAssignment`. `arrayIteratorOverrideGlobalIdx(ctx)` exposes the
+   global for the read-drive.
+
+Verified: the override global IS now emitted (CPR_DEBUG traced capture); override-free
+modules emit NO `__array_proto` global (byte-identical). `protoOverrides` value type
+carries `globalIdx`.
+
+### Read-drive design (next — the z=42 proof)
+
+At the dstr gate (`destructuring.ts` ~892, vec ref on stack), when
+`arrayDstrNeedsIdentity(ctx,isStringStruct)` AND `arrayIteratorOverrideGlobalIdx(ctx)`
+is defined:
+1. Normalise the typed-vec RHS → externref (`extern.convert_any`) = the array-as-`this`.
+2. `__call_fn_method_0(arrayExternref, global.get <overrideGlobalIdx>)` → iterator externref
+   (drives the override generator's body; #1742 guard lets its `this[i]` read the vec).
+3. Drain via the existing `__iterator_next` host import `(externref)->(i32 done, externref value)`
+   — per binding element: call next, on `done` apply the element default / undefined,
+   else assign `value`. Reuse the per-element assignment logic from
+   `compileExternrefArrayDestructuringDecl` (the externref dstr lane already drains an
+   iterator), but feed it OUR iterator (the override result) instead of `__iterator`
+   on the host array.
+4. `return` (skip the backing-store fast path) — fires the override exactly once.
+
+Termination: internal array iterations inside the override body stay on the typed-vec
+fast path (the brand gate only fires at dstr/for-of/spread observation sites, not on
+every `arr[i]`), so no global re-route → no re-entrancy.
