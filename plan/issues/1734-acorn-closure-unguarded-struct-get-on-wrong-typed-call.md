@@ -122,3 +122,41 @@ Pin it as `tests/issue-1731.test.ts` (compile + `WebAssembly.compile` succeed).
   lowering, which overlaps the CPR cluster and the #1584 (a5) ref-coercion
   migration. Ping the tech lead before editing shared property-access lowering
   broadly; keep the fix scoped to the call-receiver guarded-read path.
+
+## Investigation notes (2026-05-30, where to resume)
+
+Ruled OUT (these property-access struct-field paths are already guarded —
+they route a `ref`/`ref_null` receiver through `emitNullGuardedStructGet`
+and only emit a bare `struct.get` in the null/VOID `else`):
+- `compilePropertyAccess` main struct-field branch, property-access.ts
+  ~L2422–2462.
+- The second struct-field branch ~L2655–2684.
+- The `#1118` object-literal method-as-closure-field path ~L2332–2340 — added
+  a `DBG1734` probe at L2336; it did **not** fire for the acorn build, so this
+  is not the site.
+
+The `__closure_11` receiver chain is `call 33 ; call 110 ; struct.get 45 35`
+— i.e. the property is read off the result of a **method/closure call**
+(`X.method()…` or a lifted-closure call), so the producing path is one that
+compiles a *call-expression* receiver and trusts its resolved struct type
+without the guarded cast. Candidate next sites to instrument (bare
+`op: "struct.get"` emits in property-access.ts not yet ruled out):
+L857, L911, L1050, L1926/1954/2005/2033/2040/2058 (vec-length, unlikely),
+L2209, L2336 (ruled out), L2682 (ruled out). Most likely: a call-result
+`.field` fast path that resolves the receiver type from the call's TS return
+type and emits `struct.get` directly. The minimal-loss instrumentation: wrap
+EVERY `fctx.body.push({op:"struct.get",…})` in property-access.ts behind a
+`DBG1734` that prints `propName`/`structTypeIdx` and compares against the
+preceding producer's reported type, then re-run `DBG1734=1 dogfood:acorn`
+to find the `struct.get 45 …` emit whose receiver is a call returning a
+different struct type.
+
+**Fix shape (once site is pinned):** route the call-result receiver through
+the same `ref.test`-guarded cast / `emitNullGuardedStructGet` path that the
+sibling closures (`__closure_13`) already use, instead of a bare `struct.get`.
+Keep scoped to the call-receiver guarded-read path; ping tech lead before
+broadening to shared property-access lowering (CPR + #1584 a5 overlap).
+
+**Coordination state:** lead authorized taking this directly (2026-05-30).
+Branch `issue-1731-closure-struct-typeconfusion` holds this issue file only
+(no source changes yet). The #1725 fix it builds on is merged (main 5ac9203c4).
