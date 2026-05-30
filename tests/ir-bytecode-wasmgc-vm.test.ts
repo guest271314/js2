@@ -124,6 +124,12 @@ function compileProgramModule(
     constPool: readonly number[];
     arity: number;
     nLocals: number;
+    exceptionTable?: ReadonlyArray<{
+      tryStart: number;
+      tryEnd: number;
+      catchTarget: number;
+      spAtEntry: number;
+    }>;
   }>,
   entry: number,
   argInit: readonly string[],
@@ -137,10 +143,16 @@ function compileProgramModule(
   src = src.replace(/\/\*\* Convenience[\s\S]*$/m, "");
   const params = entryParams.map((p) => `${p}: number`).join(", ");
   const fnLiterals = functions
-    .map(
-      (f) =>
-        `{ code: [${f.code.join(", ")}], constPool: [${f.constPool.join(", ")}], arity: ${f.arity}, nLocals: ${f.nLocals} }`,
-    )
+    .map((f) => {
+      // exceptionTable defaults to [] (no try regions); a4 cases pass entries.
+      const excEntries = (f.exceptionTable ?? [])
+        .map(
+          (e) =>
+            `{ tryStart: ${e.tryStart}, tryEnd: ${e.tryEnd}, catchTarget: ${e.catchTarget}, spAtEntry: ${e.spAtEntry} }`,
+        )
+        .join(", ");
+      return `{ code: [${f.code.join(", ")}], constPool: [${f.constPool.join(", ")}], arity: ${f.arity}, nLocals: ${f.nLocals}, exceptionTable: [${excEntries}] }`;
+    })
     .join(",\n    ");
   const entrySrc = `
 export function run(${params}): number {
@@ -448,12 +460,14 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
         constPool: main.constPool.slice(),
         arity: 2,
         nLocals: 2,
+        exceptionTable: [],
       },
       {
         code: add.code.slice(),
         constPool: add.constPool.slice(),
         arity: 2,
         nLocals: 2,
+        exceptionTable: [],
       },
     ];
     const program: Program = { functions, entry: 0 };
@@ -506,12 +520,14 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
         constPool: entry.constPool.slice(),
         arity: 2,
         nLocals: 2,
+        exceptionTable: [],
       },
       {
         code: add.code.slice(),
         constPool: add.constPool.slice(),
         arity: 2,
         nLocals: 2,
+        exceptionTable: [],
       },
     ];
     const program: Program = { functions, entry: 0 };
@@ -538,12 +554,14 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
           constPool: nullEntry.constPool.slice(),
           arity: 2,
           nLocals: 2,
+          exceptionTable: [],
         },
         {
           code: add.code.slice(),
           constPool: add.constPool.slice(),
           arity: 2,
           nLocals: 2,
+          exceptionTable: [],
         },
       ],
       entry: 0,
@@ -584,6 +602,7 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
           constPool: s.constPool.slice(),
           arity: 2,
           nLocals: 3,
+          exceptionTable: [],
         },
       ],
       entry: 0,
@@ -630,6 +649,7 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
           constPool: s.constPool.slice(),
           arity: 1,
           nLocals: 2,
+          exceptionTable: [],
         },
       ],
       entry: 0,
@@ -650,6 +670,7 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
           constPool: nullGet.constPool.slice(),
           arity: 0,
           nLocals: 0,
+          exceptionTable: [],
         },
       ],
       entry: 0,
@@ -670,7 +691,12 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
   //            LOAD 1; LOAD 0; CMP_LT          (i < n ? 1 : 0)
   //            JNZ header                       (loop back while i<n)
   //   LOAD 1; RET                               (return i)
-  it("a3: JNZ loop — host-VM == WasmGC-VM == JS for count(n) (do i++ while i<n)", async () => {
+  // NB: this drives a HAND-BUILT bytecode loop stream through both VMs — it does
+  // NOT lower a real loop FUNCTION through lower.ts end-to-end (loop-body i32/
+  // struct ops still hit the requireInstrSink fence, later families). So it
+  // proves the JNZ dispatch arm + a backward loop-back through the compiled
+  // Wasm-GC-VM, not end-to-end loop compilation.
+  it("a3: JNZ dispatch — host-VM == WasmGC-VM == JS for a hand-built do-while loop", async () => {
     const s = new BytecodeSink();
     emitNumberConst(0, s); // i = 0
     E.emitLocalSet(1, s); // STORE 1
@@ -701,6 +727,7 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
           constPool: s.constPool.slice(),
           arity: 1,
           nLocals: 2,
+          exceptionTable: [],
         },
       ],
       entry: 0,
@@ -716,6 +743,161 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
       expect(runProgram(program, [n]), `host count(${n})`).toBe(expected);
       expect(await runWasm(vmMod, "run", [n]), `wasm count(${n})`).toBe(expected);
     }
+  });
+
+  // ── #1584 a3 emitter stream-shape asserts (verbatim mirror of emitter2's a3
+  // proof streams) — block/loop/br/br_if resolve to JZ/JNZ/JMP + backpatched
+  // absolute targets, so the VM-side hand-built stream must equal the emitter's.
+  it("a3: emitter stream shapes — JNZ/JMP backpatch (canonical + nested De Bruijn)", () => {
+    // canonical `block{ loop{ cond; br_if 1(exit); body; br 0(continue) } }`:
+    //   LOAD 0; JNZ 8(exit); LOAD 1; JMP 0(header)
+    const canonical = new BytecodeSink();
+    E.emitLocalGet(0, canonical);
+    canonical.emit(OP.JNZ, 8);
+    E.emitLocalGet(1, canonical);
+    canonical.emit(OP.JMP, 0);
+    expect(canonical.code).toEqual([OP.LOAD, 0, OP.JNZ, 8, OP.LOAD, 1, OP.JMP, 0]);
+
+    // nested `block{loop{ block{loop{ br_if 1; br 0 }; br 0 }}}`:
+    //   LOAD 0; JNZ 6(inner exit); JMP 0(inner header); JMP 0(outer header)
+    const nested = new BytecodeSink();
+    E.emitLocalGet(0, nested);
+    nested.emit(OP.JNZ, 6);
+    nested.emit(OP.JMP, 0);
+    nested.emit(OP.JMP, 0);
+    expect(nested.code).toEqual([OP.LOAD, 0, OP.JNZ, 6, OP.JMP, 0, OP.JMP, 0]);
+  });
+
+  // ── #1584 a4 try-throw family (THROW / TRY_START / TRY_END) ──
+  // table-scan model: per-function exceptionTable, THROW unwinds to the innermost
+  // covering handler (and across CALL frames). TRY_START/TRY_END are no-ops.
+  // Runnable execution cases via the compiled VM (compileProgramModule now
+  // threads exceptionTable) plus an emitter stream-shape mirror.
+  it("a4: THROW/catch — host-VM == WasmGC-VM for try{throw 42}catch(e){return e}", async () => {
+    // TRY_START<ct>; CONST 42; THROW; TRY_END; JMP end; ct: STORE 0; LOAD 0; RET
+    const s = new BytecodeSink();
+    const tsIdx = s.here();
+    s.emit(OP.TRY_START, -1); // catchTarget backpatched
+    const protStart = s.here();
+    emitNumberConst(42, s);
+    s.emit(OP.THROW);
+    const protEnd = s.here();
+    s.emit(OP.TRY_END);
+    const toEnd = s.code.length;
+    s.emit(OP.JMP, -1);
+    const ct = s.here();
+    E.emitLocalSet(0, s); // bind e
+    E.emitLocalGet(0, s);
+    E.emitReturn(s);
+    s.code[toEnd + 1] = s.here(); // patch JMP→end
+    s.code[tsIdx + 1] = ct; // patch TRY_START catchTarget (informational)
+    const excTable = [{ tryStart: protStart, tryEnd: protEnd, catchTarget: ct, spAtEntry: 0 }];
+
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 0,
+          nLocals: 1,
+          exceptionTable: excTable,
+        },
+      ],
+      entry: 0,
+    };
+    const vmMod = compileProgramModule(
+      [],
+      [
+        {
+          code: s.code,
+          constPool: s.constPool,
+          arity: 0,
+          nLocals: 1,
+          exceptionTable: excTable,
+        },
+      ],
+      0,
+      ["0"], // local 0 = e (0-init)
+    );
+    expect(runProgram(program, []), "host throw/catch").toBe(42);
+    expect(await runWasm(vmMod, "run", []), "wasm throw/catch").toBe(42);
+  });
+
+  it("a4: THROW unwinds across CALL frames; uncaught aborts the program", () => {
+    // B(): throw 7  (no handler).  A(): try{ CALL B }catch(e){ return e }.
+    const B = new BytecodeSink();
+    emitNumberConst(7, B);
+    B.emit(OP.THROW);
+    E.emitReturn(B);
+
+    const A = new BytecodeSink();
+    const tsIdx = A.here();
+    A.emit(OP.TRY_START, -1);
+    const protStart = A.here();
+    A.emit(OP.CALL, 1); // CALL B
+    const protEnd = A.here();
+    A.emit(OP.TRY_END);
+    const toEnd = A.code.length;
+    A.emit(OP.JMP, -1);
+    const ct = A.here();
+    E.emitLocalSet(0, A);
+    E.emitLocalGet(0, A);
+    E.emitReturn(A);
+    A.code[toEnd + 1] = A.here();
+    A.code[tsIdx + 1] = ct;
+
+    const caught: Program = {
+      functions: [
+        {
+          code: A.code.slice(),
+          constPool: A.constPool.slice(),
+          arity: 0,
+          nLocals: 1,
+          exceptionTable: [
+            {
+              tryStart: protStart,
+              tryEnd: protEnd,
+              catchTarget: ct,
+              spAtEntry: 0,
+            },
+          ],
+        },
+        {
+          code: B.code.slice(),
+          constPool: B.constPool.slice(),
+          arity: 0,
+          nLocals: 0,
+          exceptionTable: [],
+        },
+      ],
+      entry: 0,
+    };
+    expect(runProgram(caught, []), "throw across CALL → caught by A").toBe(7);
+
+    // Same B, but the entry has NO handler → the throw escapes the program.
+    const noHandler = new BytecodeSink();
+    noHandler.emit(OP.CALL, 1);
+    E.emitReturn(noHandler);
+    const uncaught: Program = {
+      functions: [
+        {
+          code: noHandler.code.slice(),
+          constPool: noHandler.constPool.slice(),
+          arity: 0,
+          nLocals: 0,
+          exceptionTable: [],
+        },
+        {
+          code: B.code.slice(),
+          constPool: B.constPool.slice(),
+          arity: 0,
+          nLocals: 0,
+          exceptionTable: [],
+        },
+      ],
+      entry: 0,
+    };
+    expect(() => runProgram(uncaught, []), "uncaught throw aborts").toThrow(/uncaught throw/);
   });
 
   // ── Sanity: the host VM still rejects malformed; the emitter rejects ops ──
