@@ -137,3 +137,52 @@ Surfaced while fixing #1727 (async-call NaN). The async-arrow equivalence case
 was attributed to async but is a general module-const-arrow dispatch bug;
 split out so #1727 ships the actual Promise-wrap fix without expanding into
 closure-ABI work.
+
+---
+
+## 2026-05-30 — sdev-vm checkpoint: trapping global.get refined; fix site differs from handoff
+
+Reproduced cleanly on current main (`const f=(x)=>x*2; main(){return f(21)}` →
+"illegal cast"; `g=f; g(21)` → 42). Dumped the WAT for the repro — the exact
+trap is:
+
+```wat
+;; receiver load (CORRECT, post-shift):
+global.get 4          ;; the closure struct value
+local.tee 0
+;; ... null-check on receiver ...
+;; callee RE-RESOLUTION for the funcref operand (STALE):
+global.get 3          ;; <-- BUG: should be `global.get 4`. global 3 = "" string-const import
+any.convert_extern
+ref.cast null (ref null 6)   ;; casts the string-const externref → closure struct → TRAP
+```
+
+So the receiver load is shifted correctly but the **callee re-resolution**
+`global.get` kept its pre-shift index (3 instead of 4). A late string-constant
+import (`gimport$3`) shifted the import-global indices; the receiver-load
+participated in the shift but the funcref-re-resolution `global.get` did not.
+
+**Refinement vs the handoff (important for whoever finishes this):** the trap is
+NOT emitted via `emitGuardedFuncRefCast` (I added a stderr trace at all
+`emitGuardedFuncRefCast` call sites in calls.ts — none fired for this repro), and
+it is NOT the #1395 callback-arrow arg-block at `calls.ts:~10094` (that path is
+already `pushBody`-wrapped). The WAT signature — `struct.get <s> 0` + inline
+`ref.test (ref <f>)` + `(if (result (ref null <f>)))` funcref-extract + `call_ref`
+— is the **closure-dispatch path**, and the stale `global.get` is the
+**module-const-arrow singleton-cache re-resolution** (`global.get cacheGlobalIdx`
+in `src/codegen/closures.ts` ~3452–3595, the `compileArrowAsClosure` cache
+materialization). That `global.get` is emitted into a body that the late-import
+global-index shifter (`shiftLateImportIndices`/`fixupModuleGlobalIndices`, which
+walks `currentFunc.body` + `savedBodies` + `liveBodies`) does not visit.
+
+**Fix direction (unchanged in spirit, corrected in location):** register the
+body that holds the cache-re-resolution `global.get` in the set the shifter
+walks (`savedBodies`/`liveBodies`), OR resolve the cache global into an OUTER-body
+local once (like `g=f` does — `g=f; g(21)` works precisely because the load lands
+in the outer body which IS shifted). The latter (hoist the funcref load to a
+local in the already-tracked outer body) is likely the smaller, safer fix and
+avoids a double-shift risk from a wrong savedBodies registration.
+
+Status: handed back — sdev-vm pivoted to the #1584 VM op-family dispatch (higher
+priority; sdev-emitter2's families landing). No code change committed; the
+refined root-cause + WAT above is the resume point.
