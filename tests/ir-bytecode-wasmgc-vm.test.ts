@@ -551,6 +551,112 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
     expect(() => runProgram(nullProgram, [1, 2]), "null funcref CALL_REF traps").toThrow(/null funcref/);
   });
 
+  // ── #1584 a2 struct/object family: STRUCT_NEW / STRUCT_GET / STRUCT_SET ──
+  // Heap objects (VM-global), struct ref ≡ f64(heapIndex), null ≡ f64(-1).
+  // mk(a,b){ const o = {x:a, y:b}; return o.x + o.y } proves host-VM ==
+  // Wasm-GC-VM == JS for new + read; a STRUCT_SET round-trip and a null-struct
+  // trap round out the family.
+  it("a2: STRUCT_NEW/GET — host-VM == WasmGC-VM == JS for mk(a,b)={x:a,y:b}; x+y", async () => {
+    // field0 = x, field1 = y (canonical order). Sequence:
+    //   LOAD 0(a); LOAD 1(b); STRUCT_NEW 2 -> ref      ; STORE 2 (o)
+    //   LOAD 2; STRUCT_GET 0 (o.x)
+    //   LOAD 2; STRUCT_GET 1 (o.y)
+    //   ADD; RET
+    const s = new BytecodeSink();
+    E.emitLocalGet(0, s); // a  (field0 = x)
+    E.emitLocalGet(1, s); // b  (field1 = y)
+    s.emit(OP.STRUCT_NEW, 2); // -> struct ref on stack
+    E.emitLocalSet(2, s); // o = ref (local 2)
+    E.emitLocalGet(2, s);
+    s.emit(OP.STRUCT_GET, 0); // o.x
+    E.emitLocalGet(2, s);
+    s.emit(OP.STRUCT_GET, 1); // o.y
+    E.emitBinary("f64.add", s);
+    E.emitReturn(s);
+    const js = (a: number, b: number): number => {
+      const o = { x: a, y: b };
+      return o.x + o.y;
+    };
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 2,
+          nLocals: 3,
+        },
+      ],
+      entry: 0,
+    };
+    const vmMod = compileProgramModule(
+      ["a", "b"],
+      [{ code: s.code, constPool: s.constPool, arity: 2, nLocals: 3 }],
+      0,
+      ["a", "b", "0"], // args[0]=a, args[1]=b, args[2]=o (struct local, 0-init)
+    );
+    for (const [a, b] of [
+      [2, 3],
+      [-5, 10],
+      [0.5, 0.25],
+      [100, -100],
+    ]) {
+      const expected = js(a, b);
+      expect(runProgram(program, [a, b]), `host struct(${a},${b})`).toBe(expected);
+      expect(await runWasm(vmMod, "run", [a, b]), `wasm struct(${a},${b})`).toBe(expected);
+    }
+  });
+
+  it("a2: STRUCT_SET round-trip + null-struct (f64(-1)) traps", () => {
+    // set(a){ const o={x:0}; o.x = a*3; return o.x } → field0 = x.
+    //   CONST 0; STRUCT_NEW 1 -> ref; STORE 1 (o)
+    //   LOAD 1; LOAD 0; CONST 3; MUL; STRUCT_SET 0   (o.x = a*3; stack [ref,val])
+    //   LOAD 1; STRUCT_GET 0; RET
+    const s = new BytecodeSink();
+    emitNumberConst(0, s); // initial x = 0
+    s.emit(OP.STRUCT_NEW, 1);
+    E.emitLocalSet(1, s); // o (local 1)
+    E.emitLocalGet(1, s); // ref (deeper)
+    E.emitLocalGet(0, s); // a
+    emitNumberConst(3, s);
+    E.emitBinary("f64.mul", s); // a*3 (value on top)
+    s.emit(OP.STRUCT_SET, 0); // o.x = a*3
+    E.emitLocalGet(1, s);
+    s.emit(OP.STRUCT_GET, 0); // o.x
+    E.emitReturn(s);
+    const program: Program = {
+      functions: [
+        {
+          code: s.code.slice(),
+          constPool: s.constPool.slice(),
+          arity: 1,
+          nLocals: 2,
+        },
+      ],
+      entry: 0,
+    };
+    for (const a of [3, -4, 0, 1.5]) {
+      expect(runProgram(program, [a]), `host struct-set(${a})`).toBe(a * 3);
+    }
+
+    // null-struct: push f64(-1) then STRUCT_GET → must trap.
+    const nullGet = new BytecodeSink();
+    emitNumberConst(-1, nullGet); // null struct ref
+    nullGet.emit(OP.STRUCT_GET, 0);
+    E.emitReturn(nullGet);
+    const nullProgram: Program = {
+      functions: [
+        {
+          code: nullGet.code.slice(),
+          constPool: nullGet.constPool.slice(),
+          arity: 0,
+          nLocals: 0,
+        },
+      ],
+      entry: 0,
+    };
+    expect(() => runProgram(nullProgram, []), "null struct STRUCT_GET traps").toThrow(/null struct/);
+  });
+
   // ── Sanity: the host VM still rejects malformed; the emitter rejects ops ──
   // outside the #1584 production subset. (The subset has grown with #958:
   // f64.div / f64.ne are now IN-subset, so the out-of-subset probe uses ops the
