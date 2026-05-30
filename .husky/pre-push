@@ -185,3 +185,61 @@ if command -v pnpm > /dev/null 2>&1 && [ -f package.json ]; then
     echo "Pre-push: sync:conformance failed (non-fatal) — CI quality gate may flag drift."
   fi
 fi
+
+# ---------- (5) issue integrity: COMMITTED-tree filename<->id match -------
+#
+# Catches the renumber footgun (#957 / #960, twice in one session): an issue
+# file is renamed and the rename committed, but the `id:` frontmatter edit is
+# left UNCOMMITTED in the working tree. The pushed commit then has
+# filename-prefix != frontmatter-id and fails CI's #1616 integrity gate ~2 min
+# later. The key is we check the COMMITTED tree (`git show HEAD:<file>`), NOT the
+# working tree — the working tree looks fine in exactly this case, which is why
+# the agents' local `check:issues` falsely passed. Also runs the full
+# check:issues for dup-IDs / broken links. Skip the whole hook with --no-verify.
+
+if command -v node > /dev/null 2>&1 && [ -d plan/issues ]; then
+  issue_block=0
+
+  # (5a) committed-tree filename<->frontmatter-id match for changed issue files.
+  range_base=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
+  if [ -n "$range_base" ]; then
+    changed_issues=$(git diff --name-only "$range_base..HEAD" -- 'plan/issues/*.md' 2>/dev/null \
+      | grep -E '^plan/issues/[0-9]+[a-z]?-.*\.md$' || true)
+  else
+    changed_issues=$(git diff --name-only "HEAD~5..HEAD" -- 'plan/issues/*.md' 2>/dev/null \
+      | grep -E '^plan/issues/[0-9]+[a-z]?-.*\.md$' || true)
+  fi
+  for f in $changed_issues; do
+    git cat-file -e "HEAD:$f" 2>/dev/null || continue   # skip deletes
+    prefix=$(basename "$f" | grep -oE '^[0-9]+')
+    id=$(git show "HEAD:$f" 2>/dev/null | grep -m1 -E '^id:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+    if [ -n "$prefix" ] && [ -n "$id" ] && [ "$prefix" != "$id" ]; then
+      echo ""
+      echo "PRE-PUSH BLOCKED (#1616 integrity): $f"
+      echo "  COMMITTED frontmatter id=$id != filename prefix=$prefix"
+      echo "  You likely renamed the file but left the 'id:' edit UNCOMMITTED."
+      echo "  Verify the COMMITTED state (not the working tree):"
+      echo "    git show HEAD:$f | grep '^id:'"
+      echo "  Then commit the id/title edits and re-push."
+      issue_block=1
+    fi
+  done
+
+  # (5b) full integrity gate (duplicate IDs, broken path links) — working tree.
+  if grep -q '"check:issues"' package.json 2>/dev/null; then
+    if ! node scripts/update-issues.mjs --check > /tmp/.prepush_issues 2>&1; then
+      echo ""
+      echo "PRE-PUSH BLOCKED: issue integrity gate (#1616) failed:"
+      tail -15 /tmp/.prepush_issues
+      issue_block=1
+    fi
+    rm -f /tmp/.prepush_issues
+  fi
+
+  if [ "$issue_block" -ne 0 ]; then
+    echo ""
+    echo "Fix the issue-integrity problem(s) above, or 'git push --no-verify' to defer to CI."
+    exit 1
+  fi
+  echo "Pre-push: issue integrity OK."
+fi
