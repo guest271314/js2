@@ -996,8 +996,10 @@ export function lowerIrFunctionBody<S>(
         // shape.fields, which is also the WasmGC struct's declared field
         // order. The builder enforces value-count parity with shape arity,
         // so this loop always produces the right stack shape.
+        // (a2) struct/object family (#1584 §2a): route through emitAggregateNew
+        // — byte-identical {op:"struct.new"} on WasmGC, OP.STRUCT_NEW on bytecode.
         for (const v of instr.values) emitValue(v, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: obj.typeIdx });
+        emitter.emitAggregateNew(obj, instr.values.length, out);
         return;
       }
       case "object.get": {
@@ -1011,12 +1013,10 @@ export function lowerIrFunctionBody<S>(
         if (!obj) {
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(valueIrType.shape)}> (${func.name})`);
         }
+        // (a2): route through emitFieldGet — byte-identical {op:"struct.get"}
+        // on WasmGC, OP.STRUCT_GET <fieldIdx> on bytecode.
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: obj.typeIdx,
-          fieldIdx: obj.fieldIdx(instr.name),
-        });
+        emitter.emitFieldGet(obj, instr.name, out);
         return;
       }
       case "object.set": {
@@ -1030,13 +1030,11 @@ export function lowerIrFunctionBody<S>(
         if (!obj) {
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(valueIrType.shape)}> (${func.name})`);
         }
+        // (a2): route through emitFieldSet — byte-identical {op:"struct.set"}
+        // on WasmGC, OP.STRUCT_SET <fieldIdx> on bytecode.
         emitValue(instr.value, out);
         emitValue(instr.newValue, out);
-        emitter.pushRaw(out, {
-          op: "struct.set",
-          typeIdx: obj.typeIdx,
-          fieldIdx: obj.fieldIdx(instr.name),
-        });
+        emitter.emitFieldSet(obj, instr.name, out);
         return;
       }
       // Slice 3 (#1169c): closure / ref-cell ops.

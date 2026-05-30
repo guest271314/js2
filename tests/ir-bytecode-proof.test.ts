@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
+import type { IrObjectStructLowering } from "../src/ir/backend/handles.js";
 import { type IrFunction, type IrLowerResolver, asBlockId, asValueId, irVal } from "../src/ir/index.js";
 // #1584 (a0-tail): the REAL production lowerer, generic over the sink. The arm
 // at the bottom of this file drives it (not a hand-lowerer) through a
@@ -458,5 +459,49 @@ describe("#1584 (a1) — real lower.ts drives OP.CALL through the BytecodeEmitte
     const dest = new BytecodeSink();
     dest.spliceArm(arm);
     expect(dest.code).toEqual([OP.LOAD, 0, OP.CALL, 5, OP.CALL_REF, 2]);
+  });
+});
+
+// ── #1584 (a2) struct/object family — STRUCT_NEW / STRUCT_GET / STRUCT_SET ──
+//
+// The full bytecode==WasmGC==JS round-trip for object.new/get/set needs the
+// VM's heap (sdev-vm's slice — struct ref ≡ f64(heapIndex)). These emitter-side
+// tests (my lane) assert the BytecodeEmitter realizes the (a2) trait primitives
+// as the right opcodes: STRUCT_NEW carries the field COUNT; STRUCT_GET/SET carry
+// the numeric field INDEX (lower.ts resolves name→fieldIdx via the layout).
+
+/** Minimal object-struct layout: field name → index in declaration order. */
+function objLayout(fields: string[]): IrObjectStructLowering {
+  return { typeIdx: 99, fieldIdx: (name: string) => fields.indexOf(name) };
+}
+
+describe("#1584 (a2) — BytecodeEmitter realizes the struct/object family", () => {
+  it("emitAggregateNew emits OP.STRUCT_NEW with the field count", () => {
+    const E = new BytecodeEmitter();
+    const s = new BytecodeSink();
+    E.emitAggregateNew(objLayout(["x", "y"]), 2, s);
+    expect(s.code).toEqual([OP.STRUCT_NEW, 2]);
+  });
+
+  it("emitFieldGet / emitFieldSet emit OP.STRUCT_GET / STRUCT_SET with the resolved field index", () => {
+    const E = new BytecodeEmitter();
+    const layout = objLayout(["x", "y", "z"]);
+    const g = new BytecodeSink();
+    E.emitFieldGet(layout, "y", g);
+    expect(g.code).toEqual([OP.STRUCT_GET, 1]);
+
+    const s = new BytecodeSink();
+    E.emitFieldSet(layout, "z", s);
+    expect(s.code).toEqual([OP.STRUCT_SET, 2]);
+  });
+
+  it("spliceArm relocates STRUCT_NEW / STRUCT_GET / STRUCT_SET as single-operand opcodes", () => {
+    const arm = new BytecodeSink();
+    arm.emit(OP.STRUCT_NEW, 2);
+    arm.emit(OP.STRUCT_GET, 0);
+    arm.emit(OP.STRUCT_SET, 1);
+    const dest = new BytecodeSink();
+    dest.spliceArm(arm);
+    expect(dest.code).toEqual([OP.STRUCT_NEW, 2, OP.STRUCT_GET, 0, OP.STRUCT_SET, 1]);
   });
 });
