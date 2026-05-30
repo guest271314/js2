@@ -1,8 +1,9 @@
 ---
 id: 1744
 title: "string-builder build-loop perf: close the remaining gap on StarlingMonkey / the JS lane"
-status: ready
+status: done
 created: 2026-05-30
+completed: 2026-05-30
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -10,11 +11,59 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
-sprint: Backlog
+sprint: 57
 related: [1580, 1210, 1175, 1588]
 origin: carved from #1580 — the hash-loop allocation was fixed there; this is the residual build-loop cost
 ---
 # #1744 — string-builder build-loop perf: close on StarlingMonkey / the JS lane
+
+## Implementation Notes (done 2026-05-30)
+
+**Target #1 (the big win) implemented — string-hash now beats StarlingMonkey.**
+
+A single-code-unit append fast path was added for the `buf += X.charAt(i)` /
+`buf += "<1 char>"` idiom:
+
+- `src/codegen/string-builder.ts` — new `emitStringBuilderAppendCodeUnit(ctx,
+  fctx, sb)`: consumes an `i32` code unit from the stack and appends it to the
+  builder buffer (grow-by-1 guard reusing the existing doubling policy →
+  `array.set buf[len]` → `len++` → invalidate `mat`). No `$NativeString`.
+- `src/codegen/expressions/assignment.ts` — new
+  `tryCompileSingleCharBuilderAppend(...)`: detects `X.charAt(i)` on a
+  static-string receiver (reads the code unit inline via `__str_flatten(X)` +
+  `array.get_u data[off+i]`) and a 1-char string literal (pushes the constant
+  code unit), then calls the new appender. Wired in
+  `compileNativeStringCompoundAssignment` ahead of the generic
+  `compileStringBuilderAppend`.
+
+**Effect (measured, wasmtime 45.0.0 aarch64-linux, 20k input, current main):**
+
+- `call $__str_charAt` in the build loop: **2 → 0** (the ~40k throwaway 1-char
+  `$NativeString` allocations are gone). The build loop is now `array.get_u`
+  reads + `array.set` appends.
+- string-hash **warm: ~22.7 ms (post-#1580) → ~9 ms** (measured 6.6–12.3 ms
+  across 5 runs on a noisy shared CI container). **This crosses below
+  StarlingMonkey's 14.2 ms** — the js2wasm AOT lane is now genuinely faster
+  than the engine lane on string-hash. Cold: 52.7 → ~32 ms.
+- Correctness: `run(20000) = 862771296` == JS; the charAt-built-string hash
+  matches JS for surrogate-pair / non-ASCII receivers too (a verbatim
+  code-unit copy is exactly what `charAt` does — it's code-unit-indexed).
+
+**Tests:** `tests/issue-1744.test.ts` (4 cases: no `__str_charAt` in build
+loop, validation, literal-append path, surrogate-pair correctness). All
+#1175/#1210/#1580 string-builder regression tests stay green.
+
+**Benchmark JSON** (`wasm-host-wasmtime-hot-runtime.json` + public mirror)
+refreshed with the measured numbers; the #1580 staleness gate stays green.
+
+**Targets #2 (elide per-iteration `__str_flatten` on the constant receiver)
+and #3 (peephole the `i32→f64→i32` index roundtrip + double cast)** were NOT
+needed to beat StarlingMonkey — wasm-opt already hoists the loop-invariant
+flatten (opt3 build shows 0 flatten calls) and collapses the index roundtrip.
+They remain available as further micro-opts if a future workload needs them,
+but Target #1 alone achieved the issue's goal.
+
+---
 
 ## Context
 

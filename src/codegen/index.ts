@@ -31,6 +31,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
+import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -997,15 +998,18 @@ export function generateModule(
     reconcileNativeStrFinalizeShift(ctx);
 
     // Second pass: collect all function declarations and interfaces
-    collectDeclarations(ctx, ast.sourceFile);
-
     // #1719 S1 — set the ITER_OVERRIDDEN brand if the program may monkeypatch
     // Array.prototype's @@iterator/values. When clear (the common case) every
     // array-destructuring site stays byte-identical; when set, the S2 slice
     // routes a branded array RHS through the host GetIterator lane (§7.4.2).
+    // Must run BEFORE collectDeclarations: the module-init statement filter
+    // (#1719 CPR write-arm) consults the brand to KEEP the
+    // `Array.prototype[@@iterator] = fn` override statement in __module_init.
     if (sourceOverridesArrayIterator(ast.sourceFile)) {
       ctx.arrayIteratorMaybeOverridden = true;
     }
+
+    collectDeclarations(ctx, ast.sourceFile);
 
     // Shape inference: detect array-like variables and override their types
     applyShapeInference(ctx, ast.checker, ast.sourceFile);
@@ -1335,6 +1339,11 @@ export function generateModule(
     emitClosureMethodCallExportN(ctx, 0);
     emitClosureMethodCallExportN(ctx, 1);
     emitClosureMethodCallExportN(ctx, 2);
+
+    // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
+    // body now that `__call_fn_method_0` is registered. No-op when no read-drive
+    // site reserved a driver (brand clear / no Array.prototype @@iterator override).
+    fillProtoIteratorDriver(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -3038,6 +3047,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     name: exportName,
     desc: { kind: "func", index: funcIdx },
   });
+
+  // (#1719 CPR) Register in funcMap so the in-Wasm `__drive_proto_iterator`
+  // driver (filled in post-processing) can resolve `__call_fn_method_0` by name
+  // and `call` it to drive a captured `Array.prototype[@@iterator]` override.
+  // No-op for existing JS-host callers (they dispatch by export name).
+  ctx.funcMap.set(exportName, funcIdx);
 }
 
 /**
@@ -4078,16 +4093,20 @@ export function generateMultiModule(
     // #1677 — final reconcile before any user function is registered.
     reconcileNativeStrFinalizeShift(ctx);
 
+    // #1719 S1 — whole-realm: OR across all source files so an override in any
+    // module trips the ITER_OVERRIDDEN brand. Must run BEFORE collectDeclarations
+    // (the module-init filter / #1719 CPR write-arm reads the brand to keep the
+    // override statement in __module_init).
+    for (const sf of multiAst.sourceFiles) {
+      if (sourceOverridesArrayIterator(sf)) {
+        ctx.arrayIteratorMaybeOverridden = true;
+      }
+    }
+
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);
-      // #1719 S1 — whole-realm: OR across all source files so an override in
-      // any module trips the ITER_OVERRIDDEN brand (never cleared by a later
-      // clean file).
-      if (sourceOverridesArrayIterator(sf)) {
-        ctx.arrayIteratorMaybeOverridden = true;
-      }
     }
 
     // Shape inference: detect array-like variables and override their types

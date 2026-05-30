@@ -454,7 +454,24 @@ export interface CodegenContext {
    * own-property descriptors (`_wasmStructAccessors` / #1629), which live on
    * values, not prototypes.
    */
-  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number }>>;
+  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number; globalIdx: number }>>;
+  /**
+   * (#1719 CPR read-drive) True once the in-Wasm
+   * `__drive_proto_iterator(thisVal: externref, closure: externref) -> externref`
+   * driver placeholder has been reserved (pushed + registered in `funcMap` under
+   * `"__drive_proto_iterator"`). The read-drive sites (array dstr / for-of /
+   * spread) are emitted during body compilation, BEFORE the post-processing
+   * phase that can see the fully-populated `closureInfoByTypeIdx` needed to
+   * dispatch the override closure. So the FIRST read-drive site pushes a
+   * placeholder function (fixing its append-position funcIdx) and registers it in
+   * `funcMap`; the body is filled in post-processing (calls the registered
+   * `__call_fn_method_0`). The placeholder is never reserved when the brand is
+   * clear, so override-free modules stay byte-identical. Storing the funcIdx in
+   * `funcMap` (not a raw number here) is load-bearing: `shiftLateImportIndices`
+   * patches both the `funcMap` entry and the emitted `call` by the same delta, so
+   * a late-import index shift never desyncs the reservation.
+   */
+  protoIteratorDriverReserved?: boolean;
   /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set

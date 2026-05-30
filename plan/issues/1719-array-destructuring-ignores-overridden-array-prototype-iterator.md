@@ -763,3 +763,207 @@ sign off on the `ctx.protoOverrides` table shape + the well-known-key whitelist
 before implementation, since it becomes the shared substrate for the cluster.
 
 No code landed by this design pass; worktree clean (gitignored `.tmp/` probes only).
+
+## CPR build plan + progress (senior-dev sdev-cpr, 2026-05-30)
+
+**Prerequisite DONE**: #1742 the `this`-receiver runtime-test guard — PR #961
+(branch issue-1719-cpr2). The override body's `this[i]`/`this.length` now read the
+compiled vec via a runtime `ref.test` chain instead of trapping "illegal cast".
+Zero equivalence regressions (failure set byte-identical to base).
+
+**Tech-lead decision: option (a)** — normalise the typed vec (`$vec_f64`/`$vec_i32`)
+→ the canonical externref-vec at the dstr/for-of/spread gate BEFORE driving the
+override. Single canonical representation; fires the override exactly ONCE at the
+observation boundary; internal array iterations stay on the typed-vec fast path
+(no global re-route) → avoids the systemic re-entrancy that killed the first attempt.
+GATE STRICTLY behind the S1 brand (`arrayIteratorMaybeOverridden` + `protoOverrides.has`)
+so output is byte-identical when no override exists (diff the wasm to confirm).
+
+Build order (each step a commit; gate-on-brand throughout):
+
+1. **CPR-1 write-arm** — in `compileElementAssignment` (assignment.ts ~2451), detect
+   `Array.prototype[Symbol.iterator] = fn` / `Array.prototype.values = fn` (the LHS
+   shape `sourceOverridesArrayIterator` already recognises). Lift the RHS closure via
+   `compileArrowAsClosure` (handles `function*` generators), recover its
+   `__closure_N` funcIdx + funcTypeIdx (from `ctx.closureInfoByTypeIdx` / closureMap),
+   and store into `ctx.protoOverrides.get("Array").set("@@iterator"|"values", {funcIdx,
+   funcTypeIdx})`. Force-emit + root the closure so DCE doesn't drop it (it's otherwise
+   only referenced from the table, not the wasm body).
+2. **Runtime drain** — a generic iterator next()-protocol helper (`__iterator_next`-style)
+   that, given the override-produced iterator externref, calls `.next()` and unpacks
+   `{value, done}` — handling BOTH a `function*` (compiled generator → its own next)
+   and a plain `{ next(){…} }` override object. Reuse #1620's multi-value
+   `__iterator_next` if it covers both; else extend.
+3. **CPR-1 read-drive** — at the dstr gate (destructuring.ts ~892), when
+   `arrayDstrNeedsIdentity(ctx,isStringRHS)` AND `ctx.protoOverrides` has the Array
+   `@@iterator` override: normalise the typed-vec RHS → canonical externref-vec, call
+   the stored override funcref with that as `this` via `__call_fn_method_0`, then drain
+   via the next()-protocol into the binding elements. PROVE `[a,b,z]=arr` with an
+   override yielding 42 at slot 3 → z===42, terminates.
+4. **CPR-2** — `Array.prototype.values` alias (same table key family) + for-of
+   (loops.ts ~1060) + spread read-consults of the same protoOverrides table.
+
+Guardrails: this is the array hot path (#1016/#1021/#1320). If the normalise step
+sprawls beyond the gate sites, STOP + ping tech-lead. Diff wasm on an override-free
+module to confirm byte-identical.
+
+**Status**: #1742 prerequisite landed (PR #961). Starting CPR-1 write-arm.
+
+## CPR-1 write-arm — DONE (senior-dev sdev-cpr, 2026-05-30, commit ea66317fe)
+
+The override assignment was dropped at compile time (S2 diagnosis, above) because
+the **module-init statement filter** (`declarations.ts` ~3058) only keeps a
+top-level assignment when its root identifier is a module global — `Array` is a
+builtin, so `Array.prototype[@@iterator] = fn` was discarded before reaching
+codegen. Root cause of the "drop" found + fixed:
+
+1. The S1 brand (`arrayIteratorMaybeOverridden`) was set AFTER `collectDeclarations`
+   in both the single- and multi-module paths (index.ts ~1000 / ~4085). Moved the
+   brand-set BEFORE `collectDeclarations` so the filter sees it.
+2. Filter now KEEPS the `Array.prototype[@@iterator|values] = fn` statement when the
+   brand is set (`isArrayProtoIteratorAssignTarget`).
+3. `src/codegen/expressions/proto-override.ts` — `maybeCaptureArrayProtoOverride`
+   lifts the RHS closure (`compileArrowAsClosure`, handles `function*`), roots it in
+   a fresh `mut externref` module global (`__array_proto_iterator_override`,
+   DCE-safe), records `{globalIdx}` in `ctx.protoOverrides["Array"]["@@iterator"]`.
+   Wired into `compileAssignment`. `arrayIteratorOverrideGlobalIdx(ctx)` exposes the
+   global for the read-drive.
+
+Verified: the override global IS now emitted (CPR_DEBUG traced capture); override-free
+modules emit NO `__array_proto` global (byte-identical). `protoOverrides` value type
+carries `globalIdx`.
+
+### Read-drive design (next — the z=42 proof)
+
+At the dstr gate (`destructuring.ts` ~892, vec ref on stack), when
+`arrayDstrNeedsIdentity(ctx,isStringStruct)` AND `arrayIteratorOverrideGlobalIdx(ctx)`
+is defined:
+1. Normalise the typed-vec RHS → externref (`extern.convert_any`) = the array-as-`this`.
+2. `__call_fn_method_0(arrayExternref, global.get <overrideGlobalIdx>)` → iterator externref
+   (drives the override generator's body; #1742 guard lets its `this[i]` read the vec).
+3. Drain via the existing `__iterator_next` host import `(externref)->(i32 done, externref value)`
+   — per binding element: call next, on `done` apply the element default / undefined,
+   else assign `value`. Reuse the per-element assignment logic from
+   `compileExternrefArrayDestructuringDecl` (the externref dstr lane already drains an
+   iterator), but feed it OUR iterator (the override result) instead of `__iterator`
+   on the host array.
+4. `return` (skip the backing-store fast path) — fires the override exactly once.
+
+Termination: internal array iterations inside the override body stay on the typed-vec
+fast path (the brand gate only fires at dstr/for-of/spread observation sites, not on
+every `arr[i]`), so no global re-route → no re-entrancy.
+
+### Read-drive dispatch — timing analysis (sdev-cpr, awaiting tech-lead a/b/c)
+
+Verified `emitClosureMethodCallExportN(0)` (index.ts ~2815): its body is the exact
+re-entrancy-safe driver we need (convert closure externref→anyref; save/install/restore
+`__current_this`; ref.test the base-wrapper struct; extract funcref field 0; dispatch
+over registered funcref types via ref.test/ref.cast/call_ref; box result→externref).
+BUT two timing facts shape the dispatch mechanism:
+1. It iterates `ctx.closureInfoByTypeIdx`, populated DURING body compilation — so it
+   MUST run in post-processing (after all closures registered), like `__call_fn_method_N`.
+2. It does NOT register in `ctx.funcMap` (only pushes mod.functions + mod.exports).
+
+So the dstr read-drive (emitted during body compilation, BEFORE post-processing) cannot
+resolve the driver's funcIdx by name at emit time. Resolution needs ONE of:
+- (a) emit a dedicated `__drive_proto_iterator` in post-processing AND reserve its funcIdx
+  up-front (a stable pre-allocated index the dstr `call` targets) — small, self-contained.
+- (b) thread a forward-funcref/patch for `__call_fn_method_0` — reuses code, more plumbing.
+- (c) inline call_ref per read-drive site — needs the full funcref-type dispatch duplicated
+  3× (dstr/for-of/spread); the closure's funcTypeIdx varies → sprawl.
+
+Recommend (a). Awaiting confirmation before adding the driver fn (array hot path).
+
+## CPR read-drive — finish-pass progress (sendev sdev-cpr2, 2026-05-30, branch issue-1719-cpr2-finish)
+
+Resumed off `bb2afb0e9` (CPR-1 write-arm) + clean `origin/main` merge (= the #1742 guard via #961). Tech-lead confirmed **option (a)** driver. Verified state + landed two foundational edits; the rest of the read-drive is the remaining work.
+
+### Verified (corrects two prior false-alarms)
+
+1. **CPR-1 write-arm WORKS in the real `compile()` pipeline.** Probed the canonical
+   shape (`Array.prototype[Symbol.iterator]=function*(){…yield 42}` + `[a,b,z]=[1,2,3]`):
+   brand fires, `maybeCaptureArrayProtoOverride` lifts the generator closure and pushes
+   the rooted `__array_proto_iterator_override` externref global; `arrayIteratorOverrideGlobalIdx`
+   returns it. The earlier "global absent" reading was a **grep-for-name false alarm** —
+   WasmGC does **not** serialize global *names* into the binary; counting `ctx.mod.globals`
+   directly confirms the push. Pre-read-drive, `z===3` (fast path), terminates — correct baseline.
+2. **Double-capture wrinkle (cosmetic, fix in this PR):** `compileModuleInitBody()` runs
+   twice (`declarations.ts:3455` early-discovery + `:3540` final), so the write-arm pushes
+   the override global **twice** — one orphan (null-init, unreferenced, from the discarded
+   first body) + one live (referenced by the final `__module_init`). Correct but wasteful;
+   dedupe by making `maybeCaptureArrayProtoOverride` idempotent per `(token,memberKey)`
+   (reuse the existing global on the 2nd pass instead of pushing a new one — but still emit
+   the `global.set/get` into the live body).
+
+### Landed (foundational, committed on branch)
+
+- **`src/codegen/index.ts`** — `emitClosureMethodCallExportN` now `ctx.funcMap.set(exportName, funcIdx)`
+  so the in-Wasm driver (filled in post-processing) can resolve `__call_fn_method_0` by name.
+  No-op for existing JS-host callers (they dispatch by export name).
+- **`src/codegen/context/types.ts`** — added `protoIteratorDriverReserved?: boolean`. The
+  driver funcIdx lives in `funcMap` under `"__drive_proto_iterator"` (NOT a raw ctx number) —
+  load-bearing because `shiftLateImportIndices` patches both the funcMap entry AND the emitted
+  read-drive `call` by the same delta, so a late-import shift never desyncs the reservation.
+
+### Remaining build (the z=42 proof) — exact plan
+
+1. **Driver reservation + fill (option a)** in `proto-override.ts`:
+   - `reserveProtoIteratorDriver(ctx)` — on first read-drive site: push a placeholder
+     `WasmFunction` (sig `(externref this, externref closure)->externref`, `addFuncType`),
+     funcIdx = `ctx.numImportFuncs + mod.functions.length`, register `funcMap["__drive_proto_iterator"]`,
+     set `protoIteratorDriverReserved=true`. Body left `[]` (filled later).
+   - `fillProtoIteratorDriver(ctx)` — called in post-processing AFTER `emitClosureMethodCallExportN(0)`
+     (so `funcMap["__call_fn_method_0"]` exists): body = `local.get 0; local.get 1; call __call_fn_method_0; return`
+     (thin wrapper; reuses the proven re-entrancy-safe `__current_this` dispatch). Guard: if
+     `__call_fn_method_0` absent (no arity-0 closure), fill with `ref.null.extern` (driver unused anyway).
+2. **Read-drive at `destructuring.ts:892`** (the `_needsArrayObjIdentity` gate, currently a void no-op):
+   when `arrayDstrNeedsIdentity(ctx,isStringStruct)` AND `arrayIteratorOverrideGlobalIdx(ctx)!==undefined`:
+   stash-then `extern.convert_any` the vec RHS → array-as-`this` externref; `global.get` the override
+   closure; `call __drive_proto_iterator` → iterator externref (local); then **per binding element**
+   drain via `__iterator_next` (the `loops.ts:3576` shape: `(i32 done, externref value)`), assigning
+   `value` to each binding local (on `done`, apply default / undefined). `return` — skip the
+   backing-store fast path. The 71 `iter-val-array-prototype` tests are fixed-arity `[a,b,c]`
+   (no rest/nested), so per-element drain suffices for CPR-1; rest/nested = CPR-2 polish.
+3. **Prove z=42** end-to-end (`tests/issue-1719-cpr.test.ts`), assert termination (the brand only
+   fires at the dstr observation boundary, so internal array iterations stay on the typed-vec fast
+   path → no re-entrancy).
+4. **CPR-2**: `values` alias (already keyed) + for-of (`loops.ts:1060`) + spread — same read-drive.
+5. **Guard**: byte-identical wasm on an override-free module (the whole branch is behind
+   `arrayIteratorMaybeOverridden && globalIdx!==undefined`, both false in the common case). Run
+   `npm test -- tests/equivalence.test.ts` → 0 regressions before PR.
+
+**Open runtime risk to validate first in step 3:** the override is a `function*`; calling it via
+`__call_fn_method_0` yields a *compiled* generator object. Draining it via the host `__iterator_next`
+relies on its `__call_next`/`__gen_next` fallback (`runtime.ts:7786-7803`) recognising the compiled
+generator. If that drain returns empty/undefined, the override-produced iterator needs the Wasm-native
+generator-next path instead (a `__call_next` dispatch on the struct) — surface immediately, do not
+paper over. This is the one unproven link in the chain.
+
+## CPR-1 LANDED — z=42 proven (sendev sdev-cpr2, 2026-05-30, commit ed780a6cf)
+
+Built + committed on `issue-1719-cpr2-finish` (merged current with origin/main).
+The "unproven link" above is **resolved**: the host `__iterator_next` drains the
+compiled-generator iterator correctly through its `__call_next` fallback.
+
+**Proven:** `Array.prototype[Symbol.iterator]=function*(){…yield 42}` +
+`var [a,b,z]=[1,2,3]` → **z===42** (was 3), TERMINATES, override-free
+byte-identical. `tests/issue-1719-cpr.test.ts` (z=42 + termination + override-free)
+green; S1 byte-identical microcheck green; #1016/#1021/#1320 dstr guards: no new
+failures (the lone 1016b `string[Symbol.iterator]` fail is PRE-EXISTING on clean
+HEAD — harness `wasm:js-string` import wiring, not this change). tsc clean.
+
+**Scope of CPR-1:** the **declaration** array-dstr path (`compileArrayDestructuring`)
+for identifier/default/elision patterns — the decl subset of the 71. The `values`
+alias rides for free (`arrayIteratorOverrideGlobalIdx` checks both keys).
+
+**CPR-2 remaining (fan-out, same proven `emitArrayProtoIteratorDrive` helper):**
+1. parameter dstr — 2nd gate site `destructureParamArray` (destructuring-params.ts:799).
+2. for-of-head dstr — `compileForOfDestructuring` (loops.ts:1060) [note: the override
+   affects BOTH the outer for-of iteration AND the inner element destructure; needs
+   care — route `compileForOfStatement`'s array fast path through the override
+   iterator when branded, reusing `compileForOfIterator`'s `__iterator_next` loop].
+3. assignment dstr (`[a,b]=arr`) — separate path from `compileArrayDestructuring`.
+4. spread (`[...arr]`).
+Each is "add the gate at site N + call the shared helper + a scoped test". Awaiting
+tech-lead a/b: (a) land CPR-1 PR now + CPR-2 follow-up (lets CI measure the real
+per-context split of the 71), or (b) build all CPR-2 into this branch first.
