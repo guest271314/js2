@@ -698,11 +698,10 @@ export function lowerIrFunctionBody<S>(
         emitter.emitConst(instr, func.name, out);
         return;
       case "call": {
+        // (a1) call family (#1584 §2a): route through the typed emitCall
+        // primitive — byte-identical {op:"call"} on WasmGC, OP.CALL on bytecode.
         for (const a of instr.args) emitValue(a, out);
-        emitter.pushRaw(out, {
-          op: "call",
-          funcIdx: resolver.resolveFunc(instr.target),
-        });
+        emitter.emitCall(resolver.resolveFunc(instr.target), out);
         return;
       }
       case "global.get":
@@ -1101,8 +1100,12 @@ export function lowerIrFunctionBody<S>(
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
+        // The struct.get (a2 struct family) + ref.cast (a5 ref-coercion) before
+        // this stay on pushRaw until their families migrate; only the terminal
+        // call_ref is the (a1) call family → typed emitCallRef (byte-identical
+        // {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
         emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
-        emitter.pushRaw(out, { op: "call_ref", typeIdx: cl.funcTypeIdx });
+        emitter.emitCallRef(cl.funcTypeIdx, out);
         return;
       }
       case "refcell.new": {
