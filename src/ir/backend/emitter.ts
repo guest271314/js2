@@ -146,6 +146,14 @@ export interface BackendEmitter<S = Instr[]> {
   emitRefCellNew?(layout: IrRefCellLowering, out: Instr[]): void;
   emitRefCellGet?(layout: IrRefCellLowering, out: Instr[]): void;
   emitRefCellSet?(layout: IrRefCellLowering, out: Instr[]): void;
-  emitCall?(funcIdx: number, out: Instr[]): void;
-  emitCallRef?(funcTypeIdx: number, out: Instr[]): void;
+
+  // ---- (a1) call family — MIGRATED behind the trait (#1584 §2a) -----------
+  // The first op-family to move from inline `lower.ts` pushes to typed trait
+  // primitives. WasmGc/Linear realize them as byte-identical `{op:"call"}` /
+  // `{op:"call_ref"}`; Bytecode realizes `OP.CALL` / `OP.CALL_REF`. Generic
+  // over the sink `S` (the a0-tail seam) so both backends drive the same arms.
+  /** Direct call to compiled function `funcIdx`. Args already on the stack. */
+  emitCall(funcIdx: number, out: S): void;
+  /** Indirect call through a typed funcref already on the stack. */
+  emitCallRef(funcTypeIdx: number, out: S): void;
 }
