@@ -90,20 +90,27 @@ export function arrayDstrNeedsIdentity(ctx: CodegenContext, isStringRHS: boolean
  * array iterations inside the override body stay on the typed-vec fast path — no
  * re-entrancy / no infinite loop.
  */
-function tryEmitArrayProtoIteratorReadDrive(
+export function tryEmitArrayProtoIteratorReadDrive(
   ctx: CodegenContext,
   fctx: FunctionContext,
   pattern: ts.ArrayBindingPattern,
   resultType: ValType,
+  /**
+   * (#1719 CPR-2) When provided, the array value is read from this local instead
+   * of consumed from the stack — lets the for-of-head / parameter dstr sites
+   * (whose value lives in a local) reuse this exact drive+drain. `undefined` ⇒
+   * the decl-dstr caller's convention (vec ref already on the stack).
+   */
+  srcLocal?: number,
 ): boolean {
   const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
   if (overrideGlobalIdx === undefined) return false;
 
-  // CPR-1 shape gate: only plain identifiers (+ optional default) and elisions.
+  // CPR shape gate: only plain identifiers (+ optional default) and elisions.
   for (const el of pattern.elements) {
     if (ts.isOmittedExpression(el)) continue;
-    if (el.dotDotDotToken) return false; // rest → CPR-2
-    if (!ts.isIdentifier(el.name)) return false; // nested → CPR-2
+    if (el.dotDotDotToken) return false; // rest → follow-up
+    if (!ts.isIdentifier(el.name)) return false; // nested → follow-up
   }
 
   // Pre-register __iterator_next (the for-of multi-value drain shape) BEFORE
@@ -118,10 +125,24 @@ function tryEmitArrayProtoIteratorReadDrive(
   flushLateImportShifts(ctx, fctx);
   if (nextIdx === undefined) return false;
 
-  // Stash the vec ref, then drive the override into an iterator local.
-  const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
-  fctx.body.push({ op: "local.set", index: vecLocal });
-  fctx.body.push({ op: "local.get", index: vecLocal });
+  // Put the array value on the stack: from `srcLocal` (for-of / param convention)
+  // or from a fresh stash of the already-on-stack vec ref (decl convention). The
+  // value may be a vec ref OR an externref (for-of elements are often externref);
+  // `emitArrayProtoIteratorDrive` does `extern.convert_any`, which only accepts
+  // an anyref/(ref any) — so an externref source must be converted first.
+  if (srcLocal !== undefined) {
+    const srcType = getLocalType(fctx, srcLocal) ?? ({ kind: "externref" } as ValType);
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    if (srcType.kind === "externref") {
+      // externref → anyref so the drive's `extern.convert_any` (any→extern) is
+      // the right direction. (#1719 CPR-2)
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+    }
+  } else {
+    const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
+    fctx.body.push({ op: "local.set", index: vecLocal });
+    fctx.body.push({ op: "local.get", index: vecLocal });
+  }
   const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
   const doneLocal = allocLocal(fctx, `__cpr_done_${fctx.locals.length}`, { kind: "i32" });
   const valLocal = allocLocal(fctx, `__cpr_val_${fctx.locals.length}`, { kind: "externref" });
