@@ -93,6 +93,13 @@ export const OP = {
   SELECT: 20, // SELECT              ; pop cond, pop b, pop a, push (cond != 0) ? a : b
   DROP: 21, //  DROP                 ; pop and discard
   UNREACHABLE: 22, // UNREACHABLE    ; trap (malformed / dead code path)
+  // ── (a1) call family (#1584 §2a) — multi-function VM (program wrapper +
+  // call-frame stack). Both mirror Wasm `call`/`call_ref` exactly: one inline
+  // operand, args already on the stack (arg0 deepest), callee arity NOT inline
+  // (read from the function-table entry). funcref ≡ f64(tableIndex), null ≡
+  // f64(-1) (CALL_REF on -1 traps). See sdev-vm coordination + issue §2a.
+  CALL: 23, //     CALL <funcIdx>     ; pop arity args, run functions[funcIdx], push result
+  CALL_REF: 24, // CALL_REF <typeIdx> ; pop funcref(top)+arity args, run functions[idx], push result
 } as const;
 
 export type Opcode = (typeof OP)[keyof typeof OP];
@@ -170,12 +177,17 @@ export class BytecodeSink {
           this.code.push(op, target + base);
           break;
         }
-        // Single-inline-operand opcodes (a local / global / const index).
+        // Single-inline-operand opcodes (a local / global / const / func /
+        // type index). CALL <funcIdx> / CALL_REF <typeIdx> carry exactly one
+        // inline operand (no relocation needed — function/type indices are
+        // program-global, not arm-local like jump targets/const-pool).
         case OP.LOAD:
         case OP.STORE:
         case OP.TEE:
         case OP.GLOBAL_GET:
         case OP.GLOBAL_SET:
+        case OP.CALL:
+        case OP.CALL_REF:
           this.code.push(op, code[i++]!);
           break;
         // Zero-operand opcodes.
@@ -373,6 +385,23 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     throw new Error(
       "BytecodeEmitter: emitBrIf (multi-block CFG) not in the #1584 subset — see §2a control-flow family.",
     );
+  }
+
+  // ---- (a1) call family (#1584 §2a) — the first migrated family -----------
+  // The args are already on the stack (caller-owns-operand-order, same as
+  // WasmGC). `OP.CALL <funcIdx>` carries ONE inline operand; the callee arity
+  // is NOT inline — the VM reads it from the function-table entry, mirroring
+  // Wasm `call $f`. The multi-function VM (program wrapper + call-frame stack)
+  // is sdev-vm's slice (see issue §2a + the locked contract).
+  emitCall(funcIdx: number, out: BytecodeSink): void {
+    out.emit(OP.CALL, funcIdx);
+  }
+
+  // `OP.CALL_REF <typeIdx>` — the funcref is already on top of the stack
+  // (lower.ts pushes the callee/funcref LAST). funcref ≡ f64(tableIndex),
+  // null ≡ f64(-1) which traps. `typeIdx` is informational (func-type id).
+  emitCallRef(funcTypeIdx: number, out: BytecodeSink): void {
+    out.emit(OP.CALL_REF, funcTypeIdx);
   }
 
   // ---- vec (array) primitives — out of the #1584 numeric subset -----------

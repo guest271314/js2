@@ -29,8 +29,8 @@
 // selected by which emitter `lower.ts` was handed. That is the proof.
 
 import type { Instr, ValType } from "../types.js";
-import type { LinearVecLowering } from "./handles.js";
 import type { BackendEmitter } from "./emitter.js";
+import type { LinearVecLowering } from "./handles.js";
 
 /** Byte offset of the `len:u32` field in the linear array header. */
 const LINEAR_ARRAY_LEN_OFFSET = 8;
@@ -92,7 +92,11 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
 
   emitVecLen(layout: LinearVecLowering, out: Instr[]): void {
     // base ptr on stack → load the u32 len field.
-    out.push({ op: "i32.load", align: 2, offset: LINEAR_ARRAY_LEN_OFFSET } as Instr);
+    out.push({
+      op: "i32.load",
+      align: 2,
+      offset: LINEAR_ARRAY_LEN_OFFSET,
+    } as Instr);
   }
 
   emitVecDataPtr(layout: LinearVecLowering, out: Instr[]): void {
@@ -108,7 +112,11 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     out.push({ op: "i32.const", value: stride });
     out.push({ op: "i32.mul" });
     out.push({ op: "i32.add" });
-    out.push({ op: linearLoadOp(layout.elementValType), align: stride === 8 ? 3 : 2, offset: 0 } as Instr);
+    out.push({
+      op: linearLoadOp(layout.elementValType),
+      align: stride === 8 ? 3 : 2,
+      offset: 0,
+    } as Instr);
   }
 
   // ---- everything else: out of #1714 scope, fail loudly -------------------
@@ -157,5 +165,13 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   }
   emitBrIf(): void {
     notImplemented("emitBrIf");
+  }
+  // (a1) call family (#1584 §2a) — out of the #1714 linear vec-proof scope;
+  // fail loudly until the linear backend wires its call lowering.
+  emitCall(): void {
+    notImplemented("emitCall");
+  }
+  emitCallRef(): void {
+    notImplemented("emitCallRef");
   }
 }

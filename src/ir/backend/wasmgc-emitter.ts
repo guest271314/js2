@@ -18,8 +18,8 @@
 import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr } from "../types.js";
-import type { IrVecLowering } from "./handles.js";
 import type { BackendEmitter } from "./emitter.js";
+import type { IrVecLowering } from "./handles.js";
 
 export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // #1584: sink = Instr[]. The factory returns a plain array and the raw escape
@@ -35,11 +35,19 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // ---- vec (array) ----------------------------------------------------
 
   emitVecLen(layout: IrVecLowering, out: Instr[]): void {
-    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.lengthFieldIdx });
+    out.push({
+      op: "struct.get",
+      typeIdx: layout.vecStructTypeIdx,
+      fieldIdx: layout.lengthFieldIdx,
+    });
   }
 
   emitVecDataPtr(layout: IrVecLowering, out: Instr[]): void {
-    out.push({ op: "struct.get", typeIdx: layout.vecStructTypeIdx, fieldIdx: layout.dataFieldIdx });
+    out.push({
+      op: "struct.get",
+      typeIdx: layout.vecStructTypeIdx,
+      fieldIdx: layout.dataFieldIdx,
+    });
   }
 
   emitElemGet(layout: IrVecLowering, out: Instr[]): void {
@@ -115,5 +123,17 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
 
   emitBrIf(depth: number, out: Instr[]): void {
     out.push({ op: "br_if", depth });
+  }
+
+  // ---- (a1) call family (#1584 §2a) — byte-identical to the prior inline
+  // `out.push({op:"call"...})` / `{op:"call_ref"...}` in lower.ts. The WasmGC
+  // stream is unchanged; this only moves the push behind the trait so the
+  // bytecode backend can realize the same intent as OP.CALL / OP.CALL_REF.
+  emitCall(funcIdx: number, out: Instr[]): void {
+    out.push({ op: "call", funcIdx });
+  }
+
+  emitCallRef(funcTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "call_ref", typeIdx: funcTypeIdx });
   }
 }

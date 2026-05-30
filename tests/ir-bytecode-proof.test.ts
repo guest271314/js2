@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { BytecodeEmitter, BytecodeSink } from "../src/ir/backend/bytecode-emitter.js";
+import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
 import { type IrFunction, type IrLowerResolver, asBlockId, asValueId, irVal } from "../src/ir/index.js";
 // #1584 (a0-tail): the REAL production lowerer, generic over the sink. The arm
@@ -370,5 +370,93 @@ describe("#1584 (a0-tail) — REAL lower.ts drives the bytecode sink (triple equ
       expect(runSink(sink, [a, b])).toBe(js(a, b));
       expect(await runWasmGc(src, "h", [a, b])).toBe(js(a, b));
     }
+  });
+});
+
+// ── #1584 (a1) call family — real lower.ts emits OP.CALL / OP.CALL_REF ───────
+//
+// The full bytecode==WasmGC==JS round-trip for a multi-function program needs
+// the VM's program-wrapper + call-frame stack (sdev-vm's slice — `runProgram`).
+// This emitter-side test (my lane) asserts the REAL `lowerIrFunctionBody`
+// routes the `call` IR node and `closure.call`'s terminal through the typed
+// emitCall/emitCallRef primitives, so the BytecodeEmitter produces the right
+// opcode stream: `... CALL <funcIdx>` / `... CALL_REF <typeIdx>`. The locked
+// contract (sdev-vm): args on stack arg0-deepest, callee arity from the
+// function-table entry, funcref ≡ f64(tableIndex), null ≡ f64(-1).
+
+/** Resolver that maps any func ref to a fixed table index, for call lowering. */
+function callResolver(funcIdx: number): IrLowerResolver {
+  let nextTypeIdx = 0;
+  return {
+    resolveFunc: () => funcIdx,
+    resolveGlobal: () => {
+      throw new Error("resolveGlobal not used in the a1 call subset");
+    },
+    resolveType: () => {
+      throw new Error("resolveType not used in the a1 call subset");
+    },
+    internFuncType: () => nextTypeIdx++,
+  };
+}
+
+describe("#1584 (a1) — real lower.ts drives OP.CALL through the BytecodeEmitter", () => {
+  it("a `call` IR node lowers to `LOAD args…; CALL <funcIdx>; RET`", () => {
+    // main(a, b): return add(a, b)  where `add` resolves to table index 1.
+    //   %2 = call add(%0, %1)
+    //   return %2
+    const main: IrFunction = {
+      name: "main",
+      params: [
+        { value: asValueId(0), type: F64, name: "a" },
+        { value: asValueId(1), type: F64, name: "b" },
+      ],
+      resultTypes: [F64],
+      blocks: [
+        {
+          id: asBlockId(0),
+          blockArgs: [],
+          blockArgTypes: [],
+          instrs: [
+            {
+              kind: "call",
+              target: { kind: "func", name: "add" },
+              args: [asValueId(0), asValueId(1)],
+              result: asValueId(2),
+              resultType: F64,
+            },
+          ],
+          terminator: { kind: "return", values: [asValueId(2)] },
+        },
+      ],
+      exported: true,
+      valueCount: 3,
+    };
+
+    const sink = lowerIrFunctionBody<BytecodeSink>(main, callResolver(1), new BytecodeEmitter()).body;
+    // The call's result is single-use in the return, so it inlines: the body is
+    //   LOAD 0 ; LOAD 1 ; CALL 1 ; RET
+    expect(sink.code).toEqual([OP.LOAD, 0, OP.LOAD, 1, OP.CALL, 1, OP.RET]);
+  });
+
+  it("BytecodeEmitter.emitCall / emitCallRef emit OP.CALL / OP.CALL_REF with their inline operand", () => {
+    const E = new BytecodeEmitter();
+    const s1 = new BytecodeSink();
+    E.emitCall(7, s1);
+    expect(s1.code).toEqual([OP.CALL, 7]);
+
+    const s2 = new BytecodeSink();
+    E.emitCallRef(3, s2);
+    expect(s2.code).toEqual([OP.CALL_REF, 3]);
+  });
+
+  it("spliceArm relocates CALL / CALL_REF as single-operand opcodes", () => {
+    // An if-arm containing a CALL keeps its inline operand after splice.
+    const arm = new BytecodeSink();
+    arm.emit(OP.LOAD, 0);
+    arm.emit(OP.CALL, 5);
+    arm.emit(OP.CALL_REF, 2);
+    const dest = new BytecodeSink();
+    dest.spliceArm(arm);
+    expect(dest.code).toEqual([OP.LOAD, 0, OP.CALL, 5, OP.CALL_REF, 2]);
   });
 });
