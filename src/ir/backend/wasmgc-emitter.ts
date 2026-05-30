@@ -21,7 +21,17 @@ import type { BlockType, Instr } from "../types.js";
 import type { IrVecLowering } from "./handles.js";
 import type { BackendEmitter } from "./emitter.js";
 
-export class WasmGcEmitter implements BackendEmitter {
+export class WasmGcEmitter implements BackendEmitter<Instr[]> {
+  // #1584: sink = Instr[]. The factory returns a plain array and the raw escape
+  // hatch is a direct `push` — so the emitted `Instr` stream is byte-identical
+  // to the pre-#1584 inline emission (the WasmGC path is unchanged).
+  newSink(): Instr[] {
+    return [];
+  }
+  pushRaw(out: Instr[], instr: Instr): void {
+    out.push(instr);
+  }
+
   // ---- vec (array) ----------------------------------------------------
 
   emitVecLen(layout: IrVecLowering, out: Instr[]): void {
