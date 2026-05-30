@@ -1,5 +1,5 @@
 ---
-id: 1742
+id: 1744
 title: "string-builder build-loop perf: close the remaining gap on StarlingMonkey / the JS lane"
 status: ready
 created: 2026-05-30
@@ -14,7 +14,7 @@ sprint: Backlog
 related: [1580, 1210, 1175, 1588]
 origin: carved from #1580 — the hash-loop allocation was fixed there; this is the residual build-loop cost
 ---
-# #1742 — string-builder build-loop perf: close on StarlingMonkey / the JS lane
+# #1744 — string-builder build-loop perf: close on StarlingMonkey / the JS lane
 
 ## Context
 
