@@ -73,6 +73,57 @@ than `ctx.moduleGlobals.get("f")` (`global$0`). The wrapper-types branch at
 `emitGuardedRefCast` → saved to a local) is the *correct* shape — the failing
 path is a *different* arm that loads self from a sentinel.
 
+## ROOT CAUSE (senior-dev, 2026-05-30) — late-import global-index shift misses the call_ref arg-block
+
+Full `$main` dump of the failing case: the closure receiver `(local.get $0)`
+IS correct (loaded from `global$0` earlier, the `throw (global.get $gimport$3)`
+on the receiver null-check is also *correct* — gimport$3 is the legitimate
+property-access-TypeError message). The trap is in the **call_ref's second
+operand**, a `(block (result f64) …)` that RE-RESOLVES the callee to build the
+funcref operand `$2`:
+
+```wat
+(call_ref $1
+  (local.get $0)                       ;; receiver — correct
+  (block (result f64)
+    (local.set $scratch (f64.const 21))
+    (global.set $global$3 (i32.const 1))
+    (if (ref.is_null (local.tee $0
+          (ref.cast (ref null $0)
+            (any.convert_extern (global.get $gimport$3)))))   ;; ← STALE INDEX
+      (then (throw $tag$0 (global.get $gimport$3))))
+    (if (ref.is_null (local.tee $2 ( … struct.get $0 0 (local.get $0) … )))
+      (then (throw $tag$0 (global.get $gimport$3))))
+    (local.get $scratch))
+  (local.get $2))                       ;; funcref
+```
+
+The `global.get` inside that arg-block was emitted as `global.get <f's
+global>` (= `global$0`, the closure), but a string-constant import (the
+"Cannot access property on null or undefined" message → `gimport$3`) was added
+**late**, shifting the import-global indices. The late-import global-index
+shifter (`shiftLateImportIndices` / `fixupModuleGlobalIndices`, which walks
+`ctx.currentFunc.body` + `fctx.savedBodies` only) did **not** visit this
+arg-block's body, so its `global.get` index stayed stale and now points at
+`gimport$3` instead of `global$0`. Then `ref.cast (ref null $0)` of that
+garbage value traps `illegal cast`. This is exactly the bug class the `#1395`
+comment at `calls.ts:~10079` describes and partially fixed for ONE arm — the
+direct module-const-arrow arg-block arm is NOT covered.
+
+**Fix direction:** ensure the call_ref argument-block body for this dispatch
+arm is tracked in `fctx.savedBodies` (or otherwise visited by the late-import
+global-index shifter) — mirror the `#1395` `pushBody`/`savedBodies` pattern
+at `calls.ts:10094`. Find which arm builds the `(block (result T))` 2nd
+operand for the direct-identifier closure call and confirm its body is in
+`savedBodies` before late imports are added. Why `const g = f; g(21)` works:
+the intermediate-local store does NOT build a separate arg-block re-resolving
+the callee — it loads `global$0` into a local once, in the OUTER body, which
+the shifter does visit.
+
+Verify with `tests/equivalence/async-function.test.ts` (un-skip the #1729/#1730
+case) + the sync `f(21)→42` case, and watch the equivalence shards for any
+late-import-heavy function regressing.
+
 ## Repro / acceptance
 
 - `const f = (x:number):number => x*2; main(){ return f(21); }` → 42 (no trap).
