@@ -1,9 +1,11 @@
 ---
 id: 1719
 title: "Array destructuring ignores overridden Array.prototype[Symbol.iterator] ('items[Symbol.iterator] must be a function', 71 fails)"
-status: in-progress
+status: done
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-05-30
+completed: 2026-05-30
+followups: [1749, 1750]
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -967,3 +969,48 @@ alias rides for free (`arrayIteratorOverrideGlobalIdx` checks both keys).
 Each is "add the gate at site N + call the shared helper + a scoped test". Awaiting
 tech-lead a/b: (a) land CPR-1 PR now + CPR-2 follow-up (lets CI measure the real
 per-context split of the 71), or (b) build all CPR-2 into this branch first.
+
+## DONE — CPR destructuring read-drive complete across all 4 contexts (sendev, 2026-05-30)
+
+The destructuring cluster — the 71 `*-iter-val-array-prototype.js` fails — is
+**closed**. Array destructuring now drives the (possibly overridden)
+`Array.prototype[Symbol.iterator]` / `Array.prototype.values` in **all four**
+destructuring contexts, each via the same proven `emitArrayProtoIteratorDrive`
+helper, all gated behind `ctx.arrayIteratorMaybeOverridden && arrayIteratorOverrideGlobalIdx(ctx) !== undefined`
+so override-free modules stay byte-identical:
+
+| Context | Site | Landed in |
+|---------|------|-----------|
+| **declaration** `var [a,b,z]=arr` | `compileArrayDestructuring` / `tryEmitArrayProtoIteratorReadDrive` (statements/destructuring.ts) | PR #963 (CPR-1) |
+| **for-of-head** `for (const [a,b] of xs)` | `compileForOfDestructuring` (statements/loops.ts) | PR #968 (CPR-2) |
+| **parameter** `function f([a,b]) {}` | `destructureParamArray` (codegen/destructuring-params.ts) | PR #968 (CPR-2) |
+| **assignment** `[a,b,z]=arr` | `tryEmitArrayProtoIteratorAssignDrive` + `compileArrayDestructuringAssignment` (expressions/assignment.ts) | PR #976 (CPR-2 final) |
+
+Proof in every context: `Array.prototype[Symbol.iterator]=function*(){…yield 42}`
++ the matching destructure → bound `z===42` (was `3`), and the override fires once
+at the observation boundary (internal array iterations stay on the typed-vec fast
+path, so it TERMINATES — no re-entrancy). Override-free modules byte-identical;
+`tests/issue-1719-cpr.test.ts` (7 tests: decl z=42 / decl termination /
+for-of-head z=42 / for-of multi-element termination / parameter z=42 /
+assignment z=42 / override-free) green; #1016/#1021/#1320 dstr guards unaffected.
+
+**Write-arm + drive mechanism (the keystone):** the override assignment
+(`Array.prototype[k]=fn`, dropped at compile time normally) is captured by
+`maybeCaptureArrayProtoOverride` into a rooted `mut externref` module global keyed
+in `ctx.protoOverrides`; the dedicated `__drive_proto_iterator` driver
+(option (a), placeholder-funcIdx reserved at body-compile, body filled in
+post-processing as a thin wrapper over `__call_fn_method_0`) installs/restores
+`__current_this` and dispatches the override; the resulting compiled-generator
+iterator is drained with the multi-value `__iterator_next` host import. See
+`src/codegen/expressions/proto-override.ts`.
+
+### Genuinely-remaining follow-ups (OUT of the original 71 — tracked, not regressions)
+
+- **#1749** — spread (`[...arr]`, `f(...arr)`, `new C(...arr)`) is a separate
+  `GetIterator` consumer with its own emit site; none of the 71 are spread. Reuse
+  `emitArrayProtoIteratorDrive` at the spread-element site.
+- **#1750** — the TS-cast assignment form `(Array.prototype as any)[Symbol.iterator]=fn`
+  is not captured by the write-arm (paren/`as` wrapper). A naive wrapper-strip was
+  reverted because the cast-form closure misses arity-0 `__call_fn_method_0`
+  dispatch (null iterator); the null-guard keeps it falling back cleanly. Hand-written
+  shape, not in test262.
