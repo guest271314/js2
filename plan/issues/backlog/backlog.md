@@ -123,3 +123,4 @@ fidelity → #1463) were NOT re-filed.
 
 - [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **ready**
 - [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **ready**
+- [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready**
