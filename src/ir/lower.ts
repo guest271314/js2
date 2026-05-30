@@ -40,8 +40,21 @@
 // unreachable at runtime, but structurally we still need an op whose type
 // is polymorphic.
 
+// #1713: BackendEmitter trait seam. The layout-handle types this file
+// historically declared now live in `backend/handles.js` and are re-exported
+// below for backwards compatibility.
+import type { BackendEmitter } from "./backend/emitter.js";
+import type {
+  IrBoxedLowering,
+  IrClassLowering,
+  IrClosureLowering,
+  IrObjectStructLowering,
+  IrRefCellLowering,
+  IrUnionLowering,
+  IrVecLowering,
+} from "./backend/handles.js";
+import { WasmGcEmitter } from "./backend/wasmgc-emitter.js";
 import {
-  asVal,
   type IrBlock,
   type IrClassShape,
   type IrClosureSignature,
@@ -53,23 +66,10 @@ import {
   type IrType,
   type IrTypeRef,
   type IrValueId,
+  asVal,
 } from "./nodes.js";
 import { isSideEffecting } from "./passes/dead-code.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
-// #1713: BackendEmitter trait seam. The layout-handle types this file
-// historically declared now live in `backend/handles.js` and are re-exported
-// below for backwards compatibility.
-import type { BackendEmitter } from "./backend/emitter.js";
-import { WasmGcEmitter } from "./backend/wasmgc-emitter.js";
-import type {
-  IrBoxedLowering,
-  IrClassLowering,
-  IrClosureLowering,
-  IrObjectStructLowering,
-  IrRefCellLowering,
-  IrUnionLowering,
-  IrVecLowering,
-} from "./backend/handles.js";
 export type {
   IrBoxedLowering,
   IrClassLowering,
@@ -232,6 +232,31 @@ export interface IrLowerResult {
   readonly func: WasmFunction;
 }
 
+/**
+ * #1584 (a0-tail): the backend-agnostic lowering result. `lowerIrFunctionBody`
+ * is generic over the emitter sink `S`; it returns the lowered body in that
+ * sink plus the backend-independent function metadata (`typeIdx`, `locals`,
+ * `name`, `exported`). The WasmGC wrapper (`lowerIrFunctionToWasm`, `S =
+ * Instr[]`) assembles the concrete `WasmFunction` from this; a bytecode driver
+ * consumes `body: BytecodeSink` directly. The `typeIdx`, `locals`, `name`, and
+ * `exported` fields are identical regardless of `S` — only `body` changes
+ * representation, which is exactly the #1715 sink-is-the-one-seam finding.
+ */
+export interface IrLoweredBody<S> {
+  readonly name: string;
+  readonly body: S;
+  readonly locals: LocalDef[];
+  readonly typeIdx: number;
+  readonly exported: boolean;
+}
+
+/**
+ * #1584 (a0-tail): thin WasmGC wrapper. Every pre-#1584 caller is unchanged —
+ * it still returns `IrLowerResult` (`{ func: WasmFunction }`) with `S = Instr[]`
+ * lowering, byte-identical to the previous monolithic body. The generic body
+ * does all the work; this only assembles the `WasmFunction` shape from the
+ * `Instr[]` sink.
+ */
 export function lowerIrFunctionToWasm(
   func: IrFunction,
   resolver: IrLowerResolver,
@@ -240,6 +265,55 @@ export function lowerIrFunctionToWasm(
   // #1714/#1715 pass an explicit emitter selected by compile target.
   emitter: BackendEmitter = new WasmGcEmitter(),
 ): IrLowerResult {
+  const lowered = lowerIrFunctionBody<Instr[]>(func, resolver, emitter);
+  return {
+    func: {
+      name: lowered.name,
+      typeIdx: lowered.typeIdx,
+      locals: lowered.locals,
+      body: lowered.body,
+      exported: lowered.exported,
+    },
+  };
+}
+
+/**
+ * #1584 (a0-tail): the real lowering, generic over the emitter sink `S`. With
+ * `S = Instr[]` (WasmGC, the default) the emitted stream is byte-identical to
+ * the pre-#1584 monolith. With `S = BytecodeSink` the SAME drive shape produces
+ * a flat opcode stream — the bytecode arm is then produced by the REAL
+ * `lower.ts`, not a hand-lowerer (the (a0) acceptance criterion).
+ *
+ * Op families that structurally embed nested `Instr[]` sub-buffers into a raw
+ * WasmGC `Instr` (loop / try / await — see `requireInstrSink` below) are still
+ * WasmGC-only: on a non-`Instr[]` sink they throw the not-yet-migrated boundary
+ * loudly. Each migrates behind a typed trait primitive in §2a (a1..a6).
+ */
+export function lowerIrFunctionBody<S>(
+  func: IrFunction,
+  resolver: IrLowerResolver,
+  // #1713: the active backend. Defaults to WasmGcEmitter (S = Instr[]) so every
+  // existing caller is unchanged and Phase 1 stays zero-delta. #1584 passes an
+  // explicit emitter (e.g. BytecodeEmitter) selected by compile target.
+  emitter: BackendEmitter<S> = new WasmGcEmitter() as unknown as BackendEmitter<S>,
+): IrLoweredBody<S> {
+  // #1584 (a0-tail): guard for op families that build nested `Instr[]`
+  // sub-buffers and EMBED them into a raw WasmGC `Instr` (`{op:"loop", body:
+  // loopBody}`, `{op:"try", body: tryBody}`, the `await` `if` arms). That
+  // structural embed is WasmGC-specific and cannot flow through a non-`Instr[]`
+  // sink. `Array.isArray(out)` is true exactly when `S = Instr[]` (WasmGC); a
+  // BytecodeSink is an object → throws (the not-yet-migrated boundary, surfaced
+  // loudly). Inside such an arm, `const wasmOut = requireInstrSink(out)` asserts
+  // `S = Instr[]` and all the arm's nested-buffer work + terminal embed use
+  // `wasmOut`. See plan/issues/1584 §2a.
+  const requireInstrSink = (out: S): Instr[] => {
+    if (!Array.isArray(out)) {
+      throw new Error(
+        `ir/lower: '${func.name}' uses an op family (loop/try/await) not yet migrated behind the trait — out of the bytecode subset. See plan/issues/1584 §2a.`,
+      );
+    }
+    return out as Instr[];
+  };
   if (func.blocks.length === 0) {
     throw new Error(`ir/lower: function ${func.name} has no blocks`);
   }
@@ -442,7 +516,10 @@ export function lowerIrFunctionToWasm(
         throw new Error(`ir/lower: local-bound SSA value ${instr.result} has no resultType in ${func.name}`);
       }
       const idx = func.params.length + locals.length;
-      locals.push({ name: `$ir${instr.result}`, type: lowerIrTypeToValType(instr.resultType, resolver, func.name) });
+      locals.push({
+        name: `$ir${instr.result}`,
+        type: lowerIrTypeToValType(instr.resultType, resolver, func.name),
+      });
       localIdx.set(instr.result, idx);
     }
     if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
@@ -564,7 +641,7 @@ export function lowerIrFunctionToWasm(
    * Once #1305 lands the IR contract holds across the board and this
    * helper can be removed.
    */
-  const coerceToF64ForBitwise = (v: IrValueId, out: Instr[]): void => {
+  const coerceToF64ForBitwise = (v: IrValueId, out: S): void => {
     let t: IrType;
     try {
       t = typeOf(v);
@@ -576,21 +653,28 @@ export function lowerIrFunctionToWasm(
     // (the legacy validator will then surface the type mismatch and we
     // haven't masked any other contract violation).
     try {
-      const idx = resolver.resolveFunc({ kind: "func", name: "__unbox_number" });
-      out.push({ op: "call", funcIdx: idx });
+      const idx = resolver.resolveFunc({
+        kind: "func",
+        name: "__unbox_number",
+      });
+      emitter.pushRaw(out, { op: "call", funcIdx: idx });
     } catch {
       // resolver doesn't know __unbox_number — fall through unchanged
     }
   };
 
-  const emitValue = (v: IrValueId, out: Instr[]): void => {
+  const emitValue = (v: IrValueId, out: S): void => {
+    // #1584 (a0-tail): local.get/tee ARE trait primitives (Phase-1, realized by
+    // both WasmGcEmitter — byte-identical {op:"local.*"} — and BytecodeEmitter —
+    // OP.LOAD/TEE). Route them through the typed methods, NOT pushRaw, so the
+    // bytecode arm works and the WasmGC arm stays byte-identical.
     const pi = paramIdx.get(v);
     if (pi !== undefined) {
-      out.push({ op: "local.get", index: pi });
+      emitter.emitLocalGet(pi, out);
       return;
     }
     if (materialized.has(v)) {
-      out.push({ op: "local.get", index: localIdx.get(v)! });
+      emitter.emitLocalGet(localIdx.get(v)!, out);
       return;
     }
     const d = defBy.get(v);
@@ -601,21 +685,24 @@ export function lowerIrFunctionToWasm(
       // tee pattern: first use emits the tree and leaves the value on the
       // stack while also storing it; later uses become `local.get`.
       emitInstrTree(d, out);
-      out.push({ op: "local.tee", index: localIdx.get(v)! });
+      emitter.emitLocalTee(localIdx.get(v)!, out);
       materialized.add(v);
       return;
     }
     emitInstrTree(d, out);
   };
 
-  const emitInstrTree = (instr: IrInstr, out: Instr[]): void => {
+  const emitInstrTree = (instr: IrInstr, out: S): void => {
     switch (instr.kind) {
       case "const":
         emitter.emitConst(instr, func.name, out);
         return;
       case "call": {
         for (const a of instr.args) emitValue(a, out);
-        out.push({ op: "call", funcIdx: resolver.resolveFunc(instr.target) });
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc(instr.target),
+        });
         return;
       }
       case "global.get":
@@ -661,14 +748,14 @@ export function lowerIrFunctionToWasm(
           // domain. No ToInt32 needed; emit native i32.* directly.
           emitValue(instr.lhs, out);
           emitValue(instr.rhs, out);
-          out.push({ op: jsBitwiseToI32(instr.op) });
+          emitter.pushRaw(out, { op: jsBitwiseToI32(instr.op) });
           if (!resultIsI32) {
             // Convert i32 → f64 to honour the legacy js.bit* result-type
             // contract. `>>>` is unsigned, others signed.
             if (instr.op === "js.shr_u") {
-              out.push({ op: "f64.convert_i32_u" });
+              emitter.pushRaw(out, { op: "f64.convert_i32_u" });
             } else {
-              out.push({ op: "f64.convert_i32_s" });
+              emitter.pushRaw(out, { op: "f64.convert_i32_s" });
             }
           }
           return;
@@ -699,23 +786,23 @@ export function lowerIrFunctionToWasm(
         if (isJsBitwise) {
           const { rhs: rhsSlot, tmp: tmpSlot } = ensureJsBitwiseScratch(rhsIsI32);
           // Stack: [lhs, rhs]
-          out.push({ op: "local.set", index: rhsSlot });
+          emitter.pushRaw(out, { op: "local.set", index: rhsSlot });
           // Stack: [lhs]; rhsSlot holds rhs.
-          if (!lhsIsI32) emitJsToInt32(out, tmpSlot);
+          if (!lhsIsI32) emitJsToInt32(emitter, out, tmpSlot);
           // Stack: [lhs_i32]
-          out.push({ op: "local.get", index: rhsSlot });
+          emitter.pushRaw(out, { op: "local.get", index: rhsSlot });
           // Stack: [lhs_i32, rhs]
-          if (!rhsIsI32) emitJsToInt32(out, tmpSlot);
+          if (!rhsIsI32) emitJsToInt32(emitter, out, tmpSlot);
           // Stack: [lhs_i32, rhs_i32]
-          out.push({ op: jsBitwiseToI32(instr.op) });
+          emitter.pushRaw(out, { op: jsBitwiseToI32(instr.op) });
           // `>>>` returns a Uint32; everything else is Int32. Convert
           // back to f64 with the matching signedness — UNLESS the IR
           // result type was already narrowed to i32 by Stage 3.
           if (!resultIsI32) {
             if (instr.op === "js.shr_u") {
-              out.push({ op: "f64.convert_i32_u" });
+              emitter.pushRaw(out, { op: "f64.convert_i32_u" });
             } else {
-              out.push({ op: "f64.convert_i32_s" });
+              emitter.pushRaw(out, { op: "f64.convert_i32_s" });
             }
           }
           return;
@@ -759,13 +846,19 @@ export function lowerIrFunctionToWasm(
         // rules as `try` / `forof.*`. Cross-block uses get pre-emitted
         // and `local.set`; void-result instrs emit in place; intra-arm
         // multi-use values emit at their use site via the tee pattern.
-        const emitArmBody = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
+        //
+        // #1584 (a0-tail): the value-producing `if` IS in the bytecode subset
+        // (`emitter.emitIf` realizes it on every backend). So each arm is built
+        // into its OWN sink via `emitter.newSink()` (type S) and handed to
+        // `emitIf` — exactly how the proof drives it. `target` is therefore S,
+        // and the cross-block `local.set` is a trait primitive (emitLocalSet).
+        const emitArmBody = (bodyInstrs: readonly IrInstr[], target: S): void => {
           for (const bodyInstr of bodyInstrs) {
             if (bodyInstr.result === null) {
               emitInstrTree(bodyInstr, target);
             } else if (crossBlock.has(bodyInstr.result)) {
               emitInstrTree(bodyInstr, target);
-              target.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+              emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
             }
             // Intra-arm multi-use: handled at use site via tee pattern.
@@ -776,12 +869,12 @@ export function lowerIrFunctionToWasm(
         emitValue(instr.cond, out);
 
         // 2. THEN arm.
-        const thenBody: Instr[] = [];
+        const thenBody: S = emitter.newSink();
         emitArmBody(instr.then, thenBody);
         emitValue(instr.thenValue, thenBody);
 
         // 3. ELSE arm.
-        const elseBody: Instr[] = [];
+        const elseBody: S = emitter.newSink();
         emitArmBody(instr.else, elseBody);
         emitValue(instr.elseValue, elseBody);
 
@@ -790,7 +883,7 @@ export function lowerIrFunctionToWasm(
         return;
       }
       case "raw.wasm":
-        for (const op of instr.ops) out.push(op);
+        for (const op of instr.ops) emitter.pushRaw(out, op);
         return;
       case "box": {
         // `toType` must be a union (V1 only boxes into tagged unions). The
@@ -813,10 +906,10 @@ export function lowerIrFunctionToWasm(
         // Struct field order: fields at indices tagFieldIdx / valFieldIdx.
         // For V1 registry, tag=0, val=1, so push tag first, then value.
         const pushes: Array<() => void> = [];
-        pushes[union.tagFieldIdx] = () => out.push({ op: "i32.const", value: tag });
+        pushes[union.tagFieldIdx] = () => emitter.pushRaw(out, { op: "i32.const", value: tag });
         pushes[union.valFieldIdx] = () => emitValue(instr.value, out);
         for (const push of pushes) push();
-        out.push({ op: "struct.new", typeIdx: union.typeIdx });
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: union.typeIdx });
         return;
       }
       case "unbox": {
@@ -833,7 +926,11 @@ export function lowerIrFunctionToWasm(
           );
         }
         emitValue(instr.value, out);
-        out.push({ op: "struct.get", typeIdx: union.typeIdx, fieldIdx: union.valFieldIdx });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: union.typeIdx,
+          fieldIdx: union.valFieldIdx,
+        });
         return;
       }
       case "tag.test": {
@@ -850,15 +947,19 @@ export function lowerIrFunctionToWasm(
         }
         const tag = union.tagFor(instr.tag);
         emitValue(instr.value, out);
-        out.push({ op: "struct.get", typeIdx: union.typeIdx, fieldIdx: union.tagFieldIdx });
-        out.push({ op: "i32.const", value: tag });
-        out.push({ op: "i32.eq" });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: union.typeIdx,
+          fieldIdx: union.tagFieldIdx,
+        });
+        emitter.pushRaw(out, { op: "i32.const", value: tag });
+        emitter.pushRaw(out, { op: "i32.eq" });
         return;
       }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
-        for (const o of ops) out.push(o);
+        for (const o of ops) emitter.pushRaw(out, o);
         return;
       }
       case "string.concat": {
@@ -866,7 +967,7 @@ export function lowerIrFunctionToWasm(
         emitValue(instr.rhs, out);
         const ops = resolver.emitStringConcat?.();
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.concat (${func.name})`);
-        for (const o of ops) out.push(o);
+        for (const o of ops) emitter.pushRaw(out, o);
         return;
       }
       case "string.eq": {
@@ -874,17 +975,17 @@ export function lowerIrFunctionToWasm(
         emitValue(instr.rhs, out);
         const ops = resolver.emitStringEquals?.();
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.eq (${func.name})`);
-        for (const o of ops) out.push(o);
-        if (instr.negate) out.push({ op: "i32.eqz" });
+        for (const o of ops) emitter.pushRaw(out, o);
+        if (instr.negate) emitter.pushRaw(out, { op: "i32.eqz" });
         return;
       }
       case "string.len": {
         emitValue(instr.value, out);
         const ops = resolver.emitStringLen?.();
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.len (${func.name})`);
-        for (const o of ops) out.push(o);
+        for (const o of ops) emitter.pushRaw(out, o);
         // IR-level result is f64 — promote the i32 length.
-        out.push({ op: "f64.convert_i32_s" });
+        emitter.pushRaw(out, { op: "f64.convert_i32_s" });
         return;
       }
       case "object.new": {
@@ -897,7 +998,7 @@ export function lowerIrFunctionToWasm(
         // order. The builder enforces value-count parity with shape arity,
         // so this loop always produces the right stack shape.
         for (const v of instr.values) emitValue(v, out);
-        out.push({ op: "struct.new", typeIdx: obj.typeIdx });
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: obj.typeIdx });
         return;
       }
       case "object.get": {
@@ -912,7 +1013,11 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(valueIrType.shape)}> (${func.name})`);
         }
         emitValue(instr.value, out);
-        out.push({ op: "struct.get", typeIdx: obj.typeIdx, fieldIdx: obj.fieldIdx(instr.name) });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: obj.typeIdx,
+          fieldIdx: obj.fieldIdx(instr.name),
+        });
         return;
       }
       case "object.set": {
@@ -928,7 +1033,11 @@ export function lowerIrFunctionToWasm(
         }
         emitValue(instr.value, out);
         emitValue(instr.newValue, out);
-        out.push({ op: "struct.set", typeIdx: obj.typeIdx, fieldIdx: obj.fieldIdx(instr.name) });
+        emitter.pushRaw(out, {
+          op: "struct.set",
+          typeIdx: obj.typeIdx,
+          fieldIdx: obj.fieldIdx(instr.name),
+        });
         return;
       }
       // Slice 3 (#1169c): closure / ref-cell ops.
@@ -939,9 +1048,9 @@ export function lowerIrFunctionToWasm(
         }
         const liftedIdx = resolver.resolveFunc(instr.liftedFunc);
         // ref.func $lifted, push captures, struct.new <subtype>.
-        out.push({ op: "ref.func", funcIdx: liftedIdx });
+        emitter.pushRaw(out, { op: "ref.func", funcIdx: liftedIdx });
         for (const cap of instr.captures) emitValue(cap, out);
-        out.push({ op: "struct.new", typeIdx: sub.structTypeIdx });
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: sub.structTypeIdx });
         return;
       }
       case "closure.cap": {
@@ -957,8 +1066,12 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot resolve closure subtype for ${func.name}`);
         }
         emitValue(instr.self, out);
-        out.push({ op: "ref.cast", typeIdx: sub.structTypeIdx });
-        out.push({ op: "struct.get", typeIdx: sub.structTypeIdx, fieldIdx: sub.capFieldIdx(instr.index) });
+        emitter.pushRaw(out, { op: "ref.cast", typeIdx: sub.structTypeIdx });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: sub.structTypeIdx,
+          fieldIdx: sub.capFieldIdx(instr.index),
+        });
         return;
       }
       case "closure.call": {
@@ -978,14 +1091,18 @@ export function lowerIrFunctionToWasm(
         emitValue(instr.callee, out);
         for (const a of instr.args) emitValue(a, out);
         emitValue(instr.callee, out);
-        out.push({ op: "struct.get", typeIdx: cl.structTypeIdx, fieldIdx: cl.funcFieldIdx });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: cl.structTypeIdx,
+          fieldIdx: cl.funcFieldIdx,
+        });
         // The struct's `func` field is typed as the abstract `funcref`
         // (matches the legacy `getOrCreateFuncRefWrapperTypes` pattern,
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
-        out.push({ op: "ref.cast", typeIdx: cl.funcTypeIdx });
-        out.push({ op: "call_ref", typeIdx: cl.funcTypeIdx });
+        emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
+        emitter.pushRaw(out, { op: "call_ref", typeIdx: cl.funcTypeIdx });
         return;
       }
       case "refcell.new": {
@@ -999,7 +1116,7 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot lower refcell<${inner.kind}> (${func.name})`);
         }
         emitValue(instr.value, out);
-        out.push({ op: "struct.new", typeIdx: cell.typeIdx });
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: cell.typeIdx });
         return;
       }
       case "refcell.get": {
@@ -1012,7 +1129,11 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot lower refcell<${cellT.inner.kind}> (${func.name})`);
         }
         emitValue(instr.cell, out);
-        out.push({ op: "struct.get", typeIdx: cell.typeIdx, fieldIdx: cell.fieldIdx });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: cell.typeIdx,
+          fieldIdx: cell.fieldIdx,
+        });
         return;
       }
       case "refcell.set": {
@@ -1026,7 +1147,11 @@ export function lowerIrFunctionToWasm(
         }
         emitValue(instr.cell, out);
         emitValue(instr.value, out);
-        out.push({ op: "struct.set", typeIdx: cell.typeIdx, fieldIdx: cell.fieldIdx });
+        emitter.pushRaw(out, {
+          op: "struct.set",
+          typeIdx: cell.typeIdx,
+          fieldIdx: cell.fieldIdx,
+        });
         return;
       }
       // Slice 4 (#1169d): class ops.
@@ -1036,9 +1161,12 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot lower class ${instr.shape.className} (${func.name})`);
         }
         for (const a of instr.args) emitValue(a, out);
-        out.push({
+        emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.constructorFuncName }),
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.constructorFuncName,
+          }),
         });
         return;
       }
@@ -1052,7 +1180,11 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot lower class ${recvT.shape.className} (${func.name})`);
         }
         emitValue(instr.value, out);
-        out.push({ op: "struct.get", typeIdx: cl.structTypeIdx, fieldIdx: cl.fieldIdx(instr.fieldName) });
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: cl.structTypeIdx,
+          fieldIdx: cl.fieldIdx(instr.fieldName),
+        });
         return;
       }
       case "class.set": {
@@ -1066,7 +1198,11 @@ export function lowerIrFunctionToWasm(
         }
         emitValue(instr.value, out);
         emitValue(instr.newValue, out);
-        out.push({ op: "struct.set", typeIdx: cl.structTypeIdx, fieldIdx: cl.fieldIdx(instr.fieldName) });
+        emitter.pushRaw(out, {
+          op: "struct.set",
+          typeIdx: cl.structTypeIdx,
+          fieldIdx: cl.fieldIdx(instr.fieldName),
+        });
         return;
       }
       case "class.call": {
@@ -1081,20 +1217,29 @@ export function lowerIrFunctionToWasm(
         // `this` first, then user args, then call $<className>_<methodName>.
         emitValue(instr.receiver, out);
         for (const a of instr.args) emitValue(a, out);
-        out.push({
+        emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.methodFuncName(instr.methodName) }),
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
         });
         return;
       }
       // Slice 6 (#1169e): slot / vec / for-of ops.
       case "slot.read": {
-        out.push({ op: "local.get", index: slotWasmIdx(instr.slotIndex) });
+        emitter.pushRaw(out, {
+          op: "local.get",
+          index: slotWasmIdx(instr.slotIndex),
+        });
         return;
       }
       case "slot.write": {
         emitValue(instr.value, out);
-        out.push({ op: "local.set", index: slotWasmIdx(instr.slotIndex) });
+        emitter.pushRaw(out, {
+          op: "local.set",
+          index: slotWasmIdx(instr.slotIndex),
+        });
         return;
       }
       case "vec.len": {
@@ -1107,7 +1252,7 @@ export function lowerIrFunctionToWasm(
         // IR-level result is f64 (matches JS Number semantics) — promote.
         // The f64.convert is an IR-result-type coercion, not a backend op,
         // so it stays in the caller (#1713 spec section 3).
-        out.push({ op: "f64.convert_i32_s" });
+        emitter.pushRaw(out, { op: "f64.convert_i32_s" });
         return;
       }
       case "vec.get": {
@@ -1161,9 +1306,12 @@ export function lowerIrFunctionToWasm(
         }
         const fnIdx = resolver.resolveFunc({ kind: "func", name: importName });
         // Stack: buffer, value → (void); call __gen_push_*.
-        out.push({ op: "local.get", index: slotWasmIdx(func.generatorBufferSlot) });
+        emitter.pushRaw(out, {
+          op: "local.get",
+          index: slotWasmIdx(func.generatorBufferSlot),
+        });
         emitValue(instr.value, out);
-        out.push({ op: "call", funcIdx: fnIdx });
+        emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
       case "gen.epilogue": {
@@ -1174,10 +1322,16 @@ export function lowerIrFunctionToWasm(
         if (func.generatorBufferSlot === undefined) {
           throw new Error(`ir/lower: gen.epilogue requires func.generatorBufferSlot (${func.name})`);
         }
-        const fnIdx = resolver.resolveFunc({ kind: "func", name: "__create_generator" });
-        out.push({ op: "local.get", index: slotWasmIdx(func.generatorBufferSlot) });
-        out.push({ op: "ref.null.extern" });
-        out.push({ op: "call", funcIdx: fnIdx });
+        const fnIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__create_generator",
+        });
+        emitter.pushRaw(out, {
+          op: "local.get",
+          index: slotWasmIdx(func.generatorBufferSlot),
+        });
+        emitter.pushRaw(out, { op: "ref.null.extern" });
+        emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
       // Slice 7b (#1169f): yield* delegation.
@@ -1191,10 +1345,16 @@ export function lowerIrFunctionToWasm(
         if (func.generatorBufferSlot === undefined) {
           throw new Error(`ir/lower: gen.yieldStar requires func.generatorBufferSlot (${func.name})`);
         }
-        const fnIdx = resolver.resolveFunc({ kind: "func", name: "__gen_yield_star" });
-        out.push({ op: "local.get", index: slotWasmIdx(func.generatorBufferSlot) });
+        const fnIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__gen_yield_star",
+        });
+        emitter.pushRaw(out, {
+          op: "local.get",
+          index: slotWasmIdx(func.generatorBufferSlot),
+        });
         emitValue(instr.inner, out);
-        out.push({ op: "call", funcIdx: fnIdx });
+        emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
       case "forof.vec": {
@@ -1207,62 +1367,93 @@ export function lowerIrFunctionToWasm(
         const vec = resolver.resolveVec?.(vecT);
         if (!vec) throw new Error(`ir/lower: resolver cannot lower vec for forof.vec (${func.name})`);
 
+        // #1584 (a0-tail): this arm structurally embeds an `Instr[]` loop body
+        // into a raw WasmGC `{op:"block",body:[{op:"loop"...}]}` — WasmGC-only
+        // until the control-flow family (§2a a3) migrates. Assert S = Instr[].
+        const wasmOut = requireInstrSink(out);
+
         // Push the vec ref.
         emitValue(instr.vec, out);
         // Save to vec slot.
-        out.push({ op: "local.set", index: slotWasmIdx(instr.vecSlot) });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.vecSlot) });
 
         // length = vec.length
-        out.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
+        wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
         emitter.emitVecLen(vec, out);
-        out.push({ op: "local.set", index: slotWasmIdx(instr.lengthSlot) });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.lengthSlot) });
 
         // data = vec.data
-        out.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
+        wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.vecSlot) });
         emitter.emitVecDataPtr(vec, out);
-        out.push({ op: "local.set", index: slotWasmIdx(instr.dataSlot) });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.dataSlot) });
 
         // counter = 0
-        out.push({ op: "i32.const", value: 0 });
-        out.push({ op: "local.set", index: slotWasmIdx(instr.counterSlot) });
+        wasmOut.push({ op: "i32.const", value: 0 });
+        wasmOut.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.counterSlot),
+        });
 
         // Build loop body Wasm ops by recursively emitting body instrs.
         const loopBody: Instr[] = [];
         // if (counter >= length) br 1 (exit)
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.lengthSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.lengthSlot),
+        });
         loopBody.push({ op: "i32.ge_s" });
         loopBody.push({ op: "br_if", depth: 1 });
 
         // element = data[counter]
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.dataSlot) });
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
-        emitter.emitElemGet(vec, loopBody);
-        loopBody.push({ op: "local.set", index: slotWasmIdx(instr.elementSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
+        // `loopBody` is an Instr[] sub-buffer; the arm has asserted S = Instr[]
+        // (via requireInstrSink) so the cast to S is sound (#1584 §2a).
+        emitter.emitElemGet(vec, loopBody as unknown as S);
+        loopBody.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.elementSlot),
+        });
 
         // Body instrs
         for (const bodyInstr of instr.body) {
           if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody);
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
           } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody);
-            loopBody.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            loopBody.push({
+              op: "local.set",
+              index: localIdx.get(bodyInstr.result)!,
+            });
             materialized.add(bodyInstr.result);
           }
           // Intra-block multi-use: handled at use site via tee pattern.
         }
 
         // counter = counter + 1
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
         loopBody.push({ op: "i32.const", value: 1 });
         loopBody.push({ op: "i32.add" });
-        loopBody.push({ op: "local.set", index: slotWasmIdx(instr.counterSlot) });
+        loopBody.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.counterSlot),
+        });
 
         // br 0 (continue)
         loopBody.push({ op: "br", depth: 0 });
 
         // Wrap in block { loop { ... } }
-        out.push({
+        wasmOut.push({
           op: "block",
           blockType: { kind: "empty" },
           body: [
@@ -1283,14 +1474,14 @@ export function lowerIrFunctionToWasm(
         // ref-typed inputs the wasm engine simply re-tags the reference
         // so it can flow into externref-typed positions.
         emitValue(instr.value, out);
-        out.push({ op: "extern.convert_any" });
+        emitter.pushRaw(out, { op: "extern.convert_any" });
         return;
       }
       case "iter.new": {
         const fnName = instr.async ? "__async_iterator" : "__iterator";
         const funcIdx = resolver.resolveFunc({ kind: "func", name: fnName });
         emitValue(instr.iterable, out);
-        out.push({ op: "call", funcIdx });
+        emitter.pushRaw(out, { op: "call", funcIdx });
         return;
       }
       case "iter.next":
@@ -1309,23 +1500,38 @@ export function lowerIrFunctionToWasm(
         );
       }
       case "iter.return": {
-        const funcIdx = resolver.resolveFunc({ kind: "func", name: "__iterator_return" });
+        const funcIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__iterator_return",
+        });
         emitValue(instr.iter, out);
-        out.push({ op: "call", funcIdx });
+        emitter.pushRaw(out, { op: "call", funcIdx });
         return;
       }
       case "forof.iter": {
         // Mirror of forof.vec but using the iterator protocol. The lowerer
         // emits the `block { loop { ... } }` Wasm pattern documented on
         // `IrInstrForOfIter` in `nodes.ts`.
-        const iteratorIdx = resolver.resolveFunc({ kind: "func", name: "__iterator" });
-        const iteratorNextIdx = resolver.resolveFunc({ kind: "func", name: "__iterator_next" });
-        const iteratorReturnIdx = resolver.resolveFunc({ kind: "func", name: "__iterator_return" });
+        const iteratorIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__iterator",
+        });
+        const iteratorNextIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__iterator_next",
+        });
+        const iteratorReturnIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__iterator_return",
+        });
+
+        // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
+        const wasmOut = requireInstrSink(out);
 
         // iter = __iterator(iterable)
         emitValue(instr.iterable, out);
-        out.push({ op: "call", funcIdx: iteratorIdx });
-        out.push({ op: "local.set", index: slotWasmIdx(instr.iterSlot) });
+        wasmOut.push({ op: "call", funcIdx: iteratorIdx });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.iterSlot) });
 
         // Build loop body Wasm ops.
         const loopBody: Instr[] = [];
@@ -1335,17 +1541,23 @@ export function lowerIrFunctionToWasm(
         // on top for the br_if exit test — no $IteratorResult struct round-trip.
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.iterSlot) });
         loopBody.push({ op: "call", funcIdx: iteratorNextIdx });
-        loopBody.push({ op: "local.set", index: slotWasmIdx(instr.elementSlot) }); // externref value (top)
+        loopBody.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.elementSlot),
+        }); // externref value (top)
         // if (done) br 1 (exit) — done (i32) is now on top of the stack
         loopBody.push({ op: "br_if", depth: 1 });
 
         // Body instrs (same materialisation pattern as forof.vec).
         for (const bodyInstr of instr.body) {
           if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody);
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
           } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody);
-            loopBody.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            loopBody.push({
+              op: "local.set",
+              index: localIdx.get(bodyInstr.result)!,
+            });
             materialized.add(bodyInstr.result);
           }
         }
@@ -1354,7 +1566,7 @@ export function lowerIrFunctionToWasm(
         loopBody.push({ op: "br", depth: 0 });
 
         // block { loop { ... } }
-        out.push({
+        wasmOut.push({
           op: "block",
           blockType: { kind: "empty" },
           body: [
@@ -1369,8 +1581,8 @@ export function lowerIrFunctionToWasm(
         // Normal-exit close: iter.return(iter). Note this runs only on
         // normal loop exit (done=true). Abrupt exits (break/return)
         // would need a try/finally — slice 6 step E (#1169h dependency).
-        out.push({ op: "local.get", index: slotWasmIdx(instr.iterSlot) });
-        out.push({ op: "call", funcIdx: iteratorReturnIdx });
+        wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.iterSlot) });
+        wasmOut.push({ op: "call", funcIdx: iteratorReturnIdx });
         return;
       }
       // Slice 9 (#1169h) — exception handling.
@@ -1382,7 +1594,7 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot resolve __exn tag for throw (${func.name})`);
         }
         emitValue(instr.value, out);
-        out.push({ op: "throw", tagIdx });
+        emitter.pushRaw(out, { op: "throw", tagIdx });
         return;
       }
       case "try": {
@@ -1404,15 +1616,24 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: resolver cannot resolve __exn tag for try (${func.name})`);
         }
 
+        // #1584 (a0-tail): out-of-subset — embeds Instr[] try/catch/finally
+        // sub-buffers into a raw WasmGC `{op:"try"...}`. Assert S = Instr[].
+        const wasmOut = requireInstrSink(out);
+
         // Helper: emit a body buffer (Instr[]) into a target out array,
-        // honoring the SSA materialisation rules used by forof.vec.
+        // honoring the SSA materialisation rules used by forof.vec. `target`
+        // is a local Instr[] sub-buffer; the arm asserted S = Instr[] so the
+        // cast to S on the recursive emit is sound (#1584 §2a).
         const emitBodyBuffer = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
           for (const bodyInstr of bodyInstrs) {
             if (bodyInstr.result === null) {
-              emitInstrTree(bodyInstr, target);
+              emitInstrTree(bodyInstr, target as unknown as S);
             } else if (crossBlock.has(bodyInstr.result)) {
-              emitInstrTree(bodyInstr, target);
-              target.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+              emitInstrTree(bodyInstr, target as unknown as S);
+              target.push({
+                op: "local.set",
+                index: localIdx.get(bodyInstr.result)!,
+              });
               materialized.add(bodyInstr.result);
             }
             // Intra-block multi-use: handled via tee at use site.
@@ -1434,7 +1655,10 @@ export function lowerIrFunctionToWasm(
           const catchBody: Instr[] = [];
           // Bind payload (or drop). Slot index === -1 means no binding.
           if (instr.catchClause.payloadSlot >= 0) {
-            catchBody.push({ op: "local.set", index: slotWasmIdx(instr.catchClause.payloadSlot) });
+            catchBody.push({
+              op: "local.set",
+              index: slotWasmIdx(instr.catchClause.payloadSlot),
+            });
           } else {
             catchBody.push({ op: "drop" });
           }
@@ -1477,7 +1701,7 @@ export function lowerIrFunctionToWasm(
           catchAll = ca;
         }
 
-        out.push({
+        wasmOut.push({
           op: "try",
           blockType: { kind: "empty" },
           body: tryBody,
@@ -1491,7 +1715,10 @@ export function lowerIrFunctionToWasm(
       // ensures this case only runs in native-strings mode (host-strings
       // mode falls through to forof.iter).
       case "forof.string": {
-        const charAtIdx = resolver.resolveFunc({ kind: "func", name: "__str_charAt" });
+        const charAtIdx = resolver.resolveFunc({
+          kind: "func",
+          name: "__str_charAt",
+        });
         // The AnyString struct's `len` field is at index 0 (matches
         // `nativeStringType` in src/codegen/native-strings.ts).
         // We recover the typeIdx from the SSA value's IrType — must be
@@ -1508,55 +1735,82 @@ export function lowerIrFunctionToWasm(
         }
         const anyStrTypeIdx = (strRef as { typeIdx: number }).typeIdx;
 
+        // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
+        const wasmOut = requireInstrSink(out);
+
         // <emit str>; local.set <strSlot>
         emitValue(instr.str, out);
-        out.push({ op: "local.set", index: slotWasmIdx(instr.strSlot) });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.strSlot) });
 
         // length = str.len  (struct field 0)
-        out.push({ op: "local.get", index: slotWasmIdx(instr.strSlot) });
-        out.push({ op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 });
-        out.push({ op: "local.set", index: slotWasmIdx(instr.lengthSlot) });
+        wasmOut.push({ op: "local.get", index: slotWasmIdx(instr.strSlot) });
+        wasmOut.push({ op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 });
+        wasmOut.push({ op: "local.set", index: slotWasmIdx(instr.lengthSlot) });
 
         // counter = 0
-        out.push({ op: "i32.const", value: 0 });
-        out.push({ op: "local.set", index: slotWasmIdx(instr.counterSlot) });
+        wasmOut.push({ op: "i32.const", value: 0 });
+        wasmOut.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.counterSlot),
+        });
 
         // Build loop body Wasm ops.
         const loopBody: Instr[] = [];
         // if (counter >= length) br 1 (exit)
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.lengthSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.lengthSlot),
+        });
         loopBody.push({ op: "i32.ge_s" });
         loopBody.push({ op: "br_if", depth: 1 });
 
         // element = __str_charAt(str, counter)
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.strSlot) });
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
         loopBody.push({ op: "call", funcIdx: charAtIdx });
-        loopBody.push({ op: "local.set", index: slotWasmIdx(instr.elementSlot) });
+        loopBody.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.elementSlot),
+        });
 
         // Body instrs (same materialisation pattern as forof.vec/forof.iter).
         for (const bodyInstr of instr.body) {
           if (bodyInstr.result === null) {
-            emitInstrTree(bodyInstr, loopBody);
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
           } else if (crossBlock.has(bodyInstr.result)) {
-            emitInstrTree(bodyInstr, loopBody);
-            loopBody.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+            emitInstrTree(bodyInstr, loopBody as unknown as S);
+            loopBody.push({
+              op: "local.set",
+              index: localIdx.get(bodyInstr.result)!,
+            });
             materialized.add(bodyInstr.result);
           }
         }
 
         // counter = counter + 1
-        loopBody.push({ op: "local.get", index: slotWasmIdx(instr.counterSlot) });
+        loopBody.push({
+          op: "local.get",
+          index: slotWasmIdx(instr.counterSlot),
+        });
         loopBody.push({ op: "i32.const", value: 1 });
         loopBody.push({ op: "i32.add" });
-        loopBody.push({ op: "local.set", index: slotWasmIdx(instr.counterSlot) });
+        loopBody.push({
+          op: "local.set",
+          index: slotWasmIdx(instr.counterSlot),
+        });
 
         // br 0 (continue)
         loopBody.push({ op: "br", depth: 0 });
 
         // block { loop { ... } }
-        out.push({
+        wasmOut.push({
           op: "block",
           blockType: { kind: "empty" },
           body: [
@@ -1581,7 +1835,7 @@ export function lowerIrFunctionToWasm(
         const importName = `${instr.className}_new`;
         const fn = resolver.resolveFunc({ kind: "func", name: importName });
         for (const a of instr.args) emitValue(a, out);
-        out.push({ op: "call", funcIdx: fn });
+        emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.call": {
@@ -1589,14 +1843,14 @@ export function lowerIrFunctionToWasm(
         const fn = resolver.resolveFunc({ kind: "func", name: importName });
         emitValue(instr.receiver, out);
         for (const a of instr.args) emitValue(a, out);
-        out.push({ op: "call", funcIdx: fn });
+        emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.prop": {
         const importName = `${instr.className}_get_${instr.property}`;
         const fn = resolver.resolveFunc({ kind: "func", name: importName });
         emitValue(instr.receiver, out);
-        out.push({ op: "call", funcIdx: fn });
+        emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.propSet": {
@@ -1604,7 +1858,7 @@ export function lowerIrFunctionToWasm(
         const fn = resolver.resolveFunc({ kind: "func", name: importName });
         emitValue(instr.receiver, out);
         emitValue(instr.value, out);
-        out.push({ op: "call", funcIdx: fn });
+        emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.regex": {
@@ -1622,14 +1876,14 @@ export function lowerIrFunctionToWasm(
         if (!patternOps) {
           throw new Error(`ir/lower: resolver cannot emit string.const for regex pattern (${func.name})`);
         }
-        for (const o of patternOps) out.push(o);
+        for (const o of patternOps) emitter.pushRaw(out, o);
         const flagsOps = resolver.emitStringConst?.(instr.flags);
         if (!flagsOps) {
           throw new Error(`ir/lower: resolver cannot emit string.const for regex flags (${func.name})`);
         }
-        for (const o of flagsOps) out.push(o);
+        for (const o of flagsOps) emitter.pushRaw(out, o);
         const fn = resolver.resolveFunc({ kind: "func", name: "RegExp_new" });
-        out.push({ op: "call", funcIdx: fn });
+        emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       // Slice 12 (#1280) — generic structured loops. Both kinds emit
@@ -1641,18 +1895,25 @@ export function lowerIrFunctionToWasm(
       // are emitted in place).
       case "while.loop":
       case "for.loop": {
+        // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
+        const wasmOut = requireInstrSink(out);
         const loopBody: Instr[] = [];
 
         // Helper: emit a body buffer (cond / body / update) into a
         // target ops array using the standard SSA materialisation
-        // rules (mirrors the `forof.*` body emission).
+        // rules (mirrors the `forof.*` body emission). `target` is a local
+        // Instr[] sub-buffer; the arm asserted S = Instr[] so the cast to S
+        // on the recursive emit is sound (#1584 §2a).
         const emitBodyBuffer = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
           for (const bodyInstr of bodyInstrs) {
             if (bodyInstr.result === null) {
-              emitInstrTree(bodyInstr, target);
+              emitInstrTree(bodyInstr, target as unknown as S);
             } else if (crossBlock.has(bodyInstr.result)) {
-              emitInstrTree(bodyInstr, target);
-              target.push({ op: "local.set", index: localIdx.get(bodyInstr.result)! });
+              emitInstrTree(bodyInstr, target as unknown as S);
+              target.push({
+                op: "local.set",
+                index: localIdx.get(bodyInstr.result)!,
+              });
               materialized.add(bodyInstr.result);
             }
             // Intra-block multi-use: handled at use site via tee pattern.
@@ -1663,7 +1924,7 @@ export function lowerIrFunctionToWasm(
         emitBodyBuffer(instr.cond, loopBody);
 
         // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
-        emitValue(instr.condValue, loopBody);
+        emitValue(instr.condValue, loopBody as unknown as S);
         loopBody.push({ op: "i32.eqz" });
         loopBody.push({ op: "br_if", depth: 1 });
 
@@ -1679,7 +1940,7 @@ export function lowerIrFunctionToWasm(
         loopBody.push({ op: "br", depth: 0 });
 
         // 6. Wrap in `block { loop { ... } }`.
-        out.push({
+        wasmOut.push({
           op: "block",
           blockType: { kind: "empty" },
           body: [
@@ -1725,11 +1986,14 @@ export function lowerIrFunctionToWasm(
           );
         }
         // Stack effect: → externref ($Promise wrapped in extern)
-        out.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+        emitter.pushRaw(out, {
+          op: "i32.const",
+          value: PROMISE_STATE_FULFILLED,
+        });
         emitValue(instr.value, out);
-        out.push({ op: "ref.null.extern" } as Instr);
-        out.push({ op: "struct.new", typeIdx: promiseTypeIdx });
-        out.push({ op: "extern.convert_any" } as Instr);
+        emitter.pushRaw(out, { op: "ref.null.extern" } as Instr);
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
+        emitter.pushRaw(out, { op: "extern.convert_any" } as Instr);
         return;
       }
       case "async.throw": {
@@ -1740,11 +2004,14 @@ export function lowerIrFunctionToWasm(
           );
         }
         // Stack effect: → externref ($Promise wrapped in extern, REJECTED state)
-        out.push({ op: "i32.const", value: PROMISE_STATE_REJECTED });
+        emitter.pushRaw(out, {
+          op: "i32.const",
+          value: PROMISE_STATE_REJECTED,
+        });
         emitValue(instr.reason, out);
-        out.push({ op: "ref.null.extern" } as Instr);
-        out.push({ op: "struct.new", typeIdx: promiseTypeIdx });
-        out.push({ op: "extern.convert_any" } as Instr);
+        emitter.pushRaw(out, { op: "ref.null.extern" } as Instr);
+        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
+        emitter.pushRaw(out, { op: "extern.convert_any" } as Instr);
         return;
       }
       case "await": {
@@ -1771,9 +2038,14 @@ export function lowerIrFunctionToWasm(
         // continuation closure here — the function continues in the
         // same wasm frame. PENDING-path continuation synthesis is
         // Slice 2 (blocked on #1326c Phase 1C-B).
+        //
+        // #1584 (a0-tail): out-of-subset — embeds Instr[] `if`-arm sub-buffers
+        // (rejectedBranch / pendingBranch) into a raw WasmGC `{op:"if"...}`.
+        // Assert S = Instr[].
+        const wasmOut = requireInstrSink(out);
         emitValue(instr.operand, out);
-        out.push({ op: "any.convert_extern" } as Instr);
-        out.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
+        wasmOut.push({ op: "any.convert_extern" } as Instr);
+        wasmOut.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
         // The next emit needs a scratch local. Reuse the
         // jsBitwiseTmp pattern: allocate lazily into `locals` and
         // remember the index for any further await in the same fn.
@@ -1784,8 +2056,12 @@ export function lowerIrFunctionToWasm(
             type: { kind: "ref", typeIdx: promiseTypeIdx } as ValType,
           });
         }
-        out.push({ op: "local.tee", index: awaitScratchPromiseIdx });
-        out.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 }); // state: i32
+        wasmOut.push({ op: "local.tee", index: awaitScratchPromiseIdx });
+        wasmOut.push({
+          op: "struct.get",
+          typeIdx: promiseTypeIdx,
+          fieldIdx: 0,
+        }); // state: i32
         // Build:
         //   if state == FULFILLED then
         //     local.get $await_promise
@@ -1800,17 +2076,24 @@ export function lowerIrFunctionToWasm(
         const exnTagIdx = resolver.ensureExnTag?.();
         const rejectedBranch: Instr[] = [];
         if (exnTagIdx !== undefined) {
-          rejectedBranch.push({ op: "local.get", index: awaitScratchPromiseIdx });
-          rejectedBranch.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr);
+          rejectedBranch.push({
+            op: "local.get",
+            index: awaitScratchPromiseIdx,
+          });
+          rejectedBranch.push({
+            op: "struct.get",
+            typeIdx: promiseTypeIdx,
+            fieldIdx: 1,
+          } as Instr);
           rejectedBranch.push({ op: "throw", tagIdx: exnTagIdx } as Instr);
         }
         rejectedBranch.push({ op: "unreachable" } as Instr);
         // PENDING / fall-through marker. Slice 2 (#1373b) replaces with
         // the CPS continuation synthesis once #1326c Phase 1C-B lands.
         const pendingBranch: Instr[] = [{ op: "unreachable" } as Instr];
-        out.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
-        out.push({ op: "i32.eq" });
-        out.push({
+        wasmOut.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+        wasmOut.push({ op: "i32.eq" });
+        wasmOut.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: [
@@ -1824,7 +2107,10 @@ export function lowerIrFunctionToWasm(
             { op: "i32.eq" } as Instr,
             {
               op: "if",
-              blockType: { kind: "val", type: { kind: "externref" } as ValType },
+              blockType: {
+                kind: "val",
+                type: { kind: "externref" } as ValType,
+              },
               then: rejectedBranch,
               else: pendingBranch,
             } as Instr,
@@ -1835,7 +2121,7 @@ export function lowerIrFunctionToWasm(
     }
   };
 
-  const emitBlockBody = (block: IrBlock, out: Instr[]): void => {
+  const emitBlockBody = (block: IrBlock, out: S): void => {
     for (const instr of block.instrs) {
       if (instr.result === null) {
         // Void-producing instrs (global.set, raw.wasm with no result).
@@ -1843,9 +2129,11 @@ export function lowerIrFunctionToWasm(
         continue;
       }
       if (crossBlock.has(instr.result)) {
-        // Pre-materialize for successor blocks.
+        // Pre-materialize for successor blocks. `local.set` is a trait
+        // primitive (emitLocalSet) — byte-identical on WasmGC, OP.STORE on
+        // bytecode.
         emitInstrTree(instr, out);
-        out.push({ op: "local.set", index: localIdx.get(instr.result)! });
+        emitter.emitLocalSet(localIdx.get(instr.result)!, out);
         materialized.add(instr.result);
         continue;
       }
@@ -1885,8 +2173,11 @@ export function lowerIrFunctionToWasm(
           throw new Error(`ir/lower: br_if target missing in ${func.name}`);
         }
         emitValue(t.condition, out);
-        const thenOps: Instr[] = [];
-        const elseOps: Instr[] = [];
+        // #1584 (a0-tail): each branch arm is built into its own sink and
+        // handed to `emitIf` (which realizes the structured `if` per backend) —
+        // the same drive shape the value-producing `if` instr uses.
+        const thenOps: S = emitter.newSink();
+        const elseOps: S = emitter.newSink();
         emitBlockBody(thenBlock, thenOps);
         emitBlockBody(elseBlock, elseOps);
         const blockType: BlockType = { kind: "empty" };
@@ -1916,29 +2207,41 @@ export function lowerIrFunctionToWasm(
     }
   };
 
-  const body: Instr[] = [];
+  const body: S = emitter.newSink();
   emitBlockBody(func.blocks[0], body);
   // A br_if-terminated entry leaves fallthrough after the structured `if`.
   // Wasm's validator requires the function body to end with an op that
   // produces the return-type-shape on stack — `unreachable` is polymorphic
   // and satisfies that contract without emitting a real value.
-  const last = body[body.length - 1];
-  if (!last || last.op !== "return") {
-    emitter.emitUnreachable(body);
+  //
+  // #1584 (a0-tail): this trailing-op fix-up inspects the last emitted `Instr`
+  // (`.op === "return"`), which is a WasmGC-shaped peek. It applies only when
+  // S = Instr[] (`Array.isArray`). On a non-`Instr[]` sink (bytecode), an
+  // in-subset function's entry block ends in a `return` terminator, so no
+  // trailing `unreachable` is needed; a function that didn't would surface the
+  // missing terminal downstream, not here.
+  if (Array.isArray(body)) {
+    const wasmBody = body as Instr[];
+    const last = wasmBody[wasmBody.length - 1];
+    if (!last || last.op !== "return") {
+      emitter.emitUnreachable(body);
+    }
   }
 
   const paramTypes: ValType[] = func.params.map((p) => lowerIrTypeToValType(p.type, resolver, func.name));
   const resultTypes: ValType[] = func.resultTypes.map((t) => lowerIrTypeToValType(t, resolver, func.name));
-  const typeIdx = resolver.internFuncType({ kind: "func", params: paramTypes, results: resultTypes });
+  const typeIdx = resolver.internFuncType({
+    kind: "func",
+    params: paramTypes,
+    results: resultTypes,
+  });
 
   return {
-    func: {
-      name: func.name,
-      typeIdx,
-      locals,
-      body,
-      exported: func.exported,
-    },
+    name: func.name,
+    body,
+    locals,
+    typeIdx,
+    exported: func.exported,
   };
 }
 
@@ -2307,21 +2610,26 @@ function jsBitwiseToI32(
   }
 }
 
-function emitJsToInt32(out: Instr[], tmpLocalIdx: number): void {
+// #1584 (a0-tail): generic over the sink `S` so the js-bitwise ToInt32 dance
+// flows through the same `emitter.pushRaw` escape hatch as its caller. On
+// WasmGC (`S = Instr[]`) the emitted stream is byte-identical to the prior
+// direct pushes; the js-bitwise family is out of the bytecode subset, so on a
+// bytecode sink `pushRaw` throws (the not-yet-migrated boundary, §2a a6).
+function emitJsToInt32<S>(emitter: BackendEmitter<S>, out: S, tmpLocalIdx: number): void {
   // Stack: [f64]
-  out.push({ op: "f64.trunc" });
+  emitter.pushRaw(out, { op: "f64.trunc" });
   // Stack: [f64_trunc]
-  out.push({ op: "local.tee", index: tmpLocalIdx });
-  out.push({ op: "local.get", index: tmpLocalIdx });
+  emitter.pushRaw(out, { op: "local.tee", index: tmpLocalIdx });
+  emitter.pushRaw(out, { op: "local.get", index: tmpLocalIdx });
   // Stack: [f64_trunc, f64_trunc]
-  out.push({ op: "f64.const", value: 4294967296 });
-  out.push({ op: "f64.div" });
-  out.push({ op: "f64.floor" });
-  out.push({ op: "f64.const", value: 4294967296 });
-  out.push({ op: "f64.mul" });
-  out.push({ op: "f64.sub" });
+  emitter.pushRaw(out, { op: "f64.const", value: 4294967296 });
+  emitter.pushRaw(out, { op: "f64.div" });
+  emitter.pushRaw(out, { op: "f64.floor" });
+  emitter.pushRaw(out, { op: "f64.const", value: 4294967296 });
+  emitter.pushRaw(out, { op: "f64.mul" });
+  emitter.pushRaw(out, { op: "f64.sub" });
   // Stack: [f64_in_range]
-  out.push({ op: "i32.trunc_sat_f64_u" });
+  emitter.pushRaw(out, { op: "i32.trunc_sat_f64_u" });
   // Stack: [i32]
 }
 
@@ -2348,7 +2656,10 @@ export function emitConstInstr(instr: Extract<IrInstr, { kind: "const" }>, out: 
     case "null": {
       const valTy = instr.resultType ? asVal(instr.resultType) : null;
       if (valTy && valTy.kind === "ref_null") {
-        out.push({ op: "ref.null", typeIdx: (valTy as { typeIdx: number }).typeIdx });
+        out.push({
+          op: "ref.null",
+          typeIdx: (valTy as { typeIdx: number }).typeIdx,
+        });
         return;
       }
       // Slice 7b (#1169f): bare `yield;` lowers to a `gen.push` of
