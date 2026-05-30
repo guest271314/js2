@@ -938,3 +938,32 @@ relies on its `__call_next`/`__gen_next` fallback (`runtime.ts:7786-7803`) recog
 generator. If that drain returns empty/undefined, the override-produced iterator needs the Wasm-native
 generator-next path instead (a `__call_next` dispatch on the struct) — surface immediately, do not
 paper over. This is the one unproven link in the chain.
+
+## CPR-1 LANDED — z=42 proven (sendev sdev-cpr2, 2026-05-30, commit ed780a6cf)
+
+Built + committed on `issue-1719-cpr2-finish` (merged current with origin/main).
+The "unproven link" above is **resolved**: the host `__iterator_next` drains the
+compiled-generator iterator correctly through its `__call_next` fallback.
+
+**Proven:** `Array.prototype[Symbol.iterator]=function*(){…yield 42}` +
+`var [a,b,z]=[1,2,3]` → **z===42** (was 3), TERMINATES, override-free
+byte-identical. `tests/issue-1719-cpr.test.ts` (z=42 + termination + override-free)
+green; S1 byte-identical microcheck green; #1016/#1021/#1320 dstr guards: no new
+failures (the lone 1016b `string[Symbol.iterator]` fail is PRE-EXISTING on clean
+HEAD — harness `wasm:js-string` import wiring, not this change). tsc clean.
+
+**Scope of CPR-1:** the **declaration** array-dstr path (`compileArrayDestructuring`)
+for identifier/default/elision patterns — the decl subset of the 71. The `values`
+alias rides for free (`arrayIteratorOverrideGlobalIdx` checks both keys).
+
+**CPR-2 remaining (fan-out, same proven `emitArrayProtoIteratorDrive` helper):**
+1. parameter dstr — 2nd gate site `destructureParamArray` (destructuring-params.ts:799).
+2. for-of-head dstr — `compileForOfDestructuring` (loops.ts:1060) [note: the override
+   affects BOTH the outer for-of iteration AND the inner element destructure; needs
+   care — route `compileForOfStatement`'s array fast path through the override
+   iterator when branded, reusing `compileForOfIterator`'s `__iterator_next` loop].
+3. assignment dstr (`[a,b]=arr`) — separate path from `compileArrayDestructuring`.
+4. spread (`[...arr]`).
+Each is "add the gate at site N + call the shared helper + a scoped test". Awaiting
+tech-lead a/b: (a) land CPR-1 PR now + CPR-2 follow-up (lets CI measure the real
+per-context split of the 71), or (b) build all CPR-2 into this branch first.
