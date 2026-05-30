@@ -433,6 +433,29 @@ export interface CodegenContext {
   /** Map from "ClassName_propName" → global index for static properties */
   staticProps: Map<string, number>;
   /**
+   * (#1719 CPR — compiled prototype record) Captured prototype-member overrides.
+   *
+   * `Array.prototype[Symbol.iterator] = fn` / `Array.prototype.values = fn` have
+   * no compiled landing spot today and are silently dropped — the override is
+   * never observed (#1719 root cause). CPR captures such writes here. The OUTER
+   * key is a **proto-owner identity token** (today a builtin name, e.g.
+   * `"Array"`); the INNER key is the well-known member key (`"@@iterator"`,
+   * `"values"`). The value is the lifted override closure's funcref index plus
+   * the funcTypeIdx needed to `call_ref` it. Read sites (array destructuring,
+   * for-of, spread) consult this when the whole-program brand
+   * (`arrayIteratorMaybeOverridden`) is set and drive the stored closure as the
+   * value's `@@iterator` (§7.4.2 GetIterator) instead of the backing-store walk.
+   *
+   * The proto-owner key is typed as an open string TOKEN (not a narrow union) so
+   * it can later carry user-class / struct-type identities — probe-1 showed
+   * `C.prototype.m=` is dropped for user classes too — without rebuilding the
+   * table; the cluster (#1130/#1320) grafts on by widening the token. This is the
+   * prototype-OVERRIDE substrate, kept conceptually distinct from instance-level
+   * own-property descriptors (`_wasmStructAccessors` / #1629), which live on
+   * values, not prototypes.
+   */
+  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number }>>;
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`
