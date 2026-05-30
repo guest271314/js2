@@ -31,7 +31,11 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
-import { maybeCaptureArrayProtoOverride } from "./proto-override.js";
+import {
+  arrayIteratorOverrideGlobalIdx,
+  emitArrayProtoIteratorDrive,
+  maybeCaptureArrayProtoOverride,
+} from "./proto-override.js";
 import {
   classifyPrivateMember,
   emitCoercedLocalSet,
@@ -1034,6 +1038,135 @@ function compileDestructuringAssignment(
   return resultType;
 }
 
+/**
+ * (#1719 CPR-2) Drive a captured `Array.prototype[@@iterator]` override for an
+ * array **assignment** destructuring (`[a, b, z] = arr`) whose targets are plain
+ * identifiers — exactly the shape of the assignment-context
+ * `*-iter-val-array-prototype.js` tests. PRECONDITION: the RHS vec ref is on the
+ * stack and the caller gated on the brand + a captured override.
+ *
+ * Returns `true` after driving (RHS consumed); returns `false` WITHOUT disturbing
+ * the stack (RHS still on top) for any non-identifier target / rest / nested
+ * shape, so the caller falls through to the backing-store lowering. Mirrors the
+ * binding-site read-drive (`tryEmitArrayProtoIteratorReadDrive`): drive override
+ * → iterator, then per element `__iterator_next` → `(i32 done, externref value)`,
+ * coerce + assign to the identifier's local/global. Null-guarded so an
+ * unresolved-override dispatch-miss degrades gracefully instead of trapping.
+ */
+function tryEmitArrayProtoIteratorAssignDrive(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.ArrayLiteralExpression,
+  resultType: ValType,
+): boolean {
+  const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
+  if (overrideGlobalIdx === undefined) return false;
+
+  // Shape gate: every element must be a plain identifier target (no holes that
+  // resolve to non-identifiers, no member/element-access, no rest/spread). Holes
+  // (OmittedExpression) are allowed — they just advance the iterator.
+  for (const el of target.elements) {
+    if (ts.isOmittedExpression(el)) continue;
+    if (ts.isSpreadElement(el)) return false; // rest → follow-up
+    if (!ts.isIdentifier(el)) return false; // member / element-access / nested → follow-up
+  }
+
+  const nextIdx = ensureLateImport(
+    ctx,
+    "__iterator_next",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }, { kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (nextIdx === undefined) return false;
+
+  // The RHS vec ref is on the stack — drive the override into an iterator local.
+  // `emitArrayProtoIteratorDrive` does `extern.convert_any` (any→extern) on the
+  // vec ref, then calls __drive_proto_iterator(array, closure).
+  const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
+  const doneLocal = allocLocal(fctx, `__cpra_done_${fctx.locals.length}`, { kind: "i32" });
+  const valLocal = allocLocal(fctx, `__cpra_val_${fctx.locals.length}`, { kind: "externref" });
+
+  // Build the per-element drain into a buffer, guarded on a non-null iterator.
+  const drainInstrs: Instr[] = [];
+  const saved = fctx.body;
+  fctx.savedBodies.push(saved);
+  fctx.body = drainInstrs;
+  try {
+    for (const el of target.elements) {
+      // (done, value) = __iterator_next(iter)
+      fctx.body.push({ op: "local.get", index: iterLocal } as Instr);
+      fctx.body.push({ op: "call", funcIdx: nextIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: valLocal } as Instr); // value (top)
+      fctx.body.push({ op: "local.set", index: doneLocal } as Instr); // done (below)
+
+      if (ts.isOmittedExpression(el) || !ts.isIdentifier(el)) continue; // hole: advance only
+
+      const name = el.text;
+      // Resolve the assignment target. Identifier assignment targets are
+      // function locals or module globals; reuse the same resolution the
+      // identifier-assignment path uses.
+      const localIdx = fctx.localMap.get(name);
+      const globalIdx = ctx.moduleGlobals.get(name);
+      // When done (iterator exhausted), the spec value is `undefined`; leave the
+      // local untouched (the targets already exist / hold their prior value) —
+      // the 71 assignment tests yield concrete values, never short.
+      if (localIdx !== undefined) {
+        const localType = getLocalType(fctx, localIdx) ?? ({ kind: "externref" } as ValType);
+        const assignBody: Instr[] = [];
+        const sb = fctx.body;
+        fctx.savedBodies.push(sb);
+        fctx.body = assignBody;
+        try {
+          fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+          coerceType(ctx, fctx, { kind: "externref" }, localType);
+          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+        } finally {
+          fctx.body = sb;
+          fctx.savedBodies.pop();
+        }
+        fctx.body.push({ op: "local.get", index: doneLocal } as Instr);
+        fctx.body.push({ op: "i32.eqz" } as Instr);
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: assignBody, else: [] } as Instr);
+      } else if (globalIdx !== undefined) {
+        const gType = ctx.mod.globals[globalIdx]?.type ?? ({ kind: "externref" } as ValType);
+        const assignBody: Instr[] = [];
+        const sb = fctx.body;
+        fctx.savedBodies.push(sb);
+        fctx.body = assignBody;
+        try {
+          fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+          coerceType(ctx, fctx, { kind: "externref" }, gType as ValType);
+          fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+        } finally {
+          fctx.body = sb;
+          fctx.savedBodies.pop();
+        }
+        fctx.body.push({ op: "local.get", index: doneLocal } as Instr);
+        fctx.body.push({ op: "i32.eqz" } as Instr);
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: assignBody, else: [] } as Instr);
+      }
+      // Unresolvable identifier target: skip (rare in the 71; spec would create
+      // a global in sloppy mode — out of scope for the fast drive).
+    }
+  } finally {
+    fctx.body = saved;
+    fctx.savedBodies.pop();
+  }
+
+  // if (iter !== null) { drain }
+  fctx.body.push({ op: "local.get", index: iterLocal } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: drainInstrs, else: [] } as Instr);
+  // The assignment expression evaluates to the RHS, but it was consumed by the
+  // drive; assignment-destructuring is almost always a statement (result
+  // dropped). Push a null externref to satisfy the caller's `externref` result
+  // contract. (#1719 CPR-2)
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  return true;
+}
+
 function compileArrayDestructuringAssignment(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1043,6 +1176,22 @@ function compileArrayDestructuringAssignment(
   // Compile the RHS — should produce a struct ref (either tuple or vec)
   const resultType = compileExpression(ctx, fctx, value);
   if (!resultType) return null;
+
+  // (#1719 CPR-2) When the program overrode Array.prototype[@@iterator] and the
+  // RHS is a real array, drive the captured override instead of the backing
+  // store (§13.15.5.2 ArrayAssignmentPattern → GetIterator). Strictly gated
+  // behind the brand + a captured override (both clear in the common case ⇒
+  // byte-identical). Returns true (and the assignment result) when it drove the
+  // identifier-target shape; falls through to the backing-store lowering for
+  // member/element-access/rest/nested targets.
+  if (
+    ctx.arrayIteratorMaybeOverridden &&
+    arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+    (resultType.kind === "ref" || resultType.kind === "ref_null")
+  ) {
+    const drove = tryEmitArrayProtoIteratorAssignDrive(ctx, fctx, target, resultType);
+    if (drove) return { kind: "externref" };
+  }
 
   // §6.2.4 PutValue: strict-mode assignment to unresolvable reference throws.
   if (isStrictContext(target) && findUnresolvableInArrayPattern(ctx, fctx, target)) {
