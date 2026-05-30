@@ -130,10 +130,7 @@ export interface BackendEmitter<S = Instr[]> {
   // closure / ref-coercion) have a stable signature to migrate against and
   // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
   // need not implement them until its group is wired.
-  emitAggregateNew?(layout: IrObjectStructLowering, fieldCount: number, out: Instr[]): void;
   emitBox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitFieldGet?(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void;
-  emitFieldSet?(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void;
   emitUnbox?(layout: IrUnionLowering, out: Instr[]): void;
   emitTagLoad?(layout: IrUnionLowering, out: Instr[]): void;
   emitNull?(irType: IrType, out: Instr[]): void;
@@ -156,4 +153,17 @@ export interface BackendEmitter<S = Instr[]> {
   emitCall(funcIdx: number, out: S): void;
   /** Indirect call through a typed funcref already on the stack. */
   emitCallRef(funcTypeIdx: number, out: S): void;
+
+  // ---- (a2) struct/object family — MIGRATED behind the trait (#1584 §2a) ---
+  // The object struct ops (object.new / object.get / object.set). WasmGc/Linear
+  // realize them as byte-identical `{op:"struct.new"}` / `{op:"struct.get"}` /
+  // `{op:"struct.set"}`; Bytecode realizes `OP.STRUCT_NEW` / `STRUCT_GET` /
+  // `STRUCT_SET` over a VM heap (struct ref ≡ f64(heapIndex), null ≡ f64(-1)).
+  /** Allocate an aggregate from `fieldCount` values already on the stack
+   * (canonical field order, field0 deepest); leaves the new struct ref. */
+  emitAggregateNew(layout: IrObjectStructLowering, fieldCount: number, out: S): void;
+  /** struct ref on stack -> the named field's value. */
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
+  /** struct ref + value on stack -> writes the named field (void). */
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
 }

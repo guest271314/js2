@@ -56,6 +56,7 @@
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
+import type { IrClassLowering, IrObjectStructLowering } from "./handles.js";
 
 // ── Opcodes ───────────────────────────────────────────────────────────────
 // A flat `number[]` instruction stream. Each opcode is one int; inline operands
@@ -100,6 +101,13 @@ export const OP = {
   // f64(-1) (CALL_REF on -1 traps). See sdev-vm coordination + issue §2a.
   CALL: 23, //     CALL <funcIdx>     ; pop arity args, run functions[funcIdx], push result
   CALL_REF: 24, // CALL_REF <typeIdx> ; pop funcref(top)+arity args, run functions[idx], push result
+  // ── (a2) struct/object family (#1584 §2a) — heap-backed structs. A struct
+  // ref ≡ f64(heapIndex) into a VM-global heap of `{fields:number[]}`; null ≡
+  // f64(-1) (STRUCT_GET/SET on -1 traps). The struct field that holds a funcref
+  // stores f64(tableIndex) (a1's invariant) so CALL_REF dispatches it.
+  STRUCT_NEW: 25, // STRUCT_NEW <fieldCount> ; pop fieldCount vals (field0 deepest), alloc heap obj, push ref
+  STRUCT_GET: 26, // STRUCT_GET <fieldIdx>   ; pop structRef, push obj.fields[fieldIdx]
+  STRUCT_SET: 27, // STRUCT_SET <fieldIdx>   ; pop value, pop structRef, obj.fields[fieldIdx]=value
 } as const;
 
 export type Opcode = (typeof OP)[keyof typeof OP];
@@ -188,6 +196,9 @@ export class BytecodeSink {
         case OP.GLOBAL_SET:
         case OP.CALL:
         case OP.CALL_REF:
+        case OP.STRUCT_NEW:
+        case OP.STRUCT_GET:
+        case OP.STRUCT_SET:
           this.code.push(op, code[i++]!);
           break;
         // Zero-operand opcodes.
@@ -402,6 +413,22 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
   // null ≡ f64(-1) which traps. `typeIdx` is informational (func-type id).
   emitCallRef(funcTypeIdx: number, out: BytecodeSink): void {
     out.emit(OP.CALL_REF, funcTypeIdx);
+  }
+
+  // ---- (a2) struct/object family (#1584 §2a) — heap-backed structs --------
+  // STRUCT_NEW carries the field COUNT (the untyped VM needs no typeIdx, only
+  // how many to pop); STRUCT_GET/SET carry the numeric field INDEX (lower.ts
+  // resolves name→fieldIdx via the layout, so the VM gets the index directly).
+  emitAggregateNew(_layout: IrObjectStructLowering, fieldCount: number, out: BytecodeSink): void {
+    out.emit(OP.STRUCT_NEW, fieldCount);
+  }
+
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: BytecodeSink): void {
+    out.emit(OP.STRUCT_GET, layout.fieldIdx(name));
+  }
+
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: BytecodeSink): void {
+    out.emit(OP.STRUCT_SET, layout.fieldIdx(name));
   }
 
   // ---- vec (array) primitives — out of the #1584 numeric subset -----------
