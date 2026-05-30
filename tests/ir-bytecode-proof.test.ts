@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { BytecodeEmitter, BytecodeSink, OP } from "../src/ir/backend/bytecode-emitter.js";
+import {
+  BytecodeEmitter,
+  BytecodeSink,
+  OP,
+} from "../src/ir/backend/bytecode-emitter.js";
 import { runSink } from "../src/ir/backend/bytecode-vm.js";
 import type { IrObjectStructLowering } from "../src/ir/backend/handles.js";
-import { type IrFunction, type IrLowerResolver, asBlockId, asValueId, irVal } from "../src/ir/index.js";
+import {
+  type IrFunction,
+  type IrLowerResolver,
+  asBlockId,
+  asValueId,
+  irVal,
+} from "../src/ir/index.js";
 // #1584 (a0-tail): the REAL production lowerer, generic over the sink. The arm
 // at the bottom of this file drives it (not a hand-lowerer) through a
 // BytecodeEmitter for the #1715 three functions — the (a0) acceptance criterion.
@@ -36,15 +46,26 @@ import { buildImports } from "../src/runtime.js";
 // The WasmGC arm DOES go through the real compiler (`compile()`), so the
 // equivalence pins the bytecode result against production WasmGC lowering.
 
-async function runWasmGc(src: string, fn: string, args: number[]): Promise<number> {
+async function runWasmGc(
+  src: string,
+  fn: string,
+  args: number[],
+): Promise<number> {
   const r = compile(src, { fileName: "test.ts" });
   if (!r.success) throw new Error(`compile error: ${r.errors[0]?.message}`);
   const imports = buildImports(r.imports, undefined, r.stringPool);
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  if (typeof (imports as { setExports?: (e: unknown) => void }).setExports === "function") {
-    (imports as { setExports: (e: unknown) => void }).setExports(instance.exports);
+  if (
+    typeof (imports as { setExports?: (e: unknown) => void }).setExports ===
+    "function"
+  ) {
+    (imports as { setExports: (e: unknown) => void }).setExports(
+      instance.exports,
+    );
   }
-  const f = (instance.exports as Record<string, (...a: number[]) => number>)[fn];
+  const f = (instance.exports as Record<string, (...a: number[]) => number>)[
+    fn
+  ];
   return f(...args);
 }
 
@@ -153,12 +174,16 @@ describe("#1584 — bytecode-emitter triple equivalence (production trait surfac
   it("out-of-subset ops throw with a clear #1584 message", () => {
     const s = new BytecodeSink();
     // js-bitwise / i32 logical families have not migrated behind the trait yet.
-    expect(() => E.emitBinary("js.bitor", s)).toThrow(/not in the #1584 production subset/);
-    expect(() => E.emitUnary("i32.eqz", s)).toThrow(/not in the #1584 production subset/);
-    // The raw-Instr escape hatch rejects an Instr for an unrealized op family.
-    expect(() => E.pushRaw(s, { op: "struct.get", typeIdx: 0, fieldIdx: 0 })).toThrow(
-      /out of the #1584 production subset/,
+    expect(() => E.emitBinary("js.bitor", s)).toThrow(
+      /not in the #1584 production subset/,
     );
+    expect(() => E.emitUnary("i32.eqz", s)).toThrow(
+      /not in the #1584 production subset/,
+    );
+    // The raw-Instr escape hatch rejects an Instr for an unrealized op family.
+    expect(() =>
+      E.pushRaw(s, { op: "struct.get", typeIdx: 0, fieldIdx: 0 }),
+    ).toThrow(/out of the #1584 production subset/);
   });
 });
 
@@ -195,7 +220,11 @@ function numericResolver(): IrLowerResolver {
 
 /** Lower a hand-built IR function to a bytecode sink via the REAL lowerer. */
 function lowerToBytecode(fn: IrFunction): BytecodeSink {
-  return lowerIrFunctionBody<BytecodeSink>(fn, numericResolver(), new BytecodeEmitter()).body;
+  return lowerIrFunctionBody<BytecodeSink>(
+    fn,
+    numericResolver(),
+    new BytecodeEmitter(),
+  ).body;
 }
 
 describe("#1584 (a0-tail) — REAL lower.ts drives the bytecode sink (triple equivalence)", () => {
@@ -433,7 +462,11 @@ describe("#1584 (a1) — real lower.ts drives OP.CALL through the BytecodeEmitte
       valueCount: 3,
     };
 
-    const sink = lowerIrFunctionBody<BytecodeSink>(main, callResolver(1), new BytecodeEmitter()).body;
+    const sink = lowerIrFunctionBody<BytecodeSink>(
+      main,
+      callResolver(1),
+      new BytecodeEmitter(),
+    ).body;
     // The call's result is single-use in the return, so it inlines: the body is
     //   LOAD 0 ; LOAD 1 ; CALL 1 ; RET
     expect(sink.code).toEqual([OP.LOAD, 0, OP.LOAD, 1, OP.CALL, 1, OP.RET]);
@@ -502,6 +535,138 @@ describe("#1584 (a2) — BytecodeEmitter realizes the struct/object family", () 
     arm.emit(OP.STRUCT_SET, 1);
     const dest = new BytecodeSink();
     dest.spliceArm(arm);
-    expect(dest.code).toEqual([OP.STRUCT_NEW, 2, OP.STRUCT_GET, 0, OP.STRUCT_SET, 1]);
+    expect(dest.code).toEqual([
+      OP.STRUCT_NEW,
+      2,
+      OP.STRUCT_GET,
+      0,
+      OP.STRUCT_SET,
+      1,
+    ]);
+  });
+});
+
+// ── #1584 (a3) control-flow family — block / loop / br / br_if → JZ/JNZ/JMP ──
+//
+// The structured `block`/`loop`/`br`/`br_if` family compiles AWAY in the
+// BytecodeEmitter to JZ/JNZ/JMP + backpatch labels (issue §1c/§2a; `emitIf`
+// already demonstrates the pattern for `if`). The only new VM opcode is JNZ —
+// the exact dual of JZ — so `br_if`'s "branch if truthy" needs no `eqz`+`JZ`.
+// `block`/`loop` add NO opcode (they resolve to backpatched targets at splice).
+//
+// These emitter-side tests (my lane) assert the lowering: `br`/`br_if` emit a
+// JMP/JNZ placeholder + a depth-tagged pending branch; `emitLoop` resolves a
+// depth-0 branch to the loop HEADER (back-edge / continue); `emitBlock` resolves
+// a depth-0 branch to the block EXIT (forward / break). The De Bruijn depth is
+// decremented as branches cross each enclosing construct outward. The matching
+// `OP.JNZ` VM dispatch arm is sdev-vm's slice (exercised in the VM unit tests).
+describe("#1584 (a3) — BytecodeEmitter realizes the control-flow family", () => {
+  it("emitBr / emitBrIf emit JMP / JNZ placeholders + record a depth-tagged pending branch", () => {
+    const E = new BytecodeEmitter();
+    const s = new BytecodeSink();
+    E.emitBr(0, s);
+    E.emitBrIf(2, s);
+    // Two placeholder jumps, both unpatched (-1) until an enclosing construct resolves them.
+    expect(s.code).toEqual([OP.JMP, -1, OP.JNZ, -1]);
+    expect(s.pendingBranches).toEqual([
+      { slot: 1, depth: 0 }, // the JMP operand slot
+      { slot: 3, depth: 2 }, // the JNZ operand slot
+    ]);
+  });
+
+  it("emitLoop resolves a depth-0 branch to the loop HEADER (back-edge / continue)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    E.emitBr(0, body); // `br 0` — continue, targets the loop header
+    const out = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, body, out);
+    // header = position the body begins = 0; the JMP back-edge patches to 0.
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // depth-0 fully resolved
+  });
+
+  it("emitBlock resolves a depth-0 branch to the block EXIT (forward / break)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    E.emitBrIf(0, body); // `br_if 0` — exit-if, targets the block end
+    body.emit(OP.LOAD, 1);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, body, out);
+    // exit = position past the spliced body = 4; the JNZ patches to 4.
+    expect(out.code).toEqual([OP.JNZ, 4, OP.LOAD, 1]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("the canonical loop `block{ loop{ cond; br_if 1; body; br 0 } }` backpatches both targets", () => {
+    // Mirrors the 4 fenced loop arms in lower.ts (forof.vec/iter/string, for/while).
+    const E = new BytecodeEmitter();
+    const loopBody = new BytecodeSink();
+    loopBody.emit(OP.LOAD, 0); // cond (truthy ⇒ exit)
+    E.emitBrIf(1, loopBody); // br_if 1 — exit the enclosing BLOCK
+    loopBody.emit(OP.LOAD, 1); // body
+    E.emitBr(0, loopBody); // br 0 — continue the LOOP
+
+    const loopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, loopBody, loopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, loopWrap, out);
+
+    // JNZ (br_if 1) → block exit = 8 (past the whole loop);
+    // JMP (br 0)    → loop header = 0 (back-edge to cond).
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 8, OP.LOAD, 1, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // every structured branch resolved
+  });
+
+  it("nested loops resolve each `br`/`br_if` to its own construct (De Bruijn depth)", () => {
+    // outer block{ loop{ inner block{ loop{ br_if 1(inner exit); br 0(inner cont) };
+    //                                   br 0(outer cont) } } }
+    // Validates depth decrement as branches cross constructs outward.
+    const E = new BytecodeEmitter();
+
+    const innerBody = new BytecodeSink();
+    innerBody.emit(OP.LOAD, 0);
+    E.emitBrIf(1, innerBody); // exit inner block
+    E.emitBr(0, innerBody); // continue inner loop
+    const innerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, innerBody, innerLoopWrap);
+    const innerBlockOut = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, innerLoopWrap, innerBlockOut);
+    // After inner block fully resolves, no pending branches escape it.
+    expect(innerBlockOut.pendingBranches).toEqual([]);
+
+    // Now wrap the inner block in the outer loop, appending an outer `br 0`.
+    const outerBody = new BytecodeSink();
+    outerBody.spliceArm(innerBlockOut);
+    E.emitBr(0, outerBody); // continue outer loop
+    const outerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, outerBody, outerLoopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, outerLoopWrap, out);
+
+    // inner: LOAD 0; JNZ → inner-block exit (6); JMP → inner-loop header (0)
+    // outer: JMP → outer-loop header (0); outer-block exit unused here
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 6, OP.JMP, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("spliceArm carries an UNPATCHED structured branch outward (relocated) but still rejects a stray unpatched jump", () => {
+    // A pending br to an as-yet-unseen enclosing construct survives a splice.
+    const E = new BytecodeEmitter();
+    const inner = new BytecodeSink();
+    inner.emit(OP.LOAD, 9);
+    E.emitBr(3, inner); // depth 3 — far outer construct, stays pending
+    const mid = new BytecodeSink();
+    mid.emit(OP.DROP);
+    mid.spliceArm(inner);
+    // The JMP relocated by +base (base=1 ⇒ operand slot 3) and its depth survives.
+    expect(mid.code).toEqual([OP.DROP, OP.LOAD, 9, OP.JMP, -1]);
+    expect(mid.pendingBranches).toEqual([{ slot: 4, depth: 3 }]);
+
+    // A non-structured unpatched jump (no pending-branch record) is still an error.
+    const bad = new BytecodeSink();
+    bad.code.push(OP.JZ, -1); // hand-forged unpatched JZ, not recorded
+    const dest = new BytecodeSink();
+    expect(() => dest.spliceArm(bad)).toThrow(/unpatched jump/);
   });
 });

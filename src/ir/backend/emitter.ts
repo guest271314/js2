@@ -103,7 +103,11 @@ export interface BackendEmitter<S = Instr[]> {
 
   // ---- scalars / locals / globals / control flow (Phase-1 stage 1) ----
   /** Emit a `const` IR instr's literal op(s). Delegates to the shared free fn. */
-  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: S): void;
+  emitConst(
+    instr: Extract<IrInstr, { kind: "const" }>,
+    funcName: string,
+    out: S,
+  ): void;
   /** Pass-through binary op (`f64.add`, `i32.eq`, `i32.and`, ...). Bitwise
    * `js.*` ops are lowered earlier in lower.ts and never reach here. */
   emitBinary(op: IrBinop, out: S): void;
@@ -123,6 +127,21 @@ export interface BackendEmitter<S = Instr[]> {
   emitBr(depth: number, out: S): void;
   emitBrIf(depth: number, out: S): void;
 
+  // ---- (a3) control-flow family — MIGRATED behind the trait (#1584 §2a) ----
+  // The structured `block` / `loop` wrappers. The caller (real `lower.ts`)
+  // pre-lowers the wrapped region into its own sink (via `newSink()`), embedding
+  // any `br` / `br_if` whose `depth` counts block/loop nesting outward (De Bruijn).
+  // WasmGc realizes them as byte-identical `{op:"block",body}` / `{op:"loop",body}`
+  // — the WasmGC `Instr` stream is unchanged. Bytecode realizes them by splicing
+  // `body` and resolving its pending `br`/`br_if` jumps to `JZ`/`JNZ`/`JMP` with
+  // backpatched targets (block ⇒ forward exit label, loop ⇒ backward header
+  // label), exactly as `emitIf` already lowers structured `if` (issue §1c/§2a:
+  // "loop / block / br_if … lowered to JZ/JNZ/JMP + backpatch labels").
+  /** Wrap `body` in a structured block; `body` was built via `newSink()`. */
+  emitBlock(blockType: BlockType, body: S, out: S): void;
+  /** Wrap `body` in a structured loop; `body` was built via `newSink()`. */
+  emitLoop(blockType: BlockType, body: S, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
   // The following are part of the full seam the spec audited but are NOT
   // routed through the trait in Phase 1 (#1713). They remain inline in
@@ -137,7 +156,11 @@ export interface BackendEmitter<S = Instr[]> {
   emitToExternref?(out: Instr[]): void;
   emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;
   emitFuncRef?(funcIdx: number, out: Instr[]): void;
-  emitClosureNew?(layout: IrClosureLowering, captureCount: number, out: Instr[]): void;
+  emitClosureNew?(
+    layout: IrClosureLowering,
+    captureCount: number,
+    out: Instr[],
+  ): void;
   emitClosureFuncGet?(layout: IrClosureLowering, out: Instr[]): void;
   emitCaptureGet?(layout: IrClosureLowering, index: number, out: Instr[]): void;
   emitRefCellNew?(layout: IrRefCellLowering, out: Instr[]): void;
@@ -161,9 +184,21 @@ export interface BackendEmitter<S = Instr[]> {
   // `STRUCT_SET` over a VM heap (struct ref ≡ f64(heapIndex), null ≡ f64(-1)).
   /** Allocate an aggregate from `fieldCount` values already on the stack
    * (canonical field order, field0 deepest); leaves the new struct ref. */
-  emitAggregateNew(layout: IrObjectStructLowering, fieldCount: number, out: S): void;
+  emitAggregateNew(
+    layout: IrObjectStructLowering,
+    fieldCount: number,
+    out: S,
+  ): void;
   /** struct ref on stack -> the named field's value. */
-  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
+  emitFieldGet(
+    layout: IrObjectStructLowering | IrClassLowering,
+    name: string,
+    out: S,
+  ): void;
   /** struct ref + value on stack -> writes the named field (void). */
-  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
+  emitFieldSet(
+    layout: IrObjectStructLowering | IrClassLowering,
+    name: string,
+    out: S,
+  ): void;
 }
