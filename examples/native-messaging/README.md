@@ -12,7 +12,7 @@ script. This directory contains:
 
 ```
 examples/native-messaging/
-  host.ts          ← the TypeScript host (compiled with --target wasi)
+  nm_js2wasm.ts          ← the TypeScript host (compiled with --target wasi)
   README.md        ← this file
   nm_js2wasm.json  ← Chrome native-host manifest template
   manifest.json    ← Web extension manifest
@@ -47,7 +47,7 @@ runtime to launch it (see "Run it" below).
 
 ## The host source
 
-[`host.ts`](./host.ts) follows the **3-symbol shape** the reference hosts use
+[`nm_js2wasm.ts`](./nm_js2wasm.ts) follows the **3-symbol shape** the reference hosts use
 across runtimes:
 
 - **`getMessage()`** — reads the 4-byte little-endian length header, then
@@ -78,29 +78,29 @@ From the repo root (works immediately after `pnpm install`, no build step):
 
 ```bash
 mkdir -p examples/native-messaging/out
-npx tsx src/cli.ts examples/native-messaging/host.ts --target wasi -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi -o examples/native-messaging/out
 ```
 
 (Once the package is built — `pnpm run build` — or installed from npm, you can
-use the `js2wasm` bin directly: `npx js2wasm host.ts --target wasi -o out`.)
+use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm.ts --target wasi -o out`.)
 
-This produces `out/host.wasm`. The module imports only from
+This produces `out/nm_js2wasm.wasm`. The module imports only from
 `wasi_snapshot_preview1` (`fd_read`, `fd_write`) — no `env.*` imports — so it
 runs on any standards-compliant WASI preview1 runtime.
 
 > The `-o` flag is an **output directory**, not a filename. js2wasm names the
-> output after the input basename (`host.wasm`).
+> output after the input basename (`nm_js2wasm.wasm`).
 
-### What is `out/host.imports.js`?
+### What is `out/nm_js2wasm.imports.js`?
 
-Alongside `host.wasm`, js2wasm emits **`host.imports.js`** (plus `host.d.ts`).
+Alongside `nm_js2wasm.wasm`, js2wasm emits **`nm_js2wasm.imports.js`** (plus `nm_js2wasm.d.ts`).
 It is the **generated host-imports glue** a compiled module needs when you
 instantiate it from a JavaScript host. It re-exports `createImports`,
 `instantiateBytes`, and `instantiateFromUrl` from the `js2wasm` runtime package,
 wiring up the module's import manifest and string pool:
 
 ```js
-import { instantiateBytes } from "./out/host.imports.js";
+import { instantiateBytes } from "./out/nm_js2wasm.imports.js";
 const { instance } = await instantiateBytes(wasmBytes, deps, options);
 instance.exports.main();
 ```
@@ -109,7 +109,7 @@ For **this** example it is **not used at runtime**: the Native Messaging host
 is a fully standalone `--target wasi` module whose only imports are the WASI
 preview1 syscalls (`fd_read`/`fd_write`), which the runtime — `wasmtime`,
 `wasmer`, `wazero`, or Node's WASI — supplies directly. So the `nm_js2wasm.sh`
-wrapper launches `host.wasm` under a WASI runtime and `host.imports.js` is
+wrapper launches `nm_js2wasm.wasm` under a WASI runtime and `nm_js2wasm.imports.js` is
 never imported.
 
 The glue file is emitted unconditionally by the compiler because the **same
@@ -148,13 +148,13 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
-> snippet does — `WebAssembly.compile(readFileSync('out/host.wasm'))` — and
+> snippet does — `WebAssembly.compile(readFileSync('out/nm_js2wasm.wasm'))` — and
 > drive it against js2wasm's own `buildWasiPolyfill()` for a JS-side
 > round-trip.
 
 ## Wire it into Chrome
 
-1. **Build** `out/host.wasm` (above) and make sure `nm_js2wasm.sh` is executable
+1. **Build** `out/nm_js2wasm.wasm` (above) and make sure `nm_js2wasm.sh` is executable
    (`chmod +x nm_js2wasm.sh`).
 
 2. **Edit `nm_js2wasm.json`**:
@@ -175,7 +175,7 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
    The manifest **filename** must match the host `name` field
    (`nm_js2wasm`). On Windows, `nm_js2wasm.sh` won't run directly —
-   use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\host.wasm"`) and point
+   use a `run.bat` (`@echo off` + `wasmtime "%~dp0out\nm_js2wasm.wasm"`) and point
    `path` at the `.bat`.
 
 4. **Connect from the extension.** With the `nativeMessaging` permission in the
