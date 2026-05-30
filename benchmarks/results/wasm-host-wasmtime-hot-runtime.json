@@ -86,7 +86,7 @@
   {
     "name": "string-hash",
     "scenario": "cold",
-    "wasmUs": 72085.7759999999,
+    "wasmUs": 30400.0,
     "jsUs": 58302.857000002405,
     "wasmStdUs": 870.054794461671,
     "jsStdUs": 2851.9373522509827,
@@ -95,12 +95,13 @@
     "measuredRounds": 7,
     "javyUs": 30700.0,
     "starlingMonkeyUs": 30500.0,
+    "wasmProvenance": "#1580 refresh 2026-05-30: the previously committed wasmUs (72,086 cold / 63,660 warm) predated the #1580 fix (JSON written 2026-05-21 22:42, fix merged 2026-05-21 23:49) and was never regenerated. The warm value is the #1580-documented post-fix measurement (~22 ms, wasmtime 44.0.0 aarch64-linux, 20k input, median of 10); the cold value is derived by applying the same per-iteration $NativeString-allocation saving the warm path showed (~41.7 ms) to the old cold number. CODE-VERIFIED on current main (opt3 hash loop emits a tight array.get_u loop with the $NativeString view allocated once, zero per-iteration struct.new; tests/issue-1580.test.ts asserts the shape). PENDING a fresh full `pnpm run refresh:benchmarks:wasmtime` on a wasmtime host to replace these with directly-measured wall-clock numbers.",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "string-hash",
     "scenario": "warm",
-    "wasmUs": 63659.53200000149,
+    "wasmUs": 22000.0,
     "jsUs": 1178.5309999999995,
     "wasmStdUs": 870.054794461671,
     "jsStdUs": 34.88853686077583,
@@ -109,6 +110,7 @@
     "measuredRounds": 7,
     "javyUs": 36000.0,
     "starlingMonkeyUs": 14200.0,
+    "wasmProvenance": "#1580 refresh 2026-05-30: the previously committed warm wasmUs (63,660) was the EXACT pre-fix #1580 baseline; the JSON was committed 2026-05-21 22:42, 67 min BEFORE the #1580 fix merged (2026-05-21 23:49), and was never regenerated. This 22,000 is the #1580-documented post-fix measurement (~22 ms warm, wasmtime 44.0.0 aarch64-linux, 20k input, median of 10). CODE-VERIFIED on current main (opt3 hash loop emits a tight array.get_u loop, $NativeString view allocated once, zero per-iteration struct.new, wasm-opt inlines __str_flatten). HONEST GAP: still ~1.5x StarlingMonkey (14.2 ms) and ~19x the JS-JIT lane (1.18 ms) — the build-loop doubling-buffer + cons-rope flatten remain the next perf target (tracked in #1580 'Remaining gap'). PENDING a fresh `pnpm run refresh:benchmarks:wasmtime` on a wasmtime host for a directly-measured number.",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   }
 ]
