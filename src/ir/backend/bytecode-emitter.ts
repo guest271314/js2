@@ -533,6 +533,35 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     out.emit(OP.STRUCT_SET, layout.fieldIdx(name));
   }
 
+  // ---- (a4) try-throw family (#1584 §2a) — VM realization pending ----------
+  // The bytecode realization is THROW + TRY_START/TRY_END + an `exceptionTable`
+  // sink field (issue §1c/§2a). The exact opcode wiring is gated on sdev-vm's
+  // VM exception-model choice (handler-stack vs table-scan) — see the a4 contract.
+  // Until that lands these throw so a try/throw function is surfaced as "out of
+  // the #1584 subset" on the bytecode path (the try arms in lower.ts are fenced
+  // by requireInstrSink anyway, so this boundary is exact, not a regression).
+  emitThrow(_tagIdx: number, _out: BytecodeSink): void {
+    throw new Error(
+      "BytecodeEmitter: emitThrow (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
+    );
+  }
+  emitRethrow(_depth: number, _out: BytecodeSink): void {
+    throw new Error(
+      "BytecodeEmitter: emitRethrow (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
+    );
+  }
+  emitTry(
+    _blockType: BlockType,
+    _body: BytecodeSink,
+    _catches: { tagIdx: number; body: BytecodeSink }[],
+    _catchAll: BytecodeSink | undefined,
+    _out: BytecodeSink,
+  ): void {
+    throw new Error(
+      "BytecodeEmitter: emitTry (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
+    );
+  }
+
   // ---- vec (array) primitives — out of the #1584 numeric subset -----------
   emitVecLen(): void {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");

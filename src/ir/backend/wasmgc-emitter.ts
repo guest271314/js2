@@ -174,6 +174,35 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
       fieldIdx: layout.fieldIdx(name),
     });
   }
+
+  // ---- (a4) try-throw family (#1584 §2a) — byte-identical to the prior inline
+  // `out.push({op:"throw"...})` / `{op:"try"...}` / `{op:"rethrow"...}` in the
+  // exception arms of lower.ts. The WasmGC stream is unchanged; this only moves
+  // the push behind the trait so the bytecode backend realizes the same intent
+  // as OP.THROW / OP.TRY_START+TRY_END + the exceptionTable.
+  emitThrow(tagIdx: number, out: Instr[]): void {
+    out.push({ op: "throw", tagIdx });
+  }
+
+  emitRethrow(depth: number, out: Instr[]): void {
+    out.push({ op: "rethrow", depth });
+  }
+
+  emitTry(
+    blockType: BlockType,
+    body: Instr[],
+    catches: { tagIdx: number; body: Instr[] }[],
+    catchAll: Instr[] | undefined,
+    out: Instr[],
+  ): void {
+    out.push({
+      op: "try",
+      blockType,
+      body,
+      catches,
+      ...(catchAll ? { catchAll } : {}),
+    });
+  }
 }
 
 /** The WasmGC struct typeIdx for an object (`typeIdx`) or class (`structTypeIdx`). */

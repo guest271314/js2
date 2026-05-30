@@ -1581,7 +1581,8 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot resolve __exn tag for throw (${func.name})`);
         }
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "throw", tagIdx });
+        // #1584 (a4): throw routes through the trait.
+        emitter.emitThrow(tagIdx, out);
         return;
       }
       case "try": {
@@ -1652,18 +1653,19 @@ export function lowerIrFunctionBody<S>(
           if (instr.finallyBody) {
             // Wrap user catch body in an inner try/catch_all so a throw
             // inside the catch body still runs finally before propagating.
+            // #1584 (a4): the inner try + rethrow route through the trait.
             const innerBody: Instr[] = [];
             emitBodyBuffer(instr.catchClause.body, innerBody);
             const innerCatchAll: Instr[] = [];
             emitBodyBuffer(instr.finallyBody, innerCatchAll);
-            innerCatchAll.push({ op: "rethrow", depth: 0 });
-            catchBody.push({
-              op: "try",
-              blockType: { kind: "empty" },
-              body: innerBody,
-              catches: [],
-              catchAll: innerCatchAll,
-            });
+            emitter.emitRethrow(0, innerCatchAll as unknown as S);
+            emitter.emitTry(
+              { kind: "empty" },
+              innerBody as unknown as S,
+              [],
+              innerCatchAll as unknown as S,
+              catchBody as unknown as S,
+            );
             // Normal-exit from catch: inline finally.
             emitBodyBuffer(instr.finallyBody, catchBody);
           } else {
@@ -1684,17 +1686,18 @@ export function lowerIrFunctionBody<S>(
           // emits it because finally MUST run on EVERY exit path.
           const ca: Instr[] = [];
           emitBodyBuffer(instr.finallyBody, ca);
-          ca.push({ op: "rethrow", depth: 0 });
+          emitter.emitRethrow(0, ca as unknown as S);
           catchAll = ca;
         }
 
-        wasmOut.push({
-          op: "try",
-          blockType: { kind: "empty" },
-          body: tryBody,
-          catches,
-          ...(catchAll ? { catchAll } : {}),
-        });
+        // #1584 (a4): the structured try routes through the trait.
+        emitter.emitTry(
+          { kind: "empty" },
+          tryBody as unknown as S,
+          catches as unknown as { tagIdx: number; body: S }[],
+          catchAll as unknown as S | undefined,
+          wasmOut as unknown as S,
+        );
         return;
       }
       // Slice 6 part 4 (#1183) — string for-of (native-strings mode).
@@ -2058,7 +2061,8 @@ export function lowerIrFunctionBody<S>(
             typeIdx: promiseTypeIdx,
             fieldIdx: 1,
           } as Instr);
-          rejectedBranch.push({ op: "throw", tagIdx: exnTagIdx } as Instr);
+          // #1584 (a4): throw routes through the trait.
+          emitter.emitThrow(exnTagIdx, rejectedBranch as unknown as S);
         }
         rejectedBranch.push({ op: "unreachable" } as Instr);
         // PENDING / fall-through marker. Slice 2 (#1373b) replaces with
