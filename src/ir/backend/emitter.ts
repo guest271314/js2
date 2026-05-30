@@ -123,6 +123,21 @@ export interface BackendEmitter<S = Instr[]> {
   emitBr(depth: number, out: S): void;
   emitBrIf(depth: number, out: S): void;
 
+  // ---- (a3) control-flow family — MIGRATED behind the trait (#1584 §2a) ----
+  // The structured `block` / `loop` wrappers. The caller (real `lower.ts`)
+  // pre-lowers the wrapped region into its own sink (via `newSink()`), embedding
+  // any `br` / `br_if` whose `depth` counts block/loop nesting outward (De Bruijn).
+  // WasmGc realizes them as byte-identical `{op:"block",body}` / `{op:"loop",body}`
+  // — the WasmGC `Instr` stream is unchanged. Bytecode realizes them by splicing
+  // `body` and resolving its pending `br`/`br_if` jumps to `JZ`/`JNZ`/`JMP` with
+  // backpatched targets (block ⇒ forward exit label, loop ⇒ backward header
+  // label), exactly as `emitIf` already lowers structured `if` (issue §1c/§2a:
+  // "loop / block / br_if … lowered to JZ/JNZ/JMP + backpatch labels").
+  /** Wrap `body` in a structured block; `body` was built via `newSink()`. */
+  emitBlock(blockType: BlockType, body: S, out: S): void;
+  /** Wrap `body` in a structured loop; `body` was built via `newSink()`. */
+  emitLoop(blockType: BlockType, body: S, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
   // The following are part of the full seam the spec audited but are NOT
   // routed through the trait in Phase 1 (#1713). They remain inline in

@@ -166,6 +166,13 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   emitBrIf(): void {
     notImplemented("emitBrIf");
   }
+  // (a3) control-flow family (#1584 §2a) — out of the #1714 vec-proof scope.
+  emitBlock(): void {
+    notImplemented("emitBlock");
+  }
+  emitLoop(): void {
+    notImplemented("emitLoop");
+  }
   // (a2) struct/object family (#1584 §2a) — out of the #1714 vec-proof scope.
   emitAggregateNew(): void {
     notImplemented("emitAggregateNew");

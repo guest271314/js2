@@ -1407,7 +1407,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.lengthSlot),
         });
         loopBody.push({ op: "i32.ge_s" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // element = data[counter]
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.dataSlot) });
@@ -1451,20 +1452,12 @@ export function lowerIrFunctionBody<S>(
         });
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // Wrap in block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // Wrap in block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // Slice 6 part 3 (#1182) — coercion + iterator protocol ops.
@@ -1547,7 +1540,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.elementSlot),
         }); // externref value (top)
         // if (done) br 1 (exit) — done (i32) is now on top of the stack
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // Body instrs (same materialisation pattern as forof.vec).
         for (const bodyInstr of instr.body) {
@@ -1564,20 +1558,12 @@ export function lowerIrFunctionBody<S>(
         }
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
 
         // Normal-exit close: iter.return(iter). Note this runs only on
         // normal loop exit (done=true). Abrupt exits (break/return)
@@ -1767,7 +1753,8 @@ export function lowerIrFunctionBody<S>(
           index: slotWasmIdx(instr.lengthSlot),
         });
         loopBody.push({ op: "i32.ge_s" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        // #1584 (a3): control-flow ops route through the trait.
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // element = __str_charAt(str, counter)
         loopBody.push({ op: "local.get", index: slotWasmIdx(instr.strSlot) });
@@ -1808,20 +1795,12 @@ export function lowerIrFunctionBody<S>(
         });
 
         // br 0 (continue)
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // block { loop { ... } }
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // block { loop { ... } } via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // Slice 10 (#1169i) — extern class ops. All five forms delegate to
@@ -1925,9 +1904,10 @@ export function lowerIrFunctionBody<S>(
         emitBodyBuffer(instr.cond, loopBody);
 
         // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
+        //    #1584 (a3): the control-flow ops route through the trait.
         emitValue(instr.condValue, loopBody as unknown as S);
         loopBody.push({ op: "i32.eqz" });
-        loopBody.push({ op: "br_if", depth: 1 });
+        emitter.emitBrIf(1, loopBody as unknown as S);
 
         // 3. Body instructions.
         emitBodyBuffer(instr.body, loopBody);
@@ -1938,20 +1918,12 @@ export function lowerIrFunctionBody<S>(
         }
 
         // 5. Continue back to the loop header.
-        loopBody.push({ op: "br", depth: 0 });
+        emitter.emitBr(0, loopBody as unknown as S);
 
-        // 6. Wrap in `block { loop { ... } }`.
-        wasmOut.push({
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: loopBody,
-            },
-          ],
-        });
+        // 6. Wrap in `block { loop { ... } }` via the trait (#1584 a3).
+        const loopWrap: Instr[] = [];
+        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
+        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
         return;
       }
       // (#1373b Phase C Slice 1) Async / await IR node lowering.

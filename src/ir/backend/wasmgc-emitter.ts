@@ -125,6 +125,19 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
     out.push({ op: "br_if", depth });
   }
 
+  // ---- (a3) control-flow family (#1584 §2a) — byte-identical to the prior
+  // inline `out.push({op:"block"...})` / `{op:"loop"...}` in lower.ts's fenced
+  // loop arms. The WasmGC stream is unchanged; this only moves the push behind
+  // the trait so the bytecode backend can realize the same intent as
+  // JZ/JNZ/JMP + backpatch labels.
+  emitBlock(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "block", blockType, body });
+  }
+
+  emitLoop(blockType: BlockType, body: Instr[], out: Instr[]): void {
+    out.push({ op: "loop", blockType, body });
+  }
+
   // ---- (a1) call family (#1584 §2a) — byte-identical to the prior inline
   // `out.push({op:"call"...})` / `{op:"call_ref"...}` in lower.ts. The WasmGC
   // stream is unchanged; this only moves the push behind the trait so the

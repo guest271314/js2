@@ -505,3 +505,128 @@ describe("#1584 (a2) — BytecodeEmitter realizes the struct/object family", () 
     expect(dest.code).toEqual([OP.STRUCT_NEW, 2, OP.STRUCT_GET, 0, OP.STRUCT_SET, 1]);
   });
 });
+
+// ── #1584 (a3) control-flow family — block / loop / br / br_if → JZ/JNZ/JMP ──
+//
+// The structured `block`/`loop`/`br`/`br_if` family compiles AWAY in the
+// BytecodeEmitter to JZ/JNZ/JMP + backpatch labels (issue §1c/§2a; `emitIf`
+// already demonstrates the pattern for `if`). The only new VM opcode is JNZ —
+// the exact dual of JZ — so `br_if`'s "branch if truthy" needs no `eqz`+`JZ`.
+// `block`/`loop` add NO opcode (they resolve to backpatched targets at splice).
+//
+// These emitter-side tests (my lane) assert the lowering: `br`/`br_if` emit a
+// JMP/JNZ placeholder + a depth-tagged pending branch; `emitLoop` resolves a
+// depth-0 branch to the loop HEADER (back-edge / continue); `emitBlock` resolves
+// a depth-0 branch to the block EXIT (forward / break). The De Bruijn depth is
+// decremented as branches cross each enclosing construct outward. The matching
+// `OP.JNZ` VM dispatch arm is sdev-vm's slice (exercised in the VM unit tests).
+describe("#1584 (a3) — BytecodeEmitter realizes the control-flow family", () => {
+  it("emitBr / emitBrIf emit JMP / JNZ placeholders + record a depth-tagged pending branch", () => {
+    const E = new BytecodeEmitter();
+    const s = new BytecodeSink();
+    E.emitBr(0, s);
+    E.emitBrIf(2, s);
+    // Two placeholder jumps, both unpatched (-1) until an enclosing construct resolves them.
+    expect(s.code).toEqual([OP.JMP, -1, OP.JNZ, -1]);
+    expect(s.pendingBranches).toEqual([
+      { slot: 1, depth: 0 }, // the JMP operand slot
+      { slot: 3, depth: 2 }, // the JNZ operand slot
+    ]);
+  });
+
+  it("emitLoop resolves a depth-0 branch to the loop HEADER (back-edge / continue)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    E.emitBr(0, body); // `br 0` — continue, targets the loop header
+    const out = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, body, out);
+    // header = position the body begins = 0; the JMP back-edge patches to 0.
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // depth-0 fully resolved
+  });
+
+  it("emitBlock resolves a depth-0 branch to the block EXIT (forward / break)", () => {
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    E.emitBrIf(0, body); // `br_if 0` — exit-if, targets the block end
+    body.emit(OP.LOAD, 1);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, body, out);
+    // exit = position past the spliced body = 4; the JNZ patches to 4.
+    expect(out.code).toEqual([OP.JNZ, 4, OP.LOAD, 1]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("the canonical loop `block{ loop{ cond; br_if 1; body; br 0 } }` backpatches both targets", () => {
+    // Mirrors the 4 fenced loop arms in lower.ts (forof.vec/iter/string, for/while).
+    const E = new BytecodeEmitter();
+    const loopBody = new BytecodeSink();
+    loopBody.emit(OP.LOAD, 0); // cond (truthy ⇒ exit)
+    E.emitBrIf(1, loopBody); // br_if 1 — exit the enclosing BLOCK
+    loopBody.emit(OP.LOAD, 1); // body
+    E.emitBr(0, loopBody); // br 0 — continue the LOOP
+
+    const loopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, loopBody, loopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, loopWrap, out);
+
+    // JNZ (br_if 1) → block exit = 8 (past the whole loop);
+    // JMP (br 0)    → loop header = 0 (back-edge to cond).
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 8, OP.LOAD, 1, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]); // every structured branch resolved
+  });
+
+  it("nested loops resolve each `br`/`br_if` to its own construct (De Bruijn depth)", () => {
+    // outer block{ loop{ inner block{ loop{ br_if 1(inner exit); br 0(inner cont) };
+    //                                   br 0(outer cont) } } }
+    // Validates depth decrement as branches cross constructs outward.
+    const E = new BytecodeEmitter();
+
+    const innerBody = new BytecodeSink();
+    innerBody.emit(OP.LOAD, 0);
+    E.emitBrIf(1, innerBody); // exit inner block
+    E.emitBr(0, innerBody); // continue inner loop
+    const innerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, innerBody, innerLoopWrap);
+    const innerBlockOut = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, innerLoopWrap, innerBlockOut);
+    // After inner block fully resolves, no pending branches escape it.
+    expect(innerBlockOut.pendingBranches).toEqual([]);
+
+    // Now wrap the inner block in the outer loop, appending an outer `br 0`.
+    const outerBody = new BytecodeSink();
+    outerBody.spliceArm(innerBlockOut);
+    E.emitBr(0, outerBody); // continue outer loop
+    const outerLoopWrap = new BytecodeSink();
+    E.emitLoop({ kind: "empty" }, outerBody, outerLoopWrap);
+    const out = new BytecodeSink();
+    E.emitBlock({ kind: "empty" }, outerLoopWrap, out);
+
+    // inner: LOAD 0; JNZ → inner-block exit (6); JMP → inner-loop header (0)
+    // outer: JMP → outer-loop header (0); outer-block exit unused here
+    expect(out.code).toEqual([OP.LOAD, 0, OP.JNZ, 6, OP.JMP, 0, OP.JMP, 0]);
+    expect(out.pendingBranches).toEqual([]);
+  });
+
+  it("spliceArm carries an UNPATCHED structured branch outward (relocated) but still rejects a stray unpatched jump", () => {
+    // A pending br to an as-yet-unseen enclosing construct survives a splice.
+    const E = new BytecodeEmitter();
+    const inner = new BytecodeSink();
+    inner.emit(OP.LOAD, 9);
+    E.emitBr(3, inner); // depth 3 — far outer construct, stays pending
+    const mid = new BytecodeSink();
+    mid.emit(OP.DROP);
+    mid.spliceArm(inner);
+    // The JMP relocated by +base (base=1 ⇒ operand slot 3) and its depth survives.
+    expect(mid.code).toEqual([OP.DROP, OP.LOAD, 9, OP.JMP, -1]);
+    expect(mid.pendingBranches).toEqual([{ slot: 4, depth: 3 }]);
+
+    // A non-structured unpatched jump (no pending-branch record) is still an error.
+    const bad = new BytecodeSink();
+    bad.code.push(OP.JZ, -1); // hand-forged unpatched JZ, not recorded
+    const dest = new BytecodeSink();
+    expect(() => dest.spliceArm(bad)).toThrow(/unpatched jump/);
+  });
+});
