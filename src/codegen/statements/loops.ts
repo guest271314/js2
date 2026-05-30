@@ -37,6 +37,7 @@ import {
 } from "../shared.js";
 import {
   compileArrayDestructuring,
+  arrayDstrNeedsIdentity,
   compileExternrefArrayDestructuringDecl,
   compileExternrefObjectDestructuringDecl,
   compileObjectDestructuring,
@@ -45,7 +46,9 @@ import {
   ensureAsyncIterator,
   ensureExternIsUndefined,
   syncDestructuredLocalsToGlobals,
+  tryEmitArrayProtoIteratorReadDrive,
 } from "./destructuring.js";
+import { arrayIteratorOverrideGlobalIdx } from "../expressions/proto-override.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
 
@@ -1243,6 +1246,19 @@ function compileForOfDestructuring(
     }); // end null guard for for-of object destructuring
   } else if (ts.isArrayBindingPattern(pattern)) {
     // Array destructuring in for-of: for (var [a, b] of arr)
+    // (#1719 CPR-2) When the program overrode Array.prototype's @@iterator and
+    // the per-element array is destructured, drive the override instead of the
+    // backing store (§8.5.2). Strictly gated behind the brand + a captured
+    // override; both clear in the common case ⇒ byte-identical. The element
+    // value lives in `elemLocal`, so feed the shared decl read-drive that local.
+    if (
+      arrayDstrNeedsIdentity(ctx, false) &&
+      arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+      tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, elemType, elemLocal)
+    ) {
+      syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+      return;
+    }
     // Element may be a vec struct (array wrapper) OR a tuple struct.
     // Handle externref elements: use __extern_get to extract indexed properties
     if (elemType.kind !== "ref" && elemType.kind !== "ref_null") {
