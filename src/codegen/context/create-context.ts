@@ -73,6 +73,7 @@ export function createCodegenContext(
     staticAccessorSet: new Set(),
     staticMethodSet: new Set(),
     staticProps: new Map(),
+    protoOverrides: new Map(), // #1719 CPR — captured prototype-member overrides
     staticInitExprs: [],
     closureCounter: 0,
     closureMap: new Map(),
@@ -105,6 +106,9 @@ export function createCodegenContext(
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
     nativeStrings,
+    // #1719 S1 — ITER_OVERRIDDEN brand; set later by the
+    // sourceOverridesArrayIterator pre-scan in index.ts. Default OFF.
+    arrayIteratorMaybeOverridden: false,
     // #1588 PR-B: dual i8/i16 storage, default OFF.
     utf8Storage: !!options?.utf8Storage,
     testRuntime: options?.testRuntime ?? false,

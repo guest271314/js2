@@ -1,9 +1,10 @@
 ---
 id: 1530
 title: "wasi: Native Messaging host example (Chrome extension integration)"
-status: in-progress
+status: done
 created: 2026-05-20
-updated: 2026-05-24
+updated: 2026-05-29
+completed: 2026-05-29
 priority: medium
 feasibility: medium
 reasoning_effort: low

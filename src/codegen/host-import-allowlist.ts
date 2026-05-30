@@ -313,6 +313,14 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
     reason:
       "Function.prototype.bind delegates to host Function.prototype.bind for spec-correct bound-function exotic. Standalone mode falls back to identity-bind (documented gap).",
   },
+  {
+    kind: "exact",
+    name: "__construct",
+    signature: "(externref, externref) -> externref",
+    trackingIssue: 1732,
+    reason:
+      "#1732 S1: runtime [[Construct]] (§7.3.13) for `new f(...)` whose callee can't be proven constructable at compile time (e.g. `var f = String.prototype.indexOf; new f`). Throws a real TypeError when IsConstructor(callee) is false. Standalone parity is S4 ($FuncObj brand read).",
+  },
 
   // ---- Async / Promise / JSON / dynamic-import (no native path yet) ----
   {

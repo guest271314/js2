@@ -60,6 +60,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
+import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { compileExpression, compileStatement } from "./shared.js";
 
 /** Accumulated state for the single-pass collector */
@@ -3056,6 +3057,15 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           opKind === ts.SyntaxKind.BarBarEqualsToken ||
           opKind === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
         if (!isAssignOp) continue;
+        // (#1719 CPR) `Array.prototype[Symbol.iterator] = fn` / `.values = fn`
+        // has no module-global root identifier (`Array` is a builtin), so the
+        // generic check below drops it. When the S1 brand is set, keep it in
+        // __module_init so the CPR write-arm (compileAssignment) captures the
+        // override closure. Gated — byte-identical when no override exists.
+        if (ctx.arrayIteratorMaybeOverridden && isArrayProtoIteratorAssignTarget(expr.left)) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {
           ctx.moduleInitStatements.push(stmt);

@@ -1918,6 +1918,52 @@ export function compilePropertyAccess(
 
   // Handle array.length (vec struct: field 0 is the logical length)
   if (propName === "length") {
+    // (#1742) `this.length` where `this` is the host-supplied `__current_this`
+    // externref but may carry a compiled vec at runtime (a closure body dispatched
+    // via `__call_fn_method_N`). The override `this` is typically `any` → externref,
+    // so the vec fast paths below never fire; without this guard the read falls
+    // through to `__extern_length`, which returns 0 for an externref-wrapped vec.
+    // Runtime `ref.test` against the registered vec types reads field 0 on a hit,
+    // `__extern_length` for a genuine host receiver. No-op otherwise.
+    {
+      // Only vec types are valid `.length` receivers (length at struct field 0);
+      // a non-vec static struct must NOT be read as a vec here.
+      const allTargets = thisReceiverGuardTargets(ctx, fctx, expr.expression, "element");
+      const targets = allTargets?.filter((idx) => {
+        const def = ctx.mod.types[idx];
+        return def?.kind === "struct" && def.fields[0]?.name === "length" && def.fields[1]?.name === "data";
+      });
+      if (targets !== undefined && targets.length > 0) {
+        const lenType: ValType = ctx.fast ? { kind: "i32" } : { kind: "f64" };
+        compileExpression(ctx, fctx, expr.expression); // → externref `this`
+        emitThisReceiverGuardConvert(
+          ctx,
+          fctx,
+          targets,
+          lenType,
+          (concreteType) => {
+            // [(ref $vec)] → length (vec struct field 0). Every registered vec
+            // type has `length` at field 0, so the matched concrete type works.
+            const vecIdx = (concreteType as { typeIdx: number }).typeIdx;
+            fctx.body.push({ op: "struct.get", typeIdx: vecIdx, fieldIdx: 0 } as Instr);
+            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+          },
+          () => {
+            // [externref] → __extern_length (genuine host receiver / real JS array)
+            const lengthFuncIdx = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+            flushLateImportShifts(ctx, fctx);
+            if (lengthFuncIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: lengthFuncIdx } as Instr);
+              if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            } else {
+              fctx.body.push({ op: "drop" } as Instr);
+              fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+            }
+          },
+        );
+        return lenType;
+      }
+    }
     // Shape-inferred array-like: obj.length → struct.get vec field 0
     if (ts.isIdentifier(expr.expression)) {
       const shapeInfo = ctx.shapeMap.get(expr.expression.text);
@@ -3026,6 +3072,152 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
 
 // ── Element access ───────────────────────────────────────────────────
 
+/**
+ * (#1742) Read-site guard-convert for a `this`-receiver that lowered to an
+ * externref but, at runtime, may carry a compiled WasmGC value (a `$vec` array
+ * or a named struct).
+ *
+ * When a closure body reads `this[i]` / `this.length` / `this.member` and `this`
+ * resolves to the `__current_this` module global (host-dispatched via
+ * `__call_fn_method_N`, #1636-S1), the resolved value is a literal **externref**.
+ * The realistic override `Array.prototype[Symbol.iterator] = function*(){…this[0]…}`
+ * has no `this:` annotation, so TS infers `this: any` → externref; a static-type
+ * gate NEVER fires (CPR_DEBUG-confirmed). The discriminator MUST therefore be a
+ * **runtime `ref.test`**, not the static type.
+ *
+ * Emits `any.convert_extern` then, for each candidate `targetTypeIdx`, a
+ * `ref.test`-guarded branch: on the FIRST hit the value is `ref.cast` to that
+ * concrete ref and `thenEmit(concreteType)` runs the vec/struct read; if NONE
+ * match the value is a genuine host externref and `elseEmit()` runs the host read
+ * path. Both arms must leave a single value of `resultType` (read-site-guard
+ * steer, NOT resolve-at-source — a real host `this` passes through unchanged).
+ * Generic over receiver shape — consumed by #1719 (vec) and #1629 (struct getters).
+ *
+ * Stack: [externref] -> [resultType].
+ */
+export function emitThisReceiverGuardConvert(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  targetTypeIdxs: number[],
+  resultType: ValType,
+  thenEmit: (concreteType: ValType) => void,
+  elseEmit: () => void,
+): void {
+  const externrefTmp = allocTempLocal(fctx, { kind: "externref" });
+  fctx.body.push({ op: "local.tee", index: externrefTmp });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const anyTmp = allocTempLocal(fctx, { kind: "anyref" });
+  fctx.body.push({ op: "local.set", index: anyTmp });
+
+  // Build the test/cast chain inside-out: the innermost else is the host path.
+  const buildArm = (i: number): Instr[] => {
+    if (i >= targetTypeIdxs.length) {
+      // No compiled type matched → genuine host externref. Run the host path.
+      const hostBody: Instr[] = [];
+      const saved = fctx.body;
+      fctx.body = hostBody;
+      fctx.body.push({ op: "local.get", index: externrefTmp } as Instr);
+      elseEmit();
+      fctx.body = saved;
+      return hostBody;
+    }
+    const tIdx = targetTypeIdxs[i]!;
+    const thenBody: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = thenBody;
+    fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: tIdx } as Instr);
+    thenEmit({ kind: "ref", typeIdx: tIdx });
+    fctx.body = saved;
+    return [
+      { op: "local.get", index: anyTmp } as Instr,
+      { op: "ref.test", typeIdx: tIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: resultType },
+        then: thenBody,
+        else: buildArm(i + 1),
+      } as unknown as Instr,
+    ];
+  };
+
+  for (const instr of buildArm(0)) fctx.body.push(instr);
+  releaseTempLocal(fctx, anyTmp);
+  releaseTempLocal(fctx, externrefTmp);
+}
+
+/**
+ * (#1742) Candidate WasmGC vec/struct types to `ref.test` a `this`-receiver
+ * externref against, or `undefined` when the guard does not apply (normal path
+ * unchanged — byte-identical).
+ *
+ * Fires only for a `this` (`ThisKeyword`) member access in a host-dispatchable
+ * closure body (`readsCurrentThis`, no local `this` binding). Because the
+ * realistic override `this` is `any` → externref, the gate does NOT require a
+ * static vec/struct type. It returns the candidate concrete types to test at
+ * runtime:
+ *   - the static `this` type when it already names a compiled vec/struct (covers
+ *     `this: T[]` / `this: Point` annotations — tested first);
+ *   - for an element access (`this[i]`), the registered numeric/externref `$vec`
+ *     types (covers the untyped override `this` over a compiled array);
+ *   - for a `.member` access, the registered vec types are NOT added (a bare
+ *     `this.member` on an untyped receiver stays on the host path).
+ */
+function thisReceiverGuardTargets(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  objExpr: ts.Expression,
+  kind: "element" | "lengthOrProperty",
+): number[] | undefined {
+  if (objExpr.kind !== ts.SyntaxKind.ThisKeyword) return undefined;
+  if (!fctx.readsCurrentThis || ctx.currentThisGlobalIdx < 0) return undefined;
+  // A local `this` binding (struct method / constructor) is NOT the
+  // __current_this externref path — it already carries the concrete ref.
+  if (fctx.localMap.has("this")) return undefined;
+
+  const targets: number[] = [];
+  const seen = new Set<number>();
+  const add = (idx: number | undefined): void => {
+    if (idx === undefined || idx < 0 || seen.has(idx)) return;
+    const def = ctx.mod.types[idx];
+    if (def?.kind === "struct" || def?.kind === "array") {
+      seen.add(idx);
+      targets.push(idx);
+    }
+  };
+
+  // 1. Static `this` type, when it already names a compiled vec/struct.
+  const thisType = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(objExpr));
+  const wasmType = resolveWasmType(ctx, thisType);
+  if (wasmType.kind === "ref" || wasmType.kind === "ref_null") {
+    add((wasmType as { typeIdx: number }).typeIdx);
+  }
+
+  // 2. For element access on an untyped `this`, the registered vec types — the
+  //    representation an overridden `@@iterator` `this` (a compiled array) carries.
+  if (kind === "element") {
+    for (const vecIdx of ctx.vecTypeMap.values()) add(vecIdx);
+  }
+
+  return targets.length > 0 ? targets : undefined;
+}
+
+/**
+ * (#1742) The `this`-receiver element-access guard recompiles the index
+ * expression in both branch arms, so it is only safe for side-effect-free index
+ * expressions. Covers the literal / identifier / simple member shapes that the
+ * overridden-iterator and `this[i]` cases use.
+ */
+function isThisGuardIndexSafe(arg: ts.Expression): boolean {
+  return (
+    ts.isNumericLiteral(arg) ||
+    ts.isStringLiteral(arg) ||
+    ts.isIdentifier(arg) ||
+    arg.kind === ts.SyntaxKind.ThisKeyword ||
+    (ts.isPropertyAccessExpression(arg) && isThisGuardIndexSafe(arg.expression))
+  );
+}
+
 export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3154,6 +3346,46 @@ export function compileElementAccess(
 
   const objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
+
+  // (#1742) `this[i]` where `this` is the host-supplied `__current_this`
+  // externref but may carry a compiled vec at runtime (a closure body dispatched
+  // via `__call_fn_method_N`). The override `this` is typically `any` → externref,
+  // so the discriminator is a RUNTIME `ref.test` against the registered vec types,
+  // NOT the static type. On a hit we read the backing store; on a miss the value
+  // is a genuine host receiver and we keep the host `__extern_get` path. The index
+  // expression is recompiled in each arm, so the guard only fires for a
+  // side-effect-free index. No-op for every other receiver — byte-identical.
+  if (objType.kind === "externref") {
+    const targets = isThisGuardIndexSafe(expr.argumentExpression)
+      ? thisReceiverGuardTargets(ctx, fctx, expr.expression, "element")
+      : undefined;
+    if (targets !== undefined) {
+      const resultType: ValType = { kind: "externref" };
+      emitThisReceiverGuardConvert(
+        ctx,
+        fctx,
+        targets,
+        resultType,
+        (concreteType) => {
+          const elemResult = compileElementAccessBody(ctx, fctx, expr, concreteType);
+          if (elemResult && elemResult.kind !== "externref") {
+            coerceType(ctx, fctx, elemResult, resultType);
+          } else if (!elemResult) {
+            fctx.body.push({ op: "ref.null.extern" } as Instr);
+          }
+        },
+        () => {
+          const hostResult = compileElementAccessBody(ctx, fctx, expr, { kind: "externref" });
+          if (hostResult && hostResult.kind !== "externref") {
+            coerceType(ctx, fctx, hostResult, resultType);
+          } else if (!hostResult) {
+            fctx.body.push({ op: "ref.null.extern" } as Instr);
+          }
+        },
+      );
+      return resultType;
+    }
+  }
 
   // Null-guard for ref_null: throw TypeError on null, narrow to ref after check
   // In JS, null[x] and undefined[x] throw TypeError

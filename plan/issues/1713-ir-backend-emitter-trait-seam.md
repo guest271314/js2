@@ -1,7 +1,8 @@
 ---
 id: 1713
 title: "IR backend-trait: audit WasmGC bias in lower.ts + define BackendEmitter seam"
-status: in-progress
+status: done
+completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
 priority: high

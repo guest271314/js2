@@ -31,6 +31,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
+import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -177,6 +178,99 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
       found = true;
       return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * (#1719 S1) Whole-program pre-scan for the `ITER_OVERRIDDEN` brand of the
+ * array object-value representation track. Returns true iff the source may
+ * monkeypatch `Array.prototype`'s iterator surface, i.e. it contains:
+ *   (i)  an assignment `Array.prototype[Symbol.iterator] = …` or
+ *        `Array.prototype.values = …` (any element/property access whose
+ *        object is `Array.prototype`), OR
+ *   (ii) `Object.defineProperty(Array.prototype, …)` /
+ *        `Object.defineProperties(Array.prototype, …)`.
+ *
+ * When this returns false (the overwhelming common case), the array
+ * destructuring / spread / for-of fast paths are provably unaffected by any
+ * prototype override and stay byte-identical (see `arrayDstrNeedsIdentity`).
+ * When true, the S2 slice routes a branded array RHS through the host-Array
+ * reflection + host `GetIterator` so the override's `@@iterator` is observed
+ * (§7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization).
+ *
+ * Reused verbatim from the dev-a `issue-1719-impl` scaffolding (the front-end
+ * half the architecture spec endorses keeping). Conservative by design: it
+ * over-approximates (a false positive only costs the S2 slow path, never
+ * correctness) and never under-approximates a literal `Array.prototype` LHS.
+ */
+export function sourceOverridesArrayIterator(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  // Strip `as`/`!`/type-assertion/paren wrappers so `(Array.prototype as any)[…]`
+  // and `(Array.prototype)[…]` match the same as the bare form.
+  function unwrap(e: ts.Expression): ts.Expression {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = ts.isParenthesizedExpression(cur)
+        ? cur.expression
+        : ts.isAsExpression(cur)
+          ? cur.expression
+          : ts.isNonNullExpression(cur)
+            ? cur.expression
+            : (cur as ts.TypeAssertion).expression;
+    }
+    return cur;
+  }
+  // `e` is the object being assigned INTO: match `Array.prototype[...]`
+  // (element access) or `Array.prototype.values` (property access).
+  function isArrayProtoLHS(e: ts.Expression): boolean {
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+      const obj = unwrap(e.expression);
+      return (
+        ts.isPropertyAccessExpression(obj) &&
+        obj.name.text === "prototype" &&
+        ts.isIdentifier(obj.expression) &&
+        obj.expression.text === "Array"
+      );
+    }
+    return false;
+  }
+  function walk(node: ts.Node): void {
+    if (found) return;
+    // (i) assignment: Array.prototype[Symbol.iterator] = … / Array.prototype.values = …
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isArrayProtoLHS(node.left)
+    ) {
+      found = true;
+      return;
+    }
+    // (ii) Object.defineProperty(Array.prototype, …) / Object.defineProperties(Array.prototype, …)
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const callee = node.expression;
+      const arg0 = node.arguments[0];
+      if (
+        ts.isIdentifier(callee.expression) &&
+        callee.expression.text === "Object" &&
+        (callee.name.text === "defineProperty" || callee.name.text === "defineProperties") &&
+        arg0 !== undefined &&
+        ts.isPropertyAccessExpression(arg0) &&
+        arg0.name.text === "prototype" &&
+        ts.isIdentifier(arg0.expression) &&
+        arg0.expression.text === "Array"
+      ) {
+        found = true;
+        return;
+      }
     }
     forEachChild(node, walk);
   }
@@ -904,6 +998,17 @@ export function generateModule(
     reconcileNativeStrFinalizeShift(ctx);
 
     // Second pass: collect all function declarations and interfaces
+    // #1719 S1 — set the ITER_OVERRIDDEN brand if the program may monkeypatch
+    // Array.prototype's @@iterator/values. When clear (the common case) every
+    // array-destructuring site stays byte-identical; when set, the S2 slice
+    // routes a branded array RHS through the host GetIterator lane (§7.4.2).
+    // Must run BEFORE collectDeclarations: the module-init statement filter
+    // (#1719 CPR write-arm) consults the brand to KEEP the
+    // `Array.prototype[@@iterator] = fn` override statement in __module_init.
+    if (sourceOverridesArrayIterator(ast.sourceFile)) {
+      ctx.arrayIteratorMaybeOverridden = true;
+    }
+
     collectDeclarations(ctx, ast.sourceFile);
 
     // Shape inference: detect array-like variables and override their types
@@ -1234,6 +1339,11 @@ export function generateModule(
     emitClosureMethodCallExportN(ctx, 0);
     emitClosureMethodCallExportN(ctx, 1);
     emitClosureMethodCallExportN(ctx, 2);
+
+    // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
+    // body now that `__call_fn_method_0` is registered. No-op when no read-drive
+    // site reserved a driver (brand clear / no Array.prototype @@iterator override).
+    fillProtoIteratorDriver(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -2937,6 +3047,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     name: exportName,
     desc: { kind: "func", index: funcIdx },
   });
+
+  // (#1719 CPR) Register in funcMap so the in-Wasm `__drive_proto_iterator`
+  // driver (filled in post-processing) can resolve `__call_fn_method_0` by name
+  // and `call` it to drive a captured `Array.prototype[@@iterator]` override.
+  // No-op for existing JS-host callers (they dispatch by export name).
+  ctx.funcMap.set(exportName, funcIdx);
 }
 
 /**
@@ -3977,6 +4093,16 @@ export function generateMultiModule(
     // #1677 — final reconcile before any user function is registered.
     reconcileNativeStrFinalizeShift(ctx);
 
+    // #1719 S1 — whole-realm: OR across all source files so an override in any
+    // module trips the ITER_OVERRIDDEN brand. Must run BEFORE collectDeclarations
+    // (the module-init filter / #1719 CPR write-arm reads the brand to keep the
+    // override statement in __module_init).
+    for (const sf of multiAst.sourceFiles) {
+      if (sourceOverridesArrayIterator(sf)) {
+        ctx.arrayIteratorMaybeOverridden = true;
+      }
+    }
+
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
@@ -4972,11 +5098,12 @@ export function ensureWasiWriteUint8ArrayHelper(
 
   const fd = useStderr ? 2 : 1;
 
-  // param: arr(0); locals: len(1), data(2), i(3)
+  // param: arr(0); locals: len(1), data(2), i(3), needPages(4)
   const ARR = 0;
   const LEN = 1;
   const DATA = 2;
   const I = 3;
+  const NEED_PAGES = 4;
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -4987,6 +5114,42 @@ export function ensureWasiWriteUint8ArrayHelper(
     { op: "local.get", index: ARR } as Instr,
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
+
+    // #389/#1723: grow linear memory if the staging buffer
+    // [WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START+len) would overflow
+    // the current memory size. The module reserves only 3 pages by default, so a
+    // ~1 MiB raw-byte write (the Native Messaging large-message case) writes far
+    // past page 2 and traps "memory access out of bounds" without this guard —
+    // the same fix the string-write helper got in #1723 but that this and the
+    // ArrayBuffer-write sibling were missing, which is what corrupted/dropped
+    // guest271314's 1 MiB framed message.
+    //
+    //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len) / 65536)
+    //               = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
+    // i32.shr_u keeps the page count non-negative for lengths near 2^31.
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 65535 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 16 } as Instr,
+    { op: "i32.shr_u" } as Instr,
+    { op: "local.set", index: NEED_PAGES } as Instr,
+    // if (needPages > memory.size) memory.grow(needPages - memory.size)
+    { op: "local.get", index: NEED_PAGES } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEED_PAGES } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
 
     // data = arr.data (field 1)
     { op: "local.get", index: ARR } as Instr,
@@ -5060,6 +5223,7 @@ export function ensureWasiWriteUint8ArrayHelper(
       { name: "len", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "needPages", type: { kind: "i32" } },
     ],
     body,
     exported: false,
@@ -5094,11 +5258,12 @@ export function ensureWasiWriteArrayBufferHelper(
 
   const fd = useStderr ? 2 : 1;
 
-  // param: buf(0); locals: len(1), data(2), i(3)
+  // param: buf(0); locals: len(1), data(2), i(3), needPages(4)
   const BUF = 0;
   const LEN = 1;
   const DATA = 2;
   const I = 3;
+  const NEED_PAGES = 4;
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: vecTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -5109,6 +5274,34 @@ export function ensureWasiWriteArrayBufferHelper(
     { op: "local.get", index: BUF } as Instr,
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
+
+    // #389/#1723: grow linear memory if the staging buffer would overflow the
+    // current memory size (only 3 pages reserved by default). A ~1 MiB
+    // ArrayBuffer write to stdout otherwise traps "memory access out of bounds".
+    // Mirrors the string-write helper's #1723 guard.
+    //   neededPages = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 65535 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 16 } as Instr,
+    { op: "i32.shr_u" } as Instr,
+    { op: "local.set", index: NEED_PAGES } as Instr,
+    { op: "local.get", index: NEED_PAGES } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEED_PAGES } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
 
     // data = buf.data (field 1)
     { op: "local.get", index: BUF } as Instr,

@@ -59,6 +59,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "new:issue-id": "node scripts/next-issue-id.mjs",
     "build": "vite build --config vite.config.lib.ts",
     "build:playground": "vite build --config website/playground/vite.config.ts",
     "dev": "pnpm run build:compiler-bundle && (pnpm run dashboard:watch &) && vite serve --config website/playground/vite.config.ts",
@@ -97,7 +98,8 @@
     "build:pages": "node scripts/run-pages-build.mjs",
     "deploy:registry-home": "mkdir -p .registry-home && cp website/index.html .registry-home/index.html && node ../file-registry-cli/dist/bin/main.js commit .registry-home -r users/tt/projects/ts2wasm && node ../file-registry-cli/dist/bin/main.js push .registry-home -r users/tt/projects/ts2wasm --public",
     "upload": "pnpm run build:playground && node ../file-registry-cli/dist/bin/main.js commit && node ../file-registry-cli/dist/bin/main.js push",
-    "prepare": "git config core.hooksPath .husky || true"
+    "prepare": "git config core.hooksPath .husky || true",
+    "reconcile:tasks": "node scripts/reconcile-tasklist.mjs"
   },
   "dependencies": {
     "binaryen": "^125.0.0",

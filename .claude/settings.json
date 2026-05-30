@@ -20,6 +20,11 @@
             "type": "command",
             "command": "node /workspace/scripts/prune-agent-status.mjs --quiet 2>/dev/null || true",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "REPO_ROOT=/workspace node /workspace/scripts/reconcile-tasklist.mjs --quiet 2>/dev/null || true",
+            "timeout": 15
           }
         ]
       }
@@ -162,6 +167,6 @@
     ]
   },
   "worktree": {
-    "bgIsolation": "none"
+    "bgIsolation": "worktree"
   }
 }

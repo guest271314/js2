@@ -705,6 +705,125 @@ function _installIteratorHelperPolyfills(): void {
       configurable: true,
     });
   }
+
+  // #1718 S1 — Iterator.prototype.flatMap (TC39 iterator-helpers, ES2025).
+  // §27.1.4.x: for each value v of the underlying iterator, call
+  // mapper(v, counter); GetIteratorFlattenable(result, reject-primitives);
+  // yield every value of that inner iterator before advancing the outer.
+  // Hosts that lack the native helper (older V8 / Node) fall through to here;
+  // installing it on %Iterator.prototype% makes every helper-iterator and
+  // synthesized iterator (which inherit from Iproto, #1367) gain flatMap.
+  if (typeof Iproto.flatMap !== "function") {
+    Object.defineProperty(Iproto, "flatMap", {
+      value: function flatMap(mapper: any) {
+        // 1. RequireObjectCoercible(this) + this has [[next]] (it's an Iterator).
+        if (this == null || typeof this.next !== "function") {
+          throw new TypeError("Iterator.prototype.flatMap called on non-iterator");
+        }
+        // 2. mapper must be callable.
+        if (typeof mapper !== "function") {
+          throw new TypeError("Iterator.prototype.flatMap: mapper is not a function");
+        }
+        const outer: any = this;
+        let counter = 0;
+        let inner: any = null; // currently-open inner iterator, or null
+        let done = false;
+
+        function closeInner(): void {
+          if (inner != null) {
+            const innerIt = inner;
+            inner = null;
+            try {
+              innerIt.return?.();
+            } catch {}
+          }
+        }
+
+        return _makeHelperIterator(
+          function next() {
+            if (done) return { value: undefined, done: true };
+            while (true) {
+              if (inner == null) {
+                // Advance the outer iterator.
+                let outerRes: any;
+                try {
+                  outerRes = outer.next();
+                } catch (e) {
+                  done = true;
+                  throw e;
+                }
+                if (outerRes && outerRes.done) {
+                  done = true;
+                  return { value: undefined, done: true };
+                }
+                // mapped = mapper(value, counter); IfAbruptCloseIterator(outer).
+                let mapped: any;
+                try {
+                  mapped = mapper(outerRes.value, counter);
+                } catch (e) {
+                  done = true;
+                  try {
+                    outer.return?.();
+                  } catch {}
+                  throw e;
+                }
+                counter++;
+                // GetIteratorFlattenable(mapped, reject-primitives): a primitive
+                // (incl. strings? — no, strings ARE iterable and accepted) — but
+                // a non-object non-string primitive rejects.
+                if (
+                  mapped == null ||
+                  (typeof mapped !== "object" && typeof mapped !== "string" && typeof mapped !== "function")
+                ) {
+                  done = true;
+                  try {
+                    outer.return?.();
+                  } catch {}
+                  throw new TypeError("Iterator.prototype.flatMap: mapper result is not an object");
+                }
+                try {
+                  inner = _getFlattenable(mapped);
+                } catch (e) {
+                  done = true;
+                  try {
+                    outer.return?.();
+                  } catch {}
+                  throw e;
+                }
+              }
+              // Pull from the inner iterator.
+              let innerRes: any;
+              try {
+                innerRes = inner.next();
+              } catch (e) {
+                done = true;
+                inner = null;
+                try {
+                  outer.return?.();
+                } catch {}
+                throw e;
+              }
+              if (innerRes && innerRes.done) {
+                inner = null;
+                continue; // inner exhausted — advance outer
+              }
+              return { value: innerRes.value, done: false };
+            }
+          },
+          function returnFn() {
+            done = true;
+            closeInner();
+            try {
+              outer.return?.();
+            } catch {}
+            return { value: undefined, done: true };
+          },
+        );
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
 }
 
 /** Tracks WasmGC struct objects that have been frozen via Object.freeze. */
@@ -5582,6 +5701,16 @@ assert._isSameValue = isSameValue;
                   // Also mark in sidecar so property enumeration knows it exists
                   _sidecarSet(obj, prop, undefined);
                 } else {
+                  // (#1629 S3) data→accessor flip: if a prior data
+                  // `defineProperty` mirrored a plain value into the value
+                  // sidecar at `sc[prop]`, it would shadow the new getter —
+                  // `_safeGet` consults `_sidecarGet` (which reads `sc[prop]`)
+                  // *before* the `__get_<prop>` getter. Drop the stale value so
+                  // the accessor wins. (A bare struct field's value lives in the
+                  // struct, not `sc`, so this is a no-op in the common case.)
+                  if ((desc.get || desc.set) && prop in sc && typeof sc[prop as string] !== "function") {
+                    delete sc[prop as string];
+                  }
                   if (desc.get) sc[`__get_${prop}`] = desc.get;
                   if (desc.set) sc[`__set_${prop}`] = desc.set;
                   // Mark the property key as "own" for hasOwnProperty checks.
@@ -6574,6 +6703,42 @@ assert._isSameValue = isSameValue;
           }
           const wrappedNew = _isWasmStruct(newTarget) ? _wrapForHost(newTarget, exports) : newTarget;
           return Reflect.construct(wrappedCtor, wrappedArgs ?? [], wrappedNew);
+        };
+      // (#1732 S1) __construct(callee, argsArray) — runtime [[Construct]] for a
+      // `new f(...)` whose callee value cannot be proven constructable at
+      // compile time (e.g. `var f = String.prototype.indexOf; new f`). Per
+      // ECMA-262 §7.3.13 Construct → §10.2.2 [[Construct]] / §10.3.2 (built-in):
+      // IsConstructor(F) false ⇒ throw a real TypeError. Builtin method values,
+      // arrow functions, methods, and bound-without-construct functions all
+      // lack [[Construct]] and must throw here. The thrown error is a genuine
+      // host TypeError instance so test262 `assert.throws(TypeError, …)` /
+      // `e instanceof TypeError` observe it.
+      if (name === "__construct")
+        return (callee: any, argsArray: any): any => {
+          const exports = callbackState?.getExports();
+          const wrappedCallee = _isWasmStruct(callee) ? _wrapForHost(callee, exports) : callee;
+          // IsConstructor probe: Reflect.construct with `wrappedCallee` as the
+          // newTarget throws TypeError when it has no [[Construct]] (the
+          // standard "is this constructable?" test). A throw here means the
+          // value is not a constructor → re-throw the spec TypeError with the
+          // method's name.
+          let isCtor = false;
+          if (typeof wrappedCallee === "function") {
+            try {
+              // Probe via a no-op proxy target; only [[Construct]] presence is
+              // tested, the proxy is never actually instantiated.
+              Reflect.construct(function () {}, [], wrappedCallee);
+              isCtor = true;
+            } catch {
+              isCtor = false;
+            }
+          }
+          if (!isCtor) {
+            const nm = wrappedCallee && wrappedCallee.name ? wrappedCallee.name : String(wrappedCallee);
+            throw new TypeError(nm + " is not a constructor");
+          }
+          const wrappedArgs = _isWasmStruct(argsArray) ? _wrapForHost(argsArray, exports) : argsArray;
+          return Reflect.construct(wrappedCallee, wrappedArgs ?? []);
         };
       // Symbol.for(key) — global symbol registry (#965)
       // Symbol.for(key) — §20.4.2.2: stringKey = ? ToString(key). Passing a

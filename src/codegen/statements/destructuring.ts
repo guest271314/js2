@@ -38,6 +38,142 @@ import {
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
 import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
+import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "../expressions/proto-override.js";
+
+/**
+ * (#1719 S1) Gate predicate for the array object-value representation track.
+ *
+ * Returns true iff array destructuring of a **typed vec / tuple RHS** must
+ * route through the host-Array reflection + host `GetIterator` lane instead of
+ * the backing-store fast path — i.e. when the program's `ITER_OVERRIDDEN`
+ * whole-program brand (`ctx.arrayIteratorMaybeOverridden`, set by
+ * `sourceOverridesArrayIterator`) is set AND the RHS is not a string.
+ *
+ * The string exclusion is load-bearing: a string is not an Array, so a
+ * monkeypatched `Array.prototype[@@iterator]` cannot affect string
+ * destructuring, and routing a string through the array iterator lane would
+ * regress string dstr (per the architecture spec).
+ *
+ * **S1 status (this PR):** this predicate establishes the *placement and
+ * string guard* the architecture spec mandates keeping from dev-a's
+ * scaffolding, but the routing target it gates is supplied by **S2** (the
+ * host-Array reflection helper + host `GetIterator`). Until S2 lands, callers
+ * evaluate this predicate but fall through to the existing fast path — so the
+ * predicate is correct and unit-tested while the codegen is behaviorally a
+ * no-op (zero test delta, the spec's S1 requirement). When
+ * `ctx.arrayIteratorMaybeOverridden` is false (the common case) this is always
+ * false, guaranteeing byte-identical output.
+ *
+ * Spec: §7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization.
+ */
+export function arrayDstrNeedsIdentity(ctx: CodegenContext, isStringRHS: boolean): boolean {
+  return ctx.arrayIteratorMaybeOverridden && !isStringRHS;
+}
+
+/**
+ * (#1719 CPR read-drive) Drive a captured `Array.prototype[@@iterator]` override
+ * for a typed-vec/tuple array-destructuring RHS, so the override's custom
+ * iterator (not the backing store) supplies the binding values
+ * (§8.5.2 IteratorBindingInitialization). PRECONDITION: the vec ref is on the
+ * stack and the caller gated on `arrayDstrNeedsIdentity && override-captured`.
+ *
+ * Scope (CPR-1): the binding pattern is all **identifier** elements (with optional
+ * `= default`) and elisions, **no rest / no nested** pattern — exactly the shape
+ * of the 71 `*-iter-val-array-prototype.js` tests. Returns `false` (caller falls
+ * through to the backing-store fast path) for rest/nested patterns so those are
+ * not regressed; CPR-2 widens the shape.
+ *
+ * Lowering: drive override → iterator (in-Wasm, `__drive_proto_iterator`), then
+ * per element `__iterator_next` → `(i32 done, externref value)`; on `done` the
+ * element takes its default (or `undefined`), else `value` coerced to the binding
+ * local's type. The brand only fires at this observation boundary, so internal
+ * array iterations inside the override body stay on the typed-vec fast path — no
+ * re-entrancy / no infinite loop.
+ */
+function tryEmitArrayProtoIteratorReadDrive(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  pattern: ts.ArrayBindingPattern,
+  resultType: ValType,
+): boolean {
+  const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
+  if (overrideGlobalIdx === undefined) return false;
+
+  // CPR-1 shape gate: only plain identifiers (+ optional default) and elisions.
+  for (const el of pattern.elements) {
+    if (ts.isOmittedExpression(el)) continue;
+    if (el.dotDotDotToken) return false; // rest → CPR-2
+    if (!ts.isIdentifier(el.name)) return false; // nested → CPR-2
+  }
+
+  // Pre-register __iterator_next (the for-of multi-value drain shape) BEFORE
+  // emitting any drive instructions, so a missing import bails cleanly (returns
+  // false → caller uses the fast path) without leaving half-emitted bytes.
+  const nextIdx = ensureLateImport(
+    ctx,
+    "__iterator_next",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }, { kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (nextIdx === undefined) return false;
+
+  // Stash the vec ref, then drive the override into an iterator local.
+  const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
+  const doneLocal = allocLocal(fctx, `__cpr_done_${fctx.locals.length}`, { kind: "i32" });
+  const valLocal = allocLocal(fctx, `__cpr_val_${fctx.locals.length}`, { kind: "externref" });
+
+  for (const el of pattern.elements) {
+    // Advance the iterator: (done, value) = __iterator_next(iter).
+    fctx.body.push({ op: "local.get", index: iterLocal });
+    fctx.body.push({ op: "call", funcIdx: nextIdx });
+    fctx.body.push({ op: "local.set", index: valLocal }); // value (top)
+    fctx.body.push({ op: "local.set", index: doneLocal }); // done (below)
+
+    if (ts.isOmittedExpression(el) || !ts.isIdentifier(el.name)) continue; // elision: just advance
+
+    const name = el.name.text;
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx === undefined) continue;
+    const localType = getLocalType(fctx, localIdx) ?? ({ kind: "externref" } as ValType);
+
+    // value-present arm: coerce `value` externref → the binding's local type.
+    const assignFromValue: Instr[] = collectInstrs(fctx, () => {
+      fctx.body.push({ op: "local.get", index: valLocal });
+      coerceType(ctx, fctx, { kind: "externref" }, localType);
+      fctx.body.push({ op: "local.set", index: localIdx });
+    });
+
+    // done / default arm: if the element has `= init`, evaluate it; else leave
+    // the local at its zero/undefined default (already TDZ-initialised upstream).
+    let defaultArm: Instr[] = [];
+    if (el.initializer) {
+      defaultArm = collectInstrs(fctx, () => {
+        const initType = compileExpression(ctx, fctx, el.initializer!);
+        if (initType) {
+          if (!valTypesMatch(initType, localType)) coerceType(ctx, fctx, initType, localType);
+          fctx.body.push({ op: "local.set", index: localIdx });
+        }
+      });
+    }
+    // ECMA-262 §8.5.2: when the iterator step is done, the value is `undefined`
+    // and the binding takes its default if present. We model that with the
+    // `done` flag: done ⇒ default arm, else ⇒ assign drained value. (A
+    // present-but-`undefined` value also triggers the default per dstr-binding
+    // semantics; CPR-2 folds that in — the 71 tests yield concrete values.)
+    fctx.body.push({ op: "local.get", index: doneLocal });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: defaultArm,
+      else: assignFromValue,
+    } as Instr);
+  }
+  return true;
+}
 
 export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, pattern: ts.BindingPattern): void {
   for (const element of pattern.elements) {
@@ -844,6 +980,24 @@ export function compileArrayDestructuring(
     ctx.nativeStrings &&
     ctx.anyStrTypeIdx >= 0 &&
     (typeIdx === ctx.anyStrTypeIdx || typeIdx === ctx.nativeStrTypeIdx || typeIdx === ctx.consStrTypeIdx);
+
+  // #1719 CPR read-drive — gate-site for the array object-value representation
+  // track. When the program overrode Array.prototype's @@iterator/values (the
+  // ITER_OVERRIDDEN brand) AND captured that override (CPR write-arm), and the
+  // RHS is a real array (not a string), the backing-store fast path below
+  // silently ignores the override (§7.4.2 GetIterator / §8.5.2
+  // IteratorBindingInitialization). Drive the captured override here instead.
+  // Strictly gated behind `arrayDstrNeedsIdentity && override-captured`, both
+  // false in the common case ⇒ override-free modules stay byte-identical.
+  if (
+    arrayDstrNeedsIdentity(ctx, isStringStruct) &&
+    arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+    (isVecArray || isTupleStruct) &&
+    tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, resultType)
+  ) {
+    syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+    return;
+  }
 
   if (!isVecArray && !isTupleStruct && !isStringStruct) {
     // Unknown struct: convert to externref and use __extern_get fallback

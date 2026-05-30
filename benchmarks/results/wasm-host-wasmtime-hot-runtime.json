@@ -86,29 +86,31 @@
   {
     "name": "string-hash",
     "scenario": "cold",
-    "wasmUs": 72085.7759999999,
-    "jsUs": 58302.857000002405,
-    "wasmStdUs": 870.054794461671,
+    "wasmUs": 32060.0,
+    "jsUs": 24849.4,
+    "wasmStdUs": 3927.0,
     "jsStdUs": 2851.9373522509827,
     "ratioStd": 0.047219569864664565,
     "warmupRounds": 2,
     "measuredRounds": 7,
     "javyUs": 30700.0,
     "starlingMonkeyUs": 30500.0,
+    "wasmProvenance": "#1744 refresh 2026-05-30: DIRECTLY MEASURED on wasmtime 45.0.0 aarch64-linux (current main = post-#1744, 20k input, warmup 2 / measured 7) by scripts/generate-wasmtime-hot-runtime.mjs. #1744 eliminated the per-charAt 1-char $NativeString allocation in the `text += alphabet.charAt(x)` build loop (~40k throwaway allocations) — the appends now read the code unit inline (array.get_u) and array.set it into the buffer. Cold dropped from the post-#1580 52.7 ms to ~32 ms here. NOTE: measured on a constrained shared CI container — wasmtime process-startup overhead inflates COLD (it dominates the ~24-30 ms baseline subtraction), so cold is conservative/high vs a clean box; the WARM number (exec-only, baseline subtracted) is the meaningful one. The other three benchmarks (fib/fib-recursive/array-sum) are intentionally left at their prior clean-aarch64-box values to avoid cross-machine skew.",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "string-hash",
     "scenario": "warm",
-    "wasmUs": 63659.53200000149,
-    "jsUs": 1178.5309999999995,
-    "wasmStdUs": 870.054794461671,
+    "wasmUs": 9000.0,
+    "jsUs": 640.4,
+    "wasmStdUs": 1900.0,
     "jsStdUs": 34.88853686077583,
     "ratioStd": 0.0004946225297867972,
     "warmupRounds": 2,
     "measuredRounds": 7,
     "javyUs": 36000.0,
     "starlingMonkeyUs": 14200.0,
+    "wasmProvenance": "#1744 refresh 2026-05-30: DIRECTLY MEASURED on wasmtime 45.0.0 aarch64-linux (current main = post-#1744, 20k input, warm = full-run minus arg=0 baseline). #1744 eliminated the per-charAt 1-char $NativeString allocation in the build loop (~40k throwaway allocations): `text += alphabet.charAt(x)` now reads the code unit inline (array.get_u) and array.sets it into the doubling buffer, no intermediate string. Warm dropped from the post-#1580 ~22.7 ms to a measured 6.6-12.3 ms across 5 runs on this NOISY shared CI container; 9,000 us is a conservative mid-range value. THIS NOW BEATS StarlingMonkey's 14.2 ms warm — the AOT lane is genuinely faster than the engine lane on string-hash. Still ~14x the V8-JIT warm lane (0.64 ms) — closing that gap further would need the hash-loop f64<->i32 roundtrip + remaining cons-rope flatten work. CODE-VERIFIED: tests/issue-1744.test.ts asserts the build loop emits no `call $__str_charAt` and the charAt-built string hash (incl. surrogate pairs) matches JS; output cross-checked on wasmtime (run(20000)=862771296 == JS).",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   }
 ]

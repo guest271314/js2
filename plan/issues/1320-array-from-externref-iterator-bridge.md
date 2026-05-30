@@ -16,6 +16,19 @@ related: [1154]
 ---
 # #1320 — Array.from / Iterator.from runtime bridge drops own [Symbol.iterator]
 
+> **2026-05-29 — array-receiver case folded into the array object-value
+> representation track.** The case where `Array.from` is given a **compiled
+> array** whose `Array.prototype[@@iterator]` was overridden cannot be fixed at
+> the runtime-bridge layer: `_materializeIterable` (`src/runtime.ts:1185`) walks
+> `__vec_len`/`__vec_get` and bypasses `@@iterator` because the compiled array is
+> not a host JS Array on the host prototype chain. The fix is **S3** of the
+> canonical architecture spec in **#1719** (array object-value representation /
+> `$ArrayObj`, the array analog of #1732's `$FuncObj`): route the array-receiver
+> through the host-Array reflection so native `Array.from` walks the override.
+> The existing `_drainWasmClosureIterable` closure-iterator drain is reused
+> unchanged. The remaining `iter-cstm-ctor` deep case stays **gated on #1684**
+> (closure-return struct readback) — orthogonal to the representation track.
+
 ## Background
 
 Filed as a follow-up to #1154 after closing it as resolved. The original

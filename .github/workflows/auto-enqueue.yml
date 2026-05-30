@@ -1,0 +1,47 @@
+name: Auto-enqueue green PRs
+
+# WHY: GitHub has no native "auto-enqueue when checks go green". `gh pr merge
+# --auto` only arms on a check-state TRANSITION, so a PR that is already green
+# by the time anyone acts is never queued; the merge queue also drops a PR when
+# main advances under it. This workflow continuously enqueues every open,
+# non-draft, mergeable PR that isn't already in the queue. The merge queue
+# re-runs the required checks on the merged state before landing, so this can
+# never merge a red PR (branch protection stays the hard gate). Drafts and PRs
+# labelled hold/do-not-merge/wip are skipped.
+
+on:
+  # Responsive: fire right after the workflows that produce required checks finish.
+  workflow_run:
+    workflows: ["Test262 Sharded", "CI"]
+    types: [completed]
+  # Backstop: catch PRs the merge queue dropped when main advanced under them.
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: auto-enqueue
+  cancel-in-progress: false
+
+jobs:
+  enqueue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/enqueue-green-prs.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Enqueue green PRs
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_ENQUEUE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/enqueue-green-prs.mjs
