@@ -60,45 +60,68 @@ import type {
 // "widen to a handle union" option from the #1713 spec section 7.
 type VecLayout = IrVecLowering | LinearVecLowering;
 
-export interface BackendEmitter {
+/**
+ * #1584: the trait is generic over its SINK type `S`. `WasmGcEmitter` /
+ * `LinearEmitter` use `S = Instr[]` (the default — every pre-#1584 caller is
+ * unchanged). `BytecodeEmitter` uses `S = BytecodeSink` (a flat opcode stream).
+ * The sink abstraction is the ONE representation-specific seam the #1715 finding
+ * identified; this generic parameter realizes it.
+ *
+ * Two sink operations belong to the trait (not the per-node primitives) because
+ * `lower.ts` itself touches the sink directly:
+ *  - `newSink()` — the sink factory `lower.ts` uses to build `if`-arm buffers
+ *    (it builds each arm into its own sink, then hands both to `emitIf`).
+ *  - `pushRaw(out, instr)` — the raw-`Instr` escape hatch (#1584 contract
+ *    §0a-1). `lower.ts` still has ~119 inline pushes for op families not yet
+ *    migrated behind the trait. On WasmGC these append to the `Instr[]`; on the
+ *    bytecode sink they hit an unrealized op family and throw (the
+ *    not-yet-migrated boundary, surfaced loudly). As each family migrates
+ *    (§2a), its sites move from `pushRaw` to a typed primitive.
+ */
+export interface BackendEmitter<S = Instr[]> {
+  /** Create a fresh empty sink (for `if`-arm buffers built by lower.ts). */
+  newSink(): S;
+  /** Raw-`Instr` escape hatch for op families not yet routed through the trait. */
+  pushRaw(out: S, instr: Instr): void;
+
   // ---- vec (array) -- the Phase-1 stage-2 primitives ------------------
   /**
    * vec ref on stack -> i32 length. The caller appends `f64.convert_i32_s`
    * when the IR result type is f64 (that is an IR-result-type coercion, not
    * a backend op, so it stays in lower.ts).
    */
-  emitVecLen(layout: VecLayout, out: Instr[]): void;
+  emitVecLen(layout: VecLayout, out: S): void;
   /**
    * vec ref on stack -> data-region handle. WasmGC leaves a `(ref $arr)`;
    * a linear backend would leave an `i32` base pointer. Both feed
    * `emitElemGet`, which closes the abstraction so `lower.ts` never reasons
    * about what is on the stack between the two calls.
    */
-  emitVecDataPtr(layout: VecLayout, out: Instr[]): void;
+  emitVecDataPtr(layout: VecLayout, out: S): void;
   /** data-region handle + i32 index on stack -> element value. */
-  emitElemGet(layout: VecLayout, out: Instr[]): void;
+  emitElemGet(layout: VecLayout, out: S): void;
 
   // ---- scalars / locals / globals / control flow (Phase-1 stage 1) ----
   /** Emit a `const` IR instr's literal op(s). Delegates to the shared free fn. */
-  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: Instr[]): void;
+  emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: S): void;
   /** Pass-through binary op (`f64.add`, `i32.eq`, `i32.and`, ...). Bitwise
    * `js.*` ops are lowered earlier in lower.ts and never reach here. */
-  emitBinary(op: IrBinop, out: Instr[]): void;
+  emitBinary(op: IrBinop, out: S): void;
   /** Pass-through unary op. */
-  emitUnary(op: IrUnop, out: Instr[]): void;
-  emitLocalGet(index: number, out: Instr[]): void;
-  emitLocalSet(index: number, out: Instr[]): void;
-  emitLocalTee(index: number, out: Instr[]): void;
-  emitGlobalGet(index: number, out: Instr[]): void;
-  emitGlobalSet(index: number, out: Instr[]): void;
-  emitDrop(out: Instr[]): void;
-  emitSelect(out: Instr[]): void;
-  emitReturn(out: Instr[]): void;
-  emitUnreachable(out: Instr[]): void;
-  /** Structured if. then/else are already lowered into their own Instr[]. */
-  emitIf(blockType: BlockType, then: Instr[], els: Instr[], out: Instr[]): void;
-  emitBr(depth: number, out: Instr[]): void;
-  emitBrIf(depth: number, out: Instr[]): void;
+  emitUnary(op: IrUnop, out: S): void;
+  emitLocalGet(index: number, out: S): void;
+  emitLocalSet(index: number, out: S): void;
+  emitLocalTee(index: number, out: S): void;
+  emitGlobalGet(index: number, out: S): void;
+  emitGlobalSet(index: number, out: S): void;
+  emitDrop(out: S): void;
+  emitSelect(out: S): void;
+  emitReturn(out: S): void;
+  emitUnreachable(out: S): void;
+  /** Structured if. then/else are already lowered into their own sink. */
+  emitIf(blockType: BlockType, then: S, els: S, out: S): void;
+  emitBr(depth: number, out: S): void;
+  emitBrIf(depth: number, out: S): void;
 
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
   // The following are part of the full seam the spec audited but are NOT
