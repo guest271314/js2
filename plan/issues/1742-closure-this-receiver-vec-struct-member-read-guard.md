@@ -83,6 +83,48 @@ through unchanged for a genuine host externref.
   still pass through to the host read path unchanged; byte-identical output for
   modules that never dispatch a compiled receiver through `__call_fn_method_N`.
 
+## Implementation resume notes (pinned sites — senior-dev, 2026-05-30)
+
+Branch `issue-1719-s2-arrayobj` (off origin/main, current). `ctx.protoOverrides`
+scaffolding already landed (commit c002ac881). All sites pinned — no further
+investigation needed:
+
+1. **`ThisKeyword` resolves to externref** at `src/codegen/expressions.ts:862`
+   (the `fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0` branch) — returns
+   `{kind:"externref"}` (null-guarded `__current_this` `global.get`).
+2. **Element-access entry**: `compileElementAccess` (`property-access.ts:3029`)
+   compiles the object at line **3155** (→ externref for a `this` receiver) and
+   dispatches to `compileElementAccessBody` (line 3177). The body's vec/struct
+   fast path is at **3245+** (`typeIdx` from `objType`). **Fix**: when
+   `expr.expression` is `ThisKeyword` + `readsCurrentThis` + the static TS type
+   resolves to a vec/struct typeIdx (via `resolveStructName` /
+   `getArrTypeIdxFromVec` on `getTypeAtLocation(expr.expression)`), after compiling
+   `this` to externref emit `any.convert_extern` + a `ref.test`-guarded `ref.cast`
+   to that concrete typeIdx, then call `compileElementAccessBody` with the concrete
+   ref ValType.
+3. **Property/`.length` entry**: same guard in `compilePropertyAccess` (same file)
+   for the `this`-receiver externref → struct/vec case.
+4. **Reuse** `emitExternrefToStructGet` (line 628) `any.convert_extern` +
+   guarded-cast pattern; factor a small shared
+   `emitThisReceiverGuardConvert(ctx, fctx, targetTypeIdx)` (externref on stack →
+   concrete ref) consumed by both #1719 (vec) and #1629 (struct getters).
+5. **Genuine host externref `this` passes through unchanged** — guard with
+   `ref.test`, convert only when the runtime value IS the compiled vec/struct, else
+   keep the host read path (read-site-guard steer, NOT resolve-at-source).
+
+**Verify**: `var g=function*(){ if(this.length>2) yield this[2]; }; var a=[5,6,7];`
+driven `g.apply(a,[]).next()...` → no "illegal cast", reads `7` (both `this.length`
+and `this[i]` currently trap; array-as-param already works). Then a struct getter
+`get x(){ return this.x }` with a compiled-struct receiver (the #1629 consumer).
+
+**Then CPR (#1719)**: write-arm in `compileElementAssignment` (`assignment.ts:~2450`,
+builtin-prototype arm storing the override funcref in `ctx.protoOverrides`,
+force-emit the closure) → read-drive at the branded dstr gate
+(`destructuring.ts:892`): call the stored override with the array as `this` via
+`__call_fn_method_N`, drain via `__iterator_next` → prove `[a,b,z]=arr` with
+overridden `@@iterator` yields `z=42` → CPR-2 (values alias + for-of + spread) →
+PR, #1719 status:done.
+
 ## Source
 
 Carved from #1719 CPR build (senior-dev, 2026-05-30) after the size-gate probe
