@@ -264,6 +264,114 @@ describe("#1584 slice (b) — Wasm-GC-native dispatch loop (quadruple equivalenc
     }
   });
 
+  // ── #1584 production opcodes: DIV / CMP_NE / TEE / GLOBAL_GET/SET / SELECT /
+  // DROP, exercised through BOTH the host VM (runSink) and the compiled VM. ──
+  // These are the additive op-set #958 committed to the emitter; this confirms
+  // bytecode-vm.ts realizes each, with host-VM == Wasm-GC-VM equivalence.
+  it("WasmGC-VM == host-VM for DIV / CMP_NE / SELECT / TEE / DROP / GLOBAL_*", async () => {
+    // DIV: f(a,b) = a / b
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      E.emitLocalGet(1, s);
+      E.emitBinary("f64.div", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b"], s.code, s.constPool, ["a", "b"]);
+      for (const [a, b] of [
+        [6, 3],
+        [7, 2],
+        [-9, 3],
+        [1, 4],
+      ]) {
+        expect(runSink(s, [a, b]), `host div(${a},${b})`).toBe(a / b);
+        expect(await runWasm(mod, "run", [a, b]), `wasm div(${a},${b})`).toBe(a / b);
+      }
+    }
+    // CMP_NE: f(a,b) = (a != b) ? 1 : 0
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      E.emitLocalGet(1, s);
+      E.emitBinary("f64.ne", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b"], s.code, s.constPool, ["a", "b"]);
+      for (const [a, b] of [
+        [1, 1],
+        [1, 2],
+        [-3, -3],
+      ]) {
+        const exp = a !== b ? 1 : 0;
+        expect(runSink(s, [a, b]), `host ne(${a},${b})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a, b]), `wasm ne(${a},${b})`).toBe(exp);
+      }
+    }
+    // SELECT: f(a,b,c) = (c != 0) ? a : b. Operand order per OP.SELECT: a, b, cond.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s); // a
+      E.emitLocalGet(1, s); // b
+      E.emitLocalGet(2, s); // cond
+      s.emit(OP.SELECT);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a", "b", "c"], s.code, s.constPool, ["a", "b", "c"]);
+      for (const [a, b, c] of [
+        [10, 20, 1],
+        [10, 20, 0],
+        [-5, 5, 7],
+      ]) {
+        const exp = c !== 0 ? a : b;
+        expect(runSink(s, [a, b, c]), `host select(${a},${b},${c})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a, b, c]), `wasm select(${a},${b},${c})`).toBe(exp);
+      }
+    }
+    // TEE: f(a) = { local1 = (a+1) [tee leaves it on stack]; return top * 2 }.
+    // sequence: LOAD a, CONST 1, ADD, TEE 1, CONST 2, MUL, RET → (a+1)*2.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(1, s);
+      E.emitBinary("f64.add", s);
+      E.emitLocalTee(1, s); // peek -> local1, leaves (a+1) on stack
+      emitNumberConst(2, s);
+      E.emitBinary("f64.mul", s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a", "0"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        const exp = (a + 1) * 2;
+        expect(runSink(s, [a, 0]), `host tee(${a})`).toBe(exp);
+        expect(await runWasm(mod, "run", [a]), `wasm tee(${a})`).toBe(exp);
+      }
+    }
+    // DROP: f(a) = { push a; push 99; DROP; return top } → a (99 discarded).
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(99, s);
+      E.emitDrop(s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        expect(runSink(s, [a]), `host drop(${a})`).toBe(a);
+        expect(await runWasm(mod, "run", [a]), `wasm drop(${a})`).toBe(a);
+      }
+    }
+    // GLOBAL_SET / GLOBAL_GET: f(a) = { global0 = a*3; return global0 }.
+    {
+      const s = new BytecodeSink();
+      E.emitLocalGet(0, s);
+      emitNumberConst(3, s);
+      E.emitBinary("f64.mul", s);
+      E.emitGlobalSet(0, s);
+      E.emitGlobalGet(0, s);
+      E.emitReturn(s);
+      const mod = compileVmModule(["a"], s.code, s.constPool, ["a"]);
+      for (const a of [3, -4, 0, 1.5]) {
+        expect(runSink(s, [a]), `host global(${a})`).toBe(a * 3);
+        expect(await runWasm(mod, "run", [a]), `wasm global(${a})`).toBe(a * 3);
+      }
+    }
+  });
+
   // ── Sanity: the host VM still rejects malformed; the emitter rejects ops ──
   // outside the #1584 production subset. (The subset has grown with #958:
   // f64.div / f64.ne are now IN-subset, so the out-of-subset probe uses ops the
