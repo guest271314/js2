@@ -31,6 +31,7 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { maybeCaptureArrayProtoOverride } from "./proto-override.js";
 import {
   classifyPrivateMember,
   emitCoercedLocalSet,
@@ -50,7 +51,12 @@ import {
 import { emitMappedArgParamSync, emitMappedArgReverseSync } from "./logical-ops.js";
 import { resolveStructName, resolveStructNameForExpr } from "./misc.js";
 import { resolveEffectiveStructName } from "../property-access.js";
-import { compileStringBuilderAppend, getBuilderInfo } from "../string-builder.js";
+import {
+  compileStringBuilderAppend,
+  emitStringBuilderAppendCodeUnit,
+  getBuilderInfo,
+  type StringBuilderInfo,
+} from "../string-builder.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -99,6 +105,15 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
     const synth = { ...expr, left: lhs } as ts.BinaryExpression;
     return compileAssignment(ctx, fctx, synth);
   }
+  // (#1719 CPR write-arm) `Array.prototype[Symbol.iterator] = fn` /
+  // `Array.prototype.values = fn` has no compiled landing spot and is otherwise
+  // silently dropped. Capture the lifted override closure into ctx.protoOverrides
+  // (rooted in a module global) so array dstr / for-of / spread can drive it.
+  // Gated on the S1 brand inside the helper — no-op (byte-identical) otherwise.
+  if (maybeCaptureArrayProtoOverride(ctx, fctx, lhs, expr.right)) {
+    return { kind: "externref" };
+  }
+
   if (ts.isIdentifier(expr.left)) {
     const name = expr.left.text;
     // const bindings — assignment throws TypeError at runtime
@@ -3919,6 +3934,94 @@ function compileStringCompoundAssignment(
 }
 
 /**
+ * #1744 — single-code-unit append fast path for string-builders.
+ *
+ * Returns `true` if `rhs` is a one-code-unit producer that can be appended
+ * to the builder `sb` without materialising an intermediate `$NativeString`,
+ * and emits the append. Two shapes qualify:
+ *
+ *   - `X.charAt(i)` where `X` is a native string — read `X`'s code unit at
+ *     `i` (flatten `X` once, `array.get_u data[off+i]`) and append it.
+ *   - a 1-character string literal (`buf += ";"`) — append the constant code
+ *     unit directly, no string materialisation at all.
+ *
+ * In both cases the bulk path would otherwise allocate a 1-char string per
+ * iteration (`array.new_fixed` + `struct.new`) and copy a single character
+ * out of it. Returns `false` (caller falls back to `compileStringBuilderAppend`)
+ * for anything else, including `at()` (negative indices) and `charAt` on a
+ * non-string receiver.
+ */
+function tryCompileSingleCharBuilderAppend(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  rhs: ts.Expression,
+  sb: StringBuilderInfo,
+): boolean {
+  // Shape 1: a 1-character string literal → append the constant code unit.
+  if (ts.isStringLiteral(rhs) && rhs.text.length === 1) {
+    fctx.body.push({ op: "i32.const", value: rhs.text.charCodeAt(0) } as Instr);
+    emitStringBuilderAppendCodeUnit(ctx, fctx, sb);
+    return true;
+  }
+
+  // Shape 2: `X.charAt(i)` on a native-string receiver.
+  if (
+    ts.isCallExpression(rhs) &&
+    ts.isPropertyAccessExpression(rhs.expression) &&
+    rhs.expression.name.text === "charAt" &&
+    rhs.arguments.length <= 1
+  ) {
+    const receiver = rhs.expression.expression;
+    const recvType = ctx.checker.getTypeAtLocation(receiver);
+    // Only fire when the receiver is statically a string — otherwise charAt
+    // might be a user method and the inline read would be wrong.
+    const isStr = (recvType.flags & ts.TypeFlags.StringLike) !== 0;
+    if (isStr) {
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      if (flattenIdx !== undefined) {
+        const strTypeIdx = ctx.nativeStrTypeIdx;
+        const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+        // flat = __str_flatten(receiver) → ref $NativeString, stash in a temp.
+        const recvVal = compileExpression(ctx, fctx, receiver);
+        if (recvVal !== null) {
+          fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+          const flatTmp = allocLocal(fctx, `__sb_charAt_flat_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx: strTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: flatTmp } as Instr);
+          // cu = flat.data[flat.off + idx]
+          fctx.body.push({ op: "local.get", index: flatTmp } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr); // .data
+          fctx.body.push({ op: "local.get", index: flatTmp } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr); // .off
+          if (rhs.arguments.length > 0) {
+            const idxType = compileExpression(ctx, fctx, rhs.arguments[0]!, { kind: "f64" });
+            if (idxType?.kind === "f64") {
+              fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            } else if (idxType !== null && idxType.kind !== "i32") {
+              // Unexpected index type — bail to the generic path would require
+              // unwinding already-emitted ops, which we can't. Coerce best-effort.
+              fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+            }
+          } else {
+            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          }
+          fctx.body.push({ op: "i32.add" } as Instr); // off + idx
+          fctx.body.push({ op: "array.get_u", typeIdx: strDataTypeIdx } as Instr);
+          emitStringBuilderAppendCodeUnit(ctx, fctx, sb);
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Native-strings variant of string `+=` (#1175). Uses `__str_concat` which
  * accepts and returns `ref $AnyString`. RHS coercion: numbers are routed
  * through `number_toString` (returns externref) then `any.convert_extern` +
@@ -3943,6 +4046,13 @@ function compileNativeStringCompoundAssignment(
   // allocations.
   const sb = getBuilderInfo(fctx, name);
   if (sb !== undefined) {
+    // #1744: single-code-unit fast path — `buf += X.charAt(i)` / `buf += "c"`
+    // append one code unit directly to the buffer, skipping the per-iteration
+    // 1-char `$NativeString` allocation the generic path would emit.
+    if (tryCompileSingleCharBuilderAppend(ctx, fctx, expr.right, sb)) {
+      fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+      return anyStrTypeNullable;
+    }
     // Compile RHS and coerce to ref $AnyString — same coercion the legacy
     // path uses below, lifted into a small helper.
     const coerced = compileAndCoerceToAnyStr(ctx, fctx, expr.right);
