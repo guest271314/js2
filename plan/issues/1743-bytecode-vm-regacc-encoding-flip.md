@@ -1,5 +1,5 @@
 ---
-id: 1742
+id: 1743
 title: "Bytecode VM: coordinated stack → register+accumulator encoding flip"
 status: ready
 sprint: Backlog
@@ -15,7 +15,7 @@ goal: spec-completeness
 parent: 1584
 depends_on: [1584]
 ---
-# #1742 — Bytecode VM: coordinated stack → register+accumulator encoding flip
+# #1743 — Bytecode VM: coordinated stack → register+accumulator encoding flip
 
 ## Problem
 
