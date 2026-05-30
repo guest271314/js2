@@ -1,9 +1,10 @@
 ---
 id: 1734
 title: "acorn dogfood: __closure_11 emits unguarded struct.get on a call result of the wrong struct type → invalid Wasm"
-status: ready
+status: done
 created: 2026-05-30
 updated: 2026-05-30
+completed: 2026-05-30
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -160,3 +161,76 @@ broadening to shared property-access lowering (CPR + #1584 a5 overlap).
 **Coordination state:** lead authorized taking this directly (2026-05-30).
 Branch `issue-1731-closure-struct-typeconfusion` holds this issue file only
 (no source changes yet). The #1725 fix it builds on is merged (main 5ac9203c4).
+
+## Resolution (2026-05-30)
+
+**Pinned site (NOT property-access.ts).** A module-wide post-codegen scan for
+`struct.get` directly consuming a `call`/`call_ref` result (the exact
+validator shape "found *call* of …") located the emit at
+**`src/codegen/expressions/calls-closures.ts`**, inside
+`compileCallablePropertyCall` — the `recv.method(args)` path where `method` is
+a **closure-valued struct field**. Two branches (the ref-field closure branch
+~L480, and the externref-field wrapper branch ~L540) compiled the receiver
+with `compileExpression(propAccess.expression)` and then emitted a **bare**
+`struct.get structTypeIdx fieldIdx` *immediately*, ignoring the receiver's
+compiled wasm type.
+
+The scan reported, verbatim:
+`fn=__closure_11 struct.get type=45(__anon_5) field=35(parse) after call
+fn=110(__closure_77) callRet={"kind":"externref"}`.
+
+**Why it's ill-typed.** `__closure_77` (the receiver call) is a lifted closure
+whose **declared** wasm return type is `externref`, but its body returns the
+object struct (`ref 94`); the property read resolves the receiver's owner
+struct to `__anon_5` (`ref 45`) and reads its closure-valued `parse` field
+(field 35). A bare `struct.get 45` whose operand is the call result (externref
+by signature, `ref 94` by emission) is ill-typed → the binary fails
+`WebAssembly.compile()`. The earlier ruled-out property-access sites never fire
+for acorn because acorn reaches the method through `compileCallablePropertyCall`
+(method-call dispatch), not `compilePropertyAccess`.
+
+**Fix.** Added a `compileGuardedReceiver()` helper in
+`compileCallablePropertyCall` that compiles the receiver and normalizes it to
+`(ref null structTypeIdx)` before the `struct.get`:
+- if the receiver's compiled type is **already exactly** `(ref structTypeIdx)`
+  / `(ref_null structTypeIdx)` → early-return, keep the bare `struct.get`
+  (zero overhead, no behavior change for the overwhelmingly common case);
+- if **externref** → `any.convert_extern` (round-trip to anyref) then
+  `emitGuardedRefCast(structTypeIdx)`;
+- if a **different struct ref** (already an anyref subtype) →
+  `emitGuardedRefCast(structTypeIdx)` directly.
+
+This mirrors the guarded cast the same function already applies to the closure
+*field* itself (L548–549), so the `struct.get` operand is always the right
+struct type. Applied to both the ref-field and externref-field branches.
+
+**Downstream-effects analysis.**
+- *Stack balance*: the helper pushes exactly one value (the normalized struct
+  ref), identical to the bare receiver compile — no stack-depth change. The
+  guarded-cast path replaces one `struct.get`-operand with an `if`-block that
+  yields a single `(ref null structTypeIdx)`, balanced.
+- *Return type*: unchanged — the method's `returnType` / `VOID_RESULT` is still
+  what's returned to the caller; only the receiver normalization changed.
+- *Index shifting*: none — no new imports/functions added; only locals (the
+  guarded-cast temp via `allocTempLocal`).
+- *Runtime semantics*: when the runtime value isn't the expected struct, the
+  guarded cast yields `ref.null` and the subsequent `struct.get` traps on null
+  (same observable as the prior bare `struct.get` on a wrong ref, which would
+  have trapped or mis-read) — acceptable, and the common exact-type case is
+  byte-for-byte identical (early-return).
+
+**Verification.**
+- `pnpm run dogfood:acorn`: the `__closure_11` / `struct.get (ref null 45) found
+  call (ref null 94)` blocker is **gone**; the binary now advances to a new,
+  distinct blocker (`__closure_37: global.set expected f64, found if of
+  (ref null 3)`) — filed as a follow-up (see #1745).
+- New `tests/issue-1731.test.ts` (3 cases) compiles, **validates**, and runs.
+- No regression: the call/property-access equivalence subset
+  (`arrow-call-apply`, `iife-and-call-expressions`, `optional-chaining-call`,
+  `object-literal-getters-setters`, `fn-variable-call`, `private-class-members`,
+  `super-property-access`, `element-access-class`) reports an **identical**
+  13-failed/101-passed split pre- and post-fix — the 13 are pre-existing
+  test-harness failures, none introduced by this change.
+
+**Files changed:** `src/codegen/expressions/calls-closures.ts`,
+`tests/issue-1731.test.ts`.

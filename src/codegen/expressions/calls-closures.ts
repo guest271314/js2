@@ -451,6 +451,39 @@ export function compileCallablePropertyCall(
 
   const fieldType = fields[fieldIdx]!.type;
 
+  // (#1734) Compile the receiver and normalize it to `(ref null structTypeIdx)`
+  // before the bare `struct.get` that extracts the method-closure field.
+  //
+  // The receiver expression's compiled wasm type can disagree with the resolved
+  // struct type `structTypeIdx`: a receiver that is itself a call (e.g. a lifted
+  // closure / static factory whose declared return is `externref` but whose body
+  // returns a wider struct, or simply a method returning the object as externref)
+  // leaves an `externref` (or a different struct ref) on the stack. Emitting
+  // `struct.get structTypeIdx` directly on that value is ill-typed and fails Wasm
+  // validation (`struct.get expected (ref null N), found … M`). Route the value
+  // through `any.convert_extern` (when externref) + a `ref.test`-guarded cast to
+  // `structTypeIdx`, mirroring the guarded cast already used for the closure
+  // field itself below, so the `struct.get` operand is always the right struct.
+  const compileGuardedReceiver = (): void => {
+    const recvResult = compileExpression(ctx, fctx, propAccess.expression);
+    // Already exactly the target struct type (or its nullable form) — the bare
+    // struct.get is well-typed; no bridge needed.
+    if (
+      recvResult &&
+      (recvResult.kind === "ref" || recvResult.kind === "ref_null") &&
+      (recvResult as { typeIdx: number }).typeIdx === structTypeIdx
+    ) {
+      return;
+    }
+    // externref must round-trip through anyref before ref.test/ref.cast.
+    if (recvResult && recvResult.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+    }
+    // A different struct ref is already an anyref subtype — guard-cast directly.
+    // (ref/ref_null of another struct, or the any-converted externref above.)
+    emitGuardedRefCast(fctx, structTypeIdx);
+  };
+
   // The field must be a callable type — check via TS type checker
   const propTsType = ctx.checker.getTypeAtLocation(propAccess);
   let callSigs = propTsType.getCallSignatures?.();
@@ -476,8 +509,8 @@ export function compileCallablePropertyCall(
   if (fieldType.kind === "ref" || fieldType.kind === "ref_null") {
     const closureInfo = ctx.closureInfoByTypeIdx.get((fieldType as { typeIdx: number }).typeIdx);
     if (closureInfo) {
-      // Compile receiver, get field value (closure struct ref)
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       const closureLocal = allocLocal(fctx, `__cprop_${fctx.locals.length}`, fieldType);
@@ -535,8 +568,8 @@ export function compileCallablePropertyCall(
     if (wrapperTypes) {
       const { structTypeIdx: wrapperStructIdx, closureInfo: matchedClosureInfo } = wrapperTypes;
 
-      // Compile receiver, get field value (externref)
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       // Convert externref -> closure struct ref (guarded to avoid illegal cast)
