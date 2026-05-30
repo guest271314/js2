@@ -78,7 +78,16 @@ function notImplemented(method: string): never {
  * #1714: a BackendEmitter that lowers the vec primitives to LINEAR memory.
  * Only the three vec methods are implemented; the rest fail loudly.
  */
-export class LinearEmitter implements BackendEmitter {
+export class LinearEmitter implements BackendEmitter<Instr[]> {
+  // #1584: sink = Instr[], same as WasmGc (the linear backend also lowers to
+  // the shared `Instr` union). Factory + raw escape hatch are array ops.
+  newSink(): Instr[] {
+    return [];
+  }
+  pushRaw(out: Instr[], instr: Instr): void {
+    out.push(instr);
+  }
+
   // ---- vec (array) — the #1714 proof surface ------------------------------
 
   emitVecLen(layout: LinearVecLowering, out: Instr[]): void {
