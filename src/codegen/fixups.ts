@@ -224,9 +224,31 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
     // struct.set consumes 2 values: the struct ref (deeper) and the field value (top).
     // Track net stack contribution going backwards: when cumulative reaches +2,
     // that instruction produced the struct ref.
+    //
+    // (#1725) `instrStackDelta` treats `if`/`block`/`loop`/`try` as opaque
+    // (delta 0), but a structured block that yields a value (e.g. `if (result T)`)
+    // nets +1 and one with diverging arms can net otherwise. When the field-VALUE
+    // sub-expression contains such control flow — as it does for
+    // `this.X = f(arr[cond ? a : b])` in a function-constructor body — the
+    // backward depth accounting under-counts, so the walk overshoots the real
+    // receiver (`local.get $__self`) and lands on an externref local DEEP inside
+    // the value sub-expression (e.g. the `options` param feeding an inline
+    // `options.ecmaVersion` read). Splicing `any.convert_extern + ref.cast_null`
+    // there produces an invalid `ref.cast_null … ; any.convert_extern` adjacency
+    // (the receiver of the inline read becomes a struct ref where the read's own
+    // `any.convert_extern` expects externref) → the binary fails validation
+    // (acorn `__fnctor_Parser_new`). Guard: if the span we walked back over
+    // contains any opaque control-flow instruction, the located producer is not
+    // a trustworthy struct-ref receiver — skip the splice and leave codegen's
+    // own (correct) receiver lowering intact.
     let depth = 0;
     let refIdx = -1;
+    let crossedControlFlow = false;
     for (let j = i - 1; j >= 0; j--) {
+      const op = body[j]!.op;
+      if (op === "if" || op === "block" || op === "loop" || op === "try") {
+        crossedControlFlow = true;
+      }
       depth += instrStackDelta(body[j]!, mod);
       if (depth >= 2) {
         refIdx = j;
@@ -234,7 +256,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
       }
     }
 
-    if (refIdx >= 0) {
+    if (refIdx >= 0 && !crossedControlFlow) {
       const refProducer = body[refIdx]!;
 
       // Pattern: ref.null.extern → ref.null $typeIdx
