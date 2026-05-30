@@ -669,7 +669,27 @@ realize it.
   family; (2) equivalence + ir-fallback budget green after every family.
 - **Dependency order:** (0)→(a0)→{(a1)∥(a2)∥(a3)∥(a4)∥(a5)∥(a6)}.
 
-##### (a0)-seam LANDED (#958, 2026-05-30) + (a0)-tail recipe (validated, deterministic)
+##### (a0)-seam LANDED (#958, 2026-05-30) + (a0)-tail LANDED (2026-05-30)
+
+**(a0) TAIL — DONE (task #246).** `lower.ts` is now generic over the emitter
+sink `S`: `lowerIrFunctionToWasm` is a thin `S = Instr[]` wrapper over the new
+`lowerIrFunctionBody<S>(func, resolver, emitter): IrLoweredBody<S>`. The
+`requireInstrSink(out)` guard (`Array.isArray` — true exactly for the WasmGC
+`Instr[]` sink) fences the op families that structurally embed `Instr[]`
+sub-buffers (forof.vec/iter/string · for/while.loop · try · await) until their
+op-families migrate (a1..a6); they throw loudly on a bytecode sink. The ~119
+inline pushes split as designed: core stack primitives (local.get/set/tee,
+const, binary, unary, select, drop, return) route through the **typed emitter
+methods** (byte-identical on WasmGC, functional on bytecode); the remaining
+not-yet-migrated raw `Instr` pushes go through `emitter.pushRaw`. Validation:
+tsc clean, ir-fallback budget unchanged (zero delta), biome clean, and the
+**full equivalence suite has a byte-for-byte identical failing-test set vs
+`origin/main`** (73 pre-existing fails, 0 regressions). `tests/ir-bytecode-proof.test.ts`
+gained a REAL-`lower.ts` arm: it hands the #1715 three IR functions to
+`lowerIrFunctionBody(fn, resolver, new BytecodeEmitter())` and asserts triple
+equivalence (bytecode == WasmGC == JS) — satisfying the (a0) acceptance
+criterion ("bytecode arm produced by real `lower.ts`, not the hand-lowerer").
+Next: the (a1..a6) op-family migration sub-track (task #245).
 
 **The (a0) SEAM is merged (PR #958):** `BackendEmitter<S = Instr[]>` is generic
 over the sink; `newSink()` + `pushRaw(out, instr)` (the raw-`Instr` escape hatch)
