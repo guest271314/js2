@@ -791,8 +791,24 @@ export function compileOptionalPropertyAccess(
   expr: ts.PropertyAccessExpression,
 ): ValType | null {
   // Compile the receiver
-  const objType = compileExpression(ctx, fctx, expr.expression);
+  let objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
+
+  // (#1742) `this.member` / `this.length` where `this` is a host-dispatched
+  // compiled vec/struct receiver: `this` compiled to the `__current_this`
+  // externref but its static type is a vec/struct — guard-convert externref ->
+  // concrete ref so the struct/vec field reads below resolve instead of
+  // bare-casting the externref and trapping "illegal cast". No-op for every
+  // other receiver (byte-identical), since the guard only fires when the static
+  // type already resolved to a compiled vec/struct.
+  if (objType.kind === "externref") {
+    const tIdx = thisReceiverVecStructTypeIdx(ctx, fctx, expr.expression);
+    if (tIdx !== undefined) {
+      emitThisReceiverGuardConvert(ctx, fctx, tIdx);
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      objType = { kind: "ref", typeIdx: tIdx };
+    }
+  }
 
   // Determine result type from the TS type of the property being accessed
   const tsPropType = ctx.checker.getTypeAtLocation(expr);
@@ -3026,6 +3042,68 @@ export function isSafeBoundsEliminated(fctx: FunctionContext, expr: ts.ElementAc
 
 // ── Element access ───────────────────────────────────────────────────
 
+/**
+ * (#1742) `this`-receiver guard-convert for compiled vec/struct receivers.
+ *
+ * When a closure body reads `this[i]` / `this.length` / `this.member` and `this`
+ * resolves to the `__current_this` module global (host-dispatched via
+ * `__call_fn_method_N`, #1636-S1), the resolved value is a literal **externref**
+ * — but its static TS type is a compiled vec/struct, so the member-read fast path
+ * would bare-cast the externref to the vec/struct ref and trap "illegal cast".
+ *
+ * This helper guard-converts the externref-on-stack to the concrete vec/struct
+ * ref: `any.convert_extern` → null-guarded `ref.cast` to `targetTypeIdx`. The
+ * `this`-via-`__call_fn_method_N` receiver IS the compiled value at runtime (the
+ * host installed the reflected vec/struct), so the cast is sound; the call sites
+ * only invoke this when the static type already resolved to a compiled vec/struct
+ * (a genuine host-object `this` has a non-vec/struct static type and never reaches
+ * here). Generic over receiver shape — consumed by #1719 (vec) and #1629 (struct
+ * getters).
+ *
+ * Stack: [externref] -> [(ref null targetTypeIdx)]. Returns the produced ValType.
+ */
+export function emitThisReceiverGuardConvert(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  targetTypeIdx: number,
+): ValType {
+  // externref -> anyref, then null-safe cast to the concrete struct/vec type.
+  // ref.cast traps on a non-null value of the wrong type; the static-type gate
+  // at the call site guarantees the runtime receiver is this exact compiled type
+  // (installed into __current_this from a compiled vec/struct), so the cast holds.
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: targetTypeIdx } as Instr);
+  return { kind: "ref_null", typeIdx: targetTypeIdx };
+}
+
+/**
+ * (#1742) True when `expr` is a `this`-receiver member access whose `this`
+ * resolves to the `__current_this` externref (host-dispatched closure body) but
+ * whose static TS type is a compiled vec/struct. In that case the object compiles
+ * to externref yet the member-read path expects the concrete ref — the guard
+ * convert bridges them. Returns the target vec/struct typeIdx, or undefined when
+ * the guard does not apply (normal path unchanged — byte-identical).
+ */
+function thisReceiverVecStructTypeIdx(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  objExpr: ts.Expression,
+): number | undefined {
+  if (objExpr.kind !== ts.SyntaxKind.ThisKeyword) return undefined;
+  if (!fctx.readsCurrentThis || ctx.currentThisGlobalIdx < 0) return undefined;
+  // A local `this` binding (struct method / constructor) is NOT the
+  // __current_this externref path — it already carries the concrete ref.
+  if (fctx.localMap.has("this")) return undefined;
+  const thisType = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(objExpr));
+  const wasmType = resolveWasmType(ctx, thisType);
+  if (wasmType.kind === "ref" || wasmType.kind === "ref_null") {
+    const typeIdx = (wasmType as { typeIdx: number }).typeIdx;
+    const typeDef = ctx.mod.types[typeIdx];
+    if (typeDef?.kind === "struct" || typeDef?.kind === "array") return typeIdx;
+  }
+  return undefined;
+}
+
 export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3154,6 +3232,22 @@ export function compileElementAccess(
 
   const objType = compileExpression(ctx, fctx, expr.expression);
   if (!objType) return null;
+
+  // (#1742) `this[i]` where `this` is a host-dispatched compiled vec/struct
+  // receiver: `this` compiled to the `__current_this` externref, but the static
+  // type is a vec/struct, so guard-convert externref -> concrete ref before the
+  // member-read body (which would otherwise bare-cast the externref and trap
+  // "illegal cast"). No-op for every other receiver — byte-identical.
+  if (objType.kind === "externref") {
+    const tIdx = thisReceiverVecStructTypeIdx(ctx, fctx, expr.expression);
+    if (tIdx !== undefined) {
+      const concreteType = emitThisReceiverGuardConvert(ctx, fctx, tIdx);
+      const nonNull: ValType = { kind: "ref", typeIdx: tIdx };
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      void concreteType;
+      return compileElementAccessBody(ctx, fctx, expr, nonNull);
+    }
+  }
 
   // Null-guard for ref_null: throw TypeError on null, narrow to ref after check
   // In JS, null[x] and undefined[x] throw TypeError

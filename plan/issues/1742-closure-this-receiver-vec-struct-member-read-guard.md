@@ -83,6 +83,33 @@ through unchanged for a genuine host externref.
   still pass through to the host read path unchanged; byte-identical output for
   modules that never dispatch a compiled receiver through `__call_fn_method_N`.
 
+## CORRECTION — the guard must be RUNTIME-tested, not static-type-gated (senior-dev, 2026-05-30)
+
+First impl attempt gated the guard on the static TS type of `this` resolving to a
+vec/struct (`emitThisReceiverGuardConvert` + `thisReceiverVecStructTypeIdx` in
+property-access.ts). **It does NOT fire** — proven by `CPR_DEBUG` instrumentation:
+in the realistic override `Array.prototype[Symbol.iterator]=function*(){…this[0]…}`
+(no `this:` annotation), TypeScript infers **`this: any`**, which `resolveWasmType`
+maps to **externref**, not a vec. So a static-type gate can never match the very
+shape #1719 needs. (`readsCurrentThis=true`, `currentThisGlobalIdx` set, no local
+`this` — all correct; only the type gate fails.)
+
+**Correct mechanism (the tech-lead's steer, precisely): RUNTIME-tested dual-arm.**
+At `this[i]` / `this.length` when `this` is the `__current_this` externref
+(`readsCurrentThis`, no local `this`), emit:
+`any.convert_extern` → `ref.test $vec`/`$struct` → **if** it IS a compiled vec/struct
+at runtime, `ref.cast` + read via the vec/struct path; **else** fall through to the
+existing host `__extern_get` / `__extern_length` lane (genuine host-object `this`).
+No static-type gate — the discriminator is the runtime `ref.test`. The element/
+length/property reads each wrap their fast path in this test. This is a slightly
+larger emit (a `ref.test`-branched dual arm) but the same ~2-3 sites; no ABI ripple.
+For #1629's struct getter the same `ref.test`-against-the-struct-type arm applies.
+
+The static-gate helpers I added are a dead end for the `any`-typed override case and
+should be replaced by the runtime-test form (keep `emitThisReceiverGuardConvert` as
+the "then" arm's cast, drop the static `thisReceiverVecStructTypeIdx` gate in favour
+of a runtime test keyed on the access shape + a candidate vec/struct type-set).
+
 ## Implementation resume notes (pinned sites — senior-dev, 2026-05-30)
 
 Branch `issue-1719-s2-arrayobj` (off origin/main, current). `ctx.protoOverrides`
