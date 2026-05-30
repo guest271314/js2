@@ -62,44 +62,88 @@ into a growable i16 buffer. Each `+=` does:
    + `array.copy` to grow), `array.copy` the chars in, bump `len`,
    invalidate the materialized cache (`mat = null`).
 
-For a 20k-iteration build that's ~60k single-char `$NativeString`
-allocations + ~60k `__str_flatten` calls + the doubling `array.copy` churn.
-The opt3 WAT confirms the build loop still contains `array.copy` /
-`array.new_default` / `struct.new` that wasm-opt cannot fully eliminate
-(unlike the hash loop, which collapsed to pure `array.get_u`).
+For a 20k-iteration build that's **~40k single-char `$NativeString`
+allocations** (the two `charAt` appends per iteration) + ~60k
+`__str_flatten` calls (one per append; the `charAt` operand `alphabet` is the
+same constant every time) + the doubling `array.copy` churn. The `-O0` WAT
+shows the build loop still contains the `array.new_fixed` + `struct.new`
+allocation and the per-iteration `__str_flatten` call that wasm-opt cannot
+eliminate (unlike the hash loop, which collapsed to pure `array.get_u`). The
+exact instruction-level breakdown is pinned below.
 
-## Likely high-value levers (for the architect / dev)
+## Pinned targets (from a tech-lead WAT-level dissection of $run, -O0)
 
-1. **`s.charAt(i)` → direct i16 append without a `$NativeString` box.**
-   When the result of `charAt`/`charCodeAt` flows straight into a `+=` on a
-   string-builder, we can append the single code unit to the buffer with one
-   `array.set` + `len++`, skipping the 1-char `$NativeString` allocation and
-   the `__str_flatten` round-trip entirely. This is the biggest win — it
-   removes ~60k allocations + ~60k flatten calls from the hot build loop.
-2. **Literal append fast-path.** `text += ";"` appends a known 1-char ASCII
-   literal — emit a direct `array.set` of the constant code unit, no
-   `$NativeString` materialization of the literal at all.
-3. **Amortized growth audit.** Confirm `__str_buf_next_cap` is true geometric
-   doubling and the `array.copy` on grow is not happening more than
-   O(log n) times; check whether the initial capacity (16) forces early
-   regrowth for a 40k-char result.
-4. **Escape analysis (#747 / #1587 ownership lattice).** The intermediate
-   1-char `$NativeString`s from `charAt` never escape; the ownership analysis
-   could mark them stack/scratch and let codegen skip the heap allocation.
+A `-O0` disassembly of the compiled `$run` resolved the func indices (no
+imports ⇒ index = declaration order): `call 7` = `__str_charAt`,
+`call 1` = `__str_flatten`. Each `text += alphabet.charAt(x)` lowers to
+`__str_charAt(__str_flatten(alphabet), x)` + append. The pinned costs, in
+priority order:
+
+### Target #1 (the big one) — eliminate the per-`charAt` 1-char-string allocation
+
+`__str_charAt` emits a fresh 1-char `$NativeString` every call
+(`array.new_fixed $u16Array 1` + `struct.new $NativeString`), the append then
+copies that single char into the buffer and discards the string. Over
+`20k × 2` `charAt` appends that is **~40,000 throwaway allocations** — the
+dominant GC cost of the build loop.
+
+**The win:** special-case the single-char-append idiom `buf += X.charAt(i)`
+in the string-builder append path. Read the char code directly
+(`array.get_u $u16Array` on `X`'s flattened data at index `i`) and append the
+**code unit** to the buffer (`array.set` + `len++`), with **no intermediate
+1-char `$NativeString`**. This removes the 40k allocations outright.
+
+### Target #2 — elide `__str_flatten` on a constant / known-flat operand
+
+`__str_flatten(alphabet)` is called **every iteration** on the constant
+`alphabet` literal — ~40k redundant flattens of an already-flat string.
+Hoist the flatten out of the loop (or elide it entirely) when the operand is
+a string literal / statically known-flat value. (`__str_flatten` is a cheap
+`ref.test`-identity on a flat input, but 40k redundant calls + the cast churn
+still cost.)
+
+### Target #3 (minor peephole) — kill the index roundtrip + double cast
+
+The `charAt` index goes `i32 → f64 → i32` (the f64 numeric ABI) and there is a
+redundant double `ref.cast null` on the receiver. A peephole pass over the
+single-char-append fast path should collapse both.
+
+### Confirmed NOT to touch (already optimal — verified by the same dissection)
+
+- **The hash loop** — the #1580 cache works: after iteration 1 the
+  `ref.is_null` short-circuits to a direct `array.get_u`, no per-read alloc.
+- **The doubling buffer** — grow is `if (new_len > cap)`-guarded ⇒ amortized
+  O(1) reallocation, not O(n²). Don't rewrite the growth policy; the initial
+  capacity is fine.
 
 ## Acceptance criteria
 
-- [ ] `string-hash` warm drops meaningfully below StarlingMonkey's 14.2 ms on
-      a clean wasmtime host (target: ≤ ~10 ms, i.e. genuinely beat the engine
-      lane, not just the lenient 30 ms gate). State the measured number.
-- [ ] The build loop no longer allocates a `$NativeString` per `charAt` /
-      per literal append (verify in the opt3 WAT: no `struct.new
-      $NativeString` inside the build loop; appends are `array.set` + `len`
-      bump).
+- [ ] **Target #1 done:** the build loop emits **no `struct.new
+      $NativeString` per `charAt`** — `buf += X.charAt(i)` lowers to
+      `array.get_u` + `array.set` + `len` bump. Verify in the `-O0` WAT of
+      `$run` (the fast path must be visible pre-wasm-opt, not just after SROA).
+- [ ] **Target #2 done:** `__str_flatten` is **not** called per-iteration on a
+      constant operand inside the build loop (hoisted or elided).
+- [ ] `string-hash` warm drops below StarlingMonkey's 14.2 ms on a clean
+      wasmtime host (target: ≤ ~10 ms — genuinely beat the engine lane). State
+      the measured number.
 - [ ] No regression to the #1580 hash-loop shape (the guard in
       `tests/issue-1580.test.ts` stays green).
+- [ ] Correctness: `string-hash` (and the broader string-builder equivalence
+      tests) still produce identical output — the single-char fast path must
+      handle surrogate pairs / non-ASCII code units the same as the
+      string-roundtrip path (a code-unit copy is correct for `charAt`, which is
+      itself code-unit-indexed, but verify against multi-byte input).
 - [ ] `benchmarks/results/wasm-host-wasmtime-hot-runtime.json` refreshed on a
       clean wasmtime host with the new measured number + provenance.
+
+## Reproduction
+
+`compile(string-hash.js, { target: "wasi", nativeStrings: true, optimize: 0 })`
+and inspect `$run` — the `__str_charAt` (`array.new_fixed` + `struct.new`)
+allocation and the per-iteration `__str_flatten` call are visible directly in
+the `-O0` WAT. (Tech-lead probe artifacts for this dissection live in that
+agent's job tmp.)
 
 ## Files most likely to touch
 
