@@ -31,6 +31,7 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { maybeCaptureArrayProtoOverride } from "./proto-override.js";
 import {
   classifyPrivateMember,
   emitCoercedLocalSet,
@@ -99,6 +100,15 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
     const synth = { ...expr, left: lhs } as ts.BinaryExpression;
     return compileAssignment(ctx, fctx, synth);
   }
+  // (#1719 CPR write-arm) `Array.prototype[Symbol.iterator] = fn` /
+  // `Array.prototype.values = fn` has no compiled landing spot and is otherwise
+  // silently dropped. Capture the lifted override closure into ctx.protoOverrides
+  // (rooted in a module global) so array dstr / for-of / spread can drive it.
+  // Gated on the S1 brand inside the helper — no-op (byte-identical) otherwise.
+  if (maybeCaptureArrayProtoOverride(ctx, fctx, lhs, expr.right)) {
+    return { kind: "externref" };
+  }
+
   if (ts.isIdentifier(expr.left)) {
     const name = expr.left.text;
     // const bindings — assignment throws TypeError at runtime
