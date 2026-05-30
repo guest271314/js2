@@ -73,6 +73,7 @@ export function createCodegenContext(
     staticAccessorSet: new Set(),
     staticMethodSet: new Set(),
     staticProps: new Map(),
+    protoOverrides: new Map(), // #1719 CPR — captured prototype-member overrides
     staticInitExprs: [],
     closureCounter: 0,
     closureMap: new Map(),

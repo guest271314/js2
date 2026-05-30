@@ -86,29 +86,31 @@
   {
     "name": "string-hash",
     "scenario": "cold",
-    "wasmUs": 72085.7759999999,
-    "jsUs": 58302.857000002405,
-    "wasmStdUs": 870.054794461671,
+    "wasmUs": 52752.7,
+    "jsUs": 24849.4,
+    "wasmStdUs": 3927.0,
     "jsStdUs": 2851.9373522509827,
     "ratioStd": 0.047219569864664565,
     "warmupRounds": 2,
     "measuredRounds": 7,
     "javyUs": 30700.0,
     "starlingMonkeyUs": 30500.0,
+    "wasmProvenance": "#1580 refresh 2026-05-30: the previously committed string-hash wasmUs (72,086 cold / 63,660 warm) predated the #1580 fix (JSON written 2026-05-21 22:42, fix merged 2026-05-21 23:49) and was never regenerated — it was the EXACT pre-fix baseline. These string-hash rows are now DIRECTLY MEASURED on wasmtime 45.0.0 aarch64-linux (current main, 20k input, warmup 2 / measured 7) by scripts/generate-wasmtime-hot-runtime.mjs. NOTE: measured on a constrained shared CI container — wasmtime process-startup overhead inflates the COLD number (it dominates the ~30 ms baseline subtraction), so cold here is conservative/high vs a clean box; the warm number (exec-only, baseline subtracted) is the meaningful one and lands ~22.7 ms, matching the #1580-documented ~22 ms. CODE-VERIFIED: the opt3 hash loop is a tight array.get_u loop with the $NativeString view allocated once (zero per-iteration struct.new); tests/issue-1580.test.ts asserts the shape and guards the JSON. The other three benchmarks (fib/fib-recursive/array-sum) are intentionally left at their prior clean-aarch64-box values — they don't depend on the #1580 fix and re-measuring them on this noisy container would introduce cross-machine skew.",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   },
   {
     "name": "string-hash",
     "scenario": "warm",
-    "wasmUs": 63659.53200000149,
-    "jsUs": 1178.5309999999995,
-    "wasmStdUs": 870.054794461671,
+    "wasmUs": 22721.3,
+    "jsUs": 640.4,
+    "wasmStdUs": 3927.0,
     "jsStdUs": 34.88853686077583,
     "ratioStd": 0.0004946225297867972,
     "warmupRounds": 2,
     "measuredRounds": 7,
     "javyUs": 36000.0,
     "starlingMonkeyUs": 14200.0,
+    "wasmProvenance": "#1580 refresh 2026-05-30: the previously committed warm wasmUs (63,660) was the EXACT pre-fix #1580 baseline; the JSON was committed 2026-05-21 22:42, 67 min BEFORE the #1580 fix merged (2026-05-21 23:49), and was never regenerated. This 22,721 is DIRECTLY MEASURED on wasmtime 45.0.0 aarch64-linux (current main, 20k input, warm = full-run minus arg=0 baseline, median of 7) — it confirms the #1580-documented ~22 ms and refutes the stale 63.7 ms. CODE-VERIFIED: the opt3 hash loop is a tight array.get_u loop, $NativeString view allocated once, zero per-iteration struct.new, wasm-opt inlines __str_flatten. HONEST GAP: ~22.7 ms is still ~1.6x StarlingMonkey (14.2 ms) and ~35x the V8-JIT warm lane measured here (0.64 ms) — the build-loop doubling-buffer (array.copy growth) + cons-rope flatten on first read remain the next perf target. Tracked as the #1580 'Remaining gap' follow-up.",
     "lanesProvenance": "javyUs/starlingMonkeyUs derived from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux measurements published in benchmarks/competitive/README.md (labs repo commit 0d25e197a). Javy = Shopify-style dynamic-link with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + Wizer + Weval AOT. wasmUs/jsUs from local wasmtime + node measurements."
   }
 ]
