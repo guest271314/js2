@@ -478,10 +478,18 @@ export function compileCallablePropertyCall(
     // externref must round-trip through anyref before ref.test/ref.cast.
     if (recvResult && recvResult.kind === "externref") {
       fctx.body.push({ op: "any.convert_extern" } as Instr);
+      emitGuardedRefCast(fctx, structTypeIdx);
+      return;
     }
     // A different struct ref is already an anyref subtype — guard-cast directly.
-    // (ref/ref_null of another struct, or the any-converted externref above.)
-    emitGuardedRefCast(fctx, structTypeIdx);
+    if (recvResult && (recvResult.kind === "ref" || recvResult.kind === "ref_null")) {
+      emitGuardedRefCast(fctx, structTypeIdx);
+      return;
+    }
+    // Anything else (primitive / void) — leave the stack as the legacy bare
+    // `struct.get` path expected; guarding a non-reference operand would itself
+    // be ill-typed. This preserves prior behavior for shapes that never reach
+    // the #1734 mismatch.
   };
 
   // The field must be a callable type — check via TS type checker
