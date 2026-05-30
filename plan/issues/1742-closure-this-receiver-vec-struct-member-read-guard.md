@@ -152,6 +152,41 @@ force-emit the closure) → read-drive at the branded dstr gate
 overridden `@@iterator` yields `z=42` → CPR-2 (values alias + for-of + spread) →
 PR, #1719 status:done.
 
+## Implemented — runtime-tested guard (senior-dev sdev-cpr, 2026-05-30)
+
+The CORRECTION is now implemented in `src/codegen/property-access.ts`:
+
+- **`emitThisReceiverGuardConvert(ctx, fctx, targetTypeIdxs[], resultType, thenEmit, elseEmit)`**
+  — the shared primitive, now RUNTIME-tested + dual-arm. Externref on stack →
+  `any.convert_extern`; then a chained `ref.test $target` per candidate type: on the
+  FIRST hit `ref.cast` + `thenEmit(concreteType)` runs the vec/struct read; if NONE
+  match, `elseEmit()` runs the host path on the original externref. Both arms leave
+  `resultType`, so a genuine host receiver passes through unchanged.
+- **`thisReceiverGuardTargets(ctx, fctx, objExpr, kind)`** — replaces the dead
+  static-type gate. Fires for any `ThisKeyword` in a `readsCurrentThis` closure (no
+  local `this`); returns candidate types = static `this` struct type (if any) ∪ the
+  registered vec types (for element access — the untyped override `this`). NO static
+  vec/struct requirement.
+- **Sites**: element-access (`this[i]`) entry of `compileElementAccess`, and the
+  array `.length` block of `compilePropertyAccess` (filtered to vec types). The wrong
+  optional-chaining inject from the WIP scaffolding was reverted (byte-identical).
+
+Verified: WAT for `this[i]`/`this.length` in a lifted closure emits a chained
+`ref.test (ref $vec_externref)` → `ref.test (ref $vec_f64)` … guard (no bare cast).
+**Zero equivalence regressions**: the full `tests/equivalence/` failure set is
+byte-for-byte identical to the pre-#1742 branch base (73 pre-existing fails, branch
+is behind main — same set with/without the guard; 0 added, 0 removed). Regression
+pinned in `tests/issue-1742-this-receiver-guard.test.ts`. #1636-S1 `this`-binding
+regression tests pass.
+
+**Runtime end-to-end note (for the #1719 CPR drive):** #1742 supplies the read
+primitive but has no independent runtime trigger — only the CPR drive (steps 3-4) or
+a #1629 accessor getter dispatches a compiled vec/struct as `this` through
+`__call_fn_method_N`. (The `g.apply(arr,[])` shape is NOT a valid trigger — `.apply`'s
+own receiver-install is a separate pre-existing gap, #1596, that reads a null
+`__current_this`.) The multi-vec `ref.test` chain means the CPR drive can install a
+typed `$vec_f64`/`$vec_i32` receiver directly without normalising to externref-vec.
+
 ## Source
 
 Carved from #1719 CPR build (senior-dev, 2026-05-30) after the size-gate probe
