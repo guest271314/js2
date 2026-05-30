@@ -181,4 +181,24 @@ export interface BackendEmitter<S = Instr[]> {
   emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
   /** struct ref + value on stack -> writes the named field (void). */
   emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: S): void;
+
+  // ---- (a4) try-throw family — MIGRATED behind the trait (#1584 §2a) --------
+  // The exception ops (throw / try / rethrow). The caller (real `lower.ts`)
+  // pre-lowers the try/catch/finally regions into their own sinks (via
+  // `newSink()`), exactly as it builds the WasmGC `try`'s body/catch/catchAll as
+  // separate `Instr[]`. WasmGc realizes them byte-identically (`{op:"throw"}` /
+  // `{op:"try",body,catches,catchAll}` / `{op:"rethrow"}`); Bytecode realizes
+  // `OP.THROW` / `OP.TRY_START`+`TRY_END` + an `exceptionTable` sink field
+  // (issue §1c/§2a). Finally semantics are compiled away in `lower.ts` (inlined
+  // on every exit path + an inner try/catch_all+rethrow), so neither backend
+  // needs a finally concept — both only see throw/try/catch_all/rethrow.
+  /** Throw the exception value already on the stack via the `__exn` tag. */
+  emitThrow(tagIdx: number, out: S): void;
+  /** Re-throw the currently-caught exception (`depth` levels out; lower.ts
+   * only emits depth 0 today). */
+  emitRethrow(depth: number, out: S): void;
+  /** Structured try. `body` / each catch `body` / `catchAll` are pre-lowered
+   * into their own sinks (built via `newSink()`). `catches[i].tagIdx` selects
+   * the handler by exception tag. */
+  emitTry(blockType: BlockType, body: S, catches: { tagIdx: number; body: S }[], catchAll: S | undefined, out: S): void;
 }

@@ -173,6 +173,16 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   emitLoop(): void {
     notImplemented("emitLoop");
   }
+  // (a4) try-throw family (#1584 §2a) — out of the #1714 vec-proof scope.
+  emitThrow(): void {
+    notImplemented("emitThrow");
+  }
+  emitRethrow(): void {
+    notImplemented("emitRethrow");
+  }
+  emitTry(): void {
+    notImplemented("emitTry");
+  }
   // (a2) struct/object family (#1584 §2a) — out of the #1714 vec-proof scope.
   emitAggregateNew(): void {
     notImplemented("emitAggregateNew");
