@@ -110,7 +110,7 @@ fidelity → #1463) were NOT re-filed.
 - [#1716](../1716-spec-gap-toprimitive-residual-object-property-key-coercion.md) — **RESIDUAL of done #1090/#1319/#1525**: `Cannot convert object to primitive value` still thrown in 111 paths (Object property-key + String/RegExp/JSON/Date `this`-value coercion) — **high**, medium, **ready**
 - [#1717](../1717-arraybuffer-prototype-slice-not-implemented.md) — `ArrayBuffer.prototype.slice` not implemented (`slice is not a function`, 17 fails) — medium, medium, **ready**
 - [#1718](../1718-iterator-sequencing-helpers-concat-zip-flatmap.md) — Iterator sequencing helpers (`Iterator.concat`/`zip`/`zipKeyed`) + `Iterator.prototype.flatMap` not implemented (101 fails; distinct from done #1340) — medium, hard, **ready**
-- [#1719](../1719-array-destructuring-ignores-overridden-array-prototype-iterator.md) — Array destructuring ignores overridden `Array.prototype[Symbol.iterator]` (`items[Symbol.iterator]` must be a function, 71 fails) — **high**, medium, **ready**
+- ~~[#1719](../1719-array-destructuring-ignores-overridden-array-prototype-iterator.md) — Array destructuring ignores overridden `Array.prototype[Symbol.iterator]` (`items[Symbol.iterator]` must be a function, 71 fails)~~ — **DONE** 2026-05-30 (CPR read-drive across decl/for-of/param/assignment, PRs #963/#968/#976). Follow-ups: #1749 (spread), #1750 (TS-cast form).
 
 ### ES3 / edition-0 conformance → Sprint 57 (Track 3)
 
