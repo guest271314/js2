@@ -118,3 +118,5 @@ fidelity → #1463) were NOT re-filed.
 - [#1721](../1721-es3-subclass-function-object-instanceof.md) — ES3 (residual of #1455): `class extends Function`/`extends Object` instanceof returns false (4 fails) — medium, medium, **ready (sprint 57)**
 - [#1722](../1722-es3-assignmenttargettype-early-syntaxerror.md) — ES3: AssignmentTargetType early SyntaxError not raised (yield/arrow as assignment target, 4 fails) — low, medium, **ready (sprint 57)**
 - [#1511](../1511-spec-gap-arguments-object-mapped-and-trailing-comma.md) — **MOVED to sprint 57** (was sprint 52): arguments object mapped semantics / descriptors / trailing-comma length — covers the ES3 mapped-arguments cluster (~19 edition-0 fails) — high, medium, **review**
+- [#1754](../1754-build-from-repo-loopdive-js2-unresolved.md) — Build-from-repo: `packages/index` re-exports unresolved `@loopdive/js2` (clean-clone build break) — medium, medium, **ready**
+- [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — TS annotation `Uint8Array<ArrayBuffer>` generic typed-array form not handled — low, medium, **ready**

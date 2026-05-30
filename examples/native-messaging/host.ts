@@ -19,8 +19,8 @@
 //              4-byte length prefix and the message body. Large raw-byte
 //              writes (>= 1 MiB) grow linear memory as needed (#389/#1723) so a
 //              megabyte-scale body round-trips byte-exactly.
-//   - stderr : console.error / console.warn write to fd=2 (#1493) — use these
-//              for debug output so they never corrupt the stdout protocol stream
+//   - stderr : process.stderr.write writes to fd=2 (no `console` in ECMA-262) —
+//              use it for debug output so it never corrupts the stdout stream
 //
 // This is a drop-in Chrome host modelled on the 3-symbol shape guest271314
 // uses across runtimes (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`):
@@ -82,7 +82,7 @@ function getMessage(): Uint8Array {
   // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
   // protocol stream. Chrome ignores the host's stderr. The frame is the 4-byte
   // LE prefix plus the declared body, so total bytes consumed is 4 + declaredLen.
-  console.error(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}`);
+  process.stderr.write(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}\n`);
   return body;
 }
 
