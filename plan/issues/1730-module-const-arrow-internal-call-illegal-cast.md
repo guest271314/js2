@@ -47,6 +47,32 @@ inline arrow / passed-as-arg paths, which work). Lives in `src/codegen/closures.
 closure call_ref dispatch (the `ref.cast typeIdx structTypeIdx` at the call
 site, see closures.ts ~1699 / dispatch ref.cast), not in the async wrap.
 
+## Further narrowing (senior-dev, 2026-05-30)
+
+Reproduced the trap and bisected the two call shapes:
+
+- **`f(21)` (direct call)** → TRAPS `illegal cast`.
+- **`const g = f; g(21)` (via intermediate local)** → WORKS (returns 42).
+
+The intermediate-local path loads the callee correctly:
+`local.set $0 (extern.convert_any (global.get $global$0))` — `global$0` holds
+the closure struct `(struct.new $0 (ref.func $__closure))`.
+
+The direct-call path instead emits, inside the `call_ref` argument region, a
+self re-resolution that **casts the wrong global**:
+`ref.cast (ref null $0) (any.convert_extern (global.get $gimport$3))` where
+`gimport$3` is the imported `"TypeError: Cannot access property…"` message
+string global — the direct-call self-load grabs a garbage global instead of
+`global$0`, then `ref.cast` to the closure struct type traps.
+
+So the defect is in the **direct `Identifier(args)` dispatch for a
+module-`const`-bound arrow** (`src/codegen/expressions/calls.ts`): the
+closure-self/receiver load resolves the callee from the wrong global rather
+than `ctx.moduleGlobals.get("f")` (`global$0`). The wrapper-types branch at
+~7996 (`compileExpression(expr.expression)` → `any.convert_extern` →
+`emitGuardedRefCast` → saved to a local) is the *correct* shape — the failing
+path is a *different* arm that loads self from a sentinel.
+
 ## Repro / acceptance
 
 - `const f = (x:number):number => x*2; main(){ return f(21); }` → 42 (no trap).
