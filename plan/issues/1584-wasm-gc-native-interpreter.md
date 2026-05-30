@@ -15,6 +15,7 @@ sprint: Backlog
 depends_on: [1058, 1006, 1066, 1102]
 es_edition: multi
 ---
+
 # #1584 — Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback
 
 Strategy proposal for executing genuinely dynamic JavaScript inside the
@@ -139,8 +140,8 @@ Briefly: register-based dispatch produces fewer opcodes per source operation
 than stack-based, the accumulator pattern reduces operand encoding overhead,
 and Wasm-locals map directly to virtual registers in the dispatch function.
 Stack-based dispatch was considered and rejected on the dispatch-loop
-performance grounds documented in Titzer 2022 (*A fast in-place interpreter
-for WebAssembly*, OOPSLA).
+performance grounds documented in Titzer 2022 (_A fast in-place interpreter
+for WebAssembly_, OOPSLA).
 
 ### Component 3: Dispatch loop (TypeScript)
 
@@ -179,7 +180,7 @@ approach (QuickJS, Engine262, V8 Ignition port). Those would all require
 adapter layers at the boundary, with the attendant identity-semantics
 breakage that has been documented for the host-import path in #1066.
 
-Built-ins (Array.prototype.*, String.prototype.*, Object.*, Reflect.*, etc.)
+Built-ins (Array.prototype._, String.prototype._, Object._, Reflect._, etc.)
 are implemented once in TypeScript against the boxed representation. The AOT
 path calls them directly via type-specialized wrappers when types allow, or
 generically when not. The interpreter calls them generically via the
@@ -187,21 +188,21 @@ generically when not. The interpreter calls them generically via the
 
 For ECMA-262 compliance, built-in implementations follow the Engine262 source
 as a reference — Engine262's spec-direct implementations port mechanically to
-TypeScript against our boxing API. This is *not* a compilation of Engine262;
+TypeScript against our boxing API. This is _not_ a compilation of Engine262;
 it is an implementation guided by the same source the TC39 reference uses.
 
 ### What's unified, what's separate
 
-| Concern | Unified | Separate |
-|---|---|---|
-| Value representation (JSValue, boxes) | ✓ | |
-| Built-in library | ✓ | |
-| Object shape / hidden-class layout | ✓ | |
-| Garbage collection | ✓ (Wasm GC) | |
-| Frontend (parser → IR) | ✓ (TS parser at build time) | |
-| Backend (IR → output) | | AOT to Wasm GC vs. bytecode emission |
-| Execution | | direct Wasm execution vs. dispatch loop |
-| Linked module size | | optional Acorn + interpreter |
+| Concern                               | Unified                     | Separate                                |
+| ------------------------------------- | --------------------------- | --------------------------------------- |
+| Value representation (JSValue, boxes) | ✓                           |                                         |
+| Built-in library                      | ✓                           |                                         |
+| Object shape / hidden-class layout    | ✓                           |                                         |
+| Garbage collection                    | ✓ (Wasm GC)                 |                                         |
+| Frontend (parser → IR)                | ✓ (TS parser at build time) |                                         |
+| Backend (IR → output)                 |                             | AOT to Wasm GC vs. bytecode emission    |
+| Execution                             |                             | direct Wasm execution vs. dispatch loop |
+| Linked module size                    |                             | optional Acorn + interpreter            |
 
 ## Scope
 
@@ -422,14 +423,14 @@ in the #1715 proof (landed via PR #954, `src/ir/backend/bytecode-emitter.ts`,
 ### 0. The #1715 ADR finding this plan rests on
 
 The #1713 trait abstracts the **execution model**, not the representation. The
-**only** representation-specific part of the seam is the *sink type*: WasmGC /
+**only** representation-specific part of the seam is the _sink type_: WasmGC /
 linear share the `Instr[]` sink; bytecode generalises it to an abstract
-`BytecodeSink`. Everything else — the primitive *set* (`emitConst`,
+`BytecodeSink`. Everything else — the primitive _set_ (`emitConst`,
 `emitBinary`, `emitLocalGet/Set`, `emitReturn`, `emitIf`, …), the
 push-to-sink convention, and the **caller-owns-operand-order** contract
-(`lower.ts` emits operand subtrees via `emitValue` *before* the terminal-op
+(`lower.ts` emits operand subtrees via `emitValue` _before_ the terminal-op
 primitive) — transfers unchanged. Critically, **the encoding (stack vs
-register+accumulator) is a free choice *below* the seam**: the seam does not
+register+accumulator) is a free choice _below_ the seam**: the seam does not
 observe it. That is what lets slices (a) and (b) proceed in parallel against a
 frozen primitive surface while one of them picks the encoding internally.
 
@@ -464,7 +465,7 @@ three distinct movements that must be scoped separately so the work is visible:
 This reframes the dependency order (see §2 summary): **contract pin → sink
 generalization → per-op-group trait-migration sub-slices (∥ where families are
 independent) → VM realization + eval-entry.** The VM and eval-entry consume
-the *output* of the migration; they do not wait for all 166 sites, only for
+the _output_ of the migration; they do not wait for all 166 sites, only for
 the op families they exercise.
 
 ### 1. THE PINNED CONTRACT (single source of truth)
@@ -472,20 +473,20 @@ the op families they exercise.
 > **Owner file: `src/ir/backend/bytecode-emitter.ts`.** This file owns the
 > opcode enum (`OP`), the `BytecodeSink` interface/class, and the
 > `BytecodeEmitter` primitive surface. **Only slice (a) edits this file.**
-> Every other slice imports it **read-only**. The VM (slice b) is the *reader*
-> of `OP` + `BytecodeSink`; the eval-entry (slice c) is a *driver* of
+> Every other slice imports it **read-only**. The VM (slice b) is the _reader_
+> of `OP` + `BytecodeSink`; the eval-entry (slice c) is a _driver_ of
 > `BytecodeEmitter`. If two slices both need to touch the contract, that is a
 > contract change — escalate, do not edit in parallel.
 >
 > **Second owned file (the seam): `src/ir/backend/emitter.ts`** — the
 > `BackendEmitter` trait + the new `BackendSink` abstraction (§0a-1). The
 > sink-generalization sub-slice owns this; the per-op-group migration sub-slices
-> *add methods to the trait* under coordination (see §2a for how the families
+> _add methods to the trait_ under coordination (see §2a for how the families
 > stay disjoint).
 
 #### 1a. Encoding decision: **register + accumulator (Ignition-style)** — but staged
 
-The #1715 proof picked a **stack machine** as the *throwaway-grade* tiebreaker
+The #1715 proof picked a **stack machine** as the _throwaway-grade_ tiebreaker
 (issue §6: "a stack machine is acceptable for the proof if simpler"). For the
 **production** Phase-1 VM, this plan commits to **register + accumulator**, per
 the issue's own §"Component 2/3" rationale and the V8 Ignition / Lua 5 / Hermes
@@ -501,14 +502,14 @@ prior art:
   the issue). The stack model would force a `number[]` push/pop hot loop that
   the AOT-compiled dispatch cannot turn into Wasm locals.
 - **Why this does NOT block parallelism:** the encoding lives **below the
-  seam**. Slices (a) and (b) agree only on the *primitive surface* + the
+  seam**. Slices (a) and (b) agree only on the _primitive surface_ + the
   `OP`/`BytecodeSink` shapes; the reg-vs-stack realization of each opcode is
   internal to (a)+(b) and invisible to (c)/(d). The #1715 stack proof remains
   the regression anchor (see §"If the contract shape changes" below).
 
 **STAGING NOTE for the two parallel senior-devs (a)/(b) starting NOW on the
 #1715 proof files:** keep building on the **stack** shapes already in
-`bytecode-emitter.ts`/`bytecode-vm.ts` for your *first* landed increment so the
+`bytecode-emitter.ts`/`bytecode-vm.ts` for your _first_ landed increment so the
 triple-equivalence test keeps passing and you stay disjoint. The reg+acc switch
 is a **follow-up contract bump** landed by slice (a) alone (see §"contract
 shape change" — it is called out explicitly there). Do **not** race each other
@@ -526,17 +527,17 @@ how the inline-site migration and the opcode growth stay coupled:
 - arithmetic completion: `DIV, MOD`, bitwise (`AND, OR, XOR, SHL, SHR, USHR`),
   remaining compares (`CMP_NE, CMP_SEQ, CMP_SNE`), `NOT`, `TYPEOF`
 - property access (`struct.*` family): `GET_BY_NAME, SET_BY_NAME,
-  GET_BY_VALUE, SET_BY_VALUE` (prototype-chain walk lives in the shared
+GET_BY_VALUE, SET_BY_VALUE` (prototype-chain walk lives in the shared
   built-in lib, invoked by the op)
 - variable/closure: `LD_GLOBAL, ST_GLOBAL, LD_CLOSURE, ST_CLOSURE`
 - calls (`call`/`call_ref` family): `CALL <argc>, CONSTRUCT <argc>,
-  CALL_METHOD <argc>` (with `this`), and `CALL_BUILTIN <id> <argc>` (dispatch
-  into the shared built-in library — the *same* functions the AOT path calls;
+CALL_METHOD <argc>` (with `this`), and `CALL_BUILTIN <id> <argc>` (dispatch
+  into the shared built-in library — the _same_ functions the AOT path calls;
   §"Component 4")
 - control flow already present (`JZ/JMP/RET`); add `JNZ`, plus the `loop` /
   `block` / `br_if` family lowered to `JZ/JNZ/JMP` + backpatch labels
 - exceptions (`try`/`throw`/`rethrow` family): `THROW, TRY_START
-  <catchTarget>, TRY_END`
+<catchTarget>, TRY_END`
 - wide / extra-wide prefix opcodes (`WIDE, EXTRA_WIDE`) for >255 locals /
   large jump targets, mirroring Ignition — declared in Phase 1, exercised as
   needed.
@@ -586,38 +587,38 @@ Both route: `source → acorn.parse (ESTree) → ESTree→IR adapter → lower.t
 BytecodeEmitter) → BytecodeSink → runBytecode`. Direct-eval scope capture is
 **Phase 2** (§Phasing); Phase 1 is indirect/global-scope only
 (ecma262 §19.2.1, the `direct=false` path of §19.2.1.1 PerformEval; Function
-constructor per §20.2.1.1, which is *always* indirect — global scope, no
+constructor per §20.2.1.1, which is _always_ indirect — global scope, no
 caller-env capture).
 
 ### 2. The slices
 
-| Slice | Owns (writes) | Imports read-only | Depends on |
-|---|---|---|---|
-| **(0) Contract pin** | `src/ir/backend/bytecode-emitter.ts` (OP enum, BytecodeSink, BytecodeEmitter surface) + ADR doc | `emitter.ts` (BackendEmitter shape) | — (lands first) |
-| **(a0) Sink generalization** | `src/ir/backend/emitter.ts` (`BackendSink` abstraction; raw-`Instr` escape hatch), `WasmGcEmitter` sink realization, the ~23 already-routed sites in `lower.ts` | `bytecode-emitter.ts` | (0) |
-| **(a1..a6) Trait-migration sub-slices** | one op-family's inline `out.push` sites in `lower.ts` + that family's trait methods in `emitter.ts` + `WasmGcEmitter` + `BytecodeEmitter` opcodes | the sink abstraction from (a0) | (a0) |
-| **(b) Wasm-GC-native VM** | `src/ir/backend/bytecode-vm.ts` | `bytecode-emitter.ts` (`OP`, `BytecodeSink`) | (0), then per-family from (a1..a6) |
-| **(c) eval / Function entry + Acorn→IR** | `src/runtime/eval-entry.ts` (new), `src/ir/backend/estree-to-ir.ts` (new), runtime `parser/acorn` vendoring | emitter/vm/lower (read-only) | (a*)+(b), **acorn track** (§3) |
-| **(d) dynamic-fallback wiring + standalone story** | `src/codegen/index.ts` dispatch glue, CLI/build flag, standalone link path | `eval-entry.ts`, `lower.ts` | (a*)+(b)+(c) |
+| Slice                                              | Owns (writes)                                                                                                                                                   | Imports read-only                            | Depends on                         |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------- |
+| **(0) Contract pin**                               | `src/ir/backend/bytecode-emitter.ts` (OP enum, BytecodeSink, BytecodeEmitter surface) + ADR doc                                                                 | `emitter.ts` (BackendEmitter shape)          | — (lands first)                    |
+| **(a0) Sink generalization**                       | `src/ir/backend/emitter.ts` (`BackendSink` abstraction; raw-`Instr` escape hatch), `WasmGcEmitter` sink realization, the ~23 already-routed sites in `lower.ts` | `bytecode-emitter.ts`                        | (0)                                |
+| **(a1..a6) Trait-migration sub-slices**            | one op-family's inline `out.push` sites in `lower.ts` + that family's trait methods in `emitter.ts` + `WasmGcEmitter` + `BytecodeEmitter` opcodes               | the sink abstraction from (a0)               | (a0)                               |
+| **(b) Wasm-GC-native VM**                          | `src/ir/backend/bytecode-vm.ts`                                                                                                                                 | `bytecode-emitter.ts` (`OP`, `BytecodeSink`) | (0), then per-family from (a1..a6) |
+| **(c) eval / Function entry + Acorn→IR**           | `src/runtime/eval-entry.ts` (new), `src/ir/backend/estree-to-ir.ts` (new), runtime `parser/acorn` vendoring                                                     | emitter/vm/lower (read-only)                 | (a\*)+(b), **acorn track** (§3)    |
+| **(d) dynamic-fallback wiring + standalone story** | `src/codegen/index.ts` dispatch glue, CLI/build flag, standalone link path                                                                                      | `eval-entry.ts`, `lower.ts`                  | (a\*)+(b)+(c)                      |
 
 The contract pin (0) is folded into slice (a0)'s owner — the **emitter
 senior-dev owns `bytecode-emitter.ts` + `emitter.ts` and lands the contract
 pin + sink generalization as the first commits**, then everyone rebases.
-This is why only one slice ever *creates* the seam shapes; the migration
-sub-slices only *add methods* to an already-shaped trait.
+This is why only one slice ever _creates_ the seam shapes; the migration
+sub-slices only _add methods_ to an already-shaped trait.
 
 ### 2a. The 166-site trait migration — its own sub-track (op-family grouped)
 
 This is the load-bearing bulk of #1584 that the headline "emitter slice"
 otherwise hides. After (a0) lands the sink abstraction, the ~166 inline
 `out.push({op})` sites in `lower.ts` migrate behind the trait **one op family
-at a time**. Each family is an independent sub-slice (parallel-safe *across
-families* because they touch disjoint `lower.ts` switch arms and disjoint trait
-methods; serialize *within* a family). Suggested ordering by leverage:
+at a time**. Each family is an independent sub-slice (parallel-safe _across
+families_ because they touch disjoint `lower.ts` switch arms and disjoint trait
+methods; serialize _within_ a family). Suggested ordering by leverage:
 
 - **(a1) call family** — `call` / `call_ref` sites → `emitCall` / `emitCallRef`
-  trait methods (already *declared* optional in `emitter.ts`) → `OP.CALL /
-  CALL_METHOD / CALL_BUILTIN / CONSTRUCT`. Highest leverage: unblocks
+  trait methods (already _declared_ optional in `emitter.ts`) → `OP.CALL /
+CALL_METHOD / CALL_BUILTIN / CONSTRUCT`. Highest leverage: unblocks
   built-in dispatch (the eval-entry needs it).
 - **(a2) struct/object family** — `struct.new` / `struct.get` / `struct.set`
   → `emitAggregateNew` / `emitFieldGet` / `emitFieldSet` (declared) →
@@ -626,14 +627,14 @@ methods; serialize *within* a family). Suggested ordering by leverage:
   emitter helpers (the bytecode realization is `JZ/JNZ/JMP` + backpatch, as
   `emitIf` already demonstrates in the #1715 proof).
 - **(a4) try/throw family** — `try` / `throw` / `rethrow` → `OP.TRY_START /
-  TRY_END / THROW` + the `exceptionTable` sink field (§1c). Gates the
+TRY_END / THROW` + the `exceptionTable` sink field (§1c). Gates the
   cross-boundary exception-propagation AC.
 - **(a5) ref-coercion family** — `ref.cast` / `any.convert_extern` /
   `extern.convert_any` → `emitToExternref` / `emitFromExternref` (declared).
   Note: this family is **WasmGC-specific**; for the bytecode backend it is
   largely a no-op (the VM operates on boxed `JSValue` directly), so the
-  `BytecodeEmitter` realization is mostly empty/identity — but the *trait
-  routing* still must happen so `lower.ts` stops branching on backend.
+  `BytecodeEmitter` realization is mostly empty/identity — but the _trait
+  routing_ still must happen so `lower.ts` stops branching on backend.
 - **(a6) bitwise scratch** — the js-bitwise lowering scratch sites →
   `OP.AND/OR/XOR/SHL/SHR/USHR/NOT`.
 
@@ -642,14 +643,14 @@ migration sub-slice (each adds/realizes its family's methods). To keep them
 disjoint, **each family owns only its own method block** — the optional method
 declarations already reserved in `emitter.ts` (`emitCall?`, `emitFieldGet?`,
 `emitAggregateNew?`, `emitToExternref?`, …) are the pre-agreed seams, so a
-sub-slice *implements* a declared method rather than *adding new surface*. New
+sub-slice _implements_ a declared method rather than _adding new surface_. New
 surface (a method not already declared) is a contract change → route through
 the (a0) owner.
 
 **Acceptance for the migration track:** the IR-fallback budget
 (`pnpm run check:ir-fallbacks`) and the existing equivalence suite stay green
 after each family lands (the WasmGC output must remain byte-identical — the
-migration is a refactor of *where* the op is emitted, not *which* op). A family
+migration is a refactor of _where_ the op is emitted, not _which_ op). A family
 is "done" when its `lower.ts` arm contains zero raw `out.push({op})` for that
 family and both `WasmGcEmitter` (byte-identical) and `BytecodeEmitter` (opcode)
 realize it.
@@ -660,13 +661,120 @@ realize it.
   abstraction + trait method realizations), the migrated `lower.ts` switch
   arms, `WasmGcEmitter` (new method realizations), and the per-family
   `BytecodeEmitter` opcodes. **Do not delete/relocate `WasmGcEmitter` logic** —
-  move it *behind* the trait, byte-identical.
+  move it _behind_ the trait, byte-identical.
 - **Imports read-only:** none beyond IR node types.
 - **Acceptance test:** (1) `tests/ir-bytecode-proof.test.ts` triple equivalence
   re-pointed so the bytecode arm is produced by **real `lower.ts`** (not the
   hand-lowerer) for the #1715 three functions; then extended per migrated
   family; (2) equivalence + ir-fallback budget green after every family.
 - **Dependency order:** (0)→(a0)→{(a1)∥(a2)∥(a3)∥(a4)∥(a5)∥(a6)}.
+
+##### (a0)-seam LANDED (#958, 2026-05-30) + (a0)-tail LANDED (2026-05-30)
+
+**(a0) TAIL — DONE (task #246).** `lower.ts` is now generic over the emitter
+sink `S`: `lowerIrFunctionToWasm` is a thin `S = Instr[]` wrapper over the new
+`lowerIrFunctionBody<S>(func, resolver, emitter): IrLoweredBody<S>`. The
+`requireInstrSink(out)` guard (`Array.isArray` — true exactly for the WasmGC
+`Instr[]` sink) fences the op families that structurally embed `Instr[]`
+sub-buffers (forof.vec/iter/string · for/while.loop · try · await) until their
+op-families migrate (a1..a6); they throw loudly on a bytecode sink. The ~119
+inline pushes split as designed: core stack primitives (local.get/set/tee,
+const, binary, unary, select, drop, return) route through the **typed emitter
+methods** (byte-identical on WasmGC, functional on bytecode); the remaining
+not-yet-migrated raw `Instr` pushes go through `emitter.pushRaw`. Validation:
+tsc clean, ir-fallback budget unchanged (zero delta), biome clean, and the
+**full equivalence suite has a byte-for-byte identical failing-test set vs
+`origin/main`** (73 pre-existing fails, 0 regressions). `tests/ir-bytecode-proof.test.ts`
+gained a REAL-`lower.ts` arm: it hands the #1715 three IR functions to
+`lowerIrFunctionBody(fn, resolver, new BytecodeEmitter())` and asserts triple
+equivalence (bytecode == WasmGC == JS) — satisfying the (a0) acceptance
+criterion ("bytecode arm produced by real `lower.ts`, not the hand-lowerer").
+Next: the (a1..a6) op-family migration sub-track (task #245).
+
+**The (a0) SEAM is merged (PR #958):** `BackendEmitter<S = Instr[]>` is generic
+over the sink; `newSink()` + `pushRaw(out, instr)` (the raw-`Instr` escape hatch)
+are on the trait; `WasmGcEmitter`/`LinearEmitter` realize `S = Instr[]`
+(byte-identical); production `BytecodeEmitter implements BackendEmitter<BytecodeSink>`
+with the additive `OP` set (base 0..14 frozen; +`DIV/CMP_NE/TEE/GLOBAL_GET/SET/
+SELECT/DROP/UNREACHABLE` = 15..22) + `BytecodeSink.spliceArm`; the proof test
+drives the production trait surface. **The (a0) TAIL — threading the generic sink
+through `lower.ts` so REAL `lower.ts` drives the bytecode emitter — is the next
+commit.** Below is the validated, deterministic recipe (derived + dry-run'd on
+branch `issue-1584-a0-tail`; reverted pending a focused-review session because it
+touches the conformance-critical 2368-line file and must be byte-identical on
+WasmGC). Task #246 tracks it.
+
+**Signature split (DONE in the dry-run, keep):**
+
+- `IrLoweredBody<S>` = `{ name, body: S, locals, typeIdx, exported }`.
+- `lowerIrFunctionToWasm(func, resolver, emitter: BackendEmitter<Instr[]> = new WasmGcEmitter())`
+  becomes a THIN wrapper that calls `lowerIrFunctionBody(...)` and assembles the
+  `WasmFunction` from `S = Instr[]` (byte-identical; every existing caller unchanged).
+- `lowerIrFunctionBody<S>(func, resolver, emitter: BackendEmitter<S> = new WasmGcEmitter() as unknown as BackendEmitter<S>): IrLoweredBody<S>`
+  holds the existing body. Final return → `IrLoweredBody<S>` (drop the `func:` wrap).
+
+**The `requireInstrSink` guard (the load-bearing insight):** the out-of-subset op
+families — `forof.vec` / `forof.iter` / `forof.string` / `for.loop` / `try` /
+`await` — build nested `Instr[]` sub-buffers (`loopBody`, `tryBody`, `catchBody`,
+`innerBody`, `innerCatchAll`, `ca`, `rejectedBranch`, `pendingBranch`) and EMBED
+them into a raw WasmGC `Instr` (`{op:"loop", body: loopBody}`). That structural
+embed is WasmGC-specific and can't flow through a non-`Instr[]` sink. So each such
+arm calls FIRST:
+
+```ts
+const requireInstrSink = (out: S): Instr[] => {
+  if (!Array.isArray(out))
+    throw new Error(
+      `ir/lower: '${func.name}' uses an op family (loop/try/await) not yet migrated behind the trait — out of the bytecode subset. See plan/issues/1584 §2a.`,
+    );
+  return out as Instr[];
+};
+```
+
+`Array.isArray(out)` is true exactly when `S = Instr[]` (WasmGC); the bytecode
+`BytecodeSink` is an object → throws (the not-yet-migrated boundary, surfaced
+loudly). Inside the arm, do `const wasmOut = requireInstrSink(out);` and use
+`wasmOut` for ALL the arm's `Instr[]` work + the terminal `out.push({op:"loop"…})`
+→ `wasmOut.push(...)`. The arm's internal `emitInstrTree(sub, loopBody)` recursions
+pass `Instr[]` buffers where `S` is expected — sound because the arm already
+asserted `S = Instr[]`, so cast: `emitInstrTree(sub, loopBody as unknown as S)`.
+
+**Generic helper signatures (`out: Instr[]` → `out: S`):** `coerceToF64ForBitwise`,
+`emitValue`, `emitInstrTree`, `emitBlockBody`. The LOCAL `emitArmBody`/`emitBodyBuffer`
+helpers INSIDE try/loop arms stay `target: Instr[]` (they write into `wasmOut`
+sub-buffers). The `case "if"` arm's `thenBody`/`elseBody` (and the `br_if`
+terminator's `thenOps`/`elseOps`) → `emitter.newSink()` (type `S`), passed to
+`emitter.emitIf(blockType, thenBody, elseBody, out)`. The entry `const body: Instr[] = []`
+→ `emitter.newSink()`.
+
+**The ~119 raw `out.push({op})` sites split into TWO classes — do NOT blanket-sed:**
+
+1. Sites where `out` is the generic-`S` param (the flat routed-subset emission:
+   `call`, `box`/`unbox`, `tag.test`, ref-coercion, the js-bitwise scratch dance,
+   etc. — the ~102 TS2339 `Property 'push' does not exist on type 'S'` errors) →
+   `emitter.pushRaw(out, {op…})`.
+2. Sites inside the out-of-subset arms after `const wasmOut = requireInstrSink(out)`
+   (loop/try/await) → rename `out.push` to `wasmOut.push` (stays a real array push).
+   Discriminate by: is the `.push` lexically inside a `forof.*`/`for.loop`/`try`/
+   `await` case arm? → class 2; else → class 1.
+
+**Error budget from the dry-run:** after the signature changes, `tsc` shows
+**127 errors in lower.ts** — 102 × TS2339 (`out.push` → `pushRaw`/`wasmOut.push`),
+24 × TS2345 (`Instr[]`↔`S` at the if-arm/loop sub-buffer hand-offs — resolved by
+`newSink()` for if-arms + the `requireInstrSink` cast for loop/try), 1 × TS2353
+(object-shape, the final return — resolved by the `IrLoweredBody<S>` split). When
+all 127 clear AND the equivalence suite + ir-fallback budget are green (WasmGC
+byte-identical), extend `tests/ir-bytecode-proof.test.ts` with a REAL-`lower.ts`
+arm: `parse src → lowerFunctionAstToIr → lowerIrFunctionBody(fn, resolver, new BytecodeEmitter()) → runSink`,
+asserting triple equivalence for the #1715 three functions. That satisfies the
+(a0) acceptance criterion ("bytecode arm produced by real `lower.ts`").
+
+**(a5) ref-coercion note (relayed from acorn-dev via #1731/#1725):** the
+ref-coercion family's real complexity isn't only `coerceType` — #1725's root cause
+
+- fix lived in `src/codegen/fixups.ts` (`repairStructTypeMismatches`, a backward-walk
+  overshoot inserting a bad `ref.cast` across control flow). The (a5) migration must
+  account for the `fixups.ts` post-pass too, not just `coerceType`.
 
 #### Slice (b) — Wasm-GC-native VM / dispatch loop
 
@@ -683,7 +791,7 @@ realize it.
   `compile()`** and runs a small program through the compiled VM, asserting it
   equals the TS-interpreted VM (proves the loop is js2wasm-compilable, AC
   "dispatch loop compiled with js2wasm").
-- **Dependency order:** parallel with (a*) once the contract lands; each VM
+- **Dependency order:** parallel with (a\*) once the contract lands; each VM
   case follows its op family.
 
 #### Slice (c) — eval()/Function() entry + Acorn parse→IR→bytecode
@@ -713,7 +821,7 @@ realize it.
   floor; an eval-enabled standalone module runs `(0, eval)("1+2")` with **no JS
   host import present in the import section**; ≥30 test262 eval-/Function-
   positive cases pass under the standalone target.
-- **Dependency order:** last — needs (a*)+(b)+(c).
+- **Dependency order:** last — needs (a\*)+(b)+(c).
 
 **Dependency order summary:**
 `(0)contract pin → (a0)sink generalization → { (a1)call ∥ (a2)struct ∥ (a3)control-flow ∥ (a4)try-throw ∥ (a5)ref-coercion ∥ (a6)bitwise } → (b)VM realization (per family) → (c)eval-entry [+ acorn track] → (d)wiring`.
@@ -736,7 +844,7 @@ acceptance:
   This is the **gate** slice (c) waits on: only once #1712 is green is
   `acorn.parse` trustworthy enough to feed the ESTree→IR adapter.
 
-**Action for the tech lead:** sequence slice (c) to *start* its
+**Action for the tech lead:** sequence slice (c) to _start_ its
 `estree-to-ir.ts` adapter (which is pure ESTree→IR shape work and can be
 unit-tested against node-acorn ASTs **without** compiled acorn) in parallel,
 but **gate its end-to-end eval ACs on #1712 acceptance**. The Acorn vendoring +
@@ -764,9 +872,9 @@ the TaskList subject for slice (c).
 shapes. This plan changes the contract in exactly TWO bounded, additive ways
 — both owned by slice (a), neither breaks the existing proof:**
 
-1. **Encoding flips stack → register+accumulator** (§1a). The `OP` *names* and
-   the `BytecodeEmitter` *primitive surface* are preserved; what changes is the
-   *operand layout* of each opcode (register indices instead of implicit
+1. **Encoding flips stack → register+accumulator** (§1a). The `OP` _names_ and
+   the `BytecodeEmitter` _primitive surface_ are preserved; what changes is the
+   _operand layout_ of each opcode (register indices instead of implicit
    stack) and the VM's internal model (an accumulator + register file instead
    of a `number[]` operand stack). **This is a slice-(a)-owned contract bump
    landed as one commit on `bytecode-emitter.ts` + a matching `bytecode-vm.ts`
