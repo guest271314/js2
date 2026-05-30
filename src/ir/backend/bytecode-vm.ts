@@ -78,6 +78,9 @@ const MAX_STEPS = 1000000;
 /** Sentinel f64 value for a null function reference (`CALL_REF` traps on it). */
 const NULL_FUNCREF = -1;
 
+/** Sentinel f64 value for a null struct reference (`STRUCT_GET`/`SET` trap). */
+const NULL_STRUCT = -1;
+
 /**
  * Run a whole {@link Program} — the multi-frame call-stack VM (#1584 a1).
  *
@@ -91,6 +94,19 @@ export function runProgram(program: Program, args: readonly number[]): number {
   // VM-global state (outlives any single frame): module globals
   // (GLOBAL_GET/SET), lazily 0-init on first access.
   const globals: number[] = [];
+
+  // VM-global heap (#1584 a2, STRUCT_NEW/GET/SET). A heap object is a record
+  // with a `fields` array; `heap[i]` is the object at heap index `i`. A struct
+  // reference is encoded as f64(heapIndex) on the stack/locals/fields domain
+  // (the cross-family invariant locked with the emitter: null-struct ≡ f64(-1)).
+  // The heap is VM-global, NOT per-frame — returned structs outlive the frame
+  // that created them. A struct field holding a funcref stores f64(tableIndex)
+  // (a1's funcref encoding), so STRUCT_GET of a closure's func field yields a
+  // value CALL_REF can dispatch (the closure.call bridge, once a5 ref.cast lands).
+  interface HeapObject {
+    fields: number[];
+  }
+  const heap: HeapObject[] = [];
 
   // The operand stack is shared across frames (Wasm-style: a callee pops its
   // args from / pushes its result onto the same value stack). Locals/pc/code/
@@ -304,6 +320,46 @@ export function runProgram(program: Program, args: readonly number[]): number {
         code = callee.code;
         constPool = callee.constPool;
         pc = 0;
+        break;
+      }
+      // ── #1584 a2 struct/object family (STRUCT_NEW / STRUCT_GET / STRUCT_SET) ──
+      // Heap objects live in the VM-global `heap`; a struct ref ≡ f64(heapIndex);
+      // null-struct ≡ f64(-1) (GET/SET on it traps). Field values are plain f64s
+      // (a funcref field stores f64(tableIndex) — the a1 bridge).
+      case OP.STRUCT_NEW: {
+        // STRUCT_NEW <fieldCount>: pop fieldCount values (field0 deepest, pushed
+        // in canonical field order), allocate a heap object, push its ref.
+        const fieldCount = code[pc++]!;
+        const fields: number[] = [];
+        for (let i = fieldCount - 1; i >= 0; i--) {
+          fields[i] = stack.pop()!;
+        }
+        heap.push({ fields });
+        stack.push(heap.length - 1); // f64(heapIndex)
+        break;
+      }
+      case OP.STRUCT_GET: {
+        // STRUCT_GET <fieldIdx>: pop structRef, push obj.fields[fieldIdx].
+        const fieldIdx = code[pc++]!;
+        const ref = stack.pop()!;
+        if (ref === NULL_STRUCT) {
+          throw new Error(`bytecode-vm: STRUCT_GET on null struct at pc ${pc - 2}`);
+        }
+        const obj = heap[ref | 0]!;
+        stack.push(obj.fields[fieldIdx]!);
+        break;
+      }
+      case OP.STRUCT_SET: {
+        // STRUCT_SET <fieldIdx>: stack [structRef, value] (value on top); pop
+        // value, pop structRef, obj.fields[fieldIdx] = value, push nothing.
+        const fieldIdx = code[pc++]!;
+        const value = stack.pop()!;
+        const ref = stack.pop()!;
+        if (ref === NULL_STRUCT) {
+          throw new Error(`bytecode-vm: STRUCT_SET on null struct at pc ${pc - 2}`);
+        }
+        const obj = heap[ref | 0]!;
+        obj.fields[fieldIdx] = value;
         break;
       }
       default:
