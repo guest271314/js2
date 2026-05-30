@@ -408,3 +408,77 @@ To be added once the issue is taken into a sprint. The plan should cover:
 - Build flag for opt-in / opt-out of the interpreter linkage
 - Cross-mode parity test extension (the differential testing harness must
   exercise both AOT and bytecode paths)
+
+---
+
+## 2026-05-30 — VM slice landed: dispatch loop runs AS compiled Wasm-GC (senior-dev)
+
+**Status: the Component-3 (dispatch loop) half is greenlit and proven.** #1715
+proved the #1713 seam can target a bytecode stream run by a HOST-TS dispatch
+loop. This slice proves the OTHER half of the Component-3 claim — *"the dispatch
+loop is itself compiled by js2wasm to Wasm-GC"* — by compiling the interpreter
+through the real `compile()` and showing its execution matches.
+
+### What landed (branch `issue-1584-wasmgc-vm`, disjoint from the emitter slice)
+- `src/ir/backend/bytecode-vm-source.ts` — the dispatch loop authored in the
+  js2wasm-compilable subset, held as `BYTECODE_VM_DISPATCH_SRC` (source text for
+  `compile()`), plus `buildBytecodeVmModule(...)` which wraps it with an exported
+  entry that builds `code`/`constPool`/`locals` in-module. Semantically identical
+  to `runBytecode` in `bytecode-vm.ts` (same opcodes, same stack machine, same
+  JZ/JMP). Opcode literals are restated inline and **pinned to the `OP` enum by
+  an assertion** (a compiled Wasm module can't import the host enum).
+- `tests/ir-bytecode-wasmgc-vm.test.ts` — **quadruple-equivalence** extending
+  #1715's triple: for `f(a,b)=a+b`, `g(a)={let x=a*2;return x}`, `h(a,b)=a>0?a+b:a-b`,
+  asserts `host-TS VM (runSink) == Wasm-GC-compiled VM == WasmGC-compiled source
+  == plain JS`. Plus NEG + every CMP_* opcode driven through the compiled VM, the
+  contract-pin assertion, and malformed-stream sentinel checks. **8 tests green.**
+  The bytecode for both VM arms comes from the SAME `BytecodeEmitter` #1715 uses
+  (consumed read-only).
+
+**Zero conformance delta:** two NEW files only. `lower.ts`, `WasmGcEmitter`,
+`bytecode-emitter.ts`, `bytecode-vm.ts`, and the default compile pipeline are
+untouched; the VM source is reached solely by this test. `tsc` clean, `biome`
+clean.
+
+### The load-bearing findings (what #1584 Phase 1 must carry forward)
+
+1. **The dispatch loop compiles to Wasm-GC today, unchanged in shape — no
+   compiler work needed.** The stack machine (`for(;;)` + `switch(op)` + operand
+   `number[]` value stack + `locals`/`code`/`constPool` `number[]`) is fully
+   inside the subset js2wasm already lowers. This is the Component-3 greenlight:
+   "interpreter authored in TS, compiled by the same compiler" is real, not
+   aspirational.
+
+2. **The ONE boundary constraint is the export ABI, not the loop (#1700).**
+   Passing a `number[]` *as an exported-function parameter* hits the JS↔Wasm
+   marshalling gap ("type incompatibility when transforming from/to JS"). The
+   interpreter therefore takes its entry as **primitive args and builds the
+   bytecode arrays in-module** — which is also how a real eval-entry behaves
+   (bytecode for a dynamic source is emitted into the module; the entry seeds
+   only the call args). When #1700's array ABI lands, a generic `run(code[],…)`
+   export becomes possible; until then, in-module-build is the entry contract.
+   **Phase 1 should depend on / track #1700 for the generic-array entry, but is
+   NOT blocked by it** — the in-module-build path is sufficient for eval/Function.
+
+3. **Encoding is a free choice below the seam (re-confirmed).** This VM is a
+   stack machine, matching #1715 §6. #1584's eventual register+accumulator VM
+   changes the opcode encoding + dispatch body but NOT the
+   "interpreter-as-compiled-Wasm-GC" property proven here, nor the host/Wasm
+   boundary contract in (2).
+
+4. **Standalone Wasm has no host exception to throw.** The host VM throws a
+   string on malformed streams; the compiled VM returns distinct sentinel f64s
+   (`VM_ERR_BAD_OPCODE`, `VM_ERR_STEP_BUDGET`). Phase 1's exception story (AC:
+   `eval("throw …")` propagating through `try/catch`) must use Wasm EH tags, not
+   string throws — this slice's sentinels are a stopgap for the numeric-only
+   subset, to be replaced when the boxed-value + EH path lands.
+
+### Scope boundary (honest)
+- Subset is exactly #1715's: numeric arithmetic + local/const + return + one
+  branch (+ NEG and the full CMP_* set). Objects/arrays-as-values/closures/calls/
+  strings/exceptions remain Phase 1 / Phase 2 work.
+- The bytecode is hand-lowered (operands then terminal op, as `lower.ts` drives
+  the emitter). Wiring real `lower.ts` to a generic sink is the **emitter slice**
+  (see `bytecode-emitter.ts` header / the #1584 emitter task), not the VM slice.
+  The WasmGC-source arm DOES use real `compile()`, so the equivalence pins the
+  VM output against production WasmGC lowering of the same source.
