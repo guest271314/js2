@@ -114,6 +114,18 @@ export const OP = {
   // `br_if`'s "branch if truthy" needs no `eqz`+`JZ` dance. block/loop add NO
   // opcode (they resolve to backpatched JMP/JNZ/JZ targets at splice time).
   JNZ: 28, //   JNZ <target>         ; pop c; if c != 0 goto target  (maps from emitBrIf / br_if)
+  // ── (a4) try-throw family (#1584 §2a) — exception handling via a per-function
+  // STATIC `exceptionTable` (table-scan model, sdev-vm locked). THROW unwinds:
+  // scan the current fn's table for the innermost {tryStart ≤ pc < tryEnd}, on a
+  // hit truncate the value stack to that entry's `spAtEntry` (always 0 — try is
+  // a statement-level node, empty operand stack at entry), push the exn, jump to
+  // `catchTarget`; no hit ⇒ pop the call frame and rescan the caller (mirrors
+  // Wasm unwind); frames empty ⇒ abort with the thrown value. TRY_START/TRY_END
+  // are RUNTIME NO-OP region markers (the table is authoritative) kept so the
+  // stream is self-describing + region boundaries are testable.
+  THROW: 29, //     THROW              ; pop exn; unwind to innermost covering handler (table-scan)
+  TRY_START: 30, // TRY_START <catchTarget> ; no-op marker (region start; table carries coverage)
+  TRY_END: 31, //   TRY_END            ; no-op marker (region end; normal-exit boundary)
 } as const;
 
 export type Opcode = (typeof OP)[keyof typeof OP];
@@ -139,6 +151,23 @@ export class BytecodeSink {
    */
   readonly pendingBranches: { slot: number; depth: number }[] = [];
 
+  /**
+   * (a4 #1584) Per-function exception table (table-scan model, §1c). One entry
+   * per `try` region: the protected code range `[tryStart, tryEnd)` (absolute
+   * code indices), the `catchTarget` THROW jumps to on a covered throw, and
+   * `spAtEntry` — the value-stack depth to truncate to on catch (always 0: a
+   * `try` is a statement-level node lowered at empty operand-stack depth).
+   * The VM scans this for the innermost covering entry on THROW; TRY_START/
+   * TRY_END are runtime no-ops (the table is authoritative). Travels with the
+   * function on its FuncEntry, alongside `code`/`constPool`.
+   */
+  readonly exceptionTable: {
+    tryStart: number;
+    tryEnd: number;
+    catchTarget: number;
+    spAtEntry: number;
+  }[] = [];
+
   /** Intern an f64 immediate into the constant pool, returning its index. */
   internConst(value: number): number {
     // Linear scan is fine — proof-grade, programs are tiny.
@@ -162,7 +191,7 @@ export class BytecodeSink {
    * Emit a jump whose target is not yet known; returns the code index of the
    * *operand slot* to backpatch once the target is known.
    */
-  emitJumpPlaceholder(op: typeof OP.JZ | typeof OP.JMP | typeof OP.JNZ): number {
+  emitJumpPlaceholder(op: typeof OP.JZ | typeof OP.JMP | typeof OP.JNZ | typeof OP.TRY_START): number {
     this.code.push(op, -1); // -1 = unpatched
     return this.code.length - 1; // index of the operand slot
   }
@@ -231,6 +260,13 @@ export class BytecodeSink {
           }
           break;
         }
+        // (a4) TRY_START carries an inline <catchTarget> that is a code POSITION
+        // in the arm's address space — relocate it by +base like a jump target.
+        // (The exceptionTable below is the VM-authoritative copy; this inline
+        // operand is the self-describing marker, kept consistent.)
+        case OP.TRY_START:
+          this.code.push(op, code[i++]! + base);
+          break;
         // Single-inline-operand opcodes (a local / global / const / func /
         // type index). CALL <funcIdx> / CALL_REF <typeIdx> carry exactly one
         // inline operand (no relocation needed — function/type indices are
@@ -247,11 +283,21 @@ export class BytecodeSink {
         case OP.STRUCT_SET:
           this.code.push(op, code[i++]!);
           break;
-        // Zero-operand opcodes.
+        // Zero-operand opcodes (incl. (a4) THROW / TRY_END).
         default:
           this.code.push(op);
           break;
       }
+    }
+    // (a4) Relocate the arm's exception table into this sink's address space.
+    // tryStart/tryEnd/catchTarget are code positions in the arm → shift by +base.
+    for (const e of arm.exceptionTable) {
+      this.exceptionTable.push({
+        tryStart: e.tryStart + base,
+        tryEnd: e.tryEnd + base,
+        catchTarget: e.catchTarget + base,
+        spAtEntry: e.spAtEntry,
+      });
     }
   }
 }
@@ -533,33 +579,80 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     out.emit(OP.STRUCT_SET, layout.fieldIdx(name));
   }
 
-  // ---- (a4) try-throw family (#1584 §2a) — VM realization pending ----------
-  // The bytecode realization is THROW + TRY_START/TRY_END + an `exceptionTable`
-  // sink field (issue §1c/§2a). The exact opcode wiring is gated on sdev-vm's
-  // VM exception-model choice (handler-stack vs table-scan) — see the a4 contract.
-  // Until that lands these throw so a try/throw function is surfaced as "out of
-  // the #1584 subset" on the bytecode path (the try arms in lower.ts are fenced
-  // by requireInstrSink anyway, so this boundary is exact, not a regression).
-  emitThrow(_tagIdx: number, _out: BytecodeSink): void {
-    throw new Error(
-      "BytecodeEmitter: emitThrow (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
-    );
+  // ---- (a4) try-throw family (#1584 §2a) — table-scan exception model -------
+  // sdev-vm-locked: per-function STATIC exceptionTable + THROW unwinds to the
+  // innermost covering entry (frame-walking across CALL); TRY_START/TRY_END are
+  // runtime no-op region markers (the table is authoritative). The thrown value
+  // is a single boxed JSValue on the stack; catch binds it via STORE; rethrow =
+  // re-push the caught value + THROW; finally is compiled away in lower.ts.
+
+  // `throw v` — v already on the stack; THROW pops it and unwinds to the
+  // innermost handler covering the current pc (table-scan), walking call frames.
+  emitThrow(_tagIdx: number, out: BytecodeSink): void {
+    out.emit(OP.THROW);
   }
-  emitRethrow(_depth: number, _out: BytecodeSink): void {
-    throw new Error(
-      "BytecodeEmitter: emitRethrow (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
-    );
+
+  // `rethrow 0` — re-throw the currently-caught value. lower.ts only emits
+  // depth 0 (the immediately-enclosing handler's caught value, still bound to
+  // the payload slot). The caught value is already on the stack at the rethrow
+  // point in our lowering (the catch_all/finally arm leaves it there before
+  // rethrow), so this is a bare THROW. `depth` is informational (single tag).
+  emitRethrow(_depth: number, out: BytecodeSink): void {
+    out.emit(OP.THROW);
   }
+
+  /**
+   * Structured `try`. Table-scan realization:
+   *
+   *   TRY_START <catchTarget>     ; no-op marker
+   *   <tryBody>
+   *   TRY_END                     ; no-op marker (end of protected region)
+   *   JMP endLabel                ; normal exit skips the handler
+   *   catchTarget: <handler>      ; THROW lands here (VM pushed exn, truncated sp)
+   *   endLabel:
+   *
+   * + an exceptionTable entry {tryStart, tryEnd, catchTarget, spAtEntry:0}.
+   * The protected region is [tryStart, tryEnd) = the spliced tryBody (between the
+   * markers). spAtEntry is 0: `try` is a statement-level node lowered at empty
+   * operand-stack depth, so on catch the VM truncates back to the empty base.
+   *
+   * Handler selection: our system has ONE exception tag (`__exn`), so a thrown
+   * value always matches a source `catch` if present; `catchAll` (emitted for
+   * the finally-leak path) is the handler only when there is no `catch`. With a
+   * single tag, `catchAll`-alongside-`catch` is the unreachable non-`__exn`
+   * leak path — we still splice it after the catch for structural fidelity, but
+   * `catchTarget` points at the live handler.
+   */
   emitTry(
     _blockType: BlockType,
-    _body: BytecodeSink,
-    _catches: { tagIdx: number; body: BytecodeSink }[],
-    _catchAll: BytecodeSink | undefined,
-    _out: BytecodeSink,
+    body: BytecodeSink,
+    catches: { tagIdx: number; body: BytecodeSink }[],
+    catchAll: BytecodeSink | undefined,
+    out: BytecodeSink,
   ): void {
-    throw new Error(
-      "BytecodeEmitter: emitTry (try-throw family) VM realization pending sdev-vm exception-model — see §2a (a4).",
-    );
+    // TRY_START marker carries the (forward) catchTarget — backpatched below.
+    const catchTargetSlot = out.emitJumpPlaceholder(OP.TRY_START);
+    const tryStart = out.here();
+    out.spliceArm(body);
+    const tryEnd = out.here();
+    out.emit(OP.TRY_END);
+    // Normal exit skips the handler.
+    const toEnd = out.emitJumpPlaceholder(OP.JMP);
+    // Handler entry — THROW jumps here with the exn pushed + sp truncated.
+    const catchTarget = out.here();
+    out.patch(catchTargetSlot, catchTarget);
+    // The live handler: the source `catch` if present, else the `catchAll`
+    // (try/finally-only). When both exist, `catchAll` is the unreachable
+    // non-`__exn` leak path, spliced after for fidelity.
+    if (catches.length > 0) {
+      out.spliceArm(catches[0]!.body);
+      if (catchAll) out.spliceArm(catchAll);
+    } else if (catchAll) {
+      out.spliceArm(catchAll);
+    }
+    out.patch(toEnd, out.here());
+    // Record the static table entry (innermost-covering selection on THROW).
+    out.exceptionTable.push({ tryStart, tryEnd, catchTarget, spAtEntry: 0 });
   }
 
   // ---- vec (array) primitives — out of the #1584 numeric subset -----------

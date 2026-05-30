@@ -630,3 +630,80 @@ describe("#1584 (a3) — BytecodeEmitter realizes the control-flow family", () =
     expect(() => dest.spliceArm(bad)).toThrow(/unpatched jump/);
   });
 });
+
+// ── #1584 (a4) try-throw family — THROW + TRY_START/TRY_END + exceptionTable ──
+//
+// The exception ops (throw / try / rethrow) realize via a per-function STATIC
+// `exceptionTable` (table-scan model, sdev-vm-locked): THROW unwinds to the
+// innermost covering entry (walking call frames); TRY_START/TRY_END are runtime
+// no-op region markers (the table is authoritative). The thrown value is a
+// single boxed JSValue on the stack; rethrow = re-push + THROW; finally is
+// compiled away in lower.ts. These emitter-side tests (my lane) assert the
+// BytecodeEmitter lowering; the OP.THROW/TRY_* VM dispatch is sdev-vm's slice.
+describe("#1584 (a4) — BytecodeEmitter realizes the try-throw family", () => {
+  it("emitThrow / emitRethrow emit OP.THROW (rethrow = re-push caught value + THROW)", () => {
+    const E = new BytecodeEmitter();
+    const t = new BytecodeSink();
+    E.emitThrow(7, t); // tagIdx is informational (single __exn tag)
+    expect(t.code).toEqual([OP.THROW]);
+
+    const r = new BytecodeSink();
+    E.emitRethrow(0, r);
+    expect(r.code).toEqual([OP.THROW]);
+  });
+
+  it("emitTry (catch) lowers to TRY_START/body/TRY_END/JMP-end/catchTarget + a table entry", () => {
+    // try { LOAD 0 } catch (x) { STORE 1; LOAD 1 }
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    const catchBody = new BytecodeSink();
+    catchBody.emit(OP.STORE, 1); // bind payload
+    catchBody.emit(OP.LOAD, 1);
+    const out = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, body, [{ tagIdx: 5, body: catchBody }], undefined, out);
+
+    // TRY_START<catchTarget=7>; LOAD 0; TRY_END; JMP<end=11>; STORE 1; LOAD 1
+    expect(out.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 11, OP.STORE, 1, OP.LOAD, 1]);
+    // Protected region [tryStart=2, tryEnd=4) = the spliced body; spAtEntry=0.
+    expect(out.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+  });
+
+  it("emitTry (finally-only / catchAll) routes the catchAll arm as the handler", () => {
+    // try { LOAD 0 } finally { LOAD 9; rethrow }  → catchAll = [LOAD 9, THROW]
+    const E = new BytecodeEmitter();
+    const body = new BytecodeSink();
+    body.emit(OP.LOAD, 0);
+    const catchAll = new BytecodeSink();
+    catchAll.emit(OP.LOAD, 9);
+    E.emitRethrow(0, catchAll); // finally re-throws on the leak path
+    const out = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, body, [], catchAll, out);
+
+    expect(out.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 10, OP.LOAD, 9, OP.THROW]);
+    expect(out.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+  });
+
+  it("spliceArm relocates a nested try's code AND its exceptionTable by +base", () => {
+    // An inner try built into its own sink, then spliced into a larger sink:
+    // its TRY_START<catchTarget> operand + its table entries all shift by +base.
+    const E = new BytecodeEmitter();
+    const innerBody = new BytecodeSink();
+    innerBody.emit(OP.LOAD, 0);
+    const innerCatch = new BytecodeSink();
+    innerCatch.emit(OP.DROP);
+    const arm = new BytecodeSink();
+    E.emitTry({ kind: "empty" }, innerBody, [{ tagIdx: 5, body: innerCatch }], undefined, arm);
+    // arm: [TRY_START,7, LOAD,0, TRY_END, JMP,8, DROP], table {2,4,7,0}
+    expect(arm.code).toEqual([OP.TRY_START, 7, OP.LOAD, 0, OP.TRY_END, OP.JMP, 8, OP.DROP]);
+    expect(arm.exceptionTable).toEqual([{ tryStart: 2, tryEnd: 4, catchTarget: 7, spAtEntry: 0 }]);
+
+    const dest = new BytecodeSink();
+    dest.emit(OP.LOAD, 3); // base = 2 before the splice
+    dest.spliceArm(arm);
+    // Code relocated by +2: TRY_START operand 7→9, JMP operand 8→10.
+    expect(dest.code).toEqual([OP.LOAD, 3, OP.TRY_START, 9, OP.LOAD, 0, OP.TRY_END, OP.JMP, 10, OP.DROP]);
+    // Table entry relocated by +2.
+    expect(dest.exceptionTable).toEqual([{ tryStart: 4, tryEnd: 6, catchTarget: 9, spAtEntry: 0 }]);
+  });
+});
