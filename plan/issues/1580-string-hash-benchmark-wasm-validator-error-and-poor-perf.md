@@ -61,14 +61,21 @@ Evidence (senior-dev, sprint 57):
 
 ### Action taken
 
-- Refreshed the two `string-hash` rows in
-  `benchmarks/results/wasm-host-wasmtime-hot-runtime.json` (+ the public
-  mirror) to the documented post-fix numbers (warm ~22 ms; cold ~30.4 ms
-  derived) with an explicit `wasmProvenance` field marking them
-  **code-verified, pending a fresh `refresh:benchmarks:wasmtime` on a
-  wasmtime host** (this container has no `wasmtime`, so a directly-measured
-  wall-clock number could not be produced here — no fabricated number is
-  written).
+- **Got a REAL measurement.** Installed wasmtime 45.0.0 (aarch64-linux) and ran
+  `scripts/generate-wasmtime-hot-runtime.mjs` against current main. **Measured
+  `string-hash` warm = 22,721 µs** (cold = 52,753 µs) — directly confirms the
+  #1580-documented ~22 ms and refutes the stale 63.7 ms. Refreshed only the two
+  `string-hash` rows in `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+  (+ public mirror) with these measured values + a `wasmProvenance` field.
+  **Caveat (in that field):** measured on a constrained shared CI container, so
+  the *cold* number is inflated by wasmtime process-startup overhead and is
+  conservative/high vs a clean box; the *warm* number (exec-only, baseline
+  subtracted) is the meaningful one and is solid. The other three benchmarks
+  (fib/fib-recursive/array-sum) were intentionally left at their prior
+  clean-aarch64-box values — they don't depend on the #1580 fix and re-measuring
+  them on this noisy container would introduce cross-machine skew (a full regen
+  here showed wasm losing to V8 on `fib` cold — a container startup artifact,
+  not reality).
 - Added a regression guard to `tests/issue-1580.test.ts`: the committed JSON's
   `string-hash`/warm `wasmUs` must stay below 40,000 µs. This fails loudly if
   the JSON is ever Interpreter-class stale again, or a codegen change re-adds

@@ -81,6 +81,16 @@ jobs:
         # provenance fails CI here.
         run: pnpm run test:ir:alloc
 
+      - name: Benchmark staleness gate (#1580)
+        # Fails if the committed Wasmtime hot-runtime benchmark JSON regresses
+        # to Interpreter-class string-hash numbers — the silent-staleness mode
+        # that let the pre-#1580 63.7 ms warm value sit on the landing page for
+        # 9 days after the fix merged (no CI regenerates that JSON; it's a
+        # manual `pnpm run refresh:benchmarks:wasmtime`). Scoped to the one
+        # guard test so it stays cheap; the full assertions also run in the
+        # equivalence shards.
+        run: pnpm exec vitest run tests/issue-1580.test.ts
+
       - name: Conformance numbers in sync (#1522)
         run: pnpm run sync:conformance:check
 
