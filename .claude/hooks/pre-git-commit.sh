@@ -22,13 +22,13 @@ if [ "$BRANCH" = "main" ] && [ "$PWD" != "/workspace" ]; then
   exit 2
 fi
 
-# For git commit: check code word and inject guidance
+# For git commit: check checklist sign-off and inject guidance
 # NOTE: formatting + linting now handled by husky + lint-staged (git pre-commit hook)
 if echo "$CMD" | grep -q 'git commit'; then
-  # Verify checklist sign-off: a ✓ checkmark in the commit message once you've
-  # completed plan/method/pre-commit-checklist.md (CHECKLIST-FOXTROT = break-glass bypass).
-  if ! echo "$CMD" | grep -q '✓' && ! echo "$CMD" | grep -q 'CHECKLIST-FOXTROT'; then
-    echo "BLOCKED: Missing checklist sign-off. End your commit message with a ✓ once you've completed plan/method/pre-commit-checklist.md (or CHECKLIST-FOXTROT to bypass)." >&2
+  # Verify checklist sign-off: end the commit message with a ✓ checkmark once you've
+  # completed plan/method/pre-commit-checklist.md.
+  if ! echo "$CMD" | grep -q '✓'; then
+    echo "BLOCKED: Missing checklist sign-off. End your commit message with a ✓ once you've completed plan/method/pre-commit-checklist.md." >&2
     exit 2
   fi
   CHECKLIST=$(head -15 /workspace/plan/method/pre-commit-checklist.md 2>/dev/null)
