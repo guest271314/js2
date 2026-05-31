@@ -1,7 +1,7 @@
 ---
 id: 1757
 title: "Migrate the public compile() API to async (embed binaryen via await import)"
-status: ready
+status: in-progress
 created: 2026-05-31
 updated: 2026-05-31
 priority: medium
@@ -88,3 +88,59 @@ be **async**. User-directed (2026-05-31) to do the full migration.
   green.
 - The codemod is the risk centre — do it AST-based and review a sample diff
   before the repo-wide run.
+
+## Implementation notes (senior-dev, 2026-05-31)
+
+**Branch:** `issue-1757-async-compile-v2` · **PR:** feat(#1757) async compile() migration.
+
+### What shipped (4 commits)
+1. **Source (Phase 1)** — `compileSource`/`compileMultiSource`/`compileFilesSource`
+   are `async -> Promise<CompileResult>`; the optimize step uses
+   `await optimizeBinaryAsync`. `index.ts` `compile`/`compileMulti`/`compileFiles`/
+   `compileToWat`/`compileProject` + `createIncrementalCompiler().compile` are async.
+   `runtime.ts`/`runtime-instantiate.ts` await (already async fns); `cli.ts` awaits
+   (top-level-await CLI); the test262/compiler workers await the now-async result.
+2. **Test codemod (Phase 2)** — ts-morph AST codemod (`.tmp/codemod-async-compile.mjs`)
+   over `tests/**/*.ts`: 2142 awaits, 1189 fns async, 769 files. Idempotent,
+   collect-then-mutate, reverse-order, fixpoint propagation through named helpers
+   (incl. `Promise<T>` return-type rewrite).
+3. **Standalone embed (Phase 3)** — fixed the residual sync `require("binaryen")`
+   in `optimizeWithBinaryenPackage` to use `process.getBuiltinModule("node:module")`
+   -> `createRequire` so bundlers don't statically follow it. README + CHANGELOG.
+4. **Playground/scripts/benchmarks** — same codemod over those consumers.
+
+### WHY the key design choices
+- **Synchronous `compileSourceSync` core.** The JS `eval` host shim
+  (`runtime-eval.ts`, `__extern_eval`) is **inherently synchronous** — it returns
+  the eval value directly to compiled Wasm via a host import and CANNOT become
+  async without breaking eval semantics. Since `eval` never passes `optimize`
+  (the only async step), I split the pipeline: `compileSourceSync` runs the full
+  synchronous codegen with NO wasm-opt; `compileSource` (async) calls the sync
+  core then applies `await optimizeBinaryAsync` over the produced binary. This
+  keeps eval sync while making the public API async. The optimize step only
+  mutates `result.binary`, so applying it post-hoc is behavior-preserving.
+- **The real #986 blocker was the sync `require("binaryen")`, not just the API
+  shape.** Binaryen's index.js has a top-level `await`. A *static*
+  `require("binaryen")` makes esbuild/bun try to inline it through a sync require
+  and fail hard (`This require call is not allowed because the imported file ...
+  contains a top-level await`). Confirmed by bundling `compiler-bundle-entry.ts`
+  with binaryen NOT externalized: it errored before the fix, and after routing
+  the sync fallback through `createRequire` it produces a 13.8 MB bundle with
+  binaryen embedded. The async `await import("binaryen")` path is the one that
+  legitimately bundles binaryen for `bun build --compile` / `deno compile`.
+- **`(await call)` wrapping + prettier cleanup.** The codemod always emits
+  `(await compile(x))` so member/element access keeps correct precedence
+  (`compile(x).binary` -> `(await compile(x)).binary`, never
+  `await (compile(x).binary)`). Prettier then strips the redundant parens in
+  plain-assignment positions. Zero `tsc --noEmit` errors across the whole repo
+  after the codemod is the structural proof the propagation is complete.
+
+### Validation
+- `tsc --noEmit` (whole project): 0 errors after every codemod stage.
+- Full `npm test` run locally. The failing files (e.g. `compiler.test.ts` 17/20,
+  `ir-scaffold` 2/7, `jwt-decode`) were verified to fail **identically on a clean
+  `origin/main` checkout** — pre-existing, not codemod regressions. No
+  Promise-misuse signatures (`is not a function`, `undefined reading success/
+  binary`, SyntaxError) anywhere in the run.
+- `compile(..., {optimize:3})` end-to-end: loads binaryen via `await import`,
+  optimizes, runs correctly.
