@@ -489,7 +489,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
         // Check if this variable is a module-level global (e.g., for(var i...)
         // at the top level). If so, use global.set instead of local.set.
-        const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+        // #1745: a function-local of the same name (hoisted by
+        // hoistVarDeclarations for a `var` inside a function/closure body)
+        // SHADOWS the module global per ECMA-262 §10.2.10 — bind to the local
+        // and fall through. Otherwise a `for (var i = <arrayExpr>; ...)` inside
+        // a closure whose `i` collides with a differently-typed top-level
+        // module global `i` would `global.set` an incompatible value type into
+        // the global → invalid Wasm.
+        const hasLocalShadow = fctx.localMap.has(name);
+        const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
         if (moduleGlobalIdx !== undefined) {
           if (decl.initializer) {
             const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleGlobalIdx)];

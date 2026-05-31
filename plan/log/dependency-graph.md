@@ -12,9 +12,9 @@ Architectural sprint. Two tracks; conformance guard is zero-regression.
 
 | #     | Title | Priority | Feasibility | Status | Depends on |
 |-------|-------|----------|-------------|--------|------------|
-| 1710  | acorn dogfood harness (compile + validate + diff-AST vs node-acorn) | high | medium | Ready | — |
-| 1711  | triage harness surface → file sized child issues | high | medium | Ready | #1710 |
-| 1712  | acceptance: compiled acorn AST == node-acorn on a representative .js | high | hard | Backlog→ready after #1710/#1711 | #1710, #1711 |
+| 1710  | acorn dogfood harness (compile + validate + diff-AST vs node-acorn) | high | medium | Done (s57) | — |
+| 1711  | triage harness surface → file sized child issues | high | medium | Done (s57) | #1710 |
+| 1712  | acceptance: compiled acorn AST == node-acorn on a representative .js | high | hard | Carried to sprint 58 (unblocked by #1745) | #1710, #1711 |
 
 Prior acorn blockers #1679 / #1690 / #1690b are **done** (regression-guarded by #1710).
 
