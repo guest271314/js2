@@ -1,6 +1,6 @@
 # Contributing to js2wasm
 
-`js2wasm` is developed as the core compiler product of **Loopdive GmbH**. This guide covers the technical workflow and the contributor licensing terms required for accepted contributions.
+`js2wasm` is an open-source project stewarded by **Loopdive GmbH** — a technical foundation for the next generation of the internet, developed fully in the open. This guide covers the technical workflow and the contributor licensing terms required for accepted contributions.
 
 ## Development Setup
 
@@ -85,7 +85,7 @@ By contributing code, documentation, tests, or other material to this repository
 
 If you do not agree to these terms, do not submit a contribution.
 
-This CLA requirement exists so the project can maintain an Apache 2.0 with LLVM Exceptions community distribution while also supporting commercial and proprietary licensing arrangements for infrastructure partners.
+This CLA exists so Loopdive GmbH can sustainably steward the project over the long term — keeping it maintained, funded, and relicensable should open-source license standards evolve — while the source is distributed under the Apache 2.0 with LLVM Exceptions license.
 
 ### How acceptance is recorded (the `cla-check` gate)
 
