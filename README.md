@@ -7,7 +7,7 @@ Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 
 `js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That avoids the runtime tax common in the interpreter-based and engine-embedding approaches — where a JavaScript interpreter or full engine is compiled to Wasm and shipped inside every module — and keeps the output aligned with Wasm-native deployment models.
 
-`js2wasm` is the core compiler product of **Loopdive GmbH**, released under **Apache License 2.0 with LLVM Exceptions** — and developed fully in the open, including its agentic engineering workflow. The repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
+`js2wasm` is a free and open-source project developed by **Loopdive GmbH** and released under the **Apache License 2.0 with LLVM Exceptions**. It is a freely-licensed, open-source technical foundation and reusable building block, developed fully in the open, including its agentic engineering workflow. The repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
 
 ## Value Proposition
 
@@ -395,24 +395,8 @@ The document is intended for senior engineers who are skeptical but curious. It 
 
 This repository is licensed under the **Apache License 2.0 with LLVM Exceptions**. See [LICENSE](./LICENSE).
 
-### Community License
-
 - Source code in this repository is available under **Apache-2.0 WITH LLVM-exception**
 - Community contributions are accepted under the contributor terms described in [CONTRIBUTING.md](./CONTRIBUTING.md)
-
-### Commercial Licensing
-
-Loopdive GmbH offers commercial licensing discussions for infrastructure partners that need:
-
-- proprietary integrations
-- closed-source redistribution rights
-- dedicated support or integration work
-- custom backends or hardware-accelerated targets
-- private deployment arrangements for platform partnerships
-
-This is the intended path for infrastructure vendors and strategic partners, including cloud, edge, browser, and silicon platform organizations evaluating deeper integration.
-
-Contact: `hello@loopdive.com`
 
 ## Testing
 
