@@ -32,6 +32,7 @@ import {
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   hoistLetConstWithTdz,
+  hoistVarDeclarations,
   nextModuleGlobalIdx,
   resolveWasmType,
 } from "./index.js";
@@ -2093,6 +2094,23 @@ export function compileArrowAsClosure(
     if (builders.size > 0) liftedFctx.pendingStringBuilders = builders;
   }
 
+  // Pre-hoist function-scoped `var` declarations into the closure's localMap
+  // (#1745). Regular functions run this in function-body.ts; closures/arrows
+  // previously skipped it, so a `var x` inside a closure body that collided
+  // with a same-named *module global* (declared a different type — e.g. a
+  // top-level numeric `var i` vs. an array-holding `var i` inside the closure)
+  // fell through `hasLocalShadow` to the global, emitting a `global.set`/`get`
+  // whose value type did not match the global's declared type → invalid Wasm
+  // ("global.set[0] expected type f64, found if of (ref null 3)" in acorn's
+  // __closure_37). hoistVarDecl allocates a function-local that shadows the
+  // module global per ECMA-262 §10.2.10. Must run BEFORE the let/const hoist
+  // and before any statement compiles so every read/write of the var binds to
+  // the local. The walker does not cross nested function scope boundaries, so
+  // captured free variables are untouched.
+  if (ts.isBlock(body)) {
+    hoistVarDeclarations(ctx, liftedFctx, body.statements);
+  }
+
   // Pre-hoist let/const with TDZ flags for the closure body so that
   // accesses before the declaration site throw ReferenceError (#790).
   if (ts.isBlock(body)) {
@@ -2607,6 +2625,13 @@ export function compileArrowAsCallback(
       const effectiveIdx = cbFctx.localMap.get(paramName) ?? arrowParamOffset + i;
       emitArrowParamDestructuring(ctx, cbFctx, param, effectiveIdx, resolved);
     }
+  }
+
+  // Pre-hoist function-scoped `var` declarations into the callback's localMap
+  // so they shadow same-named module globals (#1745, ECMA-262 §10.2.10) —
+  // mirrors the lifted-closure path above and function-body.ts.
+  if (ts.isBlock(body)) {
+    hoistVarDeclarations(ctx, cbFctx, body.statements);
   }
 
   // Pre-hoist let/const with TDZ flags for the callback body (#790)
