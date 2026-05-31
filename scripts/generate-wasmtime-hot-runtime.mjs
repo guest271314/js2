@@ -133,7 +133,7 @@ function ensureWasmtime() {
   }
 }
 
-function compileProgram(id) {
+async function compileProgram(id) {
   const sourcePath = resolve(PROGRAMS_DIR, `${id}.js`);
   const source = readFileSync(sourcePath, "utf8");
   // #1580: enable `-O3` post-processing via Binaryen wasm-opt. The unoptimized
@@ -144,7 +144,7 @@ function compileProgram(id) {
   // (instead of the previous Interpreter-class ~63ms). The optimizer is also
   // a no-op when wasm-opt isn't available — `compile` returns the unoptimized
   // binary plus a warning we surface below.
-  const result = compile(source, { fileName: `${id}.js`, target: "wasi", nativeStrings: true, optimize: 3 });
+  const result = await compile(source, { fileName: `${id}.js`, target: "wasi", nativeStrings: true, optimize: 3 });
   if (!result.success) {
     throw new Error(`Failed to compile ${id}: ${result.errors?.[0]?.message ?? "unknown error"}`);
   }
@@ -289,7 +289,7 @@ async function main() {
 
   for (const program of PROGRAMS) {
     process.stdout.write(`\n[${program.id}] compiling... `);
-    const { sourcePath, wasmPath } = compileProgram(program.id);
+    const { sourcePath, wasmPath } = await compileProgram(program.id);
     const runtimeArg = readRuntimeArg(sourcePath);
     process.stdout.write(`runtimeArg=${runtimeArg}\n`);
 

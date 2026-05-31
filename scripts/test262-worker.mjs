@@ -733,13 +733,13 @@ async function doCompile(source, sourceMapUrl) {
   const compileFn = incrementalCompiler ? incrementalCompiler.compile : compile;
   return incrementalCompiler
     ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map" })
-    : compile(source, {
-        fileName: "test.ts",
-        sourceMap: true,
-        sourceMapUrl: sourceMapUrl || "test.wasm.map",
-        emitWat: false,
-        skipSemanticDiagnostics: true,
-      });
+    : (await compile(source, {
+              fileName: "test.ts",
+              sourceMap: true,
+              sourceMapUrl: sourceMapUrl || "test.wasm.map",
+              emitWat: false,
+              skipSemanticDiagnostics: true,
+            }));
 }
 
 /**
