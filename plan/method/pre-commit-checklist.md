@@ -19,7 +19,7 @@
 
 ## Commit verification
 
-Include a **✓** (checkmark) in your commit message (anywhere in the body) once you've completed the checklist. The pre-commit hook rejects commits without it. (`CHECKLIST-FOXTROT` is the break-glass bypass for emergencies.)
+End your commit message with a **✓** (checkmark) once you've completed the checklist. The pre-commit hook rejects commits without it.
 
 ## Red flags (stop and ask tech lead)
 
