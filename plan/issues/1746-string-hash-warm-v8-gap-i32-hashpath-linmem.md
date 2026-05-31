@@ -335,7 +335,20 @@ linkage (allocate a ConsString node, no character copy), so its build loop is
 
 ### Re-prioritized levers (by MEASURED impact)
 
-1. **#3 array presizing — PROMOTE TO #1 (the whole ballgame).** The build loop is
+> **Carved into sized child issues (2026-05-31):** the two remaining levers below
+> were split out of this umbrella for dispatch:
+> - **#1761** — *array presizing* (lever #3 → re-prioritized #1): presize the
+>   string-build buffer from the static loop trip count to kill the reallocs and
+>   the per-append cap-check. The top measured AOT win.
+> - **#1762** — *linear-memory string backing* (lever #6): drop the WasmGC
+>   `(array i16)` GC barrier for the build/hash hot path. The strategic
+>   representation-level ceiling; likely needs an architect spec.
+>
+> This issue (#1746) stays the umbrella. Lever #1 (i32 hash path) is DONE here;
+> levers #2/#4/#5 are deprioritized per the differential below.
+
+1. **#3 array presizing — PROMOTE TO #1 (the whole ballgame).** *(→ carved to
+   #1761.)* The build loop is
    ~99% of wall time and ~36× V8. Its cost is per-append overhead × 60k against
    the doubling `$NativeString` buffer. The final length is *statically provable*
    from the loop (`n` literal appends × constant string lengths → `text.length =
@@ -344,7 +357,8 @@ linkage (allocate a ConsString node, no character copy), so its build loop is
    the store be a straight indexed write. This is a pure AOT win a JIT can't make
    (it can't prove the final length). **This is the lever to build next.**
 
-2. **#6 linear-memory backing for char data — STRATEGIC, the real ceiling.** Even
+2. **#6 linear-memory backing for char data — STRATEGIC, the real ceiling.**
+   *(→ carved to #1762.)* Even
    presized, each `array.set` into a WasmGC `(array i16)` carries a **GC write
    barrier**, and each `array.get_u` carries a bounds check + a read barrier +
    opaque-ref struct-field reloads Cranelift won't hoist. A flat **linear-memory
