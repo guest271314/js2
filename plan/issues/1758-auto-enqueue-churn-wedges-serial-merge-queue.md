@@ -1,7 +1,8 @@
 ---
 id: 1758
 title: "auto-enqueue churn wedges the serial merge queue — make the sweep surgical"
-status: ready
+status: done
+completed: 2026-05-31
 created: 2026-05-31
 updated: 2026-05-31
 priority: high

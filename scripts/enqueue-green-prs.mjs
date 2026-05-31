@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// enqueue-green-prs.mjs — keep the merge queue fed automatically.
+// enqueue-green-prs.mjs — keep the merge queue fed automatically, SURGICALLY.
 //
 // WHY THIS EXISTS: GitHub has no native "auto-enqueue when checks go green".
 // The only built-in automation is `gh pr merge --auto`, which arms auto-merge
@@ -13,6 +13,31 @@
 // it finds every open, non-draft, mergeable PR that is NOT already in the queue
 // and enqueues it via the GraphQL `enqueuePullRequest` mutation.
 //
+// SERIAL-QUEUE INTERACTION (#1758): the merge queue is SERIAL
+// (max_entries_to_build=1). An unconditional, high-frequency enqueue sweep
+// races GitHub's `merge_group` formation: a dequeue/enqueue poke at the serial
+// head WHILE a merge group is mid-formation wedged the queue twice on
+// 2026-05-30/31 (it stuck AWAITING_CHECKS with no `merge_group` dispatched, and
+// only a ~10-min ruleset disable/re-enable reset cleared it). The mechanism
+// built to un-strand PRs became the thing that wedged the queue. So this sweep
+// is now SURGICAL — two guards keep it from poking a forming queue:
+//
+//   1. BACK-OFF WHILE A HEAD IS FORMING — before sweeping, query the merge
+//      queue. If ANY entry is AWAITING_CHECKS (a merge group is mid-formation),
+//      SKIP THE ENTIRE SWEEP this run and let GitHub finish. We only sweep when
+//      no entry is AWAITING_CHECKS (queue idle / stable / empty). This is the
+//      key anti-wedge guard.
+//   2. GRACE WINDOW — only enqueue a PR whose required checks have all been
+//      green for at least GRACE_MINUTES (default 10). "green since" is the most
+//      recent completion across the PR's required check runs. A PR green for
+//      less than the window is left for a later cycle. This guarantees the
+//      backstop never races a fresh dev GraphQL enqueue and only catches
+//      genuine strays — devs enqueue immediately, this net is for the rare
+//      strand (queue-drop on main advance, dev exits before enqueuing).
+//
+// Combined with the lowered cron (~30 min) + single-flight concurrency guard in
+// the workflow, this removes the high-frequency serial-queue poking entirely.
+//
 // SAFETY: the merge queue re-runs the REQUIRED checks (cheap gate, merge shard
 // reports, quality — incl. the test262 regression gate) on the merged state
 // before landing, and GitHub branch protection is the hard block. So enqueuing
@@ -21,16 +46,22 @@
 //
 // Runs in GitHub Actions (.github/workflows/auto-enqueue.yml) on CI completion
 // + a schedule, and is runnable by hand: `node scripts/enqueue-green-prs.mjs`.
+// DRY RUN: `DRY_RUN=1 node scripts/enqueue-green-prs.mjs` (or `--dry-run`) logs
+// the back-off decision + per-PR grace-window decisions without enqueuing.
 // Requires `gh` authenticated (GITHUB_TOKEN with pull-requests:write in CI).
 
 import { execFileSync } from "node:child_process";
 
 const REPO = process.env.GH_REPO || "loopdive/js2";
-const DRY = process.argv.includes("--dry-run");
+const DRY = process.argv.includes("--dry-run") || process.env.DRY_RUN === "1";
+const GRACE_MINUTES = Number(process.env.GRACE_MINUTES ?? "10");
+const GRACE_MS = GRACE_MINUTES * 60 * 1000;
 const HOLD_LABELS = new Set(["hold", "do-not-merge", "do not merge", "wip", "blocked"]);
 // mergeStateStatus values we will enqueue. CLEAN = all green. UNSTABLE = mergeable
 // but a NON-required check failed (required are green) — still queue-able.
 const ENQUEUEABLE = new Set(["CLEAN", "UNSTABLE", "HAS_HOOKS"]);
+
+const [OWNER, NAME] = REPO.split("/");
 
 // IMPORTANT: invoke gh via execFileSync with an ARG ARRAY — never a shell
 // string. GraphQL queries contain `$id` and the shell would expand it to
@@ -44,13 +75,18 @@ function graphql(query, vars = {}) {
   return JSON.parse(gh(args));
 }
 
-// PR node IDs already in the merge queue → skip.
-function queuedNumbers() {
+// Merge-queue snapshot: PR numbers already queued + whether any head is forming.
+// `state` on a mergeQueueEntry is AWAITING_CHECKS while its merge group is being
+// built — that is exactly the window in which a dequeue/enqueue poke wedges the
+// serial queue (#1758).
+function mergeQueueSnapshot() {
   const r = graphql(
-    `{ repository(owner:"${REPO.split("/")[0]}",name:"${REPO.split("/")[1]}"){ mergeQueue(branch:"main"){ entries(first:100){ nodes { pullRequest { number } } } } } }`,
+    `{ repository(owner:"${OWNER}",name:"${NAME}"){ mergeQueue(branch:"main"){ entries(first:100){ nodes { state pullRequest { number } } } } } }`,
   );
   const nodes = r?.data?.repository?.mergeQueue?.entries?.nodes || [];
-  return new Set(nodes.map((n) => n.pullRequest?.number).filter(Boolean));
+  const queued = new Set(nodes.map((n) => n.pullRequest?.number).filter(Boolean));
+  const forming = nodes.filter((n) => n.state === "AWAITING_CHECKS").map((n) => n.pullRequest?.number);
+  return { queued, forming };
 }
 
 function openPrs() {
@@ -70,7 +106,43 @@ function openPrs() {
   );
 }
 
-const inQueue = queuedNumbers();
+// "green since" = the most-recent completion time across the PR's REQUIRED check
+// runs. We read the PR's statusCheckRollup contexts (CheckRun.completedAt +
+// StatusContext.createdAt) and take the max. A PR whose latest required check
+// finished < GRACE_MINUTES ago is too fresh to enqueue this cycle. Returns
+// { ageMs, completedAt } or null when no completion timestamp is available
+// (treated as "not yet eligible" — we never enqueue a PR we cannot age).
+function greenSince(prNumber) {
+  const r = graphql(
+    `{ repository(owner:"${OWNER}",name:"${NAME}"){ pullRequest(number:${prNumber}){ commits(last:1){ nodes { commit { statusCheckRollup { contexts(first:100){ nodes { __typename ... on CheckRun { completedAt } ... on StatusContext { createdAt } } } } } } } } } }`,
+  );
+  const rollup = r?.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+  const contexts = rollup?.contexts?.nodes || [];
+  let latest = 0;
+  for (const c of contexts) {
+    const ts = c.completedAt || c.createdAt;
+    if (!ts) continue;
+    const ms = Date.parse(ts);
+    if (Number.isFinite(ms) && ms > latest) latest = ms;
+  }
+  if (!latest) return null;
+  return { ageMs: Date.now() - latest, completedAt: new Date(latest).toISOString() };
+}
+
+const { queued: inQueue, forming } = mergeQueueSnapshot();
+
+// GUARD 1 — back off while a head is forming. A merge group mid-formation is the
+// exact window where poking the serial queue wedges it (#1758). Skip the whole
+// sweep; the next cycle (or CI-completion trigger) retries once the queue is idle.
+if (forming.length > 0) {
+  console.log(
+    `enqueue-green-prs: BACK OFF — ${forming.length} queue entr${
+      forming.length === 1 ? "y is" : "ies are"
+    } AWAITING_CHECKS (head forming): ${forming.map((n) => `#${n}`).join(", ")}. Skipping sweep this cycle.`,
+  );
+  process.exit(0);
+}
+
 const prs = openPrs();
 const enqueued = [];
 const skipped = [];
@@ -93,23 +165,58 @@ for (const pr of prs) {
     skipped.push([pr.number, pr.mergeStateStatus]); // BLOCKED/BEHIND/DIRTY/DRAFT/UNKNOWN
     continue;
   }
+  // GUARD 2 — grace window. Only enqueue a PR green-but-unqueued for > GRACE.
+  // Too-fresh PRs are left for a later cycle so we never race a dev's own
+  // GraphQL enqueue; this net only catches genuine strays.
+  let green;
+  try {
+    green = greenSince(pr.number);
+  } catch (e) {
+    const msg = String(e.stderr || e.message || e)
+      .split("\n")[0]
+      .slice(0, 120);
+    skipped.push([pr.number, `green-since-failed: ${msg}`]);
+    continue;
+  }
+  if (!green) {
+    skipped.push([pr.number, "no-green-timestamp"]);
+    continue;
+  }
+  const ageMin = (green.ageMs / 60000).toFixed(1);
+  if (green.ageMs < GRACE_MS) {
+    skipped.push([pr.number, `too-fresh (green ${ageMin}m < ${GRACE_MINUTES}m grace)`]);
+    continue;
+  }
   if (DRY) {
-    enqueued.push([pr.number, "would-enqueue"]);
+    enqueued.push([pr.number, `would-enqueue (green ${ageMin}m >= ${GRACE_MINUTES}m grace)`]);
     continue;
   }
   try {
-    graphql(`mutation($id:ID!){ enqueuePullRequest(input:{pullRequestId:$id}){ clientMutationId } }`, { id: pr.id });
-    enqueued.push([pr.number, "enqueued"]);
+    graphql(
+      `
+        mutation ($id: ID!) {
+          enqueuePullRequest(input: { pullRequestId: $id }) {
+            clientMutationId
+          }
+        }
+      `,
+      { id: pr.id },
+    );
+    enqueued.push([pr.number, `enqueued (green ${ageMin}m)`]);
   } catch (e) {
     // Most common benign error: required checks still in progress (PR just
     // turned mergeable). Leave it — the next sweep / CI-completion run gets it.
-    const msg = String(e.stderr || e.message || e).split("\n")[0].slice(0, 120);
+    const msg = String(e.stderr || e.message || e)
+      .split("\n")[0]
+      .slice(0, 120);
     skipped.push([pr.number, `enqueue-failed: ${msg}`]);
   }
 }
 
-console.log(`enqueue-green-prs: ${prs.length} open, ${inQueue.size} already queued`);
-for (const [n, why] of enqueued) console.log(`  ✓ #${n} ${why}`);
+console.log(
+  `enqueue-green-prs: ${prs.length} open, ${inQueue.size} already queued, grace=${GRACE_MINUTES}m${DRY ? " (DRY RUN)" : ""}`,
+);
+for (const [n, why] of enqueued) console.log(`  + #${n} ${why}`);
 for (const [n, why] of skipped) console.log(`  - #${n} skip (${why})`);
 console.log(`Done: ${enqueued.length} ${DRY ? "would be " : ""}enqueued.`);
 process.exit(0);
