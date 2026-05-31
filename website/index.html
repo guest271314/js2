@@ -1516,8 +1516,10 @@
             <div class="feature-icon"><img src="./wasm-logo-white.svg" alt="WebAssembly logo" /></div>
             <h3>No Embedded Runtime</h3>
             <p>
-              Deploy compiled JavaScript modules in standalone WebAssembly runtimes such as Wasmtime without embedding a
-              JS engine or interpreter, reducing module size and runtime overhead.
+              Deploy compiled JavaScript modules in standalone WebAssembly runtimes such as Wasmtime. Code known at
+              compile time is translated directly to WebAssembly — no embedded JS engine or interpreter — keeping
+              modules small and fast. Only code generated at runtime (<code>eval</code> / <code>new Function</code>)
+              falls back to a small embedded bytecode interpreter.
             </p>
           </article>
           <article class="feature-card">
