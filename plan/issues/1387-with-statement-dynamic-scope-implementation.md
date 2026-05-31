@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, ir
 language_feature: with
 goal: spec-completeness
-sprint: 52
+sprint: 58
 ---
 # #1387 — `with` statement: architect exploration
 

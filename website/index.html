@@ -3280,7 +3280,7 @@ match (value) {
           <div class="conformance-diagrams">
             <h4 class="host-bench-section-title">Speed <span class="section-title-note">(higher is better)</span></h4>
             <p class="host-bench-section-desc">
-              <strong>Cold speed</strong> shows first-invocation runtime — process start, module load, compile/instantiate, and the first call — with bars as speedup over the cold JS-in-V8 baseline. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
+              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime (pre-instantiated module) against a V8-isolate edge runtime (isolate-per-request) — rather than any named commercial platform. <strong>Cold speed</strong> shows first-invocation runtime — process start, module load, compile/instantiate, and the first call — with bars as speedup over the cold JS-in-V8 baseline. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline. Note: the cold lane currently measures a full cold process per request; modelling a warm-engine per-request context/instance (the representative edge cold-start) is tracked in #1764.
             </p>
             <div class="bench-test-group" data-test="fib">
               <h4 class="bench-test-title">Fibonacci loop</h4>
