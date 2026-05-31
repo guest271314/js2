@@ -24,10 +24,13 @@
  *      Models the common-case edge serverless request: the runtime has
  *      already served a request, the isolate is reused, optimizing tiers
  *      have completed.
- *      - Wasm lane: `(full wall time with runtimeArg) − (baseline wall time
- *        with arg=0)`. Cranelift-compiled native code doesn't tier up, so
- *        per-iteration cost equals per-request cost minus the fixed
- *        startup amortized away in the steady state.
+ *      - Wasm lane (#1760): one `wasmtime run --invoke warm` process whose
+ *        appended `warm` export calls `run(arg)` a few warmup times then
+ *        times many in-process iterations via CLOCK_MONOTONIC and returns
+ *        the steady-state minimum per-call ms. Process startup is amortized
+ *        across all iterations — NOT recovered by subtracting two noisy
+ *        full-process wall-times (the previous cold−baseline method had a
+ *        ~2.3× run-to-run spread that swamped any few-ms per-call signal).
  *      - JS lane: spawn `node` once, call `mod.run(arg)` WARMUP times so
  *        TurboFan tiers up, then time MEASURED more in-process iterations
  *        and report the median. This is what a Cloudflare Workers isolate
@@ -86,6 +89,52 @@ const PROGRAMS = [
 const WARMUP_RUNS = 2;
 const MEASURED_RUNS = 7;
 const WASMTIME_FEATURES = ["-W", "gc=y", "-W", "function-references=y"];
+
+// #1760: in-process repeated-measure warm driver.
+//
+// The previous warm metric derived `warm = (full-process cold wall-time) −
+// (baseline arg=0 wall-time)` — subtracting two ~30 ms `wasmtime run` process
+// wall-times to recover a few-ms per-call signal. Process-startup jitter
+// (~ms-scale) swamped the signal: 6 back-to-back runs of string-hash on an
+// IDENTICAL binary spanned 5.43–12.31 ms (a ~2.3× spread), so a genuine
+// per-call codegen win (e.g. #1746's i32 hash path) was unresolvable.
+//
+// The fix mirrors the V8 warm lane (`timeNodeWarmIter`): amortize the
+// one-time wasmtime/Cranelift startup over many in-process iterations of the
+// hot function and report the steady-state per-call time. We append a `warm`
+// export to each program that calls `run(n)` a few warmup times (to settle
+// caches/branch predictors — Cranelift AOT code does not tier up, so this is
+// short) then times WARM_ITERS_MEASURED in-process iterations via
+// `performance.now()` (CLOCK_MONOTONIC inside wasmtime, sub-ms resolution)
+// and returns the MINIMUM per-call ms — the steady-state floor, the least
+// scheduler-noise-contaminated estimator. One `wasmtime run --invoke warm`
+// process → startup amortized across all iterations. We spawn that process
+// MEASURED_RUNS times to get a sample array for the std-dev/median the chart
+// consumes, exactly parallel to the V8 lane.
+//
+// The driver is plain JS with a JSDoc `@param {number}` so the export takes a
+// numeric (not boxed externref) argument — matching how the program files
+// already type `run` — and so wasmtime `--invoke` can pass the runtimeArg.
+// `__sink` keeps `run()`'s result observable so the body isn't DCE'd.
+const WARM_ITERS_WARMUP = 5;
+const WARM_ITERS_MEASURED = 40;
+const WARM_DRIVER_SOURCE = `
+/** @param {number} __n @returns {number} */
+export function warm(__n) {
+  for (let __w = 0; __w < ${WARM_ITERS_WARMUP}; __w++) { run(__n); }
+  let __best = 1e18;
+  let __sink = 0;
+  for (let __m = 0; __m < ${WARM_ITERS_MEASURED}; __m++) {
+    const __t0 = performance.now();
+    const __r = run(__n);
+    const __dt = performance.now() - __t0;
+    __sink = (__sink + __r) | 0;
+    if (__dt < __best) __best = __dt;
+  }
+  if (__sink === 0x7fffffff) return -1;
+  return __best;
+}
+`;
 
 // Javy + StarlingMonkey verified numbers (2026-04-27 wasmtime 44.0.0,
 // aarch64-linux) — see labs benchmarks/compare-runtimes.ts.
@@ -163,11 +212,42 @@ async function compileProgram(id) {
   }
   const wasmPath = resolve(ARTIFACT_DIR, `${id}.wasm`);
   writeFileSync(wasmPath, result.binary);
-  return { sourcePath, wasmPath };
+
+  // #1760: also compile a warm variant — the original program plus an
+  // appended self-timing `warm` export (see WARM_DRIVER_SOURCE). The
+  // `export const benchmark = {…}` metadata block is stripped first so it
+  // doesn't add an unused export to the standalone module. The warm module
+  // is compiled with the IDENTICAL options (target/nativeStrings/optimize)
+  // so its `run` lowering is bit-for-bit what the cold lane measures.
+  const programBody = source.replace(/export const benchmark[\s\S]*?};\n/, "");
+  const warmSource = programBody + "\n" + WARM_DRIVER_SOURCE;
+  const warmResult = await compile(warmSource, {
+    fileName: `${id}-warm.js`,
+    target: "wasi",
+    nativeStrings: true,
+    optimize: 3,
+  });
+  if (!warmResult.success) {
+    throw new Error(`Failed to compile ${id} warm driver: ${warmResult.errors?.[0]?.message ?? "unknown error"}`);
+  }
+  for (const err of warmResult.errors ?? []) {
+    if (err.severity === "warning") {
+      console.warn(`[${id}-warm] ${err.message}`);
+    }
+  }
+  if ((warmResult.imports ?? []).length > 0) {
+    throw new Error(
+      `Program ${id} warm driver has host imports — must be standalone for wasmtime: ${JSON.stringify(warmResult.imports)}`,
+    );
+  }
+  const warmWasmPath = resolve(ARTIFACT_DIR, `${id}-warm.wasm`);
+  writeFileSync(warmWasmPath, warmResult.binary);
+
+  return { sourcePath, wasmPath, warmWasmPath };
 }
 
-function precompile(wasmPath, id) {
-  const cwasmPath = resolve(ARTIFACT_DIR, `${id}.cranelift.cwasm`);
+function precompile(wasmPath, label) {
+  const cwasmPath = resolve(ARTIFACT_DIR, `${label}.cranelift.cwasm`);
   const args = ["compile", ...WASMTIME_FEATURES, wasmPath, "-o", cwasmPath];
   execFileSync("wasmtime", args, { stdio: ["ignore", "pipe", "pipe"] });
   return cwasmPath;
@@ -195,6 +275,38 @@ function timeWasmtime(cwasmPath, arg, runs) {
       throw new Error(`wasmtime failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
     }
     samplesMs.push(ms);
+  }
+  return samplesMs;
+}
+
+/**
+ * #1760: in-process warm wasm lane. Spawns one `wasmtime run --invoke warm`
+ * process per outer sample. Inside each process the appended `warm` export
+ * does WARM_ITERS_WARMUP warmups then times WARM_ITERS_MEASURED in-process
+ * iterations of `run(arg)` via CLOCK_MONOTONIC and returns the MINIMUM
+ * per-call ms (steady-state floor). Each process's returned value is one
+ * outer-sample value. Returns per-outer-sample milliseconds. Mirrors
+ * `timeNodeWarmIter` so the warm wasm and warm v8 lanes are constructed the
+ * same way (startup amortized over many in-process iterations, not recovered
+ * by subtracting two noisy full-process wall-times).
+ */
+function timeWasmtimeWarmIter(cwasmPath, arg, outerRuns) {
+  const cmdArgs = ["run", "--allow-precompiled", ...WASMTIME_FEATURES, "--invoke", "warm", cwasmPath, String(arg)];
+  const samplesMs = [];
+  for (let i = 0; i < outerRuns; i++) {
+    const r = spawnSync("wasmtime", cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    if (r.status !== 0) {
+      throw new Error(`wasmtime warm failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
+    }
+    // `--invoke` prints the f64 return value (the min per-call ms) on stdout.
+    // It also emits experimental-feature warnings to stderr; parse the last
+    // non-empty stdout line as the numeric result.
+    const out = (r.stdout ?? "").toString().trim().split("\n").pop();
+    const perCallMs = Number(out);
+    if (!Number.isFinite(perCallMs) || perCallMs <= 0) {
+      throw new Error(`wasmtime warm did not return a positive per-call ms: ${JSON.stringify(out)}`);
+    }
+    samplesMs.push(perCallMs);
   }
   return samplesMs;
 }
@@ -289,12 +401,13 @@ async function main() {
 
   for (const program of PROGRAMS) {
     process.stdout.write(`\n[${program.id}] compiling... `);
-    const { sourcePath, wasmPath } = await compileProgram(program.id);
+    const { sourcePath, wasmPath, warmWasmPath } = await compileProgram(program.id);
     const runtimeArg = readRuntimeArg(sourcePath);
     process.stdout.write(`runtimeArg=${runtimeArg}\n`);
 
     process.stdout.write(`[${program.id}] precompiling cranelift... `);
     const cwasmPath = precompile(wasmPath, program.id);
+    const warmCwasmPath = precompile(warmWasmPath, `${program.id}-warm`);
     process.stdout.write(`ok\n`);
 
     // Cold path: full process wall time, no subtraction.
@@ -306,14 +419,14 @@ async function main() {
     const v8ColdMs = timeNodeColdProcess(sourcePath, runtimeArg, WARMUP_RUNS + MEASURED_RUNS).slice(WARMUP_RUNS);
     process.stdout.write(`${median(v8ColdMs).toFixed(1)} ms\n`);
 
-    // Warm path: wasm exec only (subtract baseline arg=0); v8 warm in-process median.
-    process.stdout.write(`[${program.id}] wasm baseline (arg=0)... `);
-    const wasmBaselineMs = timeWasmtime(cwasmPath, 0, WARMUP_RUNS + MEASURED_RUNS).slice(WARMUP_RUNS);
-    const wasmBaselineMedian = median(wasmBaselineMs);
-    process.stdout.write(`${wasmBaselineMedian.toFixed(1)} ms\n`);
-
-    const wasmWarmMs = wasmColdMs.map((ms) => Math.max(ms - wasmBaselineMedian, 0.001));
-    process.stdout.write(`[${program.id}] wasm warm (cold − baseline) = ${median(wasmWarmMs).toFixed(2)} ms\n`);
+    // Warm path (#1760): in-process repeated-measure steady-state per-call
+    // time, startup amortized. wasm via `warm` export (min per-call ms),
+    // v8 via in-process iteration median — both startup-independent, so a
+    // few-ms per-call codegen delta is now resolvable (the old cold−baseline
+    // subtraction had a ~2.3× run-to-run spread that swamped the signal).
+    process.stdout.write(`[${program.id}] wasm warm (in-process iter)... `);
+    const wasmWarmMs = timeWasmtimeWarmIter(warmCwasmPath, runtimeArg, MEASURED_RUNS);
+    process.stdout.write(`${median(wasmWarmMs).toFixed(2)} ms\n`);
 
     process.stdout.write(`[${program.id}] v8 warm (in-process iter)... `);
     const v8WarmMs = timeNodeWarmIter(sourcePath, runtimeArg, MEASURED_RUNS);
