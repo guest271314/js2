@@ -101,7 +101,7 @@ export async function runHarness({ quiet = false } = {}) {
   let result;
   let threw = null;
   try {
-    result = compile(acornSource, { fileName: "acorn.mjs" });
+    result = await compile(acornSource, { fileName: "acorn.mjs" });
   } catch (e) {
     threw = e instanceof Error ? `${e.message}` : String(e);
   }

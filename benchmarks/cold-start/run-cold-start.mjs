@@ -78,7 +78,7 @@ for (const pf of programFiles) {
 import { compile } from '${resolve(ROOT, "src/index.ts").replace(/\\/g, "/")}';
 import { readFileSync, writeFileSync } from 'fs';
 const src = readFileSync('${srcPath.replace(/\\/g, "/")}', 'utf8');
-const r = compile(src, { fileName: '${pf}' });
+const r = await compile(src, { fileName: '${pf}' });
 if (!r.success) {
   console.error('Compile failed:', r.errors?.[0]?.message);
   process.exit(1);
