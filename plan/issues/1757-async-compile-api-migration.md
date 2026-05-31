@@ -40,7 +40,7 @@ be **async**. User-directed (2026-05-31) to do the full migration.
 - **Test ripple: ~1,675 `compile(...)` call sites across 761 files.** This is the
   bulk of the work and is mechanical (codemod).
 
-## Implementation plan (staged — DRAFT PR, CI is the only validator; suite OOMs locally)
+## Implementation plan (staged — run the suite LOCALLY after the codemod, then CI gates)
 
 **Phase 1 — source (reviewable, small):**
 1. `compiler.ts`: make `compileSource`/`compileMultiSource`/`compileFilesSource`
@@ -83,7 +83,8 @@ be **async**. User-directed (2026-05-31) to do the full migration.
 - **Breaking public API change** — `compile()` returns a `Promise` now; every
   external consumer must `await`. Call it out prominently (README/CHANGELOG/major
   version bump).
-- Cannot be validated locally (full suite OOMs); rely on CI. Keep the PR **DRAFT**
-  until CI is fully green; iterate on failures with CI feedback.
+- **Validate locally** — run the full suite (`npm test`) after the codemod and
+  fix failures before pushing; CI is the final gate. Keep the PR **DRAFT** until
+  green.
 - The codemod is the risk centre — do it AST-based and review a sample diff
   before the repo-wide run.
