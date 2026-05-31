@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Breaking: `compile()` API is now async (#1757)
+
+- The public compiler entry points — `compile`, `compileMulti`, `compileFiles`,
+  `compileToWat`, `compileProject`, and `createIncrementalCompiler().compile`
+  (plus the lower-level `compileSource` / `compileMultiSource` /
+  `compileFilesSource`) — now return a `Promise`. **Every caller must `await`
+  them.** A synchronous `compileSourceSync` (no Binaryen optimization) is
+  retained for the few contexts that cannot await (the `eval` host shim).
+- **Why:** the optional Binaryen optimizer now loads via
+  `await import("binaryen")` instead of a synchronous `require`. Binaryen ships
+  a top-level `await` that a sync `require` cannot load, which is what blocked
+  embedding it in a `bun build --compile` / `deno compile` standalone binary
+  (GH #986). With the async path the optimizer is bundled and the single-file
+  binary runs `--optimize` with Binaryen embedded — no `wasm-opt` on `PATH`
+  required. Follow-up to the #1756 `createRequire` stopgap.
+
+  Migration: `const r = compile(src)` → `const r = await compile(src)`.
+
 ### Repository rename
 
 - The repo has been renamed `loopdive/js2wasm` → `loopdive/js2`.

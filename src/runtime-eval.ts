@@ -65,7 +65,7 @@
 
 import { ts } from "./ts-api.js";
 
-import { compileSource } from "./compiler.js";
+import { compileSourceSync } from "./compiler.js";
 import { buildImports, buildStringConstants, jsString } from "./runtime.js";
 
 /**
@@ -210,7 +210,7 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
     // `eval("var x = 1")` which evaluates to `undefined`).
     let result;
     try {
-      result = compileSource(`export function __eval_result() { return (${src}); }`, {
+      result = compileSourceSync(`export function __eval_result() { return (${src}); }`, {
         fileName: filename,
         allowJs: true,
         skipSemanticDiagnostics: true,
@@ -223,7 +223,7 @@ export function createEvalShim(options: EvalShimOptions = {}): (src: any, isDire
       // Try statement-form wrapper.  A throw inside `src` will propagate as
       // an uncaught exception when the child's `__eval_result` runs.
       try {
-        result = compileSource(`export function __eval_result() { ${src}; return undefined; }`, {
+        result = compileSourceSync(`export function __eval_result() { ${src}; return undefined; }`, {
           fileName: filename,
           allowJs: true,
           skipSemanticDiagnostics: true,

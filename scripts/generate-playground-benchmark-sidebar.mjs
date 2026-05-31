@@ -101,7 +101,7 @@ async function measureBenchmark(entryPath, exportName) {
   const absEntryPath = resolve(ROOT, "website", "playground", entryPath);
   const source = readFileSync(absEntryPath, "utf8");
 
-  const result = compileMulti(
+  const result = await compileMulti(
     {
       [entryPath]: source,
       "examples/benchmarks/helpers.ts": HELPERS_SOURCE,

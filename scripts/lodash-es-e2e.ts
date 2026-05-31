@@ -92,10 +92,10 @@ for (const tc of cases) {
   let result;
   try {
     if (tc.multi) {
-      result = compileProject(filePath);
+      result = await compileProject(filePath);
     } else {
       const src = readFileSync(filePath, "utf-8");
-      result = compile(src, { fileName: tc.file });
+      result = await compile(src, { fileName: tc.file });
     }
   } catch (e: any) {
     console.log(`  SKIP (compile exception): ${e.message?.slice(0, 80)}`);

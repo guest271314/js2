@@ -118,6 +118,7 @@ fidelity → #1463) were NOT re-filed.
 - [#1721](../1721-es3-subclass-function-object-instanceof.md) — ES3 (residual of #1455): `class extends Function`/`extends Object` instanceof returns false (4 fails) — medium, medium, **ready (sprint 57)**
 - [#1722](../1722-es3-assignmenttargettype-early-syntaxerror.md) — ES3: AssignmentTargetType early SyntaxError not raised (yield/arrow as assignment target, 4 fails) — low, medium, **ready (sprint 57)**
 - [#1511](../1511-spec-gap-arguments-object-mapped-and-trailing-comma.md) — **MOVED to sprint 57** (was sprint 52): arguments object mapped semantics / descriptors / trailing-comma length — covers the ES3 mapped-arguments cluster (~19 edition-0 fails) — high, medium, **review**
+- [#1757](../1757-async-compile-api-migration.md) — Migrate public `compile()` API to async (embed binaryen via await import; follow-up to #1756/#986) — **BREAKING**, ~1675 sites/761 files, medium, hard, **in-progress** [SENIOR-DEV]
 
 ### Platform / Component Model & runtime (from GitHub #389)
 

@@ -216,7 +216,7 @@ async function runPerfSuite(): Promise<PerfBenchResult[]> {
 
     try {
       const t0 = performance.now();
-      const compileResult = compile(workload.source, { fast: false });
+      const compileResult = await compile(workload.source, { fast: false });
       const compileMs = performance.now() - t0;
 
       if (!compileResult.success) {
@@ -491,7 +491,7 @@ async function runReactBench(): Promise<ReactBenchResult[]> {
 
   try {
     const t0 = performance.now();
-    const result = compile(REACT_SOURCE, { fast: true });
+    const result = await compile(REACT_SOURCE, { fast: true });
     const compileMs = performance.now() - t0;
 
     if (!result.success) {
