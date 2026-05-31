@@ -3,7 +3,7 @@ id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: backlog
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-05-31
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +12,7 @@ area: test-infrastructure, codegen
 language_feature: multi
 es_edition: multi
 goal: self-hosting-dogfood
-sprint: 57
+sprint: 58
 depends_on: [1710, 1711]
 related: [1690, 1690b, 1584, 1058]
 ---

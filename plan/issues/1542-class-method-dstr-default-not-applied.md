@@ -3,11 +3,11 @@ id: 1542
 title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" instead"
 status: ready
 created: 2026-05-20
-updated: 2026-05-29
+updated: 2026-05-31
 priority: high
 feasibility: hard
 goal: test262-conformance
-sprint: 57
+sprint: 58
 parent: 820
 test262_fail: 134
 ---
