@@ -258,8 +258,8 @@ import { buildImports as buildImportsRuntime } from "./runtime.js";
  * }
  * ```
  */
-export function compile(source: string, options?: CompileOptions): CompileResult {
-  return withImportObject(compileSource(source, options));
+export async function compile(source: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileSource(source, options));
 }
 
 /**
@@ -304,12 +304,12 @@ function withImportObject(result: CompileResult): CompileResult {
  * Compile multiple TypeScript source files into a single Wasm GC binary.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMulti(
+export async function compileMulti(
   files: Record<string, string>,
   entryFile: string,
   options?: CompileOptions,
-): CompileResult {
-  return withImportObject(compileMultiSource(files, entryFile, options));
+): Promise<CompileResult> {
+  return withImportObject(await compileMultiSource(files, entryFile, options));
 }
 
 /**
@@ -329,13 +329,13 @@ export function compileMulti(
  * // TypeScript resolves src/utils.ts automatically
  * ```
  */
-export function compileFiles(entryPath: string, options?: CompileOptions): CompileResult {
-  return withImportObject(compileFilesSource(entryPath, options));
+export async function compileFiles(entryPath: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileFilesSource(entryPath, options));
 }
 
 /** Only WAT text (debug) */
-export function compileToWat(source: string): string {
-  const result = compileSource(source, { emitWat: true });
+export async function compileToWat(source: string): Promise<string> {
+  const result = await compileSource(source, { emitWat: true });
   return result.wat;
 }
 
@@ -356,7 +356,7 @@ export function compileToObject(source: string, options?: CompileOptions) {
  * @param entryFile - Absolute or relative path to the entry .ts file
  * @param options - Compile options including resolve and externals settings
  */
-export function compileProject(entryFile: string, options?: CompileOptions): CompileResult {
+export async function compileProject(entryFile: string, options?: CompileOptions): Promise<CompileResult> {
   const resolvedEntry = path.resolve(entryFile);
   const rootDir = path.dirname(resolvedEntry);
 
@@ -383,7 +383,7 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   // Entry file key
   const entryKey = `./${path.relative(rootDir, resolvedEntry)}`;
 
-  return withImportObject(compileMultiSource(files, entryKey, effectiveOptions));
+  return withImportObject(await compileMultiSource(files, entryKey, effectiveOptions));
 }
 
 /**
@@ -403,12 +403,12 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
  * ```
  */
 export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
-  compile: (source: string, options?: CompileOptions) => CompileResult;
+  compile: (source: string, options?: CompileOptions) => Promise<CompileResult>;
   dispose: () => void;
 } {
   const service = new IncrementalLanguageService();
   return {
-    compile(source: string, options?: CompileOptions): CompileResult {
+    compile(source: string, options?: CompileOptions): Promise<CompileResult> {
       return compileSource(source, { ...defaultOptions, ...options }, service);
     },
     dispose() {

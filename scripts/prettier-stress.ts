@@ -76,7 +76,7 @@ async function run(entry: Entry): Promise<Result> {
   const src = readFileSync(resolve(entry.path), "utf-8");
   let result: CompileResult;
   try {
-    result = compile(src, {
+    result = await compile(src, {
       fileName: entry.path,
       allowJs: true,
       skipSemanticDiagnostics: true,

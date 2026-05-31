@@ -130,7 +130,7 @@ async function runJs2wasm(
   } catch (e: unknown) {
     return { stdout: "", error: `read failed: ${(e as Error).message}`, ms: Date.now() - t0, outcome: "runtime_error" };
   }
-  const r = compile(source, { fileName: file });
+  const r = await compile(source, { fileName: file });
   if (!r.success) {
     return {
       stdout: "",

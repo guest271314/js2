@@ -150,7 +150,7 @@ async function prepareArtifacts(entry) {
   const absEntryPath = resolve(ROOT, "website", "playground", entry.path);
   const source = readFileSync(absEntryPath, "utf8");
 
-  const result = compileMulti(
+  const result = await compileMulti(
     {
       [entry.path]: source,
       "examples/benchmarks/helpers.ts": HELPERS_SOURCE,

@@ -302,7 +302,7 @@ async function main() {
   // --- Compile Wasm ---
   console.log("Compiling TypeScript to WasmGC...");
   const compileStart = performance.now();
-  const result = compile(WASM_SOURCE, { fast: true });
+  const result = await compile(WASM_SOURCE, { fast: true });
   const compileTime = performance.now() - compileStart;
 
   if (!result.success) {

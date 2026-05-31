@@ -32,7 +32,7 @@ import { applyDefineSubstitutions } from "./compiler/define-substitution.js";
 import { rewriteCjsRequire } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
-import { optimizeBinary } from "./optimize.js";
+import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
@@ -132,8 +132,48 @@ function detectNodeFsImports(source: string): Set<string> {
 /**
  * Orchestrates the full compilation pipeline:
  * TS Source → tsc Parser+Checker → Codegen → Binary + WAT
+ *
+ * Async because the optional Binaryen optimizer is lazy-loaded via
+ * `await import("binaryen")` (#1757 / GH #986) so it can be embedded in a
+ * `bun build --compile` / `deno compile` standalone binary.
  */
-export function compileSource(
+export async function compileSource(
+  source: string,
+  options: CompileOptions = {},
+  /** Optional persistent language service for incremental compilation */
+  languageService?: IncrementalLanguageService,
+): Promise<CompileResult> {
+  // The whole codegen pipeline is synchronous; the ONLY async step is the
+  // optional Binaryen wasm-opt pass. Run the synchronous core, then apply
+  // optimization (when requested) over the produced binary. A synchronous
+  // entry point (compileSourceSync) is preserved for callers that cannot be
+  // async — notably the JS `eval` host shim in runtime-eval.ts, which never
+  // optimizes.
+  const result = compileSourceSync(source, options, languageService);
+
+  if (options.optimize && result.success) {
+    const level = typeof options.optimize === "number" ? options.optimize : 3;
+    const optResult = await optimizeBinaryAsync(result.binary, { level });
+    if (optResult.optimized) {
+      result.binary = optResult.binary;
+    }
+    if (optResult.warning) {
+      result.errors.push({ message: optResult.warning, line: 0, column: 0, severity: "warning" });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Synchronous compilation core (no Binaryen optimization).
+ *
+ * Identical to {@link compileSource} but never runs the async wasm-opt pass —
+ * the `optimize` option is ignored here. Use this only from synchronous
+ * contexts that cannot await (the `eval` host shim). All other callers should
+ * use the async {@link compileSource}.
+ */
+export function compileSourceSync(
   source: string,
   options: CompileOptions = {},
   /** Optional persistent language service for incremental compilation */
@@ -485,17 +525,10 @@ export function compileSource(
     };
   }
 
-  // Step 3b: Optimize binary with Binaryen (optional)
-  if (options.optimize) {
-    const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
-    if (optResult.optimized) {
-      binary = optResult.binary;
-    }
-    if (optResult.warning) {
-      pushSourceAnchoredDiagnostic(errors, ast.sourceFile, optResult.warning, "warning");
-    }
-  }
+  // Step 3b: Optimize binary with Binaryen (optional) — applied by the async
+  // compileSource wrapper, not here (the optimizer is lazy-loaded via
+  // `await import("binaryen")`, #1757). This synchronous core ignores
+  // options.optimize.
 
   // Step 4: Emit WAT (optional)
   let wat = "";
@@ -548,11 +581,11 @@ export function compileSource(
  * Compile multiple TypeScript source files into a single Wasm module.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMultiSource(
+export async function compileMultiSource(
   files: Record<string, string>,
   entryFile: string,
   options: CompileOptions = {},
-): CompileResult {
+): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -769,7 +802,7 @@ export function compileMultiSource(
   // Optimize binary with Binaryen (optional)
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }
@@ -823,7 +856,7 @@ export function compileMultiSource(
  * Uses ts.createProgram with real filesystem access -- TypeScript resolves
  * all imports automatically via standard module resolution.
  */
-export function compileFilesSource(entryPath: string, options: CompileOptions = {}): CompileResult {
+export async function compileFilesSource(entryPath: string, options: CompileOptions = {}): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -1009,7 +1042,7 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
 
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }

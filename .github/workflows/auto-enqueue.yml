@@ -3,11 +3,27 @@ name: Auto-enqueue green PRs
 # WHY: GitHub has no native "auto-enqueue when checks go green". `gh pr merge
 # --auto` only arms on a check-state TRANSITION, so a PR that is already green
 # by the time anyone acts is never queued; the merge queue also drops a PR when
-# main advances under it. This workflow continuously enqueues every open,
-# non-draft, mergeable PR that isn't already in the queue. The merge queue
-# re-runs the required checks on the merged state before landing, so this can
-# never merge a red PR (branch protection stays the hard gate). Drafts and PRs
-# labelled hold/do-not-merge/wip are skipped.
+# main advances under it. This workflow enqueues open, non-draft, mergeable PRs
+# that aren't already in the queue. The merge queue re-runs the required checks
+# on the merged state before landing, so this can never merge a red PR (branch
+# protection stays the hard gate). Drafts and PRs labelled hold/do-not-merge/wip
+# are skipped.
+#
+# SERIAL-QUEUE INTERACTION (#1758): the merge queue is SERIAL
+# (max_entries_to_build=1). An unconditional, high-frequency enqueue sweep races
+# GitHub's `merge_group` formation — poking the serial head WHILE a merge group
+# is mid-formation wedged the queue twice on 2026-05-30/31 (stuck
+# AWAITING_CHECKS, no merge_group dispatched; only a ~10-min ruleset
+# disable/re-enable reset cleared it). So the sweep is now SURGICAL. The script
+# (scripts/enqueue-green-prs.mjs) applies two guards:
+#   1. BACK-OFF — if ANY queue entry is AWAITING_CHECKS (a head is forming), it
+#      skips the entire sweep and lets GitHub finish.
+#   2. GRACE WINDOW — it only enqueues a PR whose required checks have been green
+#      for >= GRACE_MINUTES (default 10), so it never races a fresh dev enqueue
+#      and only catches genuine strays.
+# This workflow reinforces that with a LOWERED cron (~30 min; the
+# workflow_run trigger covers the responsive case) and a single-flight
+# concurrency guard so two sweeps never overlap.
 
 on:
   # Responsive: fire right after the workflows that produce required checks finish.
@@ -15,8 +31,11 @@ on:
     workflows: ["Test262 Sharded", "CI"]
     types: [completed]
   # Backstop: catch PRs the merge queue dropped when main advanced under them.
+  # Lowered to ~30 min (#1758) — the workflow_run trigger is the responsive path;
+  # the script's back-off + grace-window guards make a high cron cadence
+  # unnecessary and (against a serial queue) harmful.
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:

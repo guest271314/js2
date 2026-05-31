@@ -6,15 +6,10 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import type { CompileOptions } from "../src/index.js";
 
-export async function compileAndRun(
-  source: string,
-  options: CompileOptions = {},
-): Promise<Record<string, Function>> {
-  const result = compile(source, options);
+export async function compileAndRun(source: string, options: CompileOptions = {}): Promise<Record<string, Function>> {
+  const result = await compile(source, options);
   if (!result.success) {
-    throw new Error(
-      result.errors.map((e) => `L${e.line}: ${e.message}`).join("\n"),
-    );
+    throw new Error(result.errors.map((e) => `L${e.line}: ${e.message}`).join("\n"));
   }
   const imports = buildImports(result.imports, undefined, result.stringPool);
   const { instance } = await WebAssembly.instantiate(result.binary, imports);

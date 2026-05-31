@@ -1930,7 +1930,7 @@ async function t262LoadAndShow(filePath: string, fileResult: T262FileResult | nu
   activeT262FileResult = fileResult;
   const fname = t262FileName(filePath);
   updateTabLabel("ts-source", fname, undefined, tabTooltips["ts-source"]);
-  compileOnly();
+  await compileOnly();
   t262Loading = false;
   closeMobileSidebarAfterSelection();
 }
@@ -2103,7 +2103,7 @@ function normalizeBenchmarkHelperImport(source: string, entryPath: string | null
   );
 }
 
-function buildCompileResultForEditorSource(source: string) {
+async function buildCompileResultForEditorSource(source: string) {
   const entryPath = isBenchmarkProjectPath(t262ActivePath)
     ? t262ActivePath!
     : source.includes("bench_")
@@ -2111,9 +2111,9 @@ function buildCompileResultForEditorSource(source: string) {
       : "example.ts";
   const normalizedSource = normalizeBenchmarkHelperImport(source, entryPath);
   if (!isBenchmarkProjectPath(t262ActivePath) && !usesBenchmarkHelpers(normalizedSource)) {
-    return compile(normalizedSource);
+    return await compile(normalizedSource);
   }
-  return compileMulti(
+  return await compileMulti(
     {
       [entryPath]: normalizedSource,
       "examples/benchmarks/helpers.ts": BENCH_HELPERS_SOURCE,
@@ -3403,7 +3403,7 @@ function generateModularOutput(result: ReturnType<typeof compile>): string {
 import { compile } from "js2wasm";
 import source from "./example.ts?raw";
 
-const result = compile(source);
+const result = await compile(source);
 
 if (!result.success) {
   throw new Error(
@@ -3883,7 +3883,7 @@ function hasTopLevelMainDeclaration(source: string): boolean {
   );
 }
 
-function compileOnly() {
+async function compileOnly() {
   const source = inputFile.model.getValue();
   consolePre.textContent = "";
   errorsPre.textContent = "";
@@ -3896,7 +3896,7 @@ function compileOnly() {
   syncT262FailureAnnotations();
 
   const t0 = performance.now();
-  const result = buildCompileResultForEditorSource(source);
+  const result = await buildCompileResultForEditorSource(source);
   const compileTime = performance.now() - t0;
 
   lastResult = result;
@@ -4147,7 +4147,7 @@ async function runOnly() {
 }
 
 async function compileAndRun() {
-  compileOnly();
+  await compileOnly();
   if (!lastResult?.success) return;
   await runOnly();
 }
@@ -4186,7 +4186,7 @@ async function runBenchmark() {
     t262Loading = false;
   }
   if (!lastResult?.success) {
-    compileOnly();
+    await compileOnly();
     if (!lastResult?.success) return;
   }
 
@@ -4545,7 +4545,7 @@ function showT262DeepLinkBanner(message: string, tone: "fail" | "warn"): void {
 // Auto-compile and run on page load (or load test262 deep-link first).
 (async () => {
   const deepLinked = await loadDeepLinkFromUrl();
-  compileOnly();
+  await compileOnly();
   if (!deepLinked) {
     requestAnimationFrame(() => {
       void runOnly();

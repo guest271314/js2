@@ -118,3 +118,10 @@ fidelity → #1463) were NOT re-filed.
 - [#1721](../1721-es3-subclass-function-object-instanceof.md) — ES3 (residual of #1455): `class extends Function`/`extends Object` instanceof returns false (4 fails) — medium, medium, **ready (sprint 57)**
 - [#1722](../1722-es3-assignmenttargettype-early-syntaxerror.md) — ES3: AssignmentTargetType early SyntaxError not raised (yield/arrow as assignment target, 4 fails) — low, medium, **ready (sprint 57)**
 - [#1511](../1511-spec-gap-arguments-object-mapped-and-trailing-comma.md) — **MOVED to sprint 57** (was sprint 52): arguments object mapped semantics / descriptors / trailing-comma length — covers the ES3 mapped-arguments cluster (~19 edition-0 fails) — high, medium, **review**
+- [#1757](../1757-async-compile-api-migration.md) — Migrate public `compile()` API to async (embed binaryen via await import; follow-up to #1756/#986) — **BREAKING**, ~1675 sites/761 files, medium, hard, **in-progress** [SENIOR-DEV]
+
+### Platform / Component Model & runtime (from GitHub #389)
+
+- [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **ready**
+- [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **ready**
+- [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready**

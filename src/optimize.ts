@@ -244,10 +244,29 @@ function optimizeWithBinaryenPackage(
   referenceTypes: boolean,
   exceptionHandling: boolean,
 ): OptimizeResult | null {
-  // Dynamic import to avoid hard dependency
+  // Load binaryen synchronously via a createRequire shim rather than a bare
+  // `require("binaryen")`. Two reasons (#1757 / GH #986):
+  //  1. `require` is a ReferenceError in ESM hosts.
+  //  2. A *static* `require("binaryen")` makes esbuild/bun try to inline
+  //     binaryen into the bundle, which fails hard because binaryen ships a
+  //     top-level `await` that a synchronous require cannot load — this is the
+  //     exact blocker for `bun build --compile` / `deno compile`. Routing the
+  //     synchronous fallback through `process.getBuiltinModule("node:module")`
+  //     -> `createRequire` keeps the reference dynamic so bundlers do NOT
+  //     statically follow it; the async path (optimizeBinaryAsync ->
+  //     `await import("binaryen")`) is the one that legitimately bundles
+  //     binaryen for standalone embedding.
+  if (typeof process === "undefined" || !process.versions || !process.versions.node) {
+    return null;
+  }
   let binaryen: any;
   try {
-    binaryen = require("binaryen");
+    const getBuiltin = (process as unknown as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule;
+    if (typeof getBuiltin !== "function") return null;
+    const moduleNs = getBuiltin("node:module") as typeof import("node:module") | undefined;
+    if (!moduleNs || typeof moduleNs.createRequire !== "function") return null;
+    const req = moduleNs.createRequire(`file://${process.cwd()}/`);
+    binaryen = req("binaryen");
   } catch {
     return null;
   }
