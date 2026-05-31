@@ -125,3 +125,11 @@ fidelity → #1463) were NOT re-filed.
 - [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **ready**
 - [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **ready**
 - [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready**
+
+### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
+
+Native differential (PR #997) found the string **build** loop is ~99% of warm wall
+time (the i32 hash path lever is DONE and already faster/char than V8). Two sized levers:
+
+- [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready**
+- [#1762](../1762-linear-memory-string-backing-build-hash-hot-path.md) — Linear-memory string backing for the build/hash hot path — drop the WasmGC `(array i16)` GC barrier (strategic ceiling; dual-backend like #679/#682/#1714) — **high**, hard, **ready, likely needs arch spec**

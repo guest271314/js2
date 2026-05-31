@@ -306,6 +306,19 @@ All independent, can run in parallel.
 | 957 | Eliminate local.set + drop dead-store pattern (4.8%, 272 cases) | Size/perf | **Ready** (easy) |
 | 958 | Batch string concat chains into multi-arg call (4.8%, 531 chains) | GC allocs | **Ready** (hard) |
 
+### String-hash warm-perf levers (carved from #1746 umbrella, 2026-05-31)
+
+Native differential (PR #997) found the string **build** loop, not the hash loop, is
+~99% of warm wall time (the i32 hash path #1746 lever #1 is DONE and already ~3.8×
+faster/char than V8). The two remaining levers are now sized, dispatchable issues:
+
+| #    | Title | Impact | Ready? | Deps |
+|------|-------|--------|--------|------|
+| 1761 | Presize string-build buffer from static loop trip count (kill reallocs + per-append cap-check) | Warm perf — top AOT win | **Ready** (medium) | — (related #1746, #1580, #1744) |
+| 1762 | Linear-memory string backing for build/hash hot path — drop the WasmGC `(array i16)` GC barrier | Warm perf — strategic ceiling | **Ready, likely needs arch spec** (hard) | — (related #1746, #679, #682, #1714) |
+
+#1746 stays the umbrella tracking issue.
+
 ---
 
 ## Cluster H: Type Inference / Performance `[E][I]`
