@@ -3,7 +3,7 @@ id: 1752
 title: "TextEncoder / TextDecoder runtime API (standalone + WASI)"
 status: ready
 created: 2026-05-30
-updated: 2026-05-30
+updated: 2026-05-31
 priority: medium
 feasibility: medium
 task_type: feature
@@ -12,7 +12,7 @@ language_feature: web-api
 goal: platform
 related: [389, 1588, 1655]
 depends_on: []
-sprint: Backlog
+sprint: 58
 ---
 
 # #1752 — TextEncoder / TextDecoder runtime API

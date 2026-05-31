@@ -3,7 +3,7 @@ id: 1580
 title: "string-hash benchmark: wasm-validator pre-existing bug + uncompetitive hot runtime"
 status: in-progress
 created: 2026-05-21
-updated: 2026-05-30
+updated: 2026-05-31
 completed: 2026-05-23
 priority: high
 feasibility: medium
@@ -12,7 +12,7 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
-sprint: 57
+sprint: 58
 related: [1175, 1178, 1210, 1184]
 origin: surfaced again by 4-lane competitive benchmark refresh
 ---
