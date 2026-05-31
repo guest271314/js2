@@ -107,7 +107,7 @@ export interface CompileResult {
    * into a single object the caller passes directly:
    *
    * ```js
-   * const r = compile(src);
+   * const r = await compile(src);
    * const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
    * ```
    *
@@ -247,7 +247,7 @@ import { buildImports as buildImportsRuntime } from "./runtime.js";
  *
  * @example
  * ```ts
- * const result = compile(`
+ * const result = await compile(`
  *   export function add(a: number, b: number): number {
  *     return a + b;
  *   }
@@ -325,7 +325,7 @@ export async function compileMulti(
  * @example
  * ```ts
  * // Given: src/main.ts imports from src/utils.ts
- * const result = compileFiles("src/main.ts");
+ * const result = await compileFiles("src/main.ts");
  * // TypeScript resolves src/utils.ts automatically
  * ```
  */
