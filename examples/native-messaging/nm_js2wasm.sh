@@ -1,4 +1,4 @@
-#!/usr/bin/env -S wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y /ABSOLUTE/PATH/TO/examples/native-messaging/out/host.wasm
+#!/usr/bin/env -S wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y /ABSOLUTE/PATH/TO/examples/native-messaging/out/nm_js2wasm.wasm
 # Chrome launches the native messaging host by executing this script.
 # Replace /ABSOLUTE/PATH/TO/ above with the real absolute path to this repo.
 #

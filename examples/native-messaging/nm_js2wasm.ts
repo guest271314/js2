@@ -19,8 +19,14 @@
 //              4-byte length prefix and the message body. Large raw-byte
 //              writes (>= 1 MiB) grow linear memory as needed (#389/#1723) so a
 //              megabyte-scale body round-trips byte-exactly.
-//   - stderr : console.error / console.warn write to fd=2 (#1493) — use these
-//              for debug output so they never corrupt the stdout protocol stream
+//   - stderr : process.stderr.write writes raw bytes/strings to fd=2, and
+//              console.error formats + writes to fd=2 — both keep debug output
+//              off the stdout protocol stream. The debug telemetry line below
+//              uses console.error: it interpolates numbers into a template, and
+//              process.stderr.write of a numeric-template string currently trips
+//              the WASI native-string extern-bridge gap (#1759). console.error
+//              formats integers natively under --target wasi, so it compiles
+//              cleanly. Switch back to process.stderr.write once #1759 lands.
 //
 // This is a drop-in Chrome host modelled on the 3-symbol shape guest271314
 // uses across runtimes (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`):
@@ -82,6 +88,7 @@ function getMessage(): Uint8Array {
   // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
   // protocol stream. Chrome ignores the host's stderr. The frame is the 4-byte
   // LE prefix plus the declared body, so total bytes consumed is 4 + declaredLen.
+  // console.error (not process.stderr.write) — numeric template interpolation hits the WASI native-string bridge gap, see #1759
   console.error(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}`);
   return body;
 }
