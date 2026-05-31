@@ -12,7 +12,7 @@ language_feature: template-literals
 goal: platform
 related: [389, 985]
 depends_on: []
-sprint: Backlog
+sprint: 58
 ---
 
 # #1759 — WASI native number→string bridge gap

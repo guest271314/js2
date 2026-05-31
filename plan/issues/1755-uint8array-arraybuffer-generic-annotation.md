@@ -3,7 +3,7 @@ id: 1755
 title: "TS annotation: Uint8Array<ArrayBuffer> generic typed-array form not handled"
 status: ready
 created: 2026-05-30
-updated: 2026-05-30
+updated: 2026-05-31
 priority: low
 feasibility: medium
 task_type: bug
@@ -12,7 +12,7 @@ language_feature: typed-arrays
 goal: platform
 related: [389, 1752, 1700]
 depends_on: []
-sprint: Backlog
+sprint: 58
 ---
 
 # #1755 — `Uint8Array<ArrayBuffer>` generic annotation
