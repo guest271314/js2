@@ -1228,6 +1228,31 @@ export function compileBinaryExpression(
   const isI32MulSafe = (l: ts.Expression, r: ts.Expression): boolean => {
     return isSmallIntLit(l) || isSmallIntLit(r);
   };
+  // #1746: a call expression that provably lowers to a native i32 result is an
+  // i32-pure *leaf*. The only such call today is `<str>.charCodeAt(idx)`: in
+  // both nativeStrings mode (inline `array.get_u` → i32) and JS-host mode
+  // (`wasm:js-string.charCodeAt` import → i32) it returns a u16 code unit in
+  // [0, 65535] when the receiver is a string — always non-negative, always
+  // i32-range, always f64-exact. Crucially, `compileExpression` returns i32 for
+  // it *unconditionally* (not hint-driven), so treating the enclosing
+  // arithmetic as i32 does not change charCodeAt's own observable value: the
+  // f64 path already produces the same i32 then `f64.convert_i32_s`'s it. The
+  // index arg is left to `compileExpression`'s own ToInteger handling — we
+  // don't re-derive it, so its semantics are unchanged. This is what lets the
+  // string-hash hot loop `(hash*31 + text.charCodeAt(i)) | 0` collapse to a
+  // pure i32 chain instead of the f64 multiply/add + expensive ToInt32 dance.
+  const isI32PureStringCall = (e: ts.Expression): boolean => {
+    const inner = peel(e);
+    if (!ts.isCallExpression(inner)) return false;
+    const callee = inner.expression;
+    if (!ts.isPropertyAccessExpression(callee)) return false;
+    if (callee.name.text !== "charCodeAt") return false;
+    // Receiver must be statically a string (primitive or wrapper) so the
+    // string method dispatch fires and returns i32 — guards against a
+    // user object with a `charCodeAt` method of arbitrary return type.
+    const recvType = ctx.checker.getTypeAtLocation(callee.expression);
+    return isStringType(recvType);
+  };
   // #1179: predicate for "this expression compiles to i32 cheaply with
   // an i32 hint" — leaves are i32 locals or i32-range integer literals,
   // and internal nodes are bitwise / `| 0` (always i32) or arithmetic
@@ -1243,6 +1268,8 @@ export function compileBinaryExpression(
       const n = Number(inner.text.replace(/_/g, ""));
       return Number.isInteger(n) && n >= -2147483648 && n <= 2147483647;
     }
+    // #1746: i32-returning string call (charCodeAt) is an i32-pure leaf.
+    if (isI32PureStringCall(inner)) return true;
     if (ts.isBinaryExpression(inner)) {
       const k = inner.operatorToken.kind;
       // `expr | 0` always produces i32 cleanly when its operand does.
@@ -1270,6 +1297,50 @@ export function compileBinaryExpression(
     }
     return false;
   };
+  // #1746: emit a *proven-i32-pure* expression directly as an i32 instruction
+  // chain, leaving the result as i32 on the stack. The caller MUST have verified
+  // `isI32PureExpr(e)` first — this mirrors that predicate's structure exactly.
+  //
+  // Why this exists: `compileBinaryExpression` recomputes its i32 decision
+  // per-node by walking UP to find an enclosing bitwise/`| 0` context, and the
+  // incoming `hint` is dropped (compileExpression → compileBinaryExpression
+  // ignores it). So for `(hash*31 + charCodeAt) | 0`, the outer `+` is i32 (its
+  // parent is `| 0`), but the inner `hash*31`'s parent is `+` (not bitwise) — it
+  // would re-derive f64 and force a round-trip, defeating the whole point. This
+  // emitter keeps the entire pure subtree in i32 regardless of nesting depth,
+  // which is the lever that collapses the string-hash hot loop to pure i32.
+  const emitI32PureExpr = (e: ts.Expression): void => {
+    const inner = peel(e);
+    if (ts.isIdentifier(inner)) {
+      const idx = fctx.localMap.get(inner.text)!;
+      fctx.body.push({ op: "local.get", index: idx });
+      return;
+    }
+    if (ts.isNumericLiteral(inner)) {
+      fctx.body.push({ op: "i32.const", value: Number(inner.text.replace(/_/g, "")) | 0 });
+      return;
+    }
+    if (isI32PureStringCall(inner)) {
+      // charCodeAt already returns i32 unconditionally; emit it as-is.
+      compileExpression(ctx, fctx, inner);
+      return;
+    }
+    if (ts.isBinaryExpression(inner)) {
+      const k = inner.operatorToken.kind;
+      // `expr | 0` — the `| 0` is a no-op once its operand is i32.
+      if (k === ts.SyntaxKind.BarToken && ts.isNumericLiteral(inner.right) && inner.right.text === "0") {
+        emitI32PureExpr(inner.left);
+        return;
+      }
+      emitI32PureExpr(inner.left);
+      emitI32PureExpr(inner.right);
+      compileI32BinaryOp(ctx, fctx, k, inner);
+      return;
+    }
+    // Unreachable when the caller respects the isI32PureExpr precondition.
+    // Fall back to compileExpression for safety (keeps codegen total).
+    compileExpression(ctx, fctx, inner, { kind: "i32" });
+  };
   // Arith op with ToInt32-wrapping parent: fire if both operands are i32-pure.
   // Subsumes the original i32-locals-only check; literals and nested chains now apply too.
   // #1179-followup: when the OUTER op is `*`, additionally require the
@@ -1289,8 +1360,25 @@ export function compileBinaryExpression(
       }
     : undefined;
 
-  let leftType = compileExpression(ctx, fctx, expr.left, numericHint);
-  let rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+  // #1746: when both operands are proven i32-pure and the result is ToInt32-
+  // wrapped (arith under `| 0`/bitwise) or this op is itself bitwise, emit the
+  // operand subtrees via the self-contained i32 emitter. This keeps nested
+  // arith-under-arith nodes in i32 — the per-node parent-walk in
+  // compileBinaryExpression can't (the parent of an inner `*` inside a `+` is
+  // not bitwise, so it would re-derive f64). Without this the whole pure chain
+  // collapses back to the f64 round-trip the predicate was meant to eliminate.
+  const useI32PureEmit = arithI32WithToInt32Wrap || bitwiseI32;
+  let leftType: ValType | null;
+  let rightType: ValType | null;
+  if (useI32PureEmit) {
+    emitI32PureExpr(expr.left);
+    emitI32PureExpr(expr.right);
+    leftType = { kind: "i32" };
+    rightType = { kind: "i32" };
+  } else {
+    leftType = compileExpression(ctx, fctx, expr.left, numericHint);
+    rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+  }
 
   if (!leftType || !rightType) return null;
 
