@@ -1,9 +1,10 @@
 ---
 id: 1757
 title: "Migrate the public compile() API to async (embed binaryen via await import)"
-status: in-progress
+status: done
 created: 2026-05-31
 updated: 2026-05-31
+completed: 2026-05-31
 priority: medium
 feasibility: hard
 reasoning_effort: high
