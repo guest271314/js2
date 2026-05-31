@@ -107,7 +107,7 @@ fi
 # ALLOW: git commit / non-ff merge if the command contains the tech lead authentication token.
 # The token is documented in .claude/agents/tech-lead.md. Agents without that role file
 # will not know it. Do not reveal the token in error messages below.
-if echo "$CMD" | grep -q 'Checklist completed\.' || echo "$CMD" | grep -q 'CHECKLIST-FOXTROT' || echo "$CMD" | grep -q 'Team Lead'; then
+if echo "$CMD" | grep -q 'Checklist completed\.' || echo "$CMD" | grep -q 'Team Lead'; then
   exit 0
 fi
 
