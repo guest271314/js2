@@ -3,27 +3,40 @@
  * Generates the Wasmtime-vs-V8 per-request comparison data for the landing
  * page chart `<perf-benchmark-chart src="…hot-runtime.json">`.
  *
- * The page positions this as a Fastly Compute (Wasmtime + AOT-precompiled
- * `.cwasm`) vs Cloudflare Workers (V8 isolate) comparison: edge serverless
- * platforms that both run untrusted code per request, but with very
- * different cost models for fresh-vs-reused execution contexts.
+ * The page positions this as a generic edge-serverless comparison between
+ * two production runtime architectures: an AOT-compiled Wasm edge runtime
+ * (Wasmtime + AOT-precompiled `.cwasm`, pre-instantiated module) vs a
+ * V8-isolate edge runtime (V8 isolate-per-request). Both run untrusted code
+ * per request, but with very different cost models for fresh-vs-reused
+ * execution contexts. No specific commercial platform is named — the lanes
+ * describe the *architecture/scenario*, not a product.
+ *
+ * NOTE (#1764): the **cold** lane below currently measures full OS-process
+ * spawns (`wasmtime run` / `node script.js`), which is the true cold-process
+ * worst case, NOT how production edge runtimes serve a cold request.
+ * Production keeps the engine/runtime warm and pays only a lightweight
+ * per-request context/instance cost. #1764 specs replacing the process-spawn
+ * cold lane with a warm-engine, per-request instantiation model for both
+ * lanes (new context / new Instance from a long-lived engine). Until that
+ * lands, read the cold numbers as "full cold-process", not "edge cold-start".
  *
  * Two scenarios per program (8 rows total):
  *
- *   1. **Cold isolate / fresh process per request**
- *      Models the worst-case edge serverless request: a request arrives, no
- *      pre-warmed instance exists, the runtime must boot from scratch.
+ *   1. **Per-request cold (currently: fresh process per request)**
+ *      Today this models the worst-case full cold-process request: a request
+ *      arrives, no pre-warmed runtime exists, the runtime boots from scratch.
  *      - Wasm lane: full `wasmtime run --allow-precompiled` wall time
  *        (wasmtime startup ~ms + cwasm `mmap` + signature check + `run(arg)`).
  *      - JS lane: full `node script.js` wall time (V8 startup + module parse
  *        + Ignition → Liftoff → first invocation).
- *      Both include process startup. This is the honest per-request cost
- *      on a platform where requests aren't pinned to warm instances.
+ *      Both include process startup. Per #1764 this will move to "new
+ *      context / new Instance from a warm engine (µs–ms)", which is the
+ *      representative edge cold-start cost.
  *
- *   2. **Warm isolate / reused instance**
- *      Models the common-case edge serverless request: the runtime has
- *      already served a request, the isolate is reused, optimizing tiers
- *      have completed.
+ *   2. **Warm isolate / reused instance (steady state)**
+ *      Models the common-case edge request: the runtime has already served a
+ *      request, the isolate/instance is reused, optimizing tiers have
+ *      completed.
  *      - Wasm lane (#1760): one `wasmtime run --invoke warm` process whose
  *        appended `warm` export calls `run(arg)` a few warmup times then
  *        times many in-process iterations via CLOCK_MONOTONIC and returns
@@ -33,11 +46,11 @@
  *        ~2.3× run-to-run spread that swamped any few-ms per-call signal).
  *      - JS lane: spawn `node` once, call `mod.run(arg)` WARMUP times so
  *        TurboFan tiers up, then time MEASURED more in-process iterations
- *        and report the median. This is what a Cloudflare Workers isolate
+ *        and report the median. This is what a warm V8-isolate edge runtime
  *        actually pays once an optimizing tier has built up.
  *
  * Why no Pulley / no-JIT lane: Pulley is a portability/dev tool in
- * Wasmtime, not a production serverless config (Fastly/Fermyon/Shopify all
+ * Wasmtime, not a production serverless config (production Wasm edge runtimes
  * use Cranelift-compiled native code). Including it confused the message;
  * the genuine comparison is Cranelift AOT vs V8 JIT.
  *
@@ -49,7 +62,7 @@
  *
  * Those two values are NOT measured by this script — they require:
  *   - wasmtime ≥ 40 (for component `--invoke "fn(args)"` syntax)
- *   - javy + javy-default-plugin-v3 (Shopify-style dynamic-link mode)
+ *   - javy + javy-default-plugin-v3 (dynamic-link plugin mode)
  *   - @bytecodealliance/componentize-js ≥ 0.20.0 + Wizer + Weval AOT
  *
  * The full four-lane harness lives in the labs repo under
@@ -155,7 +168,7 @@ const STARLINGMONKEY_NUMBERS_MS = {
 };
 const LANES_PROVENANCE =
   "javyUs/starlingMonkeyUs from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux " +
-  "labs measurements (compare-runtimes.ts). Javy = Shopify-style dynamic-link " +
+  "labs measurements (compare-runtimes.ts). Javy = dynamic-link " +
   "with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + " +
   "Wizer + Weval AOT.";
 
