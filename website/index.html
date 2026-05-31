@@ -1275,7 +1275,16 @@
       .feat-row:hover .feat-name {
         color: #fff;
       }
+      /* The `host` label sits directly under the badge glyph in grid
+         column 1. It used to be `position: absolute` (left/top hard-coded),
+         which reserved no flow space and spilled past its row — overlapping
+         the next row's badge and the adjacent edition header's pass `%`.
+         Placing it as an in-flow grid item in column 1, row 2 makes the row
+         grow to contain badge + label so the ✓ / % / host stack cleanly. */
       .feat-host {
+        grid-column: 1;
+        grid-row: 2;
+        justify-self: center;
         font-family: var(--mono);
         font-size: 8px;
         font-weight: 600;
@@ -1283,12 +1292,18 @@
         color: inherit;
         background: none;
         padding: 0;
-        position: absolute;
-        left: 39px;
-        top: 34px;
-        transform: translateX(-50%);
-        line-height: 1.6;
+        margin-top: 2px;
+        line-height: 1.4;
+        text-align: center;
         white-space: nowrap;
+      }
+      /* Anchor the badge to row 1 of column 1 so the host label lands on the
+         row below it (not beside the feature name). Harmless on rows without
+         a host label (they only occupy row 1 of column 1 anyway), so no
+         `:has()` scoping is needed. */
+      .feat-badge {
+        grid-column: 1;
+        grid-row: 1;
       }
       .feat-badge.full + .feat-host {
         color: #4ade80;
@@ -1447,7 +1462,7 @@
           <h1
             id="hero-title"
             data-texts='["An ahead-of-time JavaScript compiler.", "Compile JavaScript without embedding a JS engine.",
-            "JavaScript compiled ahead of time, for fast cold starts and speed.", "Reduce supply chain attack surface with module sandboxing.", "Target existing Javascript code, not a new language."]'
+            "Tiny modules that start and run fast.", "Reduce supply chain attack surface with module sandboxing.", "Target existing Javascript code, not a new language."]'
           >
             <span class="hero-title-shell">
               <span class="hero-title-measure" aria-hidden="true"></span>
