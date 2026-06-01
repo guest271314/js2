@@ -160,6 +160,9 @@ export function createCodegenContext(
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,
+    // #682 — native standalone RegExp engine hook. Keep closed until the
+    // embedded engine is linked; #1474 owns today's refusal diagnostics.
+    standaloneRegExpEngine: null,
     // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
     // expose a CLI/option flag once the CPS lowering is parity-tested.
     supportsAsyncIr: false,
