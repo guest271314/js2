@@ -276,6 +276,12 @@ This issue (#1764) is the follow-up that changes the **measurement** itself.
     `benchmarks/wasmtime-cold-host` owns a warm Wasmtime `Engine` plus a
     Cranelift-compiled `Module`, then creates a fresh `Store` + `Instance`
     and calls `run(arg)` once per measured request.
+  - Javy / StarlingMonkey cold auxiliaries: the same Rust host now measures
+    matching warm-engine, fresh-store+instance samples. Javy uses a
+    dynamic-link module plus a preloaded `javy-default-plugin-v3` module.
+    StarlingMonkey uses a ComponentizeJS component with Wizer + Weval AOT.
+    Both auxiliary cold lanes use a fixed-argument no-return wrapper because
+    Javy v8.1.1 WIT exports only support `func()` today.
 - Documented the fidelity tradeoffs in the harness header and landing-page
   copy:
   - `vm` Context is a lower bound for a real V8 isolate.
@@ -290,10 +296,10 @@ This issue (#1764) is the follow-up that changes the **measurement** itself.
 - Added `wasmMinUs` / `wasmMaxUs` / `jsMinUs` / `jsMaxUs` to every benchmark
   row so the committed JSON carries the repeated-sample spread alongside
   medians and stddevs.
-- Dropped legacy Javy / StarlingMonkey **cold** values from the cold rows.
-  Their available cold numbers were full-process startup measurements, so
-  plotting them beside the #1764 warm-engine cold lane would be misleading.
-  Their warm steady-state values remain.
+- Replaced legacy Javy / StarlingMonkey **cold** values with matching #1764
+  warm-engine measurements instead of plotting the old full-process startup
+  numbers beside the new AOT cold lane. Their warm steady-state values remain
+  carried from the verified labs harness.
 - Added a Wasmtime-normalization pass using the existing `wasm-opt`
   `--all-features --disable-custom-descriptors` CLI shape before the
   Wasmtime warm precompile. This matches the project’s #1173 harness fix and
@@ -305,7 +311,7 @@ This issue (#1764) is the follow-up that changes the **measurement** itself.
 - Updated `website/index.html` to describe the new warm-engine cold model and
   the Rust Wasmtime host without naming commercial platforms.
 - Added `tests/issue-1764.test.ts` to guard methodology documentation, cold
-  row metadata/spread fields, absence of stale auxiliary cold lanes, and
+  row metadata/spread fields, matching auxiliary cold lanes, and
   company-agnostic benchmark framing.
 
 ### What worked
@@ -342,9 +348,11 @@ This issue (#1764) is the follow-up that changes the **measurement** itself.
 
 ### Tests
 
-- `PATH=.tmp/wasmtime-home/bin:$PATH pnpm run refresh:benchmarks:wasmtime`
-  passed and refreshed both benchmark JSON files with the Rust Wasmtime cold
-  host.
+- `PATH=.tmp/wasmtime-home/bin:$HOME/.cargo/bin:$PATH
+  JAVY_BIN=.tmp/javy-v8.1.1 pnpm run refresh:benchmarks:wasmtime` passed
+  and refreshed both benchmark JSON files with the Rust Wasmtime cold host,
+  Javy 8.1.1 dynamic-plugin cold lane, and ComponentizeJS 0.20.0
+  StarlingMonkey component cold lane.
 - `cargo build --release --manifest-path benchmarks/wasmtime-cold-host/Cargo.toml`
   passed.
 - `cargo fmt --check --manifest-path benchmarks/wasmtime-cold-host/Cargo.toml`

@@ -32,6 +32,8 @@ describe("#1764 — edge-serverless benchmark methodology", () => {
     expect(host).toContain("wasm_function_references(true)");
     expect(host).toContain("wasm_gc(true)");
     expect(host).toContain("Instance::new");
+    expect(host).toContain("Component::from_file");
+    expect(host).toContain("--preload");
     expect(host).toContain("Instant::now()");
   });
 
@@ -49,7 +51,12 @@ describe("#1764 — edge-serverless benchmark methodology", () => {
       jsMinUs?: number;
       jsMaxUs?: number;
       javyUs?: number;
+      javyColdMode?: string;
+      javyColdHost?: string;
       starlingMonkeyUs?: number;
+      starlingMonkeyColdMode?: string;
+      starlingMonkeyColdHost?: string;
+      auxiliaryColdWrapper?: string;
     }>;
 
     const coldRows = rows.filter((row) => row.scenario === "cold");
@@ -66,12 +73,13 @@ describe("#1764 — edge-serverless benchmark methodology", () => {
       expect(row.wasmMaxUs).toBeGreaterThanOrEqual(row.wasmMinUs!);
       expect(row.jsMinUs).toBeGreaterThan(0);
       expect(row.jsMaxUs).toBeGreaterThanOrEqual(row.jsMinUs!);
-
-      // The auxiliary runtime cold values available today are legacy
-      // full-process measurements. Do not plot them beside the #1764
-      // warm-engine cold rows until those lanes have matching measurements.
-      expect(row.javyUs).toBeUndefined();
-      expect(row.starlingMonkeyUs).toBeUndefined();
+      expect(row.auxiliaryColdWrapper).toBe("fixed-runtime-arg-no-return-wit");
+      expect(row.javyColdMode).toBe("rust-wasmtime-compile-once-dynamic-plugin-fresh-store-instance");
+      expect(row.javyColdHost).toBe("benchmarks/wasmtime-cold-host");
+      expect(row.javyUs).toBeGreaterThan(0);
+      expect(row.starlingMonkeyColdMode).toBe("rust-wasmtime-component-compile-once-fresh-store-instance");
+      expect(row.starlingMonkeyColdHost).toBe("benchmarks/wasmtime-cold-host");
+      expect(row.starlingMonkeyUs).toBeGreaterThan(0);
     }
   });
 
