@@ -5374,6 +5374,7 @@ export function ensureWasiWriteArrayBufferHelper(
       { name: "len", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "needPages", type: { kind: "i32" } },
     ],
     body,
     exported: false,
