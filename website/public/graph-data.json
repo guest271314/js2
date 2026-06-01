@@ -25683,6 +25683,18 @@
       "cluster": "platform"
     },
     {
+      "id": "1765",
+      "title": "nullable number alias guard not narrowed for typed-array byte assignment",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
       "id": "1768",
       "title": "allowJs native-messaging sendMessage emits invalid WASI wasm",
       "priority": "high",
@@ -32783,6 +32795,10 @@
     },
     {
       "goal": "platform",
+      "issue": "1765"
+    },
+    {
+      "goal": "platform",
       "issue": "1768"
     },
     {
@@ -38190,6 +38206,10 @@
     {
       "goal": "standalone-mode",
       "issue": "1764"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1765"
     },
     {
       "goal": "standalone-mode",

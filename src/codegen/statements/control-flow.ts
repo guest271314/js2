@@ -249,6 +249,28 @@ function detectNullNarrowing(expr: ts.Expression): { varName: string; narrowedBr
   };
 }
 
+function detectAliasedNullNarrowing(
+  fctx: FunctionContext,
+  expr: ts.Expression,
+): { varName: string; narrowedBranch: "then" | "else" } | null {
+  if (ts.isIdentifier(expr)) {
+    return fctx.nullGuardAliases?.get(expr.text) ?? null;
+  }
+  if (
+    ts.isPrefixUnaryExpression(expr) &&
+    expr.operator === ts.SyntaxKind.ExclamationToken &&
+    ts.isIdentifier(expr.operand)
+  ) {
+    const alias = fctx.nullGuardAliases?.get(expr.operand.text);
+    if (!alias) return null;
+    return {
+      varName: alias.varName,
+      narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then",
+    };
+  }
+  return null;
+}
+
 /**
  * Detect `typeof x === "string"` / `typeof x === "number"` patterns in if conditions.
  * Returns the variable name, the type literal, and which branch is narrowed.
@@ -366,7 +388,9 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   }
 
   // Detect null-narrowing pattern before compiling the condition
-  const narrowing = detectNullNarrowing(stmt.expression);
+  const directNarrowing = detectNullNarrowing(stmt.expression);
+  const aliasNarrowing = directNarrowing ? null : detectAliasedNullNarrowing(fctx, stmt.expression);
+  const narrowing = directNarrowing ?? aliasNarrowing;
 
   // Detect typeof narrowing pattern (typeof x === "string" / "number")
   const typeofNarrowing = detectTypeofNarrowing(stmt.expression);
@@ -384,11 +408,16 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
 
   // Save pre-existing narrowed set so we can restore it after each branch
   const savedNarrowedNonNull = fctx.narrowedNonNull ? new Set(fctx.narrowedNonNull) : undefined;
+  const savedAliasedNullGuardNonNull = fctx.aliasedNullGuardNonNull ? new Set(fctx.aliasedNullGuardNonNull) : undefined;
 
   // Apply narrowing for the then branch
   if (narrowing && narrowing.narrowedBranch === "then") {
     if (!fctx.narrowedNonNull) fctx.narrowedNonNull = new Set();
     fctx.narrowedNonNull.add(narrowing.varName);
+    if (aliasNarrowing) {
+      if (!fctx.aliasedNullGuardNonNull) fctx.aliasedNullGuardNonNull = new Set();
+      fctx.aliasedNullGuardNonNull.add(narrowing.varName);
+    }
   }
 
   // Compile then branch
@@ -416,11 +445,16 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
 
   // Restore narrowing before compiling else branch
   fctx.narrowedNonNull = savedNarrowedNonNull ? new Set(savedNarrowedNonNull) : undefined;
+  fctx.aliasedNullGuardNonNull = savedAliasedNullGuardNonNull ? new Set(savedAliasedNullGuardNonNull) : undefined;
 
   // Apply narrowing for the else branch
   if (narrowing && narrowing.narrowedBranch === "else") {
     if (!fctx.narrowedNonNull) fctx.narrowedNonNull = new Set();
     fctx.narrowedNonNull.add(narrowing.varName);
+    if (aliasNarrowing) {
+      if (!fctx.aliasedNullGuardNonNull) fctx.aliasedNullGuardNonNull = new Set();
+      fctx.aliasedNullGuardNonNull.add(narrowing.varName);
+    }
   }
 
   // Compile else branch
@@ -453,6 +487,7 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
 
   // Restore original narrowing state (leaving the if block clears narrowing)
   fctx.narrowedNonNull = savedNarrowedNonNull;
+  fctx.aliasedNullGuardNonNull = savedAliasedNullGuardNonNull;
 
   // Restore break/continue depths
   for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!--;
