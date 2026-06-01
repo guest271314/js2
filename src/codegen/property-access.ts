@@ -684,12 +684,7 @@ export function emitExternrefToStructGet(
       externGetFallback.push({ op: "extern.convert_any" } as Instr);
       // Push property name string
       addStringConstantGlobal(ctx, propName);
-      const strGlobalIdx = ctx.stringGlobalMap.get(propName);
-      if (strGlobalIdx !== undefined) {
-        externGetFallback.push({ op: "global.get", index: strGlobalIdx } as Instr);
-      } else {
-        externGetFallback.push({ op: "ref.null.extern" } as Instr);
-      }
+      externGetFallback.push(...stringConstantExternrefInstrs(ctx, propName));
       externGetFallback.push({ op: "call", funcIdx: getIdx } as Instr);
       // Coerce externref result to the expected result type
       if (resultType.kind === "f64") {
@@ -1267,12 +1262,7 @@ export function compilePropertyAccess(
     // Emit: __extern_get(__get_globalThis(), key) -> externref
     fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
     addStringConstantGlobal(ctx, propName);
-    const strGlobalIdx = ctx.stringGlobalMap.get(propName);
-    if (strGlobalIdx !== undefined) {
-      fctx.body.push({ op: "global.get", index: strGlobalIdx });
-    } else {
-      fctx.body.push({ op: "ref.null.extern" });
-    }
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
     if (getIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: getIdx });
     }
@@ -1393,21 +1383,11 @@ export function compilePropertyAccess(
       if (getBuiltinIdx !== undefined && getIdx !== undefined) {
         // Push builtin name string, call __get_builtin to get the real JS object
         addStringConstantGlobal(ctx, builtinName);
-        const builtinStrIdx = ctx.stringGlobalMap.get(builtinName);
-        if (builtinStrIdx !== undefined) {
-          fctx.body.push({ op: "global.get", index: builtinStrIdx });
-        } else {
-          compileStringLiteral(ctx, fctx, builtinName);
-        }
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
         fctx.body.push({ op: "call", funcIdx: getBuiltinIdx });
         // Push property name string, call __extern_get to read the property
         addStringConstantGlobal(ctx, propName);
-        const propStrIdx = ctx.stringGlobalMap.get(propName);
-        if (propStrIdx !== undefined) {
-          fctx.body.push({ op: "global.get", index: propStrIdx });
-        } else {
-          compileStringLiteral(ctx, fctx, propName);
-        }
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
         fctx.body.push({ op: "call", funcIdx: getIdx });
         return { kind: "externref" };
       }
@@ -2579,7 +2559,6 @@ export function compilePropertyAccess(
 
           // If proto is non-null, call __extern_get(proto, propName)
           addStringConstantGlobal(ctx, propName);
-          const strGlobalIdx = ctx.stringGlobalMap.get(propName);
 
           fctx.body.push({ op: "local.get", index: protoLocal });
           fctx.body.push({ op: "ref.is_null" });
@@ -2590,9 +2569,7 @@ export function compilePropertyAccess(
             then: protoDefaultInstrs,
             else: [
               { op: "local.get", index: protoLocal } as Instr,
-              ...(strGlobalIdx !== undefined
-                ? [{ op: "global.get", index: strGlobalIdx } as Instr]
-                : [{ op: "ref.null.extern" } as Instr]),
+              ...stringConstantExternrefInstrs(ctx, propName),
               { op: "call", funcIdx: getIdx } as Instr,
               ...(effectiveResult.kind === "f64" && unboxIdx !== undefined
                 ? [{ op: "call", funcIdx: unboxIdx } as Instr]
@@ -2628,12 +2605,7 @@ export function compilePropertyAccess(
             coerceType(ctx, fctx, recvType, { kind: "externref" });
           }
           addStringConstantGlobal(ctx, propName);
-          const strIdx = ctx.stringGlobalMap.get(propName);
-          if (strIdx !== undefined) {
-            fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-          } else {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
+          fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
           fctx.body.push({ op: "call", funcIdx: getIdx });
 
           // Unbox if the expected type is numeric
@@ -2841,12 +2813,7 @@ export function compilePropertyAccess(
           // Build the __extern_get fallback instructions
           const externGetFallback: Instr[] = [{ op: "local.get", index: objTmp } as Instr];
           addStringConstantGlobal(ctx, propName);
-          const strGlobalIdxExt = ctx.stringGlobalMap.get(propName);
-          if (strGlobalIdxExt !== undefined) {
-            externGetFallback.push({ op: "global.get", index: strGlobalIdxExt } as Instr);
-          } else {
-            externGetFallback.push({ op: "ref.null.extern" } as Instr);
-          }
+          externGetFallback.push(...stringConstantExternrefInstrs(ctx, propName));
           externGetFallback.push({ op: "call", funcIdx: getIdx } as Instr);
           if (resultWasm.kind === "f64" && unboxIdx !== undefined) {
             externGetFallback.push({ op: "call", funcIdx: unboxIdx } as Instr);
@@ -2950,12 +2917,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "extern.convert_any" });
         }
         addStringConstantGlobal(ctx, propName);
-        const strGIdx856 = ctx.stringGlobalMap.get(propName);
-        if (strGIdx856 !== undefined) {
-          fctx.body.push({ op: "global.get", index: strGIdx856 });
-        } else {
-          fctx.body.push({ op: "ref.null.extern" });
-        }
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
         fctx.body.push({ op: "call", funcIdx: getIdx856 });
         if (accessWasm.kind === "f64") {
           if (unboxIdx856 !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx856 });

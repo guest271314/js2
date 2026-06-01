@@ -6,7 +6,7 @@ import { ts, forEachChild } from "../../ts-api.js";
 import { isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
-import { allocLocal } from "../context/locals.js";
+import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
@@ -644,22 +644,40 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         const prevElemOverride = ctxAny._i32ElemArrayOverride;
         if (isI32SpecializedArray) ctxAny._i32ElemArrayOverride = true;
         let resultType: ValType | null;
+        const initializerExpectedType = getLocalType(fctx, localIdx) ?? wasmType;
         try {
-          resultType = compileExpression(ctx, fctx, decl.initializer, wasmType);
+          resultType = compileExpression(ctx, fctx, decl.initializer, initializerExpectedType);
         } finally {
           ctxAny._i32ElemArrayOverride = prevElemOverride;
         }
         stackType = resultType ?? wasmType;
+        if (
+          resultType &&
+          wasmType.kind === "externref" &&
+          (resultType.kind === "ref" || resultType.kind === "ref_null") &&
+          !isVar &&
+          !(fctx.tdzFlagLocals?.has(name) ?? false) &&
+          localIdx >= fctx.params.length
+        ) {
+          const localSlot = fctx.locals[localIdx - fctx.params.length];
+          if (localSlot?.type.kind === "externref") {
+            localSlot.type =
+              resultType.kind === "ref"
+                ? { kind: "ref_null", typeIdx: (resultType as { typeIdx: number }).typeIdx }
+                : resultType;
+          }
+        }
         // Coerce if the expression produced a type that doesn't match the local
-        if (resultType && !valTypesMatch(resultType, wasmType)) {
+        const targetType = getLocalType(fctx, localIdx) ?? wasmType;
+        if (resultType && !valTypesMatch(resultType, targetType)) {
           const bodyLenBeforeCoerce = fctx.body.length;
-          coerceType(ctx, fctx, resultType, wasmType);
+          coerceType(ctx, fctx, resultType, targetType);
           // Only update stackType if coercion actually emitted instructions.
           // If coerceType was a no-op (e.g. unrelated struct types), keep
           // the original resultType so emitCoercedLocalSet can detect the
           // mismatch and update the local's declared type accordingly.
           if (fctx.body.length > bodyLenBeforeCoerce) {
-            stackType = wasmType; // after coercion, stack is wasmType
+            stackType = targetType; // after coercion, stack is targetType
           }
         }
       }
