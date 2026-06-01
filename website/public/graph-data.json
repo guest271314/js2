@@ -23159,6 +23159,18 @@
       "files": [],
       "goal": "platform",
       "cluster": "platform"
+    },
+    {
+      "id": "1772",
+      "title": "Spike edge.js as a Node API module / WASI shim layer",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
     }
   ],
   "links": [
@@ -25459,7 +25471,8 @@
         "1767",
         "1768",
         "1769",
-        "1771"
+        "1771",
+        "1772"
       ],
       "track": "parallel — does not block conformance goals."
     },
@@ -30286,6 +30299,10 @@
     {
       "goal": "platform",
       "issue": "1771"
+    },
+    {
+      "goal": "platform",
+      "issue": "1772"
     },
     {
       "goal": "property-model",
@@ -35632,6 +35649,10 @@
     {
       "goal": "standalone-mode",
       "issue": "1771"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1772"
     },
     {
       "goal": "core-semantics",

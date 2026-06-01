@@ -86,9 +86,12 @@ Synchronous WASI compatibility landed locally:
 - `process.stdout.once("drain", cb)` / `process.stderr.once("drain", cb)` now
   compile as a WASI-only no-op for literal `"drain"`, avoiding JS-host
   EventEmitter imports.
+- The lowering lives in `src/codegen/node-process-api.ts`, not inline in the
+  generic call-expression compiler, and regression coverage imports
+  `process` from `node:process` to keep this shaped like a Node API module.
 - Regression coverage: `tests/issue-1766.test.ts` pins raw byte output,
-  string-write return behavior, and absence of `__extern_method_call` /
-  `__extern_get_method` imports.
+  string-write return behavior, and absence of `__extern_method_call`,
+  `__extern_get_method`, and `__node_process` imports.
 
 Remaining blocked scope: the fully idiomatic async helper
 `await new Promise((resolve) => process.stdout.once("drain", resolve))` still
