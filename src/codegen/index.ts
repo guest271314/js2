@@ -9646,6 +9646,10 @@ const DOM_ONLY_GLOBALS = new Set([
 function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinImport[]): void {
   for (const builtin of builtins) {
     if (ctx.wasi) {
+      // `node:process` is a compile-time API surface for WASI: import
+      // preprocessing leaves a type-level `process` binding in the AST and
+      // node-process-api.ts lowers supported stream calls directly to WASI.
+      if (builtin.moduleName === "process") continue;
       ctx.errors.push({
         message: `Node builtin module '${builtin.moduleName}' is not available in WASI target. Use compile-time syscall path for node:fs (#1035).`,
         line: 1,

@@ -41,12 +41,7 @@ function runWasiCaptureFd(binary: Uint8Array, fd: number): Uint8Array {
 
 describe("#1766 process stdout/stderr synchronous WASI stream compatibility", () => {
   it("returns true from process.stdout.write and compiles once('drain') without host EventEmitter imports", async () => {
-    const src = `declare const process: {
-      stdout: {
-        write(chunk: Uint8Array | string): boolean;
-        once(event: string, cb: () => void): void;
-      };
-    };
+    const src = `import process from "node:process";
 
     export function main(): void {
       if (!process.stdout.write(new Uint8Array([65]))) {
@@ -60,6 +55,7 @@ describe("#1766 process stdout/stderr synchronous WASI stream compatibility", ()
     expect(result.success).toBe(true);
     expect(result.wat).not.toContain("__extern_method_call");
     expect(result.wat).not.toContain("__extern_get_method");
+    expect(result.wat).not.toContain("__node_process");
     expect(Array.from(runWasiCaptureFd(result.binary, 1))).toEqual([65]);
   });
 

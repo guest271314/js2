@@ -36,8 +36,6 @@ Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--targ
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
 528 `invalid Wasm binary` CEs were sub-clustered by validator error; sub-causes
 already enumerated in #1522 / #1543 / #1556 are not re-filed.
-
-
 ## Harvest 2026-05-24 (new issues from test262 error analysis)
 
 - [#1591](1591-class-elements-same-line-multi-definition.md) — class/elements same-line / stacked member definitions lost or reordered — **~294 fails**, high priority (formerly 779b)
@@ -133,6 +131,8 @@ fidelity → #1463) were NOT re-filed.
 - [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1765](../1765-nullable-number-alias-narrowing-byte-assignment.md) — Nullable `number | null` sentinel not narrowed through a boolean alias before typed-array byte assignment (from GitHub #389, 2026-06-01) — medium, medium, **DONE (sprint 58)**
+- [#1766](../1766-process-stdout-write-drain-backpressure-api.md) — Node-style `process.stdout.write` backpressure / `once("drain")` pattern not supported; Preview-1 direct `fd_write` `write()`→`true` + no-op `once("drain")` shim done, full async helper still blocked (from GitHub #389, 2026-06-01) — medium, hard, **blocked (sprint 58)** on #1042/#1326/#1575
+- [#1772](../1772-edgejs-node-wasi-shim-spike.md) — Spike edge.js as a separate Node API module / WASI shim layer for imported `node:process`-style compatibility instead of accumulating host API cases inline in the compiler — medium, medium, **backlog**
 - [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **ready (sprint 58)**, follow-up to #1765
 - [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run grows wasmtime memory toward OOM despite protocol-level chunking; opt-in stress harness added (from GitHub #389, 2026-06-01) — high, hard, **blocked (sprint 58)** on #1753
 - [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
