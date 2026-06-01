@@ -13,7 +13,6 @@
         document.head.appendChild(base);
       })();
     </script>
-    <script defer src="./frame-nav-sync.js"></script>
     <title>JS² - Javascript compiler</title>
     <meta
       name="description"
@@ -3569,6 +3568,7 @@ export function run(n) {
                 ></perf-benchmark-chart>
               </div>
             </div>
+          </div>
         </div>
       </section>
 
@@ -4034,7 +4034,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             const src = panel.dataset.benchmarkSrc;
             if (!src) return;
             try {
-              const resp = await fetch(src);
+              const resp = await fetch(src, { cache: "no-store" });
               if (!resp.ok) return;
               const data = await resp.json();
               if (Array.isArray(data) && data.length > 0) {

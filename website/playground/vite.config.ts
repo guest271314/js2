@@ -1,6 +1,6 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import { resolve } from "node:path";
-import { copyFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { test262Plugin } from "./vite-plugin-test262.js";
 import { compilerBundlePlugin } from "./vite-plugin-compiler-bundle.js";
 import { adrPlugin } from "./vite-plugin-adr.js";
@@ -12,22 +12,8 @@ const dashboardPluginPath = resolve(import.meta.dirname, "vite-plugin-dashboard.
 const hasDashboardData =
   existsSync(resolve(websiteRoot, "dashboard", "index.html")) && existsSync(resolve(projectRoot, "plan", "issues"));
 
-function frameNavSyncPlugin(): Plugin {
-  let outDir = resolve(projectRoot, "dist/playground");
-  return {
-    name: "frame-nav-sync",
-    apply: "build",
-    configResolved(config) {
-      outDir = resolve(projectRoot, config.build.outDir);
-    },
-    closeBundle() {
-      copyFileSync(resolve(websiteRoot, "frame-nav-sync.js"), resolve(outDir, "frame-nav-sync.js"));
-    },
-  };
-}
-
 export default defineConfig(async () => {
-  const plugins = [compilerBundlePlugin(), test262Plugin(), adrPlugin(), frameNavSyncPlugin()];
+  const plugins = [compilerBundlePlugin(), test262Plugin(), adrPlugin()];
   if (hasDashboardData && existsSync(dashboardPluginPath)) {
     plugins.push(dashboardPlugin());
   }

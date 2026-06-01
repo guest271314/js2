@@ -1282,7 +1282,7 @@ class PerfBenchmarkChart extends HTMLElement {
 
   async _load(src) {
     try {
-      const resp = await fetch(src);
+      const resp = await fetch(src, { cache: "no-store" });
       if (!resp.ok) {
         this.style.display = "none";
         return;
