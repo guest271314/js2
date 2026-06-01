@@ -30,6 +30,7 @@
 - [feedback_architect_worktree_isolation.md](feedback_architect_worktree_isolation.md) — Always spawn architects with isolation:worktree — they stall and request respawn without it
 - [feedback_dev_limit.md](feedback_dev_limit.md) — Max 4 devs as teammates, test file naming, merge method
 - [feedback_dev_agents_worktree.md](feedback_dev_agents_worktree.md) — ALL writing agents must use worktree isolation
+- [feedback_esch_teammate_separate_worktree_branch.md](feedback_esch_teammate_separate_worktree_branch.md) — Keep Esch teammate work in its own dedicated worktree and branch
 - [feedback_serialize_cherry_picks.md](feedback_serialize_cherry_picks.md) — Wait for wave to finish, then batch merge (not cherry-pick)
 - [feedback_always_cd_workspace.md](feedback_always_cd_workspace.md) — Git safety: cd /workspace, verify main, never work from agent worktrees
 - [feedback_usage_limit.md](feedback_usage_limit.md) — Stop dispatching above 90% context usage
