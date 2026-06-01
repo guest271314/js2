@@ -60,7 +60,9 @@ describe("#1766 process stdout/stderr synchronous WASI stream compatibility", ()
   });
 
   it("returns true from string writes too", async () => {
-    const src = `import process from "node:process";
+    const src = `declare const process: {
+      stdout: { write(chunk: Uint8Array | string): boolean };
+    };
 
     export function main(): void {
       if (process.stdout.write("A")) {
