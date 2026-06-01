@@ -5,33 +5,37 @@
  *
  * The page positions this as a generic edge-serverless comparison between
  * two production runtime architectures: an AOT-compiled Wasm edge runtime
- * (Wasmtime + AOT-precompiled `.cwasm`, pre-instantiated module) vs a
- * V8-isolate edge runtime (V8 isolate-per-request). Both run untrusted code
- * per request, but with very different cost models for fresh-vs-reused
- * execution contexts. No specific commercial platform is named — the lanes
- * describe the *architecture/scenario*, not a product.
- *
- * NOTE (#1764): the **cold** lane below currently measures full OS-process
- * spawns (`wasmtime run` / `node script.js`), which is the true cold-process
- * worst case, NOT how production edge runtimes serve a cold request.
- * Production keeps the engine/runtime warm and pays only a lightweight
- * per-request context/instance cost. #1764 specs replacing the process-spawn
- * cold lane with a warm-engine, per-request instantiation model for both
- * lanes (new context / new Instance from a long-lived engine). Until that
- * lands, read the cold numbers as "full cold-process", not "edge cold-start".
+ * vs a V8-isolate edge runtime. Both run untrusted code per request, but
+ * with very different cost models for fresh-vs-reused execution contexts. No
+ * specific commercial platform is named — the lanes describe the
+ * *architecture/scenario*, not a product.
  *
  * Two scenarios per program (8 rows total):
  *
- *   1. **Per-request cold (currently: fresh process per request)**
- *      Today this models the worst-case full cold-process request: a request
- *      arrives, no pre-warmed runtime exists, the runtime boots from scratch.
- *      - Wasm lane: full `wasmtime run --allow-precompiled` wall time
- *        (wasmtime startup ~ms + cwasm `mmap` + signature check + `run(arg)`).
- *      - JS lane: full `node script.js` wall time (V8 startup + module parse
- *        + Ignition → Liftoff → first invocation).
- *      Both include process startup. Per #1764 this will move to "new
- *      context / new Instance from a warm engine (µs–ms)", which is the
- *      representative edge cold-start cost.
+ *   1. **Per-request cold (warm engine, fresh context/instance)**
+ *      Models the representative edge-serverless cold request: the engine is
+ *      already resident in a long-lived host process, and the request pays
+ *      only for its own execution context / instance plus the first call.
+ *      - JS lane (#1764): primary `jsUs` is a dependency-free lower bound:
+ *        one long-lived Node/V8 process, and per measured request:
+ *        `vm.createContext()`, `new vm.Script(program)`, and
+ *        `script.runInContext(ctx)` for the first `run(arg)`. A Node `vm`
+ *        Context is lighter than a true V8 isolate because it shares the
+ *        host isolate's heap and built-ins, so it under-counts the real
+ *        isolate-per-request allocation. The JSON also records
+ *        `jsCompiledContextUs`, a compiled-once / new-context-per-request
+ *        sensitivity number. A fresh `worker_threads` Worker would be the
+ *        heavier upper-bound analog (own thread/event loop/heap), but this
+ *        generator does not emit that row by default to keep refreshes cheap.
+ *      - Wasm lane (#1764): primary `wasmUs` comes from the committed Rust
+ *        host in `benchmarks/wasmtime-cold-host`. The host owns a warm
+ *        Wasmtime `Engine` plus a Cranelift-compiled `Module`; per measured
+ *        request it creates a fresh `Store` + `Instance` and calls
+ *        `run(arg)` once. This intentionally removes OS-process startup and
+ *        uses Wasmtime/Cranelift, not Node's host WebAssembly engine. The
+ *        `wasmtime run` CLI cannot model pooling because every CLI
+ *        invocation starts a fresh process, so the generator builds and
+ *        shells out to this embedding host for the cold lane.
  *
  *   2. **Warm isolate / reused instance (steady state)**
  *      Models the common-case edge request: the runtime has already served a
@@ -72,19 +76,31 @@
  * labs run produces new measurements by editing JAVY_NUMBERS_MS /
  * STARLINGMONKEY_NUMBERS_MS below.
  *
- * Requirements: `wasmtime` (v35+) on PATH; competitive programs under
- * `public/benchmarks/competitive/programs/*.js`.
+ * Requirements: Rust/Cargo for the cold Wasmtime embedding host; `wasmtime`
+ * (v35+) on PATH for the warm steady-state Wasmtime lane; Node.js for the
+ * JS/V8 lanes and compiler bundle; competitive programs under
+ * `website/public/benchmarks/competitive/programs/*.js`.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { Script, createContext } from "node:vm";
 import { compile } from "./compiler-bundle.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PROGRAMS_DIR = resolve(ROOT, "website", "public", "benchmarks", "competitive", "programs");
 const ARTIFACT_DIR = resolve(ROOT, ".tmp", "wasmtime-hot-runtime");
 const CHILD_JS_PATH = resolve(import.meta.dirname, "wasmtime-bench-child-js.mjs");
+const WASM_OPT_PATH = resolve(ROOT, "node_modules", ".bin", "wasm-opt");
+const WASMTIME_COLD_HOST_DIR = resolve(ROOT, "benchmarks", "wasmtime-cold-host");
+const WASMTIME_COLD_HOST_MANIFEST = resolve(WASMTIME_COLD_HOST_DIR, "Cargo.toml");
+const WASMTIME_COLD_HOST_TARGET_DIR = resolve(WASMTIME_COLD_HOST_DIR, "target");
+const WASMTIME_COLD_HOST_BIN = resolve(
+  WASMTIME_COLD_HOST_TARGET_DIR,
+  "release",
+  process.platform === "win32" ? "wasmtime-cold-host.exe" : "wasmtime-cold-host",
+);
 
 const RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
 const PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
@@ -149,22 +165,24 @@ export function warm(__n) {
 }
 `;
 
-// Javy + StarlingMonkey verified numbers (2026-04-27 wasmtime 44.0.0,
+// Javy + StarlingMonkey verified warm numbers (2026-04-27 wasmtime 44.0.0,
 // aarch64-linux) — see labs benchmarks/compare-runtimes.ts.
-// Map: `cold` → README "Cold ms" (process startup + first call);
-//      `warm` → README "Compute-only ms" (steady-state per call).
+// Map: `warm` → README "Compute-only ms" (steady-state per call).
+// The old `cold` values from that harness were full-process startup numbers;
+// #1764 intentionally omits them from the warm-engine cold row until those
+// lanes have matching context/instance-per-request measurements.
 // Programs not present in either table fall back to 0 (omitted from chart).
 const JAVY_NUMBERS_MS = {
-  fib: { cold: 28.8, warm: 1193.2 },
-  "fib-recursive": { cold: 31.2, warm: 87.9 },
-  "array-sum": { cold: 28.0, warm: 112.9 },
-  "string-hash": { cold: 30.7, warm: 36.0 },
+  fib: { warm: 1193.2 },
+  "fib-recursive": { warm: 87.9 },
+  "array-sum": { warm: 112.9 },
+  "string-hash": { warm: 36.0 },
 };
 const STARLINGMONKEY_NUMBERS_MS = {
-  fib: { cold: 37.2, warm: 1024.3 },
-  "fib-recursive": { cold: 26.4, warm: 156.7 },
-  "array-sum": { cold: 31.0, warm: 125.5 },
-  "string-hash": { cold: 30.5, warm: 14.2 },
+  fib: { warm: 1024.3 },
+  "fib-recursive": { warm: 156.7 },
+  "array-sum": { warm: 125.5 },
+  "string-hash": { warm: 14.2 },
 };
 const LANES_PROVENANCE =
   "javyUs/starlingMonkeyUs from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux " +
@@ -186,6 +204,14 @@ function stddev(values) {
   return Math.sqrt(variance);
 }
 
+function min(values) {
+  return values.length === 0 ? 0 : Math.min(...values);
+}
+
+function max(values) {
+  return values.length === 0 ? 0 : Math.max(...values);
+}
+
 function ensureWasmtime() {
   try {
     const out = execFileSync("wasmtime", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -193,6 +219,20 @@ function ensureWasmtime() {
   } catch {
     throw new Error("wasmtime not found on PATH. Install from https://wasmtime.dev/ and retry.");
   }
+}
+
+function ensureWasmtimeColdHost() {
+  try {
+    execFileSync("cargo", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    throw new Error("cargo not found on PATH. Install Rust/Cargo to build benchmarks/wasmtime-cold-host.");
+  }
+
+  execFileSync("cargo", ["build", "--release", "--manifest-path", WASMTIME_COLD_HOST_MANIFEST], {
+    env: { ...process.env, CARGO_TARGET_DIR: WASMTIME_COLD_HOST_TARGET_DIR },
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  return WASMTIME_COLD_HOST_BIN;
 }
 
 async function compileProgram(id) {
@@ -256,7 +296,10 @@ async function compileProgram(id) {
   const warmWasmPath = resolve(ARTIFACT_DIR, `${id}-warm.wasm`);
   writeFileSync(warmWasmPath, warmResult.binary);
 
-  return { sourcePath, wasmPath, warmWasmPath };
+  const wasmtimeWasmPath = normalizeWasmForWasmtime(wasmPath, id);
+  const wasmtimeWarmWasmPath = normalizeWasmForWasmtime(warmWasmPath, `${id}-warm`);
+
+  return { sourcePath, wasmPath: wasmtimeWasmPath, warmWasmPath: wasmtimeWarmWasmPath };
 }
 
 function precompile(wasmPath, label) {
@@ -266,6 +309,22 @@ function precompile(wasmPath, label) {
   return cwasmPath;
 }
 
+function normalizeWasmForWasmtime(wasmPath, label) {
+  const normalizedPath = resolve(ARTIFACT_DIR, `${label}.wasmtime.wasm`);
+  try {
+    execFileSync(
+      WASM_OPT_PATH,
+      ["--all-features", "--disable-custom-descriptors", "-O3", wasmPath, "-o", normalizedPath],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return normalizedPath;
+  } catch (err) {
+    const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr).slice(0, 400) : String(err);
+    console.warn(`[${label}] wasm-opt normalization skipped; wasmtime may reject exact refs: ${stderr}`);
+    return wasmPath;
+  }
+}
+
 function readRuntimeArg(sourcePath) {
   const text = readFileSync(sourcePath, "utf8");
   const match = text.match(/runtimeArg:\s*(\d+)/);
@@ -273,23 +332,78 @@ function readRuntimeArg(sourcePath) {
   return Number(match[1]);
 }
 
+function makeVmScriptSource(sourcePath) {
+  const source = readFileSync(sourcePath, "utf8");
+  const programBody = source
+    .replace(/export const benchmark[\s\S]*?};\n/, "")
+    .replace(/\bexport\s+function\s+run\b/, "function run");
+  return `${programBody}\nrun(globalThis.__runtimeArg__);\n`;
+}
+
 /**
- * Wall time of N `wasmtime run` invocations, each a fresh process.
- * Returns per-sample milliseconds.
+ * #1764: cold JS lower-bound lane. One long-lived Node/V8 process, and per
+ * measured request: allocate a fresh vm Context, compile the program into a
+ * Script, and run `run(arg)` once in that context. This avoids process
+ * startup and captures context + compile + first-run cost against a warm V8.
+ * A vm Context is lighter than a true isolate, so this is a lower bound.
  */
-function timeWasmtime(cwasmPath, arg, runs) {
-  const cmdArgs = ["run", "--allow-precompiled", ...WASMTIME_FEATURES, "--invoke", "run", cwasmPath, String(arg)];
+function timeNodeVmContextFreshCompile(sourcePath, arg, runs) {
+  const scriptSource = makeVmScriptSource(sourcePath);
   const samplesMs = [];
   for (let i = 0; i < runs; i++) {
     const t0 = performance.now();
-    const r = spawnSync("wasmtime", cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const context = createContext({ __runtimeArg__: arg });
+    const script = new Script(scriptSource, { filename: sourcePath });
+    const result = script.runInContext(context);
     const ms = performance.now() - t0;
-    if (r.status !== 0) {
-      throw new Error(`wasmtime failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
-    }
+    void result;
     samplesMs.push(ms);
   }
   return samplesMs;
+}
+
+/**
+ * #1764 sensitivity number: compile the Script once in the long-lived host,
+ * then allocate a fresh vm Context per request and run once. This approximates
+ * an embedder with an already-parsed code cache.
+ */
+function timeNodeVmContextCompiledOnce(sourcePath, arg, runs) {
+  const script = new Script(makeVmScriptSource(sourcePath), { filename: sourcePath });
+  const samplesMs = [];
+  for (let i = 0; i < runs; i++) {
+    const t0 = performance.now();
+    const context = createContext({ __runtimeArg__: arg });
+    const result = script.runInContext(context);
+    const ms = performance.now() - t0;
+    void result;
+    samplesMs.push(ms);
+  }
+  return samplesMs;
+}
+
+/**
+ * #1764: cold Wasmtime instantiate lane. Spawns the Rust embedding host once
+ * per program. Inside that process, Wasmtime owns a warm Engine plus compiled
+ * Module, and each measured request allocates a fresh Store + Instance and
+ * calls run(arg) once. The returned samples therefore exclude OS-process
+ * startup and measure Wasmtime/Cranelift instantiation, not Node WebAssembly.
+ */
+function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs) {
+  const r = spawnSync(hostPath, [wasmPath, String(arg), String(runs)], { stdio: ["ignore", "pipe", "pipe"] });
+  if (r.status !== 0) {
+    throw new Error(`wasmtime cold host failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 800)}`);
+  }
+  const out = (r.stdout ?? "").toString().trim().split("\n").pop();
+  const parsed = JSON.parse(out);
+  if (!Array.isArray(parsed?.samplesMs) || parsed.samplesMs.length !== runs) {
+    throw new Error(`wasmtime cold host did not return ${runs} samples: ${out}`);
+  }
+  for (const sample of parsed.samplesMs) {
+    if (typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0) {
+      throw new Error(`wasmtime cold host returned invalid sample: ${out}`);
+    }
+  }
+  return parsed.samplesMs;
 }
 
 /**
@@ -325,25 +439,6 @@ function timeWasmtimeWarmIter(cwasmPath, arg, outerRuns) {
 }
 
 /**
- * Wall time of N `node script.js` invocations in "single" mode. Each sample
- * is one fresh node process: V8 boot, parse, single call to run().
- */
-function timeNodeColdProcess(sourcePath, arg, runs) {
-  const cmdArgs = [CHILD_JS_PATH, "--mode=single", sourcePath, String(arg)];
-  const samplesMs = [];
-  for (let i = 0; i < runs; i++) {
-    const t0 = performance.now();
-    const r = spawnSync(process.execPath, cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
-    const ms = performance.now() - t0;
-    if (r.status !== 0) {
-      throw new Error(`node single failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
-    }
-    samplesMs.push(ms);
-  }
-  return samplesMs;
-}
-
-/**
  * Spawns one node process per outer sample. Inside each process, the child
  * warms TurboFan with WARMUP repeats then measures MEASURED in-process
  * iterations. The child's reported per-iteration median is treated as one
@@ -367,7 +462,7 @@ function timeNodeWarmIter(sourcePath, arg, outerRuns) {
   return samplesMs;
 }
 
-function buildRow({ programId, scenario, wasmSamplesUs, jsSamplesUs }) {
+function buildRow({ programId, scenario, wasmSamplesUs, jsSamplesUs, extra = {} }) {
   const ratioSamples = wasmSamplesUs.map(
     (us, i) => (jsSamplesUs[i] ?? jsSamplesUs[jsSamplesUs.length - 1]) / Math.max(us, 0.000001),
   );
@@ -376,11 +471,16 @@ function buildRow({ programId, scenario, wasmSamplesUs, jsSamplesUs }) {
     scenario,
     wasmUs: median(wasmSamplesUs),
     jsUs: median(jsSamplesUs),
+    wasmMinUs: min(wasmSamplesUs),
+    wasmMaxUs: max(wasmSamplesUs),
+    jsMinUs: min(jsSamplesUs),
+    jsMaxUs: max(jsSamplesUs),
     wasmStdUs: stddev(wasmSamplesUs),
     jsStdUs: stddev(jsSamplesUs),
     ratioStd: stddev(ratioSamples),
     warmupRounds: WARMUP_RUNS,
     measuredRounds: MEASURED_RUNS,
+    ...extra,
   };
   const javyMs = JAVY_NUMBERS_MS[programId]?.[scenario];
   if (typeof javyMs === "number" && javyMs > 0) {
@@ -408,6 +508,9 @@ function writeOutput(rows) {
 async function main() {
   const version = ensureWasmtime();
   console.log(`Using ${version}`);
+  process.stdout.write("Building Rust wasmtime cold host... ");
+  const coldHostPath = ensureWasmtimeColdHost();
+  process.stdout.write(`ok (${coldHostPath})\n`);
   mkdirSync(ARTIFACT_DIR, { recursive: true });
 
   const rows = [];
@@ -418,19 +521,31 @@ async function main() {
     const runtimeArg = readRuntimeArg(sourcePath);
     process.stdout.write(`runtimeArg=${runtimeArg}\n`);
 
-    process.stdout.write(`[${program.id}] precompiling cranelift... `);
-    const cwasmPath = precompile(wasmPath, program.id);
+    process.stdout.write(`[${program.id}] precompiling warm cranelift... `);
     const warmCwasmPath = precompile(warmWasmPath, `${program.id}-warm`);
     process.stdout.write(`ok\n`);
 
-    // Cold path: full process wall time, no subtraction.
-    process.stdout.write(`[${program.id}] wasm cold (full process)... `);
-    const wasmColdMs = timeWasmtime(cwasmPath, runtimeArg, WARMUP_RUNS + MEASURED_RUNS).slice(WARMUP_RUNS);
-    process.stdout.write(`${median(wasmColdMs).toFixed(1)} ms\n`);
+    // Cold path (#1764): warm engine / fresh context-or-instance per request,
+    // no OS-process startup in the measured samples.
+    process.stdout.write(`[${program.id}] wasm cold (wasmtime fresh store+instance)... `);
+    const wasmColdMs = timeWasmtimeFreshInstance(coldHostPath, wasmPath, runtimeArg, WARMUP_RUNS + MEASURED_RUNS).slice(
+      WARMUP_RUNS,
+    );
+    process.stdout.write(`${median(wasmColdMs).toFixed(3)} ms\n`);
 
-    process.stdout.write(`[${program.id}] v8 cold (full process)... `);
-    const v8ColdMs = timeNodeColdProcess(sourcePath, runtimeArg, WARMUP_RUNS + MEASURED_RUNS).slice(WARMUP_RUNS);
-    process.stdout.write(`${median(v8ColdMs).toFixed(1)} ms\n`);
+    process.stdout.write(`[${program.id}] v8 cold (vm context + fresh compile)... `);
+    const v8ColdMs = timeNodeVmContextFreshCompile(sourcePath, runtimeArg, WARMUP_RUNS + MEASURED_RUNS).slice(
+      WARMUP_RUNS,
+    );
+    process.stdout.write(`${median(v8ColdMs).toFixed(3)} ms\n`);
+
+    process.stdout.write(`[${program.id}] v8 cold sensitivity (vm context + compiled script)... `);
+    const v8CompiledContextMs = timeNodeVmContextCompiledOnce(
+      sourcePath,
+      runtimeArg,
+      WARMUP_RUNS + MEASURED_RUNS,
+    ).slice(WARMUP_RUNS);
+    process.stdout.write(`${median(v8CompiledContextMs).toFixed(3)} ms\n`);
 
     // Warm path (#1760): in-process repeated-measure steady-state per-call
     // time, startup amortized. wasm via `warm` export (min per-call ms),
@@ -453,6 +568,15 @@ async function main() {
         scenario: "cold",
         wasmSamplesUs: toUs(wasmColdMs),
         jsSamplesUs: toUs(v8ColdMs),
+        extra: {
+          wasmColdMode: "rust-wasmtime-compile-once-fresh-store-instance",
+          wasmColdEngine: "wasmtime-cranelift",
+          wasmColdHost: "benchmarks/wasmtime-cold-host",
+          jsColdMode: "node-vm-create-context-fresh-script",
+          jsColdFidelity: "vm-context-lower-bound-vs-true-v8-isolate",
+          jsCompiledContextUs: median(toUs(v8CompiledContextMs)),
+          jsCompiledContextStdUs: stddev(toUs(v8CompiledContextMs)),
+        },
       }),
     );
     rows.push(
