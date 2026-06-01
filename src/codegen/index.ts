@@ -6,6 +6,7 @@ import {
   isBooleanType,
   isExternalDeclaredClass,
   isHeterogeneousUnion,
+  isNullableNumberType,
   isNumberType,
   isStringType,
   isVoidType,
@@ -10110,7 +10111,10 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
         }
       }
     }
-    const wasmType: ValType = initForcesExternref ? { kind: "externref" as const } : resolveWasmType(ctx, varType);
+    const wasmType: ValType =
+      initForcesExternref || isNullableNumberType(varType)
+        ? { kind: "externref" as const }
+        : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
     const localIdx = allocLocal(fctx, name, wasmType);
     // In JS, hoisted `var` variables are `undefined` before their declaration,
@@ -10429,7 +10433,9 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
           ? { kind: "externref" }
           : isI32Coerced
             ? { kind: "i32" }
-            : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
+            : isNullableNumberType(varType)
+              ? { kind: "externref" }
+              : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
         allocLocal(fctx, name, wasmType);
         // Only add TDZ flag if static analysis can't prove all accesses are safe
         if (needsTdzFlag(ctx, decl)) {
