@@ -136,6 +136,7 @@ fidelity → #1463) were NOT re-filed.
 - [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **ready (sprint 58)**, follow-up to #1765
 - [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run grows wasmtime memory toward OOM despite protocol-level chunking; opt-in stress harness added (from GitHub #389, 2026-06-01) — high, hard, **blocked (sprint 58)** on #1753
 - [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
+- [#1774](../1774-wasi-preview3-async-stream-semantics.md) — WASI 0.3 / Preview 3 async stream semantics for Node stdout/stderr: map `Writable.write()` backpressure, `drain`, callbacks, and errors onto component-model `stream<u8>` / `future` shapes when that backend exists (follow-up from PR #1016 comment, 2026-06-01) — medium, hard, **ready (sprint 58)**, depends on #1042/#1326/#1575
 
 ### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
 

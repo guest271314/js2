@@ -1952,10 +1952,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (r) return r;
   }
 
-  // #1766: WASI fd_write is synchronous. Accept the Node stream backpressure
+  // #1766: In the current WASI Preview 1 lowering, process.std*.write()
+  // maps to a direct fd_write host call. Accept the Node stream backpressure
   // subscription shape so idiomatic `if (!stdout.write(...)) stdout.once("drain", cb)`
   // compiles without a JS-host EventEmitter import. Since write() returns true
-  // below, the drain callback is never needed on this path.
+  // below, the drain callback is never needed on this path. Track real WASI
+  // 0.3/Preview 3 async stream semantics separately in #1774.
   if (matchProcessStdStreamDrainOnce(ctx, fctx, expr)) {
     return VOID_RESULT;
   }
