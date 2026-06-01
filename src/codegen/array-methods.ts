@@ -319,6 +319,14 @@ export function resolveArrayInfo(
   // methods are dispatched via compileNativeStringMethodCall instead.
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && isStringType(tsType)) return null;
   const wasmType = resolveWasmType(ctx, tsType);
+  return resolveArrayInfoFromWasmType(ctx, wasmType);
+}
+
+function resolveArrayInfoFromWasmType(
+  ctx: CodegenContext,
+  wasmType: ValType | undefined,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  if (!wasmType) return null;
   if (wasmType.kind !== "ref" && wasmType.kind !== "ref_null") return null;
   const vecTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
   const vecDef = ctx.mod.types[vecTypeIdx];
@@ -330,6 +338,38 @@ export function resolveArrayInfo(
   const arrDef = ctx.mod.types[arrTypeIdx];
   if (!arrDef || arrDef.kind !== "array") return null;
   return { vecTypeIdx, arrTypeIdx, elemType: arrDef.element };
+}
+
+function inferExpressionWasmType(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  allowProbe = true,
+): ValType | undefined {
+  if (ts.isIdentifier(expr)) {
+    const name = expr.text;
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx !== undefined) return getLocalType(fctx, localIdx);
+    const gIdx = ctx.moduleGlobals.get(name);
+    if (gIdx !== undefined) return ctx.mod.globals[localGlobalIdx(ctx, gIdx)]?.type;
+  }
+
+  if (!allowProbe) return undefined;
+  const savedLen = fctx.body.length;
+  const probeResult = compileExpression(ctx, fctx, expr);
+  fctx.body.length = savedLen;
+  return probeResult ?? undefined;
+}
+
+function resolveArrayInfoForExpression(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  tsType: ts.Type,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  return (
+    resolveArrayInfo(ctx, tsType) ?? resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, expr, false))
+  );
 }
 
 /**
@@ -2346,7 +2386,10 @@ export function compileArrayMethodCall(
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
 
-  const arrInfo = resolveArrayInfo(ctx, receiverType);
+  const receiverExpr = propAccess.expression;
+  const arrInfo =
+    resolveArrayInfo(ctx, receiverType) ??
+    resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, receiverExpr, false));
   if (!arrInfo) return undefined;
 
   let { vecTypeIdx, arrTypeIdx, elemType } = arrInfo;
@@ -2361,7 +2404,6 @@ export function compileArrayMethodCall(
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
   // but resolveArrayInfo resolves (number|boolean)[] → __vec_externref.
   // Probe-compile the receiver to determine the actual Wasm type (#826).
-  const receiverExpr = ts.isPropertyAccessExpression(propAccess) ? propAccess.expression : undefined;
   if (receiverExpr) {
     // Fast path: check the Wasm local/global type directly
     let actualType: ValType | undefined;
@@ -5858,7 +5900,7 @@ function compileTypedArraySet(
   // the caller continues to the host-import path).
   const srcNode = callExpr.arguments[0]!;
   const srcTsType = ctx.checker.getTypeAtLocation(srcNode);
-  const srcArrInfo = resolveArrayInfo(ctx, srcTsType);
+  const srcArrInfo = resolveArrayInfoForExpression(ctx, fctx, srcNode, srcTsType);
   if (!srcArrInfo) return null;
 
   const srcVecTypeIdx = srcArrInfo.vecTypeIdx;

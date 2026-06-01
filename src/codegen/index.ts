@@ -19,7 +19,7 @@ import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
-import { allocLocal } from "./context/locals.js";
+import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
   ClosureInfo,
   CodegenContext,
@@ -42,7 +42,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
-import { addImport, addStringConstantGlobal } from "./registry/imports.js";
+import { addImport, addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
@@ -10352,6 +10352,37 @@ function getLoopBodyNode(loop: ts.Node): ts.Node | undefined {
   return undefined;
 }
 
+function isVecStructType(ctx: CodegenContext, type: ValType | undefined): type is ValType & { typeIdx: number } {
+  if (!type || (type.kind !== "ref" && type.kind !== "ref_null")) return false;
+  const def = ctx.mod.types[type.typeIdx];
+  return def?.kind === "struct" && def.fields[0]?.name === "length" && def.fields[1]?.name === "data";
+}
+
+function inferLetConstInitializerWasmType(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  initializer: ts.Expression | undefined,
+): ValType | null {
+  if (!initializer || !ts.isCallExpression(initializer) || !ts.isPropertyAccessExpression(initializer.expression)) {
+    return null;
+  }
+  const methodName = initializer.expression.name.text;
+  if (methodName !== "subarray" && methodName !== "slice") return null;
+
+  const receiver = initializer.expression.expression;
+  let receiverType: ValType | undefined;
+  if (ts.isIdentifier(receiver)) {
+    const localIdx = fctx.localMap.get(receiver.text);
+    if (localIdx !== undefined) receiverType = getLocalType(fctx, localIdx);
+    else {
+      const globalIdx = ctx.moduleGlobals.get(receiver.text);
+      if (globalIdx !== undefined) receiverType = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)]?.type;
+    }
+  }
+  receiverType ??= resolveWasmType(ctx, ctx.checker.getTypeAtLocation(receiver));
+  return isVecStructType(ctx, receiverType) ? { kind: "ref_null", typeIdx: receiverType.typeIdx } : null;
+}
+
 function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.Statement): void {
   if (ts.isVariableStatement(stmt)) {
     const list = stmt.declarationList;
@@ -10393,7 +10424,7 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
           ? { kind: "externref" }
           : isI32Coerced
             ? { kind: "i32" }
-            : resolveWasmType(ctx, varType);
+            : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
         allocLocal(fctx, name, wasmType);
         // Only add TDZ flag if static analysis can't prove all accesses are safe
         if (needsTdzFlag(ctx, decl)) {

@@ -979,12 +979,7 @@ function emitWrapperDynamicMethodCall(
 
   // Push method name as a string constant.
   addStringConstantGlobal(ctx, methodName);
-  const methodNameIdx = ctx.stringGlobalMap.get(methodName);
-  if (methodNameIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: methodNameIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, methodName);
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
   // Empty args array: __js_array_new() → externref.
   fctx.body.push({ op: "call", funcIdx: arrNewIdx });
@@ -2926,21 +2921,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             if (protoCallIdx !== undefined && arrNewIdx !== undefined && arrPushIdx !== undefined) {
               // Push typeName string
               addStringConstantGlobal(ctx, typeName);
-              const typeNameIdx = ctx.stringGlobalMap.get(typeName);
-              if (typeNameIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: typeNameIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, typeName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, typeName));
 
               // Push methodName string
               addStringConstantGlobal(ctx, methodName);
-              const methodNameIdx = ctx.stringGlobalMap.get(methodName);
-              if (methodNameIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: methodNameIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, methodName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
               // Compile receiver (first argument to .call).
               // (#1442) When the receiver's static TS type is `boolean`, the
@@ -7178,12 +7163,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             if (receiverIsBuiltin && getBuiltinIdx !== undefined) {
               const builtinName = (propAccess.expression as ts.Identifier).text;
               addStringConstantGlobal(ctx, builtinName);
-              const strIdx = ctx.stringGlobalMap.get(builtinName);
-              if (strIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, builtinName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
               fctx.body.push({ op: "call", funcIdx: getBuiltinIdx });
               recvType = { kind: "externref" };
             } else {
@@ -7215,12 +7195,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             // Push receiver, method name, args array → call __extern_method_call
             fctx.body.push({ op: "local.get", index: recvLocal });
             addStringConstantGlobal(ctx, methodName);
-            const strIdx = ctx.stringGlobalMap.get(methodName);
-            if (strIdx !== undefined) {
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-            } else {
-              compileStringLiteral(ctx, fctx, methodName);
-            }
+            fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
             fctx.body.push({ op: "local.get", index: argsLocal });
             fctx.body.push({ op: "call", funcIdx: methodCallIdx });
             return { kind: "externref" };
