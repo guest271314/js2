@@ -1,10 +1,9 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: in-progress
-owner: Hooke
+status: ready
 created: 2026-05-08
-updated: 2026-06-01
+updated: 2026-05-31
 priority: medium
 feasibility: medium  # Tier 1 (IR-proven static routing) is medium and dispatchable; Tier 2 (dynamic fallback) is hard and overlaps the object-representation ceiling — slice & ship Tier 1 first.
 reasoning_effort: max
@@ -25,17 +24,6 @@ WasmGC typed struct emission.
 
 However, the user has asked for an architect exploration: **how can we implement `with` nonetheless?**
 If a fully static path is not possible, an IR-dependent or externref-fallback path may be acceptable.
-
-## Evidence: real standalone test262 run 2026-06-01
-
-Artifacts:
-`benchmarks/results/test262-standalone-report-20260601-213702.json` and
-`benchmarks/results/test262-standalone-results-20260601-213702.jsonl`.
-
-Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
-baseline of 30,480 / 43,106 (70.7%). `WithStatement` unsupported appears in
-294 non-exclusive standalone failures, matching this issue's static
-prove-or-demote plan and the older #671 umbrella count.
 
 ## What `with` does (spec §14.11)
 
@@ -418,31 +406,3 @@ retained here only for history.
 4. ✅ Re-graded feasibility (Tier 1 medium/dispatchable; Tier 2 hard/deferred) and recommended
    slicing.
 5. ✅ Called out the IR prerequisite (access-lattice mutation tag) rather than assuming it.
-
-## Implementation note — 2026-06-01 diagnostic slice
-
-This slice deliberately takes the precise diagnostic branch rather than shipping an unsound
-Tier-1 rewrite. The current IR path still has no `WithStatement` lowering node, no closed-shape
-fact namespace, and no key-set/prototype mutation access tag distinct from generic value writes.
-That means even `with ({ a: 1 }) { ... }` cannot yet be proven sound under ECMA-262 14.11.2:
-`with` installs an Object Environment Record, whose HasBinding operation (9.1.1.2.1) depends on
-HasProperty plus `@@unscopables`; HasProperty (7.3.11) includes inherited properties.
-
-Implemented behavior:
-
-- `src/codegen/statements.ts` now handles `WithStatement` explicitly instead of falling through
-  to `Unsupported statement: WithStatement`.
-- The diagnostic is anchored to the `with` source location, cites #1387, cites the relevant
-  ECMA-262 sections, explains the target expression kind, and points the dynamic fallback to
-  #1472 rather than inventing local dynamic object helpers.
-- Sloppy-mode coverage lives in `tests/issue-1387-with-diagnostic.test.ts`; existing source
-  location tests were updated to expect the #1387 diagnostic.
-
-Validation:
-
-- `node node_modules/vitest/dist/cli.js run tests/issue-1387-with-diagnostic.test.ts tests/error-reporting.test.ts`
-  → 2 files passed, 10 tests passed.
-- Accidental broad command `pnpm test -- tests/issue-1387-with-diagnostic.test.ts tests/error-reporting.test.ts`
-  expanded through the package script and ran the wider suite, including `tests/test262-vitest.test.ts`;
-  it is not a scoped #1387 signal and eventually failed/OOMed after unrelated existing failures and
-  missing precompile-cache/network issues.
