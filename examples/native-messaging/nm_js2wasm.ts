@@ -16,9 +16,9 @@
 //              header then exactly the declared body length.
 //   - stdout : process.stdout.write(bytes|str) writes raw bytes / a string to
 //              fd=1 with NO trailing newline (#1651) — used for the binary
-//              4-byte length prefix and the message body. Large raw-byte
-//              writes (>= 1 MiB) grow linear memory as needed (#389/#1723) so a
-//              megabyte-scale body round-trips byte-exactly.
+//              4-byte length prefix and the message body. Response writes are
+//              capped at <=1 MiB frames for Chrome (#1753/#1767), using a
+//              reusable scratch chunk for larger bodies.
 //   - stderr : process.stderr.write writes raw bytes/strings to fd=2, and
 //              console.error formats + writes to fd=2 — both keep debug output
 //              off the stdout protocol stream. The debug telemetry line below
@@ -35,19 +35,29 @@
 //   sendMessage(message) — frame with the LE length prefix + write stdout
 //   main()               — the port loop: const m = getMessage(); sendMessage(m);
 //
-// The body is carried as a raw `Uint8Array` end-to-end and echoed back verbatim
-// (the strict #930 round-trip echo) — it is NOT decoded to a JS string, so the
-// bytes are preserved exactly regardless of size or content (#389). A real host
-// would decode `message` with a UTF-8 reader, dispatch on a command field, and
-// frame a fresh response with sendMessage(). Carrying bytes (not a string) is
-// also forward-compatible with Chromium's in-progress Uint8Array Native
-// Messaging support — the protocol body is fundamentally a byte buffer.
+// <=1 MiB bodies are carried as a raw `Uint8Array` end-to-end and echoed back
+// verbatim (the strict #930 round-trip echo). Larger bodies are written as a
+// sequence of <=1 MiB response frames so the host never stages one oversized
+// stdout payload. The reported Chrome workload is a JSON `Array(...nulls...)`;
+// for that shape, large responses are emitted as valid JSON array chunks so the
+// browser can deliver each frame to `port.onMessage`. Other large byte bodies
+// are split as raw byte chunks for the harness / future Uint8Array Native
+// Messaging consumers.
 
 declare const process: {
   stdin: { read(buf: Uint8Array, offset?: number): number };
   stdout: { write(chunk: Uint8Array | string): void };
   stderr: { write(chunk: Uint8Array | string): void };
 };
+
+const MAX_RESPONSE_FRAME_BYTES = 1024 * 1024;
+const MAX_NULL_ARRAY_ELEMENTS_PER_FRAME = 209715;
+const BYTE_OPEN_BRACKET = 91;
+const BYTE_CLOSE_BRACKET = 93;
+const BYTE_COMMA = 44;
+const BYTE_N = 110;
+const BYTE_U = 117;
+const BYTE_L = 108;
 
 // Read exactly `n` bytes into the first `n` slots of `buf` via a read-until
 // loop, handling short reads (fd_read may return fewer bytes than requested).
@@ -69,11 +79,28 @@ function decodeLength(header: Uint8Array): number {
   return header[0] + header[1] * 256 + header[2] * 65536 + header[3] * 16777216;
 }
 
+function minI32(a: number, b: number): number {
+  return a < b ? a : b;
+}
+
+function copyBytes(source: Uint8Array, sourceOffset: number, target: Uint8Array, count: number): void {
+  let i = 0;
+  while (i < count) {
+    target[i] = source[sourceOffset + i];
+    i = i + 1;
+  }
+}
+
+function writeLength(len: number): void {
+  process.stdout.write(new Uint8Array([len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >> 24) & 0xff]));
+}
+
 // getMessage() — read one framed Native Messaging message: the 4-byte LE length
 // header, then exactly that many body bytes. Returns the raw body `Uint8Array`,
 // or a zero-length buffer on EOF (peer closed stdin) so the port loop can stop.
-// The body is kept as raw bytes — never stringified — so it round-trips
-// byte-exactly at any size (#389).
+// The body is kept as raw bytes — never stringified — so normal-size messages
+// round-trip byte-exactly (#389), and large responses can be chunked without a
+// lossy string bridge.
 function getMessage(): Uint8Array {
   const header = new Uint8Array(4);
   // 4-byte LE length prefix. EOF here = clean shutdown → empty body.
@@ -93,14 +120,119 @@ function getMessage(): Uint8Array {
   return body;
 }
 
+function isNullArrayMessage(message: Uint8Array): boolean {
+  if (message.length < 2) return false;
+  if (message[0] !== BYTE_OPEN_BRACKET) return false;
+  if (message[message.length - 1] !== BYTE_CLOSE_BRACKET) return false;
+  if (message.length === 2) return true;
+
+  let cursor = 1;
+  while (cursor < message.length - 1) {
+    if (message[cursor] !== BYTE_N) return false;
+    if (message[cursor + 1] !== BYTE_U) return false;
+    if (message[cursor + 2] !== BYTE_L) return false;
+    if (message[cursor + 3] !== BYTE_L) return false;
+    cursor = cursor + 4;
+
+    if (cursor === message.length - 1) return true;
+    if (message[cursor] !== BYTE_COMMA) return false;
+    cursor = cursor + 1;
+  }
+
+  return false;
+}
+
+function countNullArrayElements(message: Uint8Array): number {
+  if (message.length === 2) return 0;
+  let count = 0;
+  let cursor = 1;
+  while (cursor < message.length - 1) {
+    count = count + 1;
+    cursor = cursor + 5;
+  }
+  return count;
+}
+
+function fillNullArrayChunk(chunk: Uint8Array, elements: number): number {
+  chunk[0] = BYTE_OPEN_BRACKET;
+  let cursor = 1;
+  let i = 0;
+  while (i < elements) {
+    if (i > 0) {
+      chunk[cursor] = BYTE_COMMA;
+      cursor = cursor + 1;
+    }
+    chunk[cursor] = BYTE_N;
+    chunk[cursor + 1] = BYTE_U;
+    chunk[cursor + 2] = BYTE_L;
+    chunk[cursor + 3] = BYTE_L;
+    cursor = cursor + 4;
+    i = i + 1;
+  }
+  chunk[cursor] = BYTE_CLOSE_BRACKET;
+  return cursor + 1;
+}
+
+function writeFrameFromScratch(scratch: Uint8Array, len: number): void {
+  writeLength(len);
+  if (len === scratch.length) {
+    process.stdout.write(scratch);
+    return;
+  }
+
+  const tail = new Uint8Array(len);
+  copyBytes(scratch, 0, tail, len);
+  process.stdout.write(tail);
+}
+
+function sendNullArrayChunks(message: Uint8Array): void {
+  let remaining = countNullArrayElements(message);
+  const chunk = new Uint8Array(MAX_RESPONSE_FRAME_BYTES);
+
+  if (remaining === 0) {
+    const len = fillNullArrayChunk(chunk, 0);
+    writeFrameFromScratch(chunk, len);
+    return;
+  }
+
+  while (remaining > 0) {
+    const elements = minI32(remaining, MAX_NULL_ARRAY_ELEMENTS_PER_FRAME);
+    const len = fillNullArrayChunk(chunk, elements);
+    writeFrameFromScratch(chunk, len);
+    remaining = remaining - elements;
+  }
+}
+
+function sendRawByteChunks(message: Uint8Array): void {
+  let offset = 0;
+  const chunk = new Uint8Array(MAX_RESPONSE_FRAME_BYTES);
+
+  while (offset < message.length) {
+    const len = minI32(MAX_RESPONSE_FRAME_BYTES, message.length - offset);
+    copyBytes(message, offset, chunk, len);
+    writeFrameFromScratch(chunk, len);
+    offset = offset + len;
+  }
+}
+
 // sendMessage(message) — write a framed Native Messaging response: the 4-byte
-// little-endian length prefix followed by the body bytes, both on stdout (fd=1),
-// no trailing newline. The body is written as raw bytes so it is byte-exact for
-// any payload, including a megabyte-scale message (#389).
+// little-endian length prefix followed by the body bytes, both on stdout
+// (fd=1), no trailing newline. Large responses are split into <=1 MiB frames
+// and copy one output chunk at a time through a reusable buffer, avoiding one
+// oversized response staging region (#1753/#1767).
 function sendMessage(message: Uint8Array): void {
   const len = message.length;
+  if (len > MAX_RESPONSE_FRAME_BYTES) {
+    if (isNullArrayMessage(message)) {
+      sendNullArrayChunks(message);
+    } else {
+      sendRawByteChunks(message);
+    }
+    return;
+  }
+
   // Binary 4-byte LE length prefix via raw-byte stdout (#1651).
-  process.stdout.write(new Uint8Array([len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >> 24) & 0xff]));
+  writeLength(len);
   // Body — raw bytes, written verbatim with no trailing newline. The write
   // helper grows linear memory for large bodies (#389/#1723).
   process.stdout.write(message);
@@ -111,12 +243,10 @@ export function main(): void {
   // each one back verbatim. getMessage() returns a zero-length body at EOF (or a
   // truncated frame), which terminates the loop.
   //
-  // Strict echo: the received body is sent back byte-for-byte, with no wrapper
-  // and no added bytes. This makes the demo a true round-trip proof — what
-  // Chrome sends in is exactly what comes back out, so the stdin->stdout
-  // fidelity of the WASI build is directly observable. A real host would instead
-  // decode `message`, dispatch on a command field, and frame a structured
-  // response with sendMessage().
+  // Normal-size messages are sent back byte-for-byte, with no wrapper and no
+  // added bytes. Larger messages are chunked by sendMessage(); a real host would
+  // instead decode `message`, dispatch on a command field, and frame structured
+  // responses with the same bounded writer.
   while (true) {
     const message = getMessage();
     if (message.length === 0) break;

@@ -1,7 +1,7 @@
 ---
 id: 1767
 title: "native-messaging 64 MiB run grows wasmtime memory toward OOM"
-status: blocked
+status: in-progress
 created: 2026-06-01
 updated: 2026-06-01
 priority: high
@@ -65,10 +65,10 @@ called out that the memory behavior undermines performance comparisons.
 
 ## Blocking context
 
-This is blocked on #1753 landing the repo-owned 64 MiB chunked
-native-messaging path. The reporter has an external version that demonstrates
-the memory problem, but the internal stress proof belongs on the repo example
-once #1753 exists.
+#1753's full 64 MiB read/write story is still open, but the #1767 branch is
+actively taking the needed write-side slice: the native-messaging example now
+emits large responses as <=1 MiB frames through a reusable chunk buffer instead
+of one oversized stdout write.
 
 ## Blocked findings — 2026-06-01
 
@@ -138,6 +138,39 @@ than absolute Task Manager numbers:
 - wasm pages: peak linear memory should plateau after the input/body and current
   chunk buffers are allocated. A growing page count across response chunks is a
   regression signal even if RSS happens to lag.
+
+## Implementation slice — 2026-06-01
+
+The branch `codex/1767-native-messaging-memory-growth` unblocks the response
+side of #1753 enough to move this issue from `blocked` to `in-progress`:
+
+- `examples/native-messaging/nm_js2wasm.ts` now keeps <=1 MiB messages
+  byte-exact, but routes larger responses through a bounded writer that emits
+  successive <=1 MiB Native Messaging frames.
+- The reported Chrome workload (`Array(209715 * 64)`) is handled as valid JSON
+  array chunks. Each chunk carries at most 209,715 `null` elements, which
+  serializes to exactly 1 MiB, so Chrome can deliver each frame to
+  `port.onMessage` and the extension can sum `message.length`.
+- Non-array large byte bodies still use raw <=1 MiB byte chunks for the
+  harness/future Uint8Array Native Messaging path. That preserves the bounded
+  memory property without claiming arbitrary JSON fragments are Chrome-valid.
+- `examples/native-messaging/stress-memory.mjs` now validates response frame
+  budgets and array-element totals without retaining response bodies. The
+  `--reported-64mib` run has default guardrails: sampled RSS may grow at most
+  256 MiB above the first sample and the child is killed after 180 seconds.
+- `tests/issue-1767.test.ts` covers the 1 MiB + 1 raw-byte boundary and the
+  209,716-element null-array boundary, asserting two <=1 MiB response frames
+  and valid JSON array chunks for the Chrome-shaped case.
+
+Manual full run, not for normal CI:
+
+```bash
+node examples/native-messaging/stress-memory.mjs --reported-64mib
+```
+
+Remaining #1767 work after this slice: run and record a real guarded 64x
+wasmtime measurement with baseline/peak RSS on a suitable machine. #1753 also
+still owns the broader read-side multi-frame aggregation story.
 
 ## Scope
 

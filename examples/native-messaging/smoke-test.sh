@@ -19,7 +19,12 @@ OUT_DIR=$(mktemp -d)
 trap 'rm -rf "$OUT_DIR"' EXIT
 
 echo "== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi =="
-( cd "$REPO_ROOT" && npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi -o "$OUT_DIR" )
+CLI="$OUT_DIR/js2wasm-cli.mjs"
+(
+  cd "$REPO_ROOT"
+  node scripts/build-standalone-cli.mjs --outfile "$CLI"
+  node "$CLI" examples/native-messaging/nm_js2wasm.ts --target wasi -o "$OUT_DIR" --quiet
+)
 WASM="$OUT_DIR/nm_js2wasm.wasm"
 [ -f "$WASM" ] || { echo "FAIL: $WASM was not produced" >&2; exit 1; }
 

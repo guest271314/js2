@@ -31,10 +31,13 @@ Options:
   --wasm PATH                Use an existing nm_js2wasm.wasm instead of building
   --wasmtime PATH            Runtime binary; default "wasmtime"
   --sample-ms N              RSS sample interval; default 100
+  --timeout-ms N             Kill wasmtime if it runs too long; default 180000
+  --max-rss-delta-mb N       Kill wasmtime if sampled RSS exceeds first sample by N MiB;
+                             default 256 for --reported-64mib, disabled otherwise
   --max-response-frame-bytes N
                              Chunk budget to enforce; default ${ONE_MIB}
   --allow-large-response-frame
-                             Measure current single-frame echo even when it exceeds the chunk budget
+                             Permit legacy single-frame wasm when it exceeds the chunk budget
   --keep                     Keep the temporary build directory
   --help                     Show this help
 `);
@@ -56,8 +59,11 @@ function parseArgs(argv) {
     wasm: undefined,
     wasmtime: process.env.WASMTIME || "wasmtime",
     sampleMs: 100,
+    timeoutMs: 180_000,
+    maxRssDeltaMb: undefined,
     maxResponseFrameBytes: ONE_MIB,
     allowLargeResponseFrame: false,
+    reported64mib: false,
     keep: false,
   };
 
@@ -76,6 +82,7 @@ function parseArgs(argv) {
     } else if (arg === "--reported-64mib") {
       opts.arrayElements = REPORTED_ARRAY_ELEMENTS;
       opts.bodyBytes = undefined;
+      opts.reported64mib = true;
     } else if (arg === "--allow-large-response-frame") {
       opts.allowLargeResponseFrame = true;
     } else if (arg === "--keep") {
@@ -83,15 +90,21 @@ function parseArgs(argv) {
     } else if (arg === "--array-elements" || arg.startsWith("--array-elements=")) {
       opts.arrayElements = parsePositiveInteger(readValue("--array-elements"), "--array-elements");
       opts.bodyBytes = undefined;
+      opts.reported64mib = false;
     } else if (arg === "--bytes" || arg.startsWith("--bytes=")) {
       opts.bodyBytes = parsePositiveInteger(readValue("--bytes"), "--bytes");
       opts.arrayElements = undefined;
+      opts.reported64mib = false;
     } else if (arg === "--wasm" || arg.startsWith("--wasm=")) {
       opts.wasm = resolve(readValue("--wasm"));
     } else if (arg === "--wasmtime" || arg.startsWith("--wasmtime=")) {
       opts.wasmtime = readValue("--wasmtime");
     } else if (arg === "--sample-ms" || arg.startsWith("--sample-ms=")) {
       opts.sampleMs = parsePositiveInteger(readValue("--sample-ms"), "--sample-ms");
+    } else if (arg === "--timeout-ms" || arg.startsWith("--timeout-ms=")) {
+      opts.timeoutMs = parsePositiveInteger(readValue("--timeout-ms"), "--timeout-ms");
+    } else if (arg === "--max-rss-delta-mb" || arg.startsWith("--max-rss-delta-mb=")) {
+      opts.maxRssDeltaMb = parsePositiveInteger(readValue("--max-rss-delta-mb"), "--max-rss-delta-mb");
     } else if (arg === "--max-response-frame-bytes" || arg.startsWith("--max-response-frame-bytes=")) {
       opts.maxResponseFrameBytes = parsePositiveInteger(
         readValue("--max-response-frame-bytes"),
@@ -103,6 +116,8 @@ function parseArgs(argv) {
   }
 
   if (opts.sampleMs < 10) throw new Error("--sample-ms must be at least 10");
+  if (opts.timeoutMs < 1000) throw new Error("--timeout-ms must be at least 1000");
+  if (opts.reported64mib && opts.maxRssDeltaMb === undefined) opts.maxRssDeltaMb = 256;
   return opts;
 }
 
@@ -170,7 +185,57 @@ async function writeNativeMessage(stream, opts, bytes) {
   stream.end();
 }
 
-function createFrameParser() {
+function createNullArrayScanner(stats) {
+  let state = 0;
+  let invalid = false;
+
+  return {
+    start() {
+      state = 0;
+      invalid = false;
+    },
+    push(chunk, offset, length) {
+      const end = offset + length;
+      for (let i = offset; i < end; i++) {
+        const byte = chunk[i];
+        if (invalid) continue;
+
+        if (state === 0) {
+          if (byte === 91) state = 1;
+          else invalid = true;
+        } else if (state === 1) {
+          if (byte === 93) state = 7;
+          else if (byte === 110) state = 2;
+          else invalid = true;
+        } else if (state === 2) {
+          if (byte === 117) state = 3;
+          else invalid = true;
+        } else if (state === 3) {
+          if (byte === 108) state = 4;
+          else invalid = true;
+        } else if (state === 4) {
+          if (byte === 108) {
+            stats.responseArrayElements++;
+            state = 5;
+          } else {
+            invalid = true;
+          }
+        } else if (state === 5) {
+          if (byte === 44) state = 1;
+          else if (byte === 93) state = 7;
+          else invalid = true;
+        } else {
+          invalid = true;
+        }
+      }
+    },
+    finish() {
+      if (invalid || state !== 7) stats.invalidArrayFrames++;
+    },
+  };
+}
+
+function createFrameParser({ inspectArrayFrames = false } = {}) {
   const header = Buffer.alloc(4);
   let headerOffset = 0;
   let bodyRemaining = 0;
@@ -178,7 +243,25 @@ function createFrameParser() {
     responseFrames: 0,
     responseBodyBytes: 0,
     maxResponseFrameBodyBytes: 0,
+    responseArrayElements: 0,
+    invalidArrayFrames: 0,
     stdoutBytes: 0,
+  };
+  const arrayScanner = inspectArrayFrames ? createNullArrayScanner(stats) : undefined;
+
+  const startFrame = (len) => {
+    stats.responseFrames++;
+    stats.responseBodyBytes += len;
+    stats.maxResponseFrameBodyBytes = Math.max(stats.maxResponseFrameBodyBytes, len);
+    bodyRemaining = len;
+    if (arrayScanner) arrayScanner.start();
+    if (len === 0 && arrayScanner) arrayScanner.finish();
+  };
+
+  const consumeBody = (chunk, offset, length) => {
+    if (arrayScanner) arrayScanner.push(chunk, offset, length);
+    bodyRemaining -= length;
+    if (bodyRemaining === 0 && arrayScanner) arrayScanner.finish();
   };
 
   return {
@@ -189,7 +272,7 @@ function createFrameParser() {
       while (offset < chunk.length) {
         if (bodyRemaining > 0) {
           const n = Math.min(bodyRemaining, chunk.length - offset);
-          bodyRemaining -= n;
+          consumeBody(chunk, offset, n);
           offset += n;
           continue;
         }
@@ -201,11 +284,8 @@ function createFrameParser() {
 
         if (headerOffset === 4) {
           const len = header.readUInt32LE(0);
-          stats.responseFrames++;
-          stats.responseBodyBytes += len;
-          stats.maxResponseFrameBodyBytes = Math.max(stats.maxResponseFrameBodyBytes, len);
           headerOffset = 0;
-          bodyRemaining = len;
+          startFrame(len);
         }
       }
     },
@@ -214,6 +294,8 @@ function createFrameParser() {
       if (bodyRemaining !== 0)
         errors.push(`stdout ended ${bodyRemaining} bytes before the current frame body completed`);
       if (headerOffset !== 0) errors.push(`stdout ended with ${headerOffset} partial header bytes`);
+      if (stats.invalidArrayFrames !== 0)
+        errors.push(`${stats.invalidArrayFrames} response frames were not null-array JSON`);
       return errors;
     },
   };
@@ -245,12 +327,29 @@ function formatMb(kb) {
   return kb === undefined ? "n/a" : (kb / 1024).toFixed(1);
 }
 
+function buildCompilerCli(repoRoot, outDir) {
+  const cli = join(outDir, "js2wasm-cli.mjs");
+  console.error("== Building temporary standalone js2wasm CLI ==");
+  const result = spawnSync(process.execPath, ["scripts/build-standalone-cli.mjs", "--outfile", cli], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`standalone CLI build exited with status ${result.status}`);
+  if (!existsSync(cli)) throw new Error(`${cli} was not produced`);
+  return cli;
+}
+
 function buildWasm(repoRoot, outDir) {
   console.error("== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi ==");
+  const cli = buildCompilerCli(repoRoot, outDir);
   const result = spawnSync(
-    "npx",
-    ["tsx", "src/cli.ts", "examples/native-messaging/nm_js2wasm.ts", "--target", "wasi", "-o", outDir],
-    { cwd: repoRoot, stdio: "inherit" },
+    process.execPath,
+    [cli, "examples/native-messaging/nm_js2wasm.ts", "--target", "wasi", "-o", outDir, "--quiet"],
+    {
+      cwd: repoRoot,
+      stdio: "inherit",
+    },
   );
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`compiler exited with status ${result.status}`);
@@ -287,7 +386,7 @@ async function main() {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    const parser = createFrameParser();
+    const parser = createFrameParser({ inspectArrayFrames: opts.arrayElements !== undefined });
     let stderrBytes = 0;
     let stderrPreview = "";
     let spawnError;
@@ -296,6 +395,8 @@ async function main() {
     let peakHwmKb;
     let rssSource = "n/a";
     let rssSamples = 0;
+    const guardErrors = [];
+    let guardTerminated = false;
 
     child.once("error", (err) => {
       spawnError = err;
@@ -313,11 +414,29 @@ async function main() {
         if (firstRssKb === undefined) firstRssKb = rss.rssKb;
         peakSampledRssKb = Math.max(peakSampledRssKb, rss.rssKb);
         rssSamples++;
+        if (
+          opts.maxRssDeltaMb !== undefined &&
+          firstRssKb !== undefined &&
+          rss.rssKb > firstRssKb + opts.maxRssDeltaMb * 1024 &&
+          !guardTerminated
+        ) {
+          guardTerminated = true;
+          guardErrors.push(
+            `sampled RSS exceeded guard: ${formatMb(rss.rssKb)} MiB > first + ${opts.maxRssDeltaMb} MiB`,
+          );
+          child.kill("SIGTERM");
+        }
       }
       if (rss.hwmKb !== undefined) peakHwmKb = Math.max(peakHwmKb ?? 0, rss.hwmKb);
     };
     sample();
     const sampler = setInterval(sample, opts.sampleMs);
+    const timeout = setTimeout(() => {
+      guardTerminated = true;
+      guardErrors.push(`timeout exceeded: ${opts.timeoutMs} ms`);
+      child.kill("SIGTERM");
+    }, opts.timeoutMs);
+    timeout.unref?.();
 
     let writeError;
     const closePromise = new Promise((resolve) => {
@@ -332,10 +451,12 @@ async function main() {
 
     const close = await closePromise;
     clearInterval(sampler);
+    clearTimeout(timeout);
     sample();
 
     const elapsedMs = Math.round(performance.now() - started);
     const errors = parser.finishErrors();
+    errors.push(...guardErrors);
     if (spawnError) errors.push(String(spawnError.message || spawnError));
     if (writeError) errors.push(String(writeError.message || writeError));
     if (close.code !== 0) errors.push(`${opts.wasmtime} exited with status ${close.code}`);
@@ -343,6 +464,14 @@ async function main() {
     if (parser.stats.maxResponseFrameBodyBytes > opts.maxResponseFrameBytes && !opts.allowLargeResponseFrame) {
       errors.push(
         `response frame exceeded chunk budget: ${parser.stats.maxResponseFrameBodyBytes} > ${opts.maxResponseFrameBytes}`,
+      );
+    }
+    if (opts.bodyBytes !== undefined && parser.stats.responseBodyBytes !== bodyBytes) {
+      errors.push(`response body byte total mismatch: ${parser.stats.responseBodyBytes} !== ${bodyBytes}`);
+    }
+    if (opts.arrayElements !== undefined && parser.stats.responseArrayElements !== opts.arrayElements) {
+      errors.push(
+        `response array element total mismatch: ${parser.stats.responseArrayElements} !== ${opts.arrayElements}`,
       );
     }
 
@@ -353,6 +482,7 @@ async function main() {
     console.log(`request_body_bytes=${bodyBytes}`);
     console.log(`response_frames=${parser.stats.responseFrames}`);
     console.log(`response_body_bytes=${parser.stats.responseBodyBytes}`);
+    if (opts.arrayElements !== undefined) console.log(`response_array_elements=${parser.stats.responseArrayElements}`);
     console.log(`max_response_frame_body_bytes=${parser.stats.maxResponseFrameBodyBytes}`);
     console.log(`chunk_budget_bytes=${opts.maxResponseFrameBytes}`);
     console.log(`stdout_bytes=${parser.stats.stdoutBytes}`);
@@ -361,7 +491,14 @@ async function main() {
     console.log(`rss_first_mb=${formatMb(firstRssKb)}`);
     console.log(`rss_peak_sampled_mb=${formatMb(peakSampledRssKb || undefined)}`);
     console.log(`rss_peak_hwm_mb=${formatMb(peakHwmKb)}`);
+    console.log(
+      `rss_peak_delta_sampled_mb=${
+        firstRssKb === undefined || !peakSampledRssKb ? "n/a" : ((peakSampledRssKb - firstRssKb) / 1024).toFixed(1)
+      }`,
+    );
+    console.log(`rss_limit_delta_mb=${opts.maxRssDeltaMb ?? "n/a"}`);
     console.log(`rss_samples=${rssSamples}`);
+    console.log(`timeout_ms=${opts.timeoutMs}`);
     console.log(`elapsed_ms=${elapsedMs}`);
     if (opts.keep) console.log(`work_dir=${tmp}`);
     if (stderrPreview.trim().length > 0) console.log(`stderr_preview=${JSON.stringify(stderrPreview.trim())}`);
