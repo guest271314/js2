@@ -41,7 +41,6 @@ function htmlShell({ title, body }) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script defer src="../../frame-nav-sync.js"></script>
   <title>${escapeHtml(title)} — js2wasm</title>
   <link rel="icon" href="../../js2logo.svg" type="image/svg+xml" />
   <style>
