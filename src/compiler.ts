@@ -259,9 +259,9 @@ function detectNodeFsImports(source: string): Set<string> {
  * Orchestrates the full compilation pipeline:
  * TS Source → tsc Parser+Checker → Codegen → Binary + WAT
  *
- * Async because the optional Binaryen optimizer is lazy-loaded via
- * `await import("binaryen")` (#1757 / GH #986) so it can be embedded in a
- * `bun build --compile` / `deno compile` standalone binary.
+ * Async because the optional Binaryen optimizer is lazy-loaded only when
+ * wasm-opt is requested (#1757 / GH #986), so normal compilation and
+ * standalone bundles do not need to embed Binaryen.
  */
 export async function compileSource(
   source: string,
@@ -655,8 +655,8 @@ export function compileSourceSync(
   }
 
   // Step 3b: Optimize binary with Binaryen (optional) — applied by the async
-  // compileSource wrapper, not here (the optimizer is lazy-loaded via
-  // `await import("binaryen")`, #1757). This synchronous core ignores
+  // compileSource wrapper, not here (the optimizer is lazy-loaded only when
+  // wasm-opt is requested, #1757). This synchronous core ignores
   // options.optimize.
 
   // Step 4: Emit WAT (optional)

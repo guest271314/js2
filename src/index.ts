@@ -418,6 +418,7 @@ export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
 }
 
 export { getBarePackageName, ModuleResolver, resolveAllImports } from "./resolve.js";
+export { preloadLibFiles } from "./checker/index.js";
 export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";

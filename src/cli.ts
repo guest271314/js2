@@ -4,6 +4,16 @@ import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
+declare const __JS2WASM_CLI_VERSION__: string | undefined;
+
+function getCliVersion(): string {
+  const bundledVersion = typeof __JS2WASM_CLI_VERSION__ === "string" ? __JS2WASM_CLI_VERSION__ : undefined;
+  if (bundledVersion) return bundledVersion;
+  const require = createRequire(import.meta.url);
+  const pkg = require("../package.json") as { version?: string };
+  return pkg.version ?? "0.0.0";
+}
+
 const args = process.argv.slice(2);
 
 // `--ts7` swaps the parser/checker frontend to `@typescript/native-preview`
@@ -18,9 +28,7 @@ const { compile } = await import("./index.js");
 const { buildDefaultDefines } = await import("./compiler/define-substitution.js");
 
 if (args.includes("--version") || args.includes("-v")) {
-  const require = createRequire(import.meta.url);
-  const pkg = require("../package.json");
-  console.log(pkg.version);
+  console.log(getCliVersion());
   process.exit(0);
 }
 

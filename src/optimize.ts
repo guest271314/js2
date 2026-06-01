@@ -3,7 +3,7 @@
  * Post-processing pass using Binaryen's wasm-opt optimizer.
  *
  * Tries two strategies in order:
- * 1. The `binaryen` npm package (if installed as an optional dependency)
+ * 1. The `binaryen` npm package (if installed as an optional peer dependency)
  * 2. A system `wasm-opt` binary on PATH
  *
  * If neither is available, returns the original binary unchanged and emits a warning.
@@ -141,10 +141,10 @@ function isBrowserLikeRuntime(): boolean {
  * migration every live caller goes through this async path, and the sync
  * variant only kept alive a dead `createRequire("binaryen")` branch — the
  * exact bundler hazard #986/#1756 set out to remove. The `binaryen` package
- * is loaded via `await import("binaryen")` (see `getBinaryenModule`), which
- * is the import form bundlers can legitimately follow for standalone
- * embedding; the system `wasm-opt` CLI fallback still uses the dynamic
- * node-builtin shim that bundlers intentionally cannot statically resolve.
+ * is loaded lazily at runtime (see `getBinaryenModule`) without making
+ * bundlers embed it in standalone artifacts; the system `wasm-opt` CLI
+ * fallback still uses the dynamic node-builtin shim that bundlers
+ * intentionally cannot statically resolve.
  */
 export async function optimizeBinaryAsync(binary: Uint8Array, options: OptimizeOptions = {}): Promise<OptimizeResult> {
   const level = options.level ?? 3;
@@ -198,7 +198,11 @@ async function getBinaryenModule(): Promise<any | null> {
     }
 
     try {
-      const mod = await import("binaryen");
+      // Keep Binaryen optional. A string-literal dynamic import makes esbuild,
+      // Bun, and Deno treat the package as a bundle input, adding ~13.5 MB to
+      // standalone artifacts even though wasm-opt is only a post-compile pass.
+      const specifier = (globalObject.__js2wasmBinaryenModuleSpecifier as string | undefined) ?? "binaryen";
+      const mod = await import(/* @vite-ignore */ specifier);
       return mod.default ?? mod;
     } catch {
       return null;
