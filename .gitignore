@@ -91,6 +91,7 @@ tests/fixtures/*.imports.js
 .claude/nonces/
 *.jsonl
 benchmarks/results/runs/
+benchmarks/wasmtime-cold-host/target/
 .playwright-cli/
 vendor/
 docs/publications/

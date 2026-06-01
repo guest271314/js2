@@ -24345,6 +24345,1300 @@
       "title": "perf(string-hash): presize string-build buffer from static loop-trip-count to kill reallocs + per-append cap-check",
       "priority": "high",
       "status": "ready",
+      "raw_status": "review",
+      "sprint": "50",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1646",
+      "title": "spec gap: Set methods (union/intersection/etc.) accept any set-like argument (101 test262 fails)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "review",
+      "sprint": "50",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1647",
+      "title": "ECMAScript spec compliance audit: section-by-section review, gap issues, HTML report",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "50",
+      "depends_on": [],
+      "files": [],
+      "goal": "npm-library-support",
+      "cluster": "npm-library-support"
+    },
+    {
+      "id": "1648",
+      "title": "spec gap: Object.create(proto, descriptors) ignores descriptor map (162 test262 fails)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "50",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1649",
+      "title": "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)",
+      "priority": "medium",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "50",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1650",
+      "title": "Component Model string boundary: encode-import selection (Edge B) on the encoding annotation",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1588"
+      ],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1651",
+      "title": "wasi: process.stdout.write(str|Uint8Array) → fd_write (no newline, raw bytes)",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "review",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1652",
+      "title": "Fix native-messaging README build command (npx js2wasm not found on fresh clone)",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1653",
+      "title": "wasi: process.stdin.read(buffer, offset?) — binary incremental stdin read into a typed buffer",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1654"
+      ],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1654",
+      "title": "wasi: DataView/ArrayBuffer-backed TypedArrays emit an invalid wasm module under --target wasi",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1655",
+      "title": "wasi: process.stdout.write(ArrayBuffer) — accept ArrayBuffer arg, not only Uint8Array literal",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1654"
+      ],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1656",
+      "title": "Consolidate all website/frontend files under website/",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1657",
+      "title": "Skip merge_group test262 shards for non-src changes (keep required check green)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "review",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1658",
+      "title": "Destructured/scalar function-parameter default not applied (returns wrong value)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1659"
+      ],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1659",
+      "title": "CI does not run tests/equivalence/ (OOM) — genuine equivalence regressions land silently",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1660",
+      "title": "Replace placeholder cla-check with a real CLA signature/approval gate",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-Backlog"
+    },
+    {
+      "id": "1661",
+      "title": "README programmatic-API example fails: instantiate(binary, {}) but default mode requires host imports",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1662",
+      "title": "audit: standalone (--target wasi) host-import leaks per construct + remaining-gap map",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1663",
+      "title": "host-indep: pure-Wasm parseInt / parseFloat / Number(string) in standalone mode",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1664",
+      "title": "host-indep: residual __extern_* / __register_* / __iterator* / __array_* leaks after #1472",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1665",
+      "title": "host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1666",
+      "title": "bug: --target wasi emits INVALID wasm for class/closure/callback/number→string/regex/generator/typed-array (native helper type mismatch + unbound late global)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1667",
+      "title": "DX: compile() should return a ready-to-pass import object for default/JS-host mode",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-Backlog"
+    },
+    {
+      "id": "1668",
+      "title": "CI catastrophic-regression guard — block merge-queue on large test262 pass drops",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "review",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1669",
+      "title": "codegen: object-method trampoline forwards args without coercion → invalid wasm (regressed by #1602)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "goal": "compiler-correctness",
+      "cluster": "compiler-correctness"
+    },
+    {
+      "id": "1670",
+      "title": "Atomics negative tests trap with `illegal cast` (regressed by #1654 / PR #599)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1671",
+      "title": "object-method trampoline / direct dispatch lost the real receiver → ~200 runtime null-derefs (completes #1669/#621)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "goal": "compiler-correctness",
+      "cluster": "compiler-correctness"
+    },
+    {
+      "id": "1672",
+      "title": "async / async-gen object+class method trampolines must return the real result, not null (completes #1671)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [
+        "1671"
+      ],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1673",
+      "title": "super.<method>() on a built-in parent class fails to compile",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1674",
+      "title": "GetSetRecord set-like consumption: .size NaN, coercion count, has/keys callable checks",
+      "priority": "low",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1675",
+      "title": "built-ins/Set residual fails — 63 non-passing after set-like fix (split from #1646)",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "compiler_errors": 7
+    },
+    {
+      "id": "1677",
+      "title": "Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1678",
+      "title": "externref-typed array/rest binding default not recognised by Array.isArray",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "56",
+      "depends_on": [],
+      "files": [],
+      "goal": "property-model",
+      "cluster": "property-model",
+      "test262_fail": 727
+    },
+    {
+      "id": "1679",
+      "title": "Stress test: compile acorn.js — `new this(...)` dynamic constructor unsupported",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "real-world-compat",
+      "cluster": "real-world-compat"
+    },
+    {
+      "id": "1680",
+      "title": "Private setter write falls through to struct-field write — stacked private accessors cross-talk (~132 fails)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "test262_fail": 132
+    },
+    {
+      "id": "1680b",
+      "title": "Private getter/method read missing PrivateBrandCheck — TypeError not thrown for non-brand receiver",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1681",
+      "title": "Static private accessor reached through inner closure emits invalid Wasm (extern.convert_any) / infinite recursion (~10 fails)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "test262_fail": 10
+    },
+    {
+      "id": "1682",
+      "title": "Derived constructor must call super() for builtin subclasses (WeakMap/Promise/Object) — missing ReferenceError",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "55",
+      "depends_on": [],
+      "files": [],
+      "cluster": "sprint-55"
+    },
+    {
+      "id": "1684",
+      "title": "Iterator-result object literal `{ value, done }` from a nested closure reads back value=0 / done never truthy (closure-backed iterator value round-trip)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-conformance",
+      "cluster": "spec-conformance"
+    },
+    {
+      "id": "1686",
+      "title": "built-ins/Set residual fails — 63 non-passing after set-like fix (split from #1646)",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "compiler_errors": 7
+    },
+    {
+      "id": "1687",
+      "title": "spec gap: eager generator model can't thread .next(arg) / .throw() / .return() into yield (44/63 yield fails)",
+      "priority": "high",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "compiler_errors": 1
+    },
+    {
+      "id": "1688",
+      "title": "Symbol→string implicit coercion must throw TypeError (value-representation gap, split from #1637)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "wont-fix",
+      "sprint": "56",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1689",
+      "title": "Number(string) returns 0 under --target wasi — missing native StringToNumber",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-mode",
+      "cluster": "standalone-mode"
+    },
+    {
+      "id": "1690",
+      "title": "Stress test: compile acorn.mjs — invalid Wasm in isInAstralSet (f64 op reads global array ref)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1690b",
+      "title": "Inner function `var x` aliases module-level `__mod_x` global instead of allocating a function-local",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1691",
+      "title": "yield* does not delegate throw()/return() to the inner iterator (eager-generator model gap)",
+      "priority": "medium",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1693",
+      "title": "multi-funcref-dispatch (#1131) missing return-type coercion — emits invalid Wasm on full-module axios/utils.js (mis-presented as `&&` fallthru bug)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "npm-library-support",
+      "cluster": "npm-library-support"
+    },
+    {
+      "id": "1694",
+      "title": "Promise.any/all/allSettled/race: non-Promise capability `this` + extends-Promise codegen (~50 fails)",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1695",
+      "title": "DisposableStack/AsyncDisposableStack prototype methods — deferred-callback writeback fires too early (23 fails)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "test262_fail": 23
+    },
+    {
+      "id": "1696",
+      "title": "dynamic-import eval-script-code fixture resolution + sloppy redecl (18 CE tests)",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "conformance-hygiene",
+      "cluster": "conformance-hygiene",
+      "compiler_errors": 18
+    },
+    {
+      "id": "1697",
+      "title": "static method `this.X = v` write not routed to staticProps global — public + private (asymmetric with read path)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "test262_fail": 12
+    },
+    {
+      "id": "1698",
+      "title": "ArrayBuffer.prototype.slice() not implemented in --target wasi (dual-mode gap, same shape as #1654)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "wasi-completeness",
+      "cluster": "wasi-completeness"
+    },
+    {
+      "id": "1700",
+      "title": "TypedArray as exported Wasm function param fails JS↔Wasm marshalling (TypeError: type incompatibility)",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "in-progress",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "native-messaging, host-interop",
+      "cluster": "native-messaging, host-interop"
+    },
+    {
+      "id": "1701",
+      "title": "Assignment destructuring residuals — empty pattern + non-iterable RHS + iterator close",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "54",
+      "depends_on": [],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1702",
+      "title": "Residual strict-mode `this` regressions: function-expression direct-call + nested fn-decl in class method",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "56",
+      "depends_on": [],
+      "files": [],
+      "goal": "core-semantics",
+      "cluster": "core-semantics"
+    },
+    {
+      "id": "1710",
+      "title": "acorn dogfood harness: compile + validate + differential-AST vs node-acorn",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1711",
+      "title": "acorn failure-surface triage: bucket harness output + file sized child issues",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [
+        "1710"
+      ],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1712",
+      "title": "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn",
+      "priority": "high",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "58",
+      "depends_on": [
+        "1710",
+        "1711"
+      ],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1713",
+      "title": "IR backend-trait: audit WasmGC bias in lower.ts + define BackendEmitter seam",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "backend-agnostic-ir",
+      "cluster": "backend-agnostic-ir"
+    },
+    {
+      "id": "1714",
+      "title": "Lower one IR node kind through the BackendEmitter trait to BOTH WasmGC and linear",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [
+        "1713"
+      ],
+      "files": [],
+      "goal": "backend-agnostic-ir",
+      "cluster": "backend-agnostic-ir"
+    },
+    {
+      "id": "1715",
+      "title": "Minimal bytecode emitter + dispatch loop for an IR subset (backend-agnostic proof point)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [
+        "1713"
+      ],
+      "files": [],
+      "goal": "backend-agnostic-ir",
+      "cluster": "backend-agnostic-ir"
+    },
+    {
+      "id": "1716",
+      "title": "spec gap (RESIDUAL of #1090/#1525): 'Cannot convert object to primitive value' still thrown in 111 coercion paths",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 111
+    },
+    {
+      "id": "1717",
+      "title": "ArrayBuffer.prototype.slice not implemented ('slice is not a function', 17 fails)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 17
+    },
+    {
+      "id": "1718",
+      "title": "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "compiler_errors": 262,
+      "test262_fail": 101
+    },
+    {
+      "id": "1719",
+      "title": "Array destructuring ignores overridden Array.prototype[Symbol.iterator] ('items[Symbol.iterator] must be a function', 71 fails)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "object-representation",
+      "cluster": "object-representation",
+      "test262_fail": 71
+    },
+    {
+      "id": "1720",
+      "title": "ES3: prefix/postfix inc-dec reference is evaluated once before the null/undefined deref ('base[prop()]++')",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 10
+    },
+    {
+      "id": "1721",
+      "title": "ES3 (RESIDUAL of #1455): 'class extends Function' / 'class extends Object' instanceof returns false",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 4
+    },
+    {
+      "id": "1722",
+      "title": "ES3: AssignmentTargetType early SyntaxError not raised (parenthesized object/array literal as assignment target)",
+      "priority": "low",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 4
+    },
+    {
+      "id": "1723",
+      "title": "writeMessage cast failure on multi-segment / large message (ConsString downcast + fixed-staging overflow)",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "real-world-compat, spec-completeness",
+      "cluster": "real-world-compat, spec-completeness"
+    },
+    {
+      "id": "1724",
+      "title": "WASI number formatting corrupts string constants (itoa scratch aliases data segments)",
+      "priority": "critical",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "real-world-compat, spec-completeness",
+      "cluster": "real-world-compat, spec-completeness"
+    },
+    {
+      "id": "1725",
+      "title": "acorn dogfood: __fnctor_<Ctor>_new emits any.convert_extern on a ref.cast-null struct ref → invalid Wasm",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1726",
+      "title": "spec gap: mapped `arguments` exotic-object representation (§10.4.4)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1727",
+      "title": "internal async-function call result wrapped in Promise then unboxed → NaN",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1728",
+      "title": "ES5: compound assignment to unresolvable reference must throw ReferenceError",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1729",
+      "title": "instanceof Object returns false for WasmGC-struct values (object literal / array / class instance / thrown value)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1730",
+      "title": "internal call to a module-level `const` arrow traps with illegal cast",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1731",
+      "title": "String.prototype.substring()/slice() with no args returns '' instead of the whole string",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1732",
+      "title": "spec gap: builtin method values lack [[Construct]]-absent brand + own length/name descriptors (~40 String.prototype A7/A8 fails)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1632",
+        "1665"
+      ],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness",
+      "test262_fail": 40
+    },
+    {
+      "id": "1733",
+      "title": "Native Messaging host: 1 MiB body corruption — byte-write helpers miss the memory-grow guard; refactor host to raw-Uint8Array 3-symbol API",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "real-world-compat, wasi-completeness",
+      "cluster": "real-world-compat, wasi-completeness"
+    },
+    {
+      "id": "1734",
+      "title": "acorn dogfood: __closure_11 emits unguarded struct.get on a call result of the wrong struct type → invalid Wasm",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1735",
+      "title": "Number.prototype.toExponential(NaN) collides with no-arg sentinel — returns variable digits instead of ToInteger(NaN)=0",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance",
+      "test262_fail": 1
+    },
+    {
+      "id": "1736",
+      "title": "ArrayBuffer.prototype.byteLength returns NaN in JS-host mode",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1737",
+      "title": "Uint8Array(arrayBuffer) does not alias the ArrayBuffer's backing store (JS-host)",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1738",
+      "title": "DataView.prototype.set* (setUint8 etc.) 'not a function' in JS-host mode",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1739",
+      "title": "String.prototype methods fail not-a-constructor (A7) + .length-DontEnum (A8) invariants across the suite",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1740",
+      "title": "String.prototype.padStart/padEnd omitted fillString defaults to 'null' instead of space",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1741",
+      "title": "TS type-checker CEs on test262 intentionally-wrong-typed builtin method args",
+      "priority": "medium",
+      "status": "backlog",
+      "raw_status": "backlog",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1742",
+      "title": "Closure `this`-receiver member reads trap 'illegal cast' when `this` is a compiled vec/struct (CPR prerequisite, shared with #1629)",
+      "priority": "high",
+      "status": "ready",
+      "raw_status": "in-progress",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "test262-conformance",
+      "cluster": "test262-conformance"
+    },
+    {
+      "id": "1743",
+      "title": "Bytecode VM: coordinated stack → register+accumulator encoding flip",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [
+        "1584"
+      ],
+      "files": [],
+      "goal": "spec-completeness",
+      "cluster": "spec-completeness"
+    },
+    {
+      "id": "1744",
+      "title": "string-builder build-loop perf: close the remaining gap on StarlingMonkey / the JS lane",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "performance",
+      "cluster": "performance"
+    },
+    {
+      "id": "1745",
+      "title": "acorn dogfood: __closure_37 global.set expects f64, found if of (ref null 3) → invalid Wasm",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "self-hosting-dogfood",
+      "cluster": "self-hosting-dogfood"
+    },
+    {
+      "id": "1746",
+      "title": "string-hash: reach (and beat) warm-V8 via AOT analysis — i32 path, const-eval, presize, SIMD, loop fusion/unroll",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "57",
+      "depends_on": [],
+      "files": [],
+      "goal": "performance",
+      "cluster": "performance"
+    },
+    {
+      "id": "1747",
+      "title": "Array.prototype.pop() on an empty array traps instead of returning undefined (compiled WasmGC)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-correctness",
+      "cluster": "standalone-correctness"
+    },
+    {
+      "id": "1748",
+      "title": "readonly array as a nested struct field traps on indexed read (compiled WasmGC)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "standalone-correctness",
+      "cluster": "standalone-correctness"
+    },
+    {
+      "id": "1749",
+      "title": "Array spread `[...arr]` / spread-call must honor overridden Array.prototype[Symbol.iterator]",
+      "priority": "low",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "object-representation",
+      "cluster": "object-representation"
+    },
+    {
+      "id": "1750",
+      "title": "TS-cast form `(Array.prototype as any)[Symbol.iterator] = fn` not captured by CPR write-arm",
+      "priority": "low",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "object-representation",
+      "cluster": "object-representation"
+    },
+    {
+      "id": "1751",
+      "title": "WIT generator emits an incomplete world: hardcoded package name + no WASI imports",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1752",
+      "title": "TextEncoder / TextDecoder runtime API (standalone + WASI)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1753",
+      "title": "Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1754",
+      "title": "Build-from-repo: packages/index re-exports unresolved @loopdive/js2",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1755",
+      "title": "TS annotation: Uint8Array<ArrayBuffer> generic typed-array form not handled",
+      "priority": "low",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1757",
+      "title": "Migrate the public compile() API to async (embed binaryen via await import)",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1758",
+      "title": "auto-enqueue churn wedges the serial merge queue — make the sweep surgical",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1759",
+      "title": "native number→string missing on the WASI/standalone string-concat path (process.stderr/stdout.write of numeric template emits invalid module)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1760",
+      "title": "wasm warm-runtime benchmark lane: in-process repeated-measure (current cold−baseline subtraction is noise-dominated)",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "Backlog",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1761",
+      "title": "perf(string-hash): presize string-build buffer from static loop-trip-count to kill reallocs + per-append cap-check",
+      "priority": "high",
+      "status": "ready",
       "raw_status": "ready",
       "sprint": "Backlog",
       "depends_on": [],
@@ -32646,6 +33940,86 @@
     {
       "goal": "spec-completeness",
       "issue": "1634"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1635"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1636"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1637"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1638"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1639"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1640"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1641"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1642"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1643"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1644"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1645"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1646"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1648"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1649"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1658"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1659"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1673"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1674"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1675"
+    },
+    {
+      "goal": "spec-completeness",
+      "issue": "1680"
     },
     {
       "goal": "spec-completeness",
