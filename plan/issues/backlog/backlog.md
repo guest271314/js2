@@ -127,6 +127,7 @@ fidelity → #1463) were NOT re-filed.
 - [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready (sprint 58)**
 - [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
+- [#1766](../1766-process-stdout-write-drain-backpressure-api.md) — Node-style `process.stdout.write` backpressure / `once("drain")` pattern not supported; sync WASI `write()`→`true` + no-op `once("drain")` shim done, full async helper still blocked (from GitHub #389, 2026-06-01) — medium, hard, **blocked (sprint 58)** on #1042/#1326/#1575
 
 ### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
 

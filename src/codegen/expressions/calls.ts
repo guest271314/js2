@@ -1672,6 +1672,22 @@ function matchProcessStdStreamWrite(
   return { useStderr: streamName === "stderr" };
 }
 
+function matchProcessStdStreamDrainOnce(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
+  if (!ctx.wasi) return false;
+  if (expr.questionDotToken || expr.arguments.length !== 2) return false;
+  const onceAccess = expr.expression;
+  if (!ts.isPropertyAccessExpression(onceAccess) || onceAccess.name.text !== "once") return false;
+  const streamAccess = onceAccess.expression;
+  if (!ts.isPropertyAccessExpression(streamAccess)) return false;
+  const streamName = streamAccess.name.text;
+  if (streamName !== "stdout" && streamName !== "stderr") return false;
+  const procIdent = streamAccess.expression;
+  if (!ts.isIdentifier(procIdent) || procIdent.text !== "process") return false;
+  if (fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false)) return false;
+  const eventArg = expr.arguments[0]!;
+  return ts.isStringLiteralLike(eventArg) && eventArg.text === "drain";
+}
+
 /**
  * Statically flatten an array literal's elements into a positional argument
  * list, expanding spreads of nested array literals (`[...[a, b]]` → `a, b`).
@@ -1941,6 +1957,14 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (r) return r;
   }
 
+  // #1766: WASI fd_write is synchronous. Accept the Node stream backpressure
+  // subscription shape so idiomatic `if (!stdout.write(...)) stdout.once("drain", cb)`
+  // compiles without a JS-host EventEmitter import. Since write() returns true
+  // below, the drain callback is never needed on this path.
+  if (matchProcessStdStreamDrainOnce(ctx, fctx, expr)) {
+    return VOID_RESULT;
+  }
+
   // #1651 (GitHub #572): process.stdout.write(x) / process.stderr.write(x)
   // under --target wasi → write x to fd=1 / fd=2 with NO trailing newline
   // (unlike console.log). Supersedes the bespoke `writeStdout` builtin from
@@ -1975,7 +1999,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           const writeStrIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
           if (writeStrIdx >= 0) {
             fctx.body.push({ op: "call", funcIdx: writeStrIdx } as Instr);
-            return VOID_RESULT;
+            fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+            return { kind: "i32" };
           }
         }
         // Fallback: drop to keep the stack balanced.
@@ -2015,7 +2040,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         : ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
       if (helperIdx >= 0) {
         fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
-        return VOID_RESULT;
+        fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+        return { kind: "i32" };
       }
       if (argType) fctx.body.push({ op: "drop" } as Instr);
       return VOID_RESULT;
