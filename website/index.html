@@ -3272,7 +3272,7 @@ match (value) {
             <strong>Interpreter</strong>
             (a per-function tiny module delegating to a preloaded embedded-interpreter plugin), and
             <strong>Engine</strong>
-            (a full JS engine bundled inside Wasm with AOT pre-init — multiple megabytes per function, shown where a matching measurement exists). Two scenarios per program:
+            (a full JS engine bundled inside Wasm with AOT pre-init — multiple megabytes per function). Two scenarios per program:
             fresh context or instance per request (cold) and reused context or instance (warm). Interpreter and Engine both run a JS
             interpreter inside Wasm — the size and per-call cost tradeoff isn't free. One chart per benchmark; each
             chart shows the available execution-model lanes for both scenarios.
@@ -3280,7 +3280,7 @@ match (value) {
           <div class="conformance-diagrams">
             <h4 class="host-bench-section-title">Speed <span class="section-title-note">(higher is better)</span></h4>
             <p class="host-bench-section-desc">
-              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime against a V8-isolate edge runtime — rather than any named commercial platform. <strong>Cold speed</strong> shows warm-engine per-request setup plus the first call: a Rust Wasmtime host compiles the Wasm module once with Cranelift, then creates a fresh store and instance per request; JS creates a fresh V8 context, compiles the program into it, and runs once. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
+              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime against a V8-isolate edge runtime — rather than any named commercial platform. <strong>Cold speed</strong> shows warm-engine per-request setup plus the first call: a Rust Wasmtime host compiles each Wasm module or component once, then creates a fresh store and instance per request; JS creates a fresh V8 context, compiles the program into it, and runs once. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
             </p>
             <div class="bench-test-group" data-test="fib">
               <h4 class="bench-test-title">Fibonacci loop</h4>
