@@ -194,8 +194,10 @@ fi
 # filename-prefix != frontmatter-id and fails CI's #1616 integrity gate ~2 min
 # later. The key is we check the COMMITTED tree (`git show HEAD:<file>`), NOT the
 # working tree — the working tree looks fine in exactly this case, which is why
-# the agents' local `check:issues` falsely passed. Also runs the full
-# check:issues for dup-IDs / broken links. Skip the whole hook with --no-verify.
+# the agents' local `check:issues` falsely passed. Also checks committed-tree
+# dependencies so uncommitted sibling issue files cannot hide a dangling
+# depends_on, then runs the full check:issues for dup-IDs / broken links.
+# Skip the whole hook with --no-verify.
 
 if command -v node > /dev/null 2>&1 && [ -d plan/issues ]; then
   issue_block=0
@@ -225,7 +227,20 @@ if command -v node > /dev/null 2>&1 && [ -d plan/issues ]; then
     fi
   done
 
-  # (5b) full integrity gate (duplicate IDs, broken path links) — working tree.
+  # (5b) committed-tree graph integrity. This catches the PR-quality failure
+  # where an uncommitted sibling issue file makes the working tree look valid,
+  # but the pushed commit has a dangling depends_on.
+  if [ -f scripts/check-committed-issue-integrity.mjs ]; then
+    if ! node scripts/check-committed-issue-integrity.mjs HEAD > /tmp/.prepush_issues_committed 2>&1; then
+      echo ""
+      echo "PRE-PUSH BLOCKED: committed issue integrity gate (#1616) failed:"
+      tail -30 /tmp/.prepush_issues_committed
+      issue_block=1
+    fi
+    rm -f /tmp/.prepush_issues_committed
+  fi
+
+  # (5c) full integrity gate (duplicate IDs, broken path links) — working tree.
   if grep -q '"check:issues"' package.json 2>/dev/null; then
     if ! node scripts/update-issues.mjs --check > /tmp/.prepush_issues 2>&1; then
       echo ""

@@ -1,9 +1,10 @@
 ---
 id: 1764
 title: "wasmtime bench: model production edge-serverless per-request instantiation (warm engine), not full process spawns"
-status: ready
+status: done
 created: 2026-05-31
-updated: 2026-05-31
+updated: 2026-06-01
+completed: 2026-06-01
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -166,27 +167,60 @@ context/instance from a warm engine (µs–ms)."** Expected effect:
   is a much closer race than process boot vs process boot, which is the
   honest story.
 
+## Measured cold-cost anatomy (2026-05-31, aarch64 dev container, wasmtime 44)
+
+Direct measurement decomposing the `string-hash` cold number — to correct the
+prior (wrong) assumption that it reflected a large module. **It does not: the
+module is tiny; cold is dominated by fixed per-instance `wasmtime run`
+instantiation, not module weight or AOT slowness.**
+
+- `string-hash.js` source: 28 lines / 601 B.
+- Compiled module (`target: wasi, nativeStrings, optimize: 3`): **1.4 KB wasm**
+  (gzip 0.7 KB). Precompiled artifact: **201 KB `.cwasm`** (native code +
+  wasmtime AOT format overhead).
+- **Bare `wasmtime run` of an empty no-op module: ~2 ms** (warm disk cache) —
+  i.e. wasmtime's own process startup is *not* the bottleneck.
+- Cold `wasmtime run --allow-precompiled --invoke run` (best-of-3):
+  - `run(1)`   (≈zero compute): **24 ms**
+  - `run(1000)`               : **22 ms**
+  - `run(50000)` (heavy build+hash): **56 ms**
+
+**Interpretation:** `run(1)` does essentially no work yet costs ~24 ms, so
+**~22 ms is fixed per-instance instantiation overhead** over the ~2 ms bare
+floor — loading the precompiled module + building the **WasmGC heap / type
+definitions** + **WASI** context init + linear-memory growth + first-touch page
+faults. Only the jump to 56 ms at n=50000 is actual compute. The published
+~30 ms cold ≈ this ~22 ms fixed instantiate + the workload run once.
+
+**Why this matters for the two-lane redesign above:** that ~22 ms is precisely
+what a warm-engine / pre-instantiated-module / Wizer-snapshot model removes —
+dropping cold toward the ~2 ms floor and revealing AOT's real cold-start lead
+(which the current fresh-instantiate-per-call measurement masks). It is also
+why the interpreter lanes cluster at ~28–31 ms: they pay the analogous
+per-instance engine-setup cost. So Lane B (Wasm pre-instantiated pool) should
+report this ~22 ms instantiate cost **once at pool warm-up**, not per request.
+
 ## Acceptance criteria
 
-- [ ] **Company-agnostic labels** throughout the harness header and landing
+- [x] **Company-agnostic labels** throughout the harness header and landing
       page (no Cloudflare / Fastly / Workers / Compute@Edge / Fermyon /
       Shopify in benchmark framing). *(Label genericization landed in the
       originating PR — Deliverable 1; this criterion is the regression guard:
       no commercial platform name reappears in the framing.)*
-- [ ] **Cold lane models warm-engine per-request instantiation for BOTH
+- [x] **Cold lane models warm-engine per-request instantiation for BOTH
       lanes**: JS via `node:vm` createContext (+ optional `worker_threads`
       sensitivity row); Wasm via a warm-`Engine` + fresh-`Instance` host
       (Node binding, in-Node `WebAssembly` API, or minimal Rust/C wasmtime
       host — whichever is chosen, with the tradeoff documented).
-- [ ] **Methodology documented** in BOTH the issue (resolution notes) and the
+- [x] **Methodology documented** in BOTH the issue (resolution notes) and the
       harness header comment: which mechanism each lane uses, the `vm`-lighter
       / worker-heavier JS fidelity bounds, and the wasmtime-embedding choice
       and its engine-fidelity tradeoff.
-- [ ] **Numbers refreshed** in `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+- [x] **Numbers refreshed** in `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
       (+ the `website/public/...` copy) once the embedding harness exists,
       using current main's compiler, with a stability proof in the same shape
       as #1760 (repeated identical-binary samples, spread reported).
-- [ ] **No new always-on heavy dependency** without sign-off: if a Rust/C
+- [x] **No new always-on heavy dependency** without sign-off: if a Rust/C
       host is required, it is an optional, documented build step (the
       generator degrades gracefully / skips that lane when the host binary is
       absent, exactly as it skips Javy/StarlingMonkey today).
@@ -196,7 +230,7 @@ context/instance from a warm engine (µs–ms)."** Expected effect:
 | Lane | Mechanism | Fidelity caveat |
 |------|-----------|-----------------|
 | JS cold | `node:vm` `createContext` + run (warm V8) | `vm` Context is **lighter** than a true isolate (shared heap/builtins) → **lower bound** on per-request JS cost. Optional `worker_threads` row = **upper bound**. |
-| Wasm cold | warm `Engine` + fresh `Instance` (Rust/C host, Node binding, or in-Node `WebAssembly` API) | `wasmtime run` CLI cannot pool — needs an **embedding**. In-Node `WebAssembly` API measures **V8 Wasm**, not Cranelift. A Rust/C host measures **true wasmtime/Cranelift** but adds a build step. |
+| Wasm cold | Rust host with warm Wasmtime `Engine` + Cranelift-compiled `Module`; per sample fresh `Store` + `Instance` | `wasmtime run` CLI cannot pool — needs an **embedding**. The Rust host measures true Wasmtime/Cranelift instantiation and adds a Cargo build step. |
 | Warm (both) | #1760 in-process repeated-measure | already faithful steady state; re-label only. |
 
 ## Primary implementation cost (call-out)
@@ -226,3 +260,103 @@ production per-request measurement`) already:
   still parses.
 
 This issue (#1764) is the follow-up that changes the **measurement** itself.
+
+## Implementation Summary
+
+### What was done
+
+- Replaced the full-process cold lane in
+  `scripts/generate-wasmtime-hot-runtime.mjs` with warm-engine,
+  per-request measurements:
+  - JS cold primary: `node:vm` `createContext` + fresh `Script` compile +
+    first `run(arg)` in one long-lived Node/V8 process.
+  - JS cold sensitivity: compiled-once `Script` + fresh context per request,
+    emitted as `jsCompiledContextUs` / `jsCompiledContextStdUs`.
+  - Wasm cold primary: a committed Rust host in
+    `benchmarks/wasmtime-cold-host` owns a warm Wasmtime `Engine` plus a
+    Cranelift-compiled `Module`, then creates a fresh `Store` + `Instance`
+    and calls `run(arg)` once per measured request.
+- Documented the fidelity tradeoffs in the harness header and landing-page
+  copy:
+  - `vm` Context is a lower bound for a real V8 isolate.
+  - A Worker-per-request row would be the heavier upper-bound analog but is
+    not emitted by default.
+  - The Wasm cold lane uses Wasmtime's Rust embedding API, so the primary
+    cold number is a Cranelift instantiation number rather than a Node
+    `WebAssembly` lifecycle fallback.
+- Kept the #1760 warm steady-state lane unchanged: Wasm still uses
+  `wasmtime run --invoke warm` with in-process repeated measurement; JS still
+  uses the existing child-process warm iterator.
+- Added `wasmMinUs` / `wasmMaxUs` / `jsMinUs` / `jsMaxUs` to every benchmark
+  row so the committed JSON carries the repeated-sample spread alongside
+  medians and stddevs.
+- Dropped legacy Javy / StarlingMonkey **cold** values from the cold rows.
+  Their available cold numbers were full-process startup measurements, so
+  plotting them beside the #1764 warm-engine cold lane would be misleading.
+  Their warm steady-state values remain.
+- Added a Wasmtime-normalization pass using the existing `wasm-opt`
+  `--all-features --disable-custom-descriptors` CLI shape before the
+  Wasmtime warm precompile. This matches the project’s #1173 harness fix and
+  prevents the optimized `string-hash` warm artifact from reintroducing exact
+  refs that Wasmtime rejects.
+- Refreshed `benchmarks/results/wasm-host-wasmtime-hot-runtime.json` and the
+  `website/public/...` mirror with Node v24.4.1, Wasmtime 45.0.0
+  (`377cd917a`, 2026-05-21), and the Rust `wasmtime` crate 45.0.0.
+- Updated `website/index.html` to describe the new warm-engine cold model and
+  the Rust Wasmtime host without naming commercial platforms.
+- Added `tests/issue-1764.test.ts` to guard methodology documentation, cold
+  row metadata/spread fields, absence of stale auxiliary cold lanes, and
+  company-agnostic benchmark framing.
+
+### What worked
+
+- The Rust Wasmtime host directly models the requested warm-Engine /
+  fresh-Store+Instance lifecycle and keeps host process startup outside the
+  measured samples.
+- The compiled-once JS sensitivity row showed the intended lower-bound
+  distinction without changing the chart’s primary `jsUs` baseline.
+- The existing `wasm-opt --disable-custom-descriptors` mitigation was enough
+  to keep the refreshed `string-hash` warm artifact loadable by Wasmtime 45.
+
+### What did not work
+
+- The first implementation used Node's host `WebAssembly` API as a pragmatic
+  lifecycle-shape fallback. That was rejected because it did not measure
+  Wasmtime/Cranelift. The Rust embedding host replaces that fallback.
+- I did not emit the optional `worker_threads` upper-bound row by default; it
+  would make refreshes heavier and needs chart/schema design before becoming
+  user-facing.
+
+### Files changed
+
+- `.gitignore`
+- `benchmarks/wasmtime-cold-host/Cargo.toml`
+- `benchmarks/wasmtime-cold-host/Cargo.lock`
+- `benchmarks/wasmtime-cold-host/src/main.rs`
+- `scripts/generate-wasmtime-hot-runtime.mjs`
+- `scripts/wasmtime-bench-child-js.mjs`
+- `website/index.html`
+- `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+- `website/public/benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+- `tests/issue-1764.test.ts`
+
+### Tests
+
+- `PATH=.tmp/wasmtime-home/bin:$PATH pnpm run refresh:benchmarks:wasmtime`
+  passed and refreshed both benchmark JSON files with the Rust Wasmtime cold
+  host.
+- `cargo build --release --manifest-path benchmarks/wasmtime-cold-host/Cargo.toml`
+  passed.
+- `cargo fmt --check --manifest-path benchmarks/wasmtime-cold-host/Cargo.toml`
+  passed.
+- `node node_modules/vitest/dist/cli.js run tests/issue-1764.test.ts tests/issue-1580.test.ts`
+  passed: 2 files, 9 tests.
+- `node --check scripts/generate-wasmtime-hot-runtime.mjs` passed.
+- `node --check scripts/wasmtime-bench-child-js.mjs` passed.
+- `pnpm exec prettier --check scripts/generate-wasmtime-hot-runtime.mjs scripts/wasmtime-bench-child-js.mjs tests/issue-1764.test.ts benchmarks/results/wasm-host-wasmtime-hot-runtime.json website/public/benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+  passed.
+- `git diff --check` passed.
+- Accidental broad `pnpm test -- tests/issue-1764.test.ts tests/issue-1580.test.ts`
+  invocation ran the wider suite, hit many existing unrelated failures, and
+  eventually exited with a V8 out-of-memory error. The targeted Vitest run
+  above is the relevant signal for this issue.

@@ -54,6 +54,10 @@ From the dev-1553b destructuring-lane verification sweep.
 - [#1658](../1658-destructured-function-param-default-not-applied.md) — Destructured/scalar **function-parameter** default not applied: returns 30 where 40 is expected on the real runtime (distinct from the object/array decl-mode #1553b/#1553d which are done) — high, medium, **ready**. NOT currently caught by CI (see #1659); depends on #1659 for gating.
 - [#1659](../1659-ci-equivalence-tests-not-run.md) — CI does not run `tests/equivalence/` (OOMs in runner) so genuine equivalence regressions (e.g. #1658) land silently. Options: shard like test262 / constrained workers / `--no-threads` / separate scheduled job. Sub-item: fix `__extern_get` harness-fidelity gap in `tests/equivalence/helpers.ts` so the suite runs clean — high, medium, **ready**. Gates CI-visibility of #1658.
 
+## CI quality gate hardening (2026-06-01)
+
+- [#1771](../1771-prepush-issue-integrity-committed-tree.md) — Pre-push issue integrity must check the committed tree so dangling `depends_on` edges cannot be masked by uncommitted sibling issue files — medium, easy, **DONE (sprint 58)**.
+
 ## Sprint 55 — repo structure / website (2026-05-24)
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
@@ -128,6 +132,9 @@ fidelity → #1463) were NOT re-filed.
 - [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1765](../1765-nullable-number-alias-narrowing-byte-assignment.md) — Nullable `number | null` sentinel not narrowed through a boolean alias before typed-array byte assignment (from GitHub #389, 2026-06-01) — medium, medium, **DONE (sprint 58)**
+- [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **ready (sprint 58)**, follow-up to #1765
+- [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run grows wasmtime memory toward OOM despite protocol-level chunking; opt-in stress harness added (from GitHub #389, 2026-06-01) — high, hard, **blocked (sprint 58)** on #1753
+- [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
 
 ### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
 

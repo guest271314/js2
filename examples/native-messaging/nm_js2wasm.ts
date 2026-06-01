@@ -1,6 +1,6 @@
 // Chrome Native Messaging host, compiled to standalone WASI by js2wasm.
 //
-//   npx js2wasm examples/native-messaging/host.ts --target wasi -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi -o out
 //
 // Chrome's Native Messaging protocol frames each message as a 4-byte
 // little-endian length prefix followed by a UTF-8 JSON body, exchanged over

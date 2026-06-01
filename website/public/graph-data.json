@@ -23086,8 +23086,8 @@
       "id": "1764",
       "title": "wasmtime bench: model production edge-serverless per-request instantiation (warm engine), not full process spawns",
       "priority": "medium",
-      "status": "ready",
-      "raw_status": "ready",
+      "status": "done",
+      "raw_status": "done",
       "sprint": "58",
       "depends_on": [],
       "files": [],
@@ -23097,6 +23097,56 @@
     {
       "id": "1765",
       "title": "nullable number alias guard not narrowed for typed-array byte assignment",
+      "priority": "medium",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1767",
+      "title": "native-messaging 64 MiB run grows wasmtime memory toward OOM",
+      "priority": "high",
+      "status": "blocked",
+      "raw_status": "blocked",
+      "sprint": "58",
+      "depends_on": [
+        "1753"
+      ],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1768",
+      "title": "allowJs native-messaging sendMessage emits invalid WASI wasm",
+      "priority": "high",
+      "status": "done",
+      "raw_status": "done",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1769",
+      "title": "generalize nullable primitive union lowering and narrowing",
+      "priority": "medium",
+      "status": "ready",
+      "raw_status": "ready",
+      "sprint": "58",
+      "depends_on": [],
+      "files": [],
+      "goal": "platform",
+      "cluster": "platform"
+    },
+    {
+      "id": "1771",
+      "title": "pre-push issue integrity can miss committed dangling dependencies",
       "priority": "medium",
       "status": "done",
       "raw_status": "done",
@@ -23615,6 +23665,10 @@
     {
       "source": "1584",
       "target": "1743"
+    },
+    {
+      "source": "1753",
+      "target": "1767"
     },
     {
       "source": "241",
@@ -25385,7 +25439,11 @@
         "1760",
         "1763",
         "1764",
-        "1765"
+        "1765",
+        "1767",
+        "1768",
+        "1769",
+        "1771"
       ],
       "track": "parallel — does not block conformance goals."
     },
@@ -30196,6 +30254,22 @@
     {
       "goal": "platform",
       "issue": "1765"
+    },
+    {
+      "goal": "platform",
+      "issue": "1767"
+    },
+    {
+      "goal": "platform",
+      "issue": "1768"
+    },
+    {
+      "goal": "platform",
+      "issue": "1769"
+    },
+    {
+      "goal": "platform",
+      "issue": "1771"
     },
     {
       "goal": "property-model",
@@ -35526,6 +35600,22 @@
     {
       "goal": "standalone-mode",
       "issue": "1765"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1767"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1768"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1769"
+    },
+    {
+      "goal": "standalone-mode",
+      "issue": "1771"
     },
     {
       "goal": "core-semantics",

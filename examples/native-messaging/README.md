@@ -29,15 +29,15 @@ little-endian length prefix plus the JSON body — to stdout (fd=1) with no
 trailing newline. The two stdout gaps that previously blocked this are closed
 (#1618, #1651).
 
-| Capability | Status | Detail |
-|------------|--------|--------|
-| Read framed message from stdin | works | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
-| Decode the 4-byte LE length prefix | works | byte math on the first 4 bytes of the read header buffer |
-| Route debug to stderr (fd=2) | works | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean |
-| Print a **string literal** to stdout | works | `console.log("…")` emits UTF-8 + `\n` (#1480) |
-| Print a **runtime/computed string** to stdout | works | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618) |
-| Write a **string** to stdout with no newline | works | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651) |
-| Emit the **binary 4-byte LE length prefix** on stdout | works | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651) |
+| Capability                                            | Status | Detail                                                                                                                                                                          |
+| ----------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
+| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                        |
+| Route debug to stderr (fd=2)                          | works  | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean                                                                                               |
+| Print a **string literal** to stdout                  | works  | `console.log("…")` emits UTF-8 + `\n` (#1480)                                                                                                                                   |
+| Print a **runtime/computed string** to stdout         | works  | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618)                                                  |
+| Write a **string** to stdout with no newline          | works  | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651)                                                                                                                 |
+| Emit the **binary 4-byte LE length prefix** on stdout | works  | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651)                                                                               |
 
 The response is framed with `process.stdout.write` — a `Uint8Array` for the
 binary length prefix, then the body bytes — mirroring the Node.js host API used
@@ -60,7 +60,7 @@ across runtimes:
   length prefix, then the body bytes, to stdout with no trailing newline. Large
   bodies grow linear memory as needed (#389/#1723).
 - **`main()`** — the continuous port loop: `const m = getMessage();
-  sendMessage(m);`, looping until `getMessage()` returns an empty body.
+sendMessage(m);`, looping until `getMessage()` returns an empty body.
 
 Diagnostics go to **stderr** (so they never corrupt the stdout protocol
 stream). The application logic — here, a **strict echo** that sends the received
@@ -146,6 +146,32 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 ./examples/native-messaging/smoke-test.sh
 ```
 
+### Manual wasmtime memory stress
+
+For opt-in local memory measurements, use
+[`stress-memory.mjs`](./stress-memory.mjs). It builds the WASI host, streams a
+Native Messaging frame into wasmtime, drains framed stdout without retaining the
+response body, and samples the wasmtime child RSS. The default run uses
+`JSON.stringify(Array(209715))`, whose body is exactly 1 MiB:
+
+```bash
+node examples/native-messaging/stress-memory.mjs
+```
+
+To reproduce the reported 64x browser workload shape without adding a heavy CI
+test, run the same harness manually:
+
+```bash
+node examples/native-messaging/stress-memory.mjs --reported-64mib --allow-large-response-frame
+```
+
+`--reported-64mib` sends the `Array(209715 * 64)` body. Until the chunked
+large-response path from #1753 lands, the shipped echo host writes that response
+as one oversized frame, so `--allow-large-response-frame` is needed when the
+goal is measurement rather than enforcing Chrome's 1 MiB host-to-browser frame
+budget. After #1753, omit that flag and expect
+`max_response_frame_body_bytes <= 1048576`.
+
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
 > snippet does — `WebAssembly.compile(readFileSync('out/nm_js2wasm.wasm'))` — and
@@ -159,7 +185,7 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 2. **Edit `nm_js2wasm.json`**:
    - `path` → the **absolute** path to `nm_js2wasm.sh` (Chrome requires an absolute
-     path and does not set a predictable working directory), and make sure the file is 
+     path and does not set a predictable working directory), and make sure the file is
      set to executable.
    - `allowed_origins` → `chrome-extension://YOUR_EXTENSION_ID/` for the
      extension that will connect. Find the ID on `chrome://extensions` with
@@ -167,11 +193,11 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 
 3. **Install the manifest** in the per-platform location Chrome scans:
 
-   | Platform | Manifest location |
-   |----------|-------------------|
-   | Linux | `~/.config/google-chrome/NativeMessagingHosts/nm_js2wasm.json` |
-   | macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_js2wasm.json` |
-   | Windows | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_js2wasm` whose default value is the absolute path to the manifest `.json` |
+   | Platform | Manifest location                                                                                                                             |
+   | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+   | Linux    | `~/.config/google-chrome/NativeMessagingHosts/nm_js2wasm.json`                                                                                |
+   | macOS    | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/nm_js2wasm.json`                                                            |
+   | Windows  | a registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\nm_js2wasm` whose default value is the absolute path to the manifest `.json` |
 
    The manifest **filename** must match the host `name` field
    (`nm_js2wasm`). On Windows, `nm_js2wasm.sh` won't run directly —
