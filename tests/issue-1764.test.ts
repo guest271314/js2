@@ -83,6 +83,16 @@ describe("#1764 — edge-serverless benchmark methodology", () => {
     }
   });
 
+  it("landing-page benchmark charts fetch fresh payloads for cold auxiliary lanes", () => {
+    const chart = readRepo("website/components/perf-benchmark-chart.js");
+    const landing = readRepo("website/index.html");
+
+    expect(chart).toContain('fetch(src, { cache: "no-store" })');
+    expect(chart).toContain('{ key: "javyUs", label: "Interpreter" }');
+    expect(chart).toContain('{ key: "starlingMonkeyUs", label: "Engine" }');
+    expect(landing).toContain('fetch(src, { cache: "no-store" })');
+  });
+
   it("keeps benchmark framing company-agnostic", () => {
     const framing = [
       readRepo("scripts/generate-wasmtime-hot-runtime.mjs"),
