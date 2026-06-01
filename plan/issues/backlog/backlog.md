@@ -127,6 +127,7 @@ fidelity → #1463) were NOT re-filed.
 - [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready (sprint 58)**
 - [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
+- [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **ready (sprint 58)**, follow-up to #1765
 - [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run grows wasmtime memory toward OOM despite protocol-level chunking; opt-in stress harness added (from GitHub #389, 2026-06-01) — high, hard, **blocked (sprint 58)** on #1753
 - [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
 
