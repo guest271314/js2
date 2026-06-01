@@ -228,6 +228,22 @@ export function isNumberType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Number) !== 0 || (type.flags & ts.TypeFlags.NumberLiteral) !== 0;
 }
 
+/** Check if a type is a nullable numeric sentinel, e.g. number | null. */
+export function isNullableNumberType(type: ts.Type): boolean {
+  if (!type.isUnion()) return false;
+  let hasNull = false;
+  const nonNullTypes: ts.Type[] = [];
+  for (const part of type.types) {
+    if (part.flags & ts.TypeFlags.Null) {
+      hasNull = true;
+      continue;
+    }
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) return false;
+    nonNullTypes.push(part);
+  }
+  return hasNull && nonNullTypes.length > 0 && nonNullTypes.every((part) => isNumberType(part));
+}
+
 /** Check if a ts.Type represents boolean */
 export function isBooleanType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Boolean) !== 0 || (type.flags & ts.TypeFlags.BooleanLiteral) !== 0;

@@ -209,6 +209,10 @@ export interface FunctionContext {
   readsCurrentThis?: boolean;
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
+  /** Const boolean aliases for null guards, e.g. `const ok = x !== null`. */
+  nullGuardAliases?: Map<string, { varName: string; narrowedBranch: "then" | "else" }>;
+  /** Variables narrowed through a const boolean null-guard alias in the active branch. */
+  aliasedNullGuardNonNull?: Set<string>;
   /**
    * Set of "arrayVar:indexVar" keys where bounds checks can be elided.
    * Populated when a for-loop condition guarantees indexVar < arrayVar.length.

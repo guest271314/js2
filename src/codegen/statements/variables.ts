@@ -3,7 +3,7 @@
  * Variable declaration statement lowering.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isStringType, isVoidType } from "../../checker/type-mapper.js";
+import { isNullableNumberType, isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
@@ -95,6 +95,26 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
  *  Variables initialized from these calls use externref instead of the GC vec struct
  *  that resolveWasmType would produce for the TS return type (e.g. string[]). */
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
+
+function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
+  return isNullableNumberType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
+}
+
+function detectNullGuardAlias(expr: ts.Expression): { varName: string; narrowedBranch: "then" | "else" } | null {
+  if (!ts.isBinaryExpression(expr)) return null;
+  const op = expr.operatorToken.kind;
+  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  if (!isNeq && !isEq) return null;
+
+  const rightIsNull = expr.right.kind === ts.SyntaxKind.NullKeyword;
+  const leftIsNull = expr.left.kind === ts.SyntaxKind.NullKeyword;
+  if (!rightIsNull && !leftIsNull) return null;
+
+  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  if (!ts.isIdentifier(nonNullSide)) return null;
+  return { varName: nonNullSide.text, narrowedBranch: isNeq ? "then" : "else" };
+}
 
 /** Check if an expression is a string method call that returns a host array (externref). */
 function isStringMethodReturningHostArray(ctx: CodegenContext, expr: ts.Expression): boolean {
@@ -210,6 +230,13 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     if (stmt.declarationList.flags & ts.NodeFlags.Const) {
       if (!fctx.constBindings) fctx.constBindings = new Set();
       fctx.constBindings.add(name);
+      if (decl.initializer) {
+        const alias = detectNullGuardAlias(decl.initializer);
+        if (alias) {
+          if (!fctx.nullGuardAliases) fctx.nullGuardAliases = new Map();
+          fctx.nullGuardAliases.set(name, alias);
+        }
+      }
     }
 
     // #1210: string-builder rewrite for `let s = "";` followed by an
@@ -459,7 +486,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                     // the target's closure struct (which traps → null binding).
                     decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
                     ? { kind: "externref" as const }
-                    : resolveWasmType(ctx, varType)));
+                    : localTypeForDeclaration(ctx, varType)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot

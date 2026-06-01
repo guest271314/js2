@@ -510,3 +510,4 @@ sprint: 0
 | 943 | 2026-04-04 | Test262 runner instability investigation resolved into deterministic compiler + narrower runner follow-ups | Sprint-37 |
 | 882 | 2026-04-09 | Test262 runner: sharded parallel execution with merged reports | Sprint-40 |
 | 884 | 2026-04-09 | CI: GitHub Actions test262 on every PR | Sprint-40 |
+| 1765 | 2026-06-01 | Nullable number sentinels now preserve null and narrow through direct/aliased guards before typed-array byte writes | Sprint-58 |

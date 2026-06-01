@@ -3,7 +3,13 @@
  * Identifier resolution, TDZ analysis, and instanceof handling.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isBooleanType, isHeterogeneousUnion, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import {
+  isBooleanType,
+  isHeterogeneousUnion,
+  isNullableNumberType,
+  isNumberType,
+  isStringType,
+} from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
 import { emitLazyClassObjectGet } from "./extern.js";
@@ -266,6 +272,16 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
+function isDeclaredNullableNumberIdentifier(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const symbol = ctx.checker.getSymbolAtLocation(id);
+  const decl = symbol?.valueDeclaration;
+  if (!decl) return false;
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
+    return isNullableNumberType(ctx.checker.getTypeAtLocation(decl));
+  }
+  return false;
+}
+
 /**
  * Compile-time TDZ elision for top-level let/const variables (#906).
  *
@@ -453,6 +469,14 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;
+      if (fctx.aliasedNullGuardNonNull?.has(name) && isDeclaredNullableNumberIdentifier(ctx, id)) {
+        addUnionImports(ctx);
+        const funcIdx = ctx.funcMap.get("__unbox_number");
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "f64" };
+        }
+      }
     }
 
     // Null narrowing: if this variable is known non-null (e.g. inside `if (x !== null)`),
