@@ -47,6 +47,7 @@ export interface BlockScopeSave {
   locals: Map<string, number> | null;
   tdzFlags: Map<string, number> | null;
   constBindings: Map<string, boolean> | null;
+  nullGuardAliases: Map<string, { varName: string; narrowedBranch: "then" | "else" } | null> | null;
 }
 
 function collectBindingPatternNames(pattern: ts.BindingPattern, names: string[]): void {
@@ -103,10 +104,14 @@ export function saveBlockScopedShadows(fctx: FunctionContext, block: ts.Block): 
   let savedLocals: Map<string, number> | null = null;
   let savedTdz: Map<string, number> | null = null;
   let savedConstBindings: Map<string, boolean> | null = null;
+  let savedNullGuardAliases: Map<string, { varName: string; narrowedBranch: "then" | "else" } | null> | null = null;
   for (const name of blockNames) {
     if (!savedConstBindings) savedConstBindings = new Map();
     savedConstBindings.set(name, fctx.constBindings?.has(name) ?? false);
     fctx.constBindings?.delete(name);
+    if (!savedNullGuardAliases) savedNullGuardAliases = new Map();
+    savedNullGuardAliases.set(name, fctx.nullGuardAliases?.get(name) ?? null);
+    fctx.nullGuardAliases?.delete(name);
 
     const existing = fctx.localMap.get(name);
     if (existing !== undefined) {
@@ -125,8 +130,13 @@ export function saveBlockScopedShadows(fctx: FunctionContext, block: ts.Block): 
       }
     }
   }
-  if (!savedLocals && !savedTdz && !savedConstBindings) return null;
-  return { locals: savedLocals, tdzFlags: savedTdz, constBindings: savedConstBindings };
+  if (!savedLocals && !savedTdz && !savedConstBindings && !savedNullGuardAliases) return null;
+  return {
+    locals: savedLocals,
+    tdzFlags: savedTdz,
+    constBindings: savedConstBindings,
+    nullGuardAliases: savedNullGuardAliases,
+  };
 }
 
 /**
@@ -151,6 +161,13 @@ export function restoreBlockScopedShadows(fctx: FunctionContext, saved: BlockSco
     for (const [name, hadConstBinding] of saved.constBindings) {
       if (hadConstBinding) fctx.constBindings.add(name);
       else fctx.constBindings.delete(name);
+    }
+  }
+  if (saved.nullGuardAliases) {
+    if (!fctx.nullGuardAliases) fctx.nullGuardAliases = new Map();
+    for (const [name, alias] of saved.nullGuardAliases) {
+      if (alias) fctx.nullGuardAliases.set(name, alias);
+      else fctx.nullGuardAliases.delete(name);
     }
   }
 }

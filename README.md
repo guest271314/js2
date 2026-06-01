@@ -146,8 +146,8 @@ Programmatic API:
 > **Breaking change (#1757):** `compile()` (and `compileMulti`, `compileFiles`,
 > `compileToWat`, `compileProject`, `createIncrementalCompiler().compile`) now
 > return a `Promise` — `await` them. This lets the optional Binaryen optimizer
-> load via `await import("binaryen")`, so it can be embedded in a
-> `bun build --compile` / `deno compile` standalone binary (GH #986).
+> load lazily only when `optimize` is requested, without forcing standalone
+> bundles to embed Binaryen (GH #986).
 
 ```ts
 import { compile } from "js2wasm";
@@ -167,6 +167,25 @@ if (result.success) {
   console.log((instance.exports as any).add(2, 3)); // → 5
 }
 ```
+
+Standalone CLI bundle:
+
+```bash
+pnpm run build:standalone-cli -- --minify
+deno compile -A --no-check -o js2wasm dist/js2wasm-standalone.mjs
+# or:
+bun build --compile --target=node --outfile js2wasm dist/js2wasm-standalone.mjs
+```
+
+`build:standalone-cli` creates a relocatable `dist/js2wasm-standalone.mjs`
+bundle for native-executable workflows. Unlike the normal npm library build, it
+bundles the core compiler dependencies and embeds TypeScript's `lib.*.d.ts`
+declarations, so the generated file does not need to remain next to
+`node_modules/typescript/lib` after it is moved or compiled. The `--ts7`
+preview backend and Binaryen optimizer remain development/optimization opt-ins
+and are not bundled into this standalone artifact. If you use `-O` with the
+standalone CLI, install `binaryen` next to the runner or put `wasm-opt` on PATH;
+you can also run `wasm-opt` directly on the emitted `.wasm` afterward.
 
 ### Compile modes and imports
 

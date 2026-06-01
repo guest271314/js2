@@ -6,6 +6,7 @@ import {
   isBooleanType,
   isExternalDeclaredClass,
   isHeterogeneousUnion,
+  isNullableNumberType,
   isNumberType,
   isStringType,
   isVoidType,
@@ -5374,6 +5375,7 @@ export function ensureWasiWriteArrayBufferHelper(
       { name: "len", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "needPages", type: { kind: "i32" } },
     ],
     body,
     exported: false,
@@ -9644,6 +9646,10 @@ const DOM_ONLY_GLOBALS = new Set([
 function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinImport[]): void {
   for (const builtin of builtins) {
     if (ctx.wasi) {
+      // `node:process` is a compile-time API surface for WASI: import
+      // preprocessing leaves a type-level `process` binding in the AST and
+      // node-process-api.ts lowers supported stream calls directly to WASI.
+      if (builtin.moduleName === "process") continue;
       ctx.errors.push({
         message: `Node builtin module '${builtin.moduleName}' is not available in WASI target. Use compile-time syscall path for node:fs (#1035).`,
         line: 1,
@@ -10105,7 +10111,10 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
         }
       }
     }
-    const wasmType: ValType = initForcesExternref ? { kind: "externref" as const } : resolveWasmType(ctx, varType);
+    const wasmType: ValType =
+      initForcesExternref || isNullableNumberType(varType)
+        ? { kind: "externref" as const }
+        : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
     const localIdx = allocLocal(fctx, name, wasmType);
     // In JS, hoisted `var` variables are `undefined` before their declaration,
@@ -10424,7 +10433,9 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
           ? { kind: "externref" }
           : isI32Coerced
             ? { kind: "i32" }
-            : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
+            : isNullableNumberType(varType)
+              ? { kind: "externref" }
+              : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
         allocLocal(fctx, name, wasmType);
         // Only add TDZ flag if static analysis can't prove all accesses are safe
         if (needsTdzFlag(ctx, decl)) {

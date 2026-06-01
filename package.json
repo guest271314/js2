@@ -58,6 +58,22 @@
   "engines": {
     "node": ">=20"
   },
+  "peerDependencies": {
+    "binaryen": "^125.0.0",
+    "bun": ">=1.3.14",
+    "deno": ">=2.8.1"
+  },
+  "peerDependenciesMeta": {
+    "binaryen": {
+      "optional": true
+    },
+    "bun": {
+      "optional": true
+    },
+    "deno": {
+      "optional": true
+    }
+  },
   "scripts": {
     "new:issue-id": "node scripts/next-issue-id.mjs",
     "build": "vite build --config vite.config.lib.ts",
@@ -81,6 +97,7 @@
     "refresh:benchmarks:no-jit": "pnpm run build:compiler-bundle && node scripts/generate-playground-benchmark-sidebar-no-jit.mjs",
     "refresh:benchmarks:wasmtime": "pnpm run build:compiler-bundle && node scripts/generate-wasmtime-hot-runtime.mjs",
     "build:compiler-bundle": "esbuild scripts/compiler-bundle-entry.ts --bundle --platform=node --format=esm --outfile=scripts/compiler-bundle.mjs --external:typescript --external:binaryen --external:@typescript/native-preview --external:@typescript/native-preview/*",
+    "build:standalone-cli": "node scripts/build-standalone-cli.mjs",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'",
     "lint": "biome lint --diagnostic-level=error",
@@ -102,7 +119,6 @@
     "reconcile:tasks": "node scripts/reconcile-tasklist.mjs"
   },
   "dependencies": {
-    "binaryen": "^125.0.0",
     "typescript": "^5.7"
   },
   "devDependencies": {
@@ -113,6 +129,9 @@
     "@types/node": "^22",
     "@typescript/native-preview": "^7.0.0-dev.20260502.1",
     "axios": "^1.16.1",
+    "binaryen": "^125.0.0",
+    "bun": "1.3.14",
+    "deno": "2.8.1",
     "esbuild": "^0.25.12",
     "eslint": "^10.0.3",
     "hono": "^4.12.16",

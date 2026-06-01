@@ -42,9 +42,6 @@ import {
   addUnionImports,
   ensureExnTag,
   ensureI32Condition,
-  ensureWasiWriteAnyStringHelper,
-  ensureWasiWriteArrayBufferHelper,
-  ensureWasiWriteUint8ArrayHelper,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
@@ -52,7 +49,6 @@ import {
   hoistVarDeclarations,
   nativeStringType,
   resolveWasmType,
-  WASI_STDIN_BUF_START,
 } from "../index.js";
 import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
 import {
@@ -67,6 +63,7 @@ import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../sh
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import { emitSetExtrasArgv, ensureArgcGlobal, ensureExtrasArgvGlobal } from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
+import { tryCompileNodeProcessCall } from "../node-process-api.js";
 import {
   defaultValueInstrs,
   emitGuardedFuncRefCast,
@@ -1638,36 +1635,6 @@ function emitVirtualMethodDispatchByTag(
 }
 
 /**
- * #1651: recognise `process.stdout.write(x)` / `process.stderr.write(x)` under
- * --target wasi. Returns `{ useStderr }` when the callee is exactly the
- * `write` method of `process.stdout` / `process.stderr` (with exactly one
- * argument and `process` not shadowed by a local), else null.
- *
- * Shape: CallExpression.expression is `PropertyAccess(name="write")` whose
- * `.expression` is `PropertyAccess(name="stdout"|"stderr")` whose `.expression`
- * is the identifier `process`.
- */
-function matchProcessStdStreamWrite(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  expr: ts.CallExpression,
-): { useStderr: boolean } | null {
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined || ctx.wasiFdWriteIdx < 0) return null;
-  if (expr.questionDotToken || expr.arguments.length !== 1) return null;
-  const writeAccess = expr.expression;
-  if (!ts.isPropertyAccessExpression(writeAccess) || writeAccess.name.text !== "write") return null;
-  const streamAccess = writeAccess.expression;
-  if (!ts.isPropertyAccessExpression(streamAccess)) return null;
-  const streamName = streamAccess.name.text;
-  if (streamName !== "stdout" && streamName !== "stderr") return null;
-  const procIdent = streamAccess.expression;
-  if (!ts.isIdentifier(procIdent) || procIdent.text !== "process") return null;
-  // Don't hijack a user-shadowed `process` local/capture.
-  if (fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false)) return null;
-  return { useStderr: streamName === "stderr" };
-}
-
-/**
  * Statically flatten an array literal's elements into a positional argument
  * list, expanding spreads of nested array literals (`[...[a, b]]` → `a, b`).
  * Returns undefined when the literal contains an element we cannot expand at
@@ -1690,188 +1657,6 @@ function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expressi
     }
   }
   return out;
-}
-
-/**
- * #1653 — match `process.stdin.read(buf, offset?)` under --target wasi: the
- * binary, incremental Node-API stdin read.
- * Returns true when matched. Mirrors `matchProcessStdStreamWrite`.
- */
-function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
-  if (!ctx.wasi || ctx.wasiFdReadIdx === undefined || ctx.wasiFdReadIdx < 0) return false;
-  if (expr.questionDotToken || expr.arguments.length < 1 || expr.arguments.length > 2) return false;
-  const readAccess = expr.expression;
-  if (!ts.isPropertyAccessExpression(readAccess) || readAccess.name.text !== "read") return false;
-  const streamAccess = readAccess.expression;
-  if (!ts.isPropertyAccessExpression(streamAccess) || streamAccess.name.text !== "stdin") return false;
-  const procIdent = streamAccess.expression;
-  if (!ts.isIdentifier(procIdent) || procIdent.text !== "process") return false;
-  // Don't hijack a user-shadowed `process` local/capture.
-  if (fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false)) return false;
-  return true;
-}
-
-/**
- * #1653 — emit `process.stdin.read(buf, offset?)` under --target wasi.
- *
- * Lowers to a single `fd_read(0, iov, 1, nread)` where the iov points at the
- * WASI stdin scratch page; the bytes read are then copied into the
- * caller-supplied buffer's WasmGC backing array starting at `offset`, and the
- * byte count is returned (f64). The read length is `buf.length - offset` (the
- * remaining writable capacity), so a caller can request exactly the bytes it
- * needs (e.g. a 4-byte LE header, then N body bytes).
- *
- * The buffer is a Uint8Array (vec of f64 elements) or an ArrayBuffer (vec of
- * i32 byte elements); we recover the backing array from the vec struct and pick
- * the per-element store conversion accordingly (#1654 made both representations
- * valid standalone). Returns null if the buffer doesn't resolve to a vec struct
- * (caller falls through to generic handling).
- */
-function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult | null {
-  const fdReadIdx = ctx.wasiFdReadIdx;
-  if (fdReadIdx === undefined || fdReadIdx < 0) return null;
-
-  // Compile the buffer expression and recover the vec struct.
-  const bufType = compileExpression(ctx, fctx, expr.arguments[0]!);
-  if (!bufType || (bufType.kind !== "ref" && bufType.kind !== "ref_null") || !("typeIdx" in bufType)) {
-    if (bufType) fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  const vecTypeIdx = bufType.typeIdx;
-  const vecDef = ctx.mod.types[vecTypeIdx];
-  if (!vecDef || vecDef.kind !== "struct" || vecDef.fields.length < 2) {
-    fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
-  if (arrTypeIdx < 0) {
-    fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  // Element kind of the backing array decides the per-byte store conversion.
-  const arrDef = ctx.mod.types[arrTypeIdx];
-  const elemKind = arrDef && arrDef.kind === "array" && arrDef.element.kind === "f64" ? "f64" : "i32";
-
-  // Stash the vec (assert non-null) and its backing array.
-  if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  const vecLocal = allocLocal(fctx, `__stdin_vec_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "local.set", index: vecLocal });
-  const arrLocal = allocLocal(fctx, `__stdin_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal });
-
-  // offset (arg 1) → i32, default 0.
-  const offLocal = allocLocal(fctx, `__stdin_off_${fctx.locals.length}`, { kind: "i32" });
-  if (expr.arguments.length >= 2) {
-    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  }
-  fctx.body.push({ op: "local.set", index: offLocal });
-
-  // capacity = buf.length - offset (remaining writable bytes from offset).
-  const capLocal = allocLocal(fctx, `__stdin_cap_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
-  fctx.body.push({ op: "local.set", index: capLocal });
-
-  // #1723: grow linear memory so the read staging buffer
-  // [WASI_STDIN_BUF_START .. WASI_STDIN_BUF_START+capacity) fits. The module
-  // reserves only 3 pages by default; a single large read (e.g. a ~1 MiB
-  // Native Messaging body read into one buffer) would otherwise write past the
-  // end of memory in fd_read and trap. neededPages = ceil((STDIN_BUF_START +
-  // capacity) / 65536) == (STDIN_BUF_START + capacity + 65535) >> 16.
-  const needPagesLocal = allocLocal(fctx, `__stdin_needPages_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-  fctx.body.push({ op: "i32.shr_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "memory.size" } as Instr);
-  fctx.body.push({ op: "i32.gt_u" } as Instr);
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      { op: "local.get", index: needPagesLocal } as Instr,
-      { op: "memory.size" } as Instr,
-      { op: "i32.sub" } as Instr,
-      { op: "memory.grow" } as Instr,
-      { op: "drop" } as Instr,
-    ],
-  } as Instr);
-
-  // iovec.buf = WASI_STDIN_BUF_START at memory[0]
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-  // iovec.buf_len = capacity at memory[4]
-  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-  fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-
-  // fd_read(fd=0, iovs=0, iovs_len=1, nread=8) -> errno (ignored)
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "call", funcIdx: fdReadIdx } as Instr);
-  fctx.body.push({ op: "drop" } as Instr);
-
-  // nread = memory[8]
-  const nreadLocal = allocLocal(fctx, `__stdin_nread_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "i32.load", align: 2, offset: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
-
-  // for (j = 0; j < nread; j++) arr[off + j] = mem[STDIN_BUF_START + j]
-  const jLocal = allocLocal(fctx, `__stdin_j_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: jLocal });
-  const storeByte: Instr[] = [
-    { op: "i32.const", value: WASI_STDIN_BUF_START } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
-  ];
-  if (elemKind === "f64") storeByte.push({ op: "f64.convert_i32_u" } as Instr);
-  const loopBody: Instr[] = [
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "local.get", index: nreadLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    // arr[off + j] = (conv) mem[STDIN_BUF_START + j]
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: offLocal } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    ...storeByte,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
-    // j++
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: jLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
-  ];
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
-
-  // return nread as f64 (Node API returns the number of bytes read)
-  fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-  return { kind: "f64" };
 }
 
 function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
@@ -1926,96 +1711,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     }
   }
 
-  // #1653: process.stdin.read(buf, offset?) under --target wasi → fd_read(0, …)
-  // into the caller-supplied typed buffer's backing array starting at `offset`,
-  // returning the number of bytes read. The binary, incremental Node-API stdin
-  // read. Lets a `while (true)` port loop read a fixed 4-byte LE header then
-  // exactly N body bytes — the Native Messaging frame shape.
-  if (matchProcessStdinRead(ctx, fctx, expr)) {
-    const r = emitProcessStdinRead(ctx, fctx, expr);
-    if (r) return r;
-  }
-
-  // #1651 (GitHub #572): process.stdout.write(x) / process.stderr.write(x)
-  // under --target wasi → write x to fd=1 / fd=2 with NO trailing newline
-  // (unlike console.log). Supersedes the bespoke `writeStdout` builtin from
-  // #1617 with the standard Node.js API. Accepts a string (UTF-8/Latin-1 bytes)
-  // or a Uint8Array (raw bytes — the 4-byte LE length prefix the Native
-  // Messaging host #1530 needs).
-  {
-    const stdoutWrite = matchProcessStdStreamWrite(ctx, fctx, expr);
-    if (stdoutWrite) {
-      const { useStderr } = stdoutWrite;
-      const argExpr = expr.arguments[0]!;
-      const argTsType = ctx.checker.getTypeAtLocation(argExpr);
-      if (isStringType(argTsType)) {
-        // String → reuse the runtime-string byte writer (#1618). It flattens
-        // and writes the string bytes verbatim, no newline.
-        const compiled = compileExpression(ctx, fctx, argExpr);
-        flushLateImportShifts(ctx, fctx);
-        if (compiled && ctx.nativeStrTypeIdx >= 0) {
-          // #1723: do NOT downcast to NativeString here. The argument may be a
-          // ConsString (rope) — e.g. `process.stdout.write(`{"received":${x}}`)`
-          // in the Native Messaging host — and `ref.cast` to the concrete
-          // NativeString type TRAPS ("illegal cast") for a rope. The value
-          // trapped at the call BEFORE ever reaching the flattening helper, so
-          // the host worked only for tiny single-segment (still-flat) responses.
-          // `__wasi_write_any_string` now takes the AnyString supertype, which a
-          // NativeString or ConsString satisfies directly; it flattens any rope
-          // internally. We only assert non-null for a nullable ref so the value
-          // matches the helper's non-null param without changing its (sub)type.
-          if (compiled.kind === "ref_null") {
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
-          }
-          const writeStrIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
-          if (writeStrIdx >= 0) {
-            fctx.body.push({ op: "call", funcIdx: writeStrIdx } as Instr);
-            return VOID_RESULT;
-          }
-        }
-        // Fallback: drop to keep the stack balanced.
-        if (compiled) fctx.body.push({ op: "drop" } as Instr);
-        return VOID_RESULT;
-      }
-
-      // #1655: distinguish ArrayBuffer (vec of i32_byte) from Uint8Array /
-      // typed-array views (vec of f64) at compile time. Under
-      // --target wasi/standalone, `new ArrayBuffer(n)` lowers to a vec struct
-      // with i32 byte elements (one byte per element, see dataview-native.ts);
-      // `new Uint8Array(...)` / `.subarray(...)` lowers to a vec with f64
-      // elements. The two helpers differ only in the per-element read
-      // conversion, so we pick the helper at compile time from the static
-      // type of the argument.
-      const argSymName = argTsType.getSymbol?.()?.name;
-      const isArrayBufferArg = argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
-      const elemKey: "i32_byte" | "f64" = isArrayBufferArg ? "i32_byte" : "f64";
-      const elemType: ValType = isArrayBufferArg ? { kind: "i32" } : { kind: "f64" };
-      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
-      const argType = compileExpression(ctx, fctx, argExpr);
-      flushLateImportShifts(ctx, fctx);
-      // The helper takes a non-null ref; cast a mismatched ref / assert non-null.
-      if (argType) {
-        if (argType.kind === "ref_null") {
-          if ("typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
-            fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
-          } else {
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
-          }
-        } else if (argType.kind === "ref" && "typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
-          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
-        }
-      }
-      const helperIdx = isArrayBufferArg
-        ? ensureWasiWriteArrayBufferHelper(ctx, vecTypeIdx, useStderr)
-        : ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
-      if (helperIdx >= 0) {
-        fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
-        return VOID_RESULT;
-      }
-      if (argType) fctx.body.push({ op: "drop" } as Instr);
-      return VOID_RESULT;
-    }
-  }
+  // Node-shaped process APIs are lowered in their own module so the generic
+  // call-expression compiler does not accumulate host API special cases.
+  const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
+  if (nodeProcessCall !== undefined) return nodeProcessCall;
 
   // RegExp(pattern, flags) called without `new` — per spec, equivalent to
   // `new RegExp(pattern, flags)` (unless pattern is already a RegExp with
