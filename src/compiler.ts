@@ -7,6 +7,7 @@ import {
   IncrementalLanguageService,
   type TypedAST,
 } from "./checker/index.js";
+import { isNullableNumberType } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
@@ -100,9 +101,134 @@ function isBindingPatternFalsePositive(diag: ts.Diagnostic, checker: ts.TypeChec
   return ts.isArrayBindingPattern(paramDecl.name) || ts.isObjectBindingPattern(paramDecl.name);
 }
 
+function findSmallestNodeAtPosition(file: ts.SourceFile, pos: number): ts.Node | undefined {
+  function visit(node: ts.Node): ts.Node | undefined {
+    if (pos < node.getStart(file) || pos >= node.getEnd()) return undefined;
+    let found: ts.Node = node;
+    node.forEachChild((child) => {
+      const inner = visit(child);
+      if (inner) found = inner;
+    });
+    return found;
+  }
+  return visit(file);
+}
+
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  while (current) {
+    if (current === ancestor) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function detectNullGuardForVar(
+  expr: ts.Expression,
+  varName: string,
+): { varName: string; narrowedBranch: "then" | "else" } | null {
+  if (!ts.isBinaryExpression(expr)) return null;
+  const op = expr.operatorToken.kind;
+  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  if (!isNeq && !isEq) return null;
+
+  const rightIsNull = expr.right.kind === ts.SyntaxKind.NullKeyword;
+  const leftIsNull = expr.left.kind === ts.SyntaxKind.NullKeyword;
+  if (!rightIsNull && !leftIsNull) return null;
+
+  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  if (!ts.isIdentifier(nonNullSide) || nonNullSide.text !== varName) return null;
+  return { varName, narrowedBranch: isNeq ? "then" : "else" };
+}
+
+function detectConditionNullGuard(
+  checker: ts.TypeChecker,
+  condition: ts.Expression,
+  varName: string,
+): { varName: string; narrowedBranch: "then" | "else" } | null {
+  const direct = detectNullGuardForVar(condition, varName);
+  if (direct) return direct;
+  if (ts.isIdentifier(condition)) {
+    const symbol = checker.getSymbolAtLocation(condition);
+    const decl = symbol?.valueDeclaration;
+    if (
+      decl &&
+      ts.isVariableDeclaration(decl) &&
+      decl.initializer &&
+      ts.isVariableDeclarationList(decl.parent) &&
+      (decl.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      return detectNullGuardForVar(decl.initializer, varName);
+    }
+  }
+  if (
+    ts.isPrefixUnaryExpression(condition) &&
+    condition.operator === ts.SyntaxKind.ExclamationToken &&
+    ts.isIdentifier(condition.operand)
+  ) {
+    const alias = detectConditionNullGuard(checker, condition.operand, varName);
+    if (!alias) return null;
+    return { varName, narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then" };
+  }
+  return null;
+}
+
+function isUint8ArrayType(checker: ts.TypeChecker, expr: ts.Expression): boolean {
+  const type = checker.getTypeAtLocation(expr);
+  const sym = (type as ts.TypeReference).symbol ?? type.symbol;
+  return sym?.name === "Uint8Array";
+}
+
+function isGuardedNullableNumberByteAssignmentDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
+  if (diag.code !== 2322) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  let node = findSmallestNodeAtPosition(file, diag.start);
+  if (!node) return false;
+  while (node && !ts.isBinaryExpression(node)) node = node.parent;
+  if (!node || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+  if (!ts.isElementAccessExpression(node.left)) return false;
+
+  let rhs = node.right;
+  while (
+    ts.isParenthesizedExpression(rhs) ||
+    ts.isAsExpression(rhs) ||
+    ts.isTypeAssertionExpression(rhs) ||
+    ts.isNonNullExpression(rhs)
+  ) {
+    rhs = ts.isParenthesizedExpression(rhs)
+      ? rhs.expression
+      : ts.isAsExpression(rhs)
+        ? rhs.expression
+        : ts.isNonNullExpression(rhs)
+          ? rhs.expression
+          : (rhs as ts.TypeAssertion).expression;
+  }
+  if (!ts.isIdentifier(rhs)) return false;
+  if (!isNullableNumberType(checker.getTypeAtLocation(rhs))) return false;
+  if (!isUint8ArrayType(checker, node.left.expression)) return false;
+
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isIfStatement(current)) {
+      const guard = detectConditionNullGuard(checker, current.expression, rhs.text);
+      if (guard) {
+        if (guard.narrowedBranch === "then" && isDescendantOf(node, current.thenStatement)) return true;
+        if (guard.narrowedBranch === "else" && current.elseStatement && isDescendantOf(node, current.elseStatement)) {
+          return true;
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
+  if (checker && isGuardedNullableNumberByteAssignmentDiagnostic(diag, checker)) return false;
   return true;
 }
 
@@ -261,7 +387,10 @@ export function compileSourceSync(
     if (diag.category === 1) {
       // Error
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
-      const severity = DOWNGRADE_DIAG_CODES.has(diag.code) ? "warning" : "error";
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, ast.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
@@ -613,11 +742,15 @@ export async function compileMultiSource(
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1 && isEntryDiag(diag)) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
@@ -868,11 +1001,15 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
