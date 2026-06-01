@@ -50,8 +50,8 @@ rather than inventing bespoke builtins.
 Needed pieces:
 
 - `process.stdout.write(chunk)` / `process.stderr.write(chunk)` should expose a
-  Node-compatible return shape. For WASI's synchronous fd_write path, returning
-  `true` is a reasonable first implementation.
+  Node-compatible return shape. For the current WASI Preview 1 direct `fd_write`
+  lowering, returning `true` is a reasonable first implementation.
 - `process.stdout.once("drain", cb)` should compile. In the WASI synchronous
   path it can be a no-op or immediate callback if writes never report
   backpressure.
@@ -77,10 +77,10 @@ This is blocked on broader async/EventEmitter work:
 
 ## Implementation notes — 2026-06-01
 
-Synchronous WASI compatibility landed locally:
+Preview-1 direct-call WASI compatibility landed locally:
 
 - `process.stdout.write(...)` / `process.stderr.write(...)` now leave `true`
-  (`i32.const 1`) on the stack after the synchronous `fd_write` helper call, so
+  (`i32.const 1`) on the stack after the direct `fd_write` helper call, so
   `if (!process.stdout.write(bytes)) { ... }` does not enter the drain branch
   under WASI.
 - `process.stdout.once("drain", cb)` / `process.stderr.once("drain", cb)` now

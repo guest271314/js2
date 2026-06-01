@@ -513,3 +513,4 @@ sprint: 0
 | 1764 | 2026-06-01 | Wasmtime benchmark cold lane now uses a Rust Wasmtime host for warm-Engine, fresh-Store+Instance Cranelift measurements; refreshed JSON with vm-context JS cold numbers and spread fields | Sprint-58 |
 | 1765 | 2026-06-01 | Nullable number sentinels now preserve null and narrow through direct/aliased guards before typed-array byte writes | Sprint-58 |
 | 1768 | 2026-06-01 | allowJs native-messaging sendMessage shape now emits valid WASI wasm; fixed native-string sentinel fallbacks and vec inference for subarray/set | Sprint-58 |
+| 1773 | 2026-06-01 | Dependency graph data is now generated during Pages builds and published to labs instead of tracked as public source JSON | Sprint-58 |

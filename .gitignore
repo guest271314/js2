@@ -42,6 +42,7 @@ scripts/compiler-bundle.mjs
 scripts/runtime-bundle.mjs
 scripts/main-compiler-bundle.mjs
 scripts/main-runtime-bundle.mjs
+website/public/graph-data.json
 tmp_*.ts
 tmp_*.mts
 _tmp_*.ts

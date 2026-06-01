@@ -1711,6 +1711,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     }
   }
 
+  // Node-shaped process APIs are lowered in their own module so the generic
+  // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
   if (nodeProcessCall !== undefined) return nodeProcessCall;
 
