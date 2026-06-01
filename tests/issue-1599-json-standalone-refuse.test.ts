@@ -16,8 +16,9 @@ import { compile } from "../src/index.js";
  *   - emits a clear `#1599` compile error at the call site for any shape not
  *     covered by the pure-Wasm primitive `JSON.stringify` slice (#1324).
  *
- * The primitive `JSON.stringify` slice (null / undefined / boolean / number)
- * is still lowered to pure Wasm and continues to compile standalone.
+ * The primitive `JSON.stringify` slice (null / undefined / boolean) is still
+ * lowered to pure Wasm and continues to compile standalone. Number stringify
+ * is refused here until it has a pure-Wasm number-to-string path.
  *
  * Phase 2 (a pure-Wasm JSON codec for objects / arrays / strings / parse) is
  * tracked in the issue file as a follow-up.
@@ -47,6 +48,11 @@ describe("#1599 --target standalone refuses unsupported JSON shapes", () => {
 
   it("rejects JSON.stringify of a string", async () => {
     await expectRefused(`export function f(s: string): string { return JSON.stringify(s); }`);
+  });
+
+  it("rejects JSON.stringify of a number until Phase 2 adds pure-Wasm number formatting", async () => {
+    const r = await expectRefused(`export function f(n: number): string { return JSON.stringify(n); }`);
+    expect(r.errors.some((e) => /numbers, objects, arrays, strings, and JSON\.parse/.test(e.message))).toBe(true);
   });
 
   it("rejects JSON.parse", async () => {
