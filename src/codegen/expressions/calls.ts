@@ -299,17 +299,17 @@ function resolveClosureInfoFromLocal(
 
 /**
  * (#1324 primitives slice) Try to emit `JSON.stringify(arg)` for a
- * statically-typed primitive value as pure Wasm — no JS host call.
+ * statically-typed primitive value without the `JSON_stringify` JS host call.
  *
  * Supported shapes (all leave an externref string on the stack):
  *   - `null`       → string `"null"`
- *   - `undefined`  → undefined (ref.null.extern) — per spec §25.5.2,
+ *   - `undefined`  → undefined (ref.null.extern) — per spec §25.5.4.2,
  *                    `JSON.stringify(undefined)` returns `undefined`,
  *                    not the string "null"
  *   - `boolean`    → string `"true"` or `"false"`
- *   - `number`     → result of `number_toString(value)`, except
+ *   - `number`     → result of `number_toString(value)` when available, except
  *                    `NaN`/`±Infinity` serialize to the string `"null"`
- *                    per §25.5.2 step 11
+ *                    per §25.5.4.2 step 9
  *
  * Deferred to #1353 (full architect spec):
  *   - `string`  — needs runtime JSON-escape helper
@@ -4961,8 +4961,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const method = propAccess.name.text;
       if ((method === "stringify" || method === "parse") && expr.arguments.length >= 1) {
         // (#1324 primitives slice) For JSON.stringify of statically-typed
-        // primitive values (null / undefined / boolean / number), emit the
-        // result as pure Wasm so standalone-mode (no JS host) builds work.
+        // primitive values (null / undefined / boolean, plus number when the
+        // target has a number_toString helper), emit the result without the
+        // JSON_stringify host import. Standalone/WASI number stringify falls
+        // through to the #1599 refusal until Phase 2 has pure-Wasm formatting.
         // Object/array/string/bigint cases fall through to the existing
         // JSON_stringify host import — full pure-Wasm shape walking is
         // tracked under #1353 (architect-spec follow-up).
@@ -4970,7 +4972,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           if (tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!)) {
             // Compile remaining args (replacer, space) for their side
             // effects only — primitive stringify ignores them per spec
-            // §25.5.2 (replacer doesn't observe primitives, space only
+            // §25.5.4 (replacer doesn't observe primitives, space only
             // affects nested output).
             for (let i = 1; i < expr.arguments.length; i++) {
               const t = compileExpression(ctx, fctx, expr.arguments[i]!);
@@ -4982,7 +4984,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
         // WASI mode there is no `env::JSON_*` host import to fall back to.
         // The primitive `JSON.stringify` slice above (#1324) already handles
-        // null / undefined / boolean / number as pure Wasm; everything else
+        // null / undefined / boolean as pure Wasm; everything else
         // (objects, arrays, strings, and all `JSON.parse`) needs the pure-Wasm
         // codec from Phase 2, which is not yet implemented. Emit a clear
         // compile error rather than a module that traps at instantiation.
@@ -4991,8 +4993,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             ctx,
             expr,
             `Codegen error: JSON.${method} of this value is not yet supported in --target standalone/wasi (#1599). ` +
-              `Pure-Wasm JSON.stringify of null/undefined/boolean/number works standalone; ` +
-              `objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
+              `Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; ` +
+              `numbers, objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
               `Avoid JSON for these shapes in standalone/WASI targets for now.`,
           );
           return null;

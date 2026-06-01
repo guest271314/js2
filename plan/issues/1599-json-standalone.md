@@ -1,9 +1,10 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: done
+status: in-progress
+owner: Copernicus
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-06-01
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,9 +12,10 @@ task_type: feature
 area: codegen, runtime
 language_feature: json
 goal: standalone-wasm
-sprint: 55
+sprint: 58
 related: [1474, 1539]
 ---
+
 # #1599 — JSON standalone: refuse-and-document then pure-Wasm implementation
 
 ## Problem
@@ -23,7 +25,7 @@ related: [1474, 1539]
 
 ```ts
 addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx }); // line 1065
-addImport(ctx, "env", "JSON_parse",     { kind: "func", typeIdx }); // line 1069
+addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx }); // line 1069
 ```
 
 Any standalone/WASI module that calls `JSON.parse(s)` or `JSON.stringify(v)` fails
@@ -32,6 +34,17 @@ at instantiation with `unknown import env::JSON_stringify`.
 JSON is one of the most common serialization primitives in npm packages. Without it,
 modules that do any serialization (config parsing, API responses, logging) cannot
 run standalone.
+
+## Evidence: real standalone test262 run 2026-06-01
+
+Artifacts:
+`benchmarks/results/test262-standalone-report-20260601-213702.json` and
+`benchmarks/results/test262-standalone-results-20260601-213702.jsonl`.
+
+Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
+baseline of 30,480 / 43,106 (70.7%). JSON unsupported appears in 134
+non-exclusive standalone failures. Phase 1 refusal avoids host imports; Phase 2
+needs the pure-Wasm parser/stringifier to recover this test262 surface.
 
 ## Phase 1 — Refuse-and-document (fast follow to #1474 pattern)
 
@@ -54,9 +67,12 @@ At the call sites in `string-ops.ts` / `expressions/calls.ts` that lower
 
 ```ts
 if (ctx.standalone) {
-  reportError(ctx, expr,
+  reportError(
+    ctx,
+    expr,
     "JSON.stringify / JSON.parse is not supported in --target standalone (#1599). " +
-    "Use a pure-JS serializer compiled with js2wasm, or avoid JSON in WASI targets.");
+      "Use a pure-JS serializer compiled with js2wasm, or avoid JSON in WASI targets.",
+  );
   return null;
 }
 ```
@@ -116,12 +132,14 @@ number   := '-'? int frac? exp?
 ## Files
 
 ### Phase 1
+
 - `src/codegen/declarations.ts` lines 1065, 1069 — add `ctx.standalone` guard
 - Call sites for `JSON.stringify` / `JSON.parse` in `src/codegen/expressions/calls.ts`
   — add `reportError` when `ctx.standalone`
-- `tests/issue-1593-json-standalone-refuse.test.ts` — refusal tests
+- `tests/issue-1599-json-standalone-refuse.test.ts` — refusal tests
 
 ### Phase 2
+
 - `src/codegen/wasm-helpers/json-stringify.ts` — serialiser helper emitter
 - `src/codegen/wasm-helpers/json-parse.ts` — recursive-descent parser helper emitter
 - `src/codegen/declarations.ts` — wire up helpers when `ctx.standalone && state.jsonNeed*`
@@ -129,11 +147,13 @@ number   := '-'? int frac? exp?
 ## Acceptance criteria
 
 ### Phase 1
+
 - `--target standalone` module using `JSON.parse` or `JSON.stringify` fails at
   compile time with a clear error referencing #1599.
 - No `env::JSON_parse` or `env::JSON_stringify` in standalone output.
 
 ### Phase 2
+
 - `JSON.stringify({a: 1, b: [2, 3]})` returns `'{"a":1,"b":[2,3]}'` in standalone.
 - `JSON.parse('{"x":42}').x === 42` in standalone.
 - Passes `test/built-ins/JSON/*` test262 subset under `--target standalone`.
@@ -149,6 +169,7 @@ Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolc
 (pure-Wasm codec) remains a follow-up.
 
 ### What landed
+
 - `src/codegen/declarations.ts` — `env::JSON_stringify` / `env::JSON_parse`
   imports are now gated on `!(ctx.wasi || ctx.standalone)`. No JSON host import
   is registered in standalone / WASI output. (Both targets lack the JS host;
@@ -160,18 +181,31 @@ Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolc
   the pure-Wasm primitive slice (#1324), emit a `reportError` whose message
   starts with `Codegen error:` (required to flip `CompileResult.success` to
   `false` per `src/compiler.ts`) referencing #1599.
-- `tests/issue-1599-json-standalone-refuse.test.ts` — 11 tests: refusal of
-  object/array/string stringify + all parse (standalone AND wasi), no
+- `tests/issue-1599-json-standalone-refuse.test.ts` — 12 tests: refusal of
+  object/array/string/number stringify + all parse (standalone AND wasi), no
   `env::JSON_*` import emitted, primitive `null`/`true` stringify still compiles
   standalone, and default JS-host mode unchanged.
 
+### Spec anchors
+
+- ECMA-262 §25.5.2 `JSON.parse` and §25.5.2.1 `ParseJSON`: full standalone
+  support must parse ECMA-404 JSON text to ECMAScript values and throw
+  `SyntaxError` for invalid JSON text.
+- ECMA-262 §25.5.4 `JSON.stringify` and §25.5.4.2
+  `SerializeJSONProperty`: full standalone support must return a UTF-16 JSON
+  String or `undefined`, with `null`/boolean/number/string/object/array rules
+  and `TypeError` for BigInt/cycles. Phase 1 intentionally refuses shapes that
+  would otherwise route to the JS host.
+
 ### Acceptance criteria — Phase 1
+
 - ✅ `--target standalone`/`wasi` module using non-primitive `JSON.stringify`
   or any `JSON.parse` fails at compile time with a clear `#1599` error + source
   location.
 - ✅ No `env::JSON_parse` / `env::JSON_stringify` in standalone/wasi output.
 
 ### Notes for Phase 2 (follow-up — NOT in this PR)
+
 - The primitive `JSON.stringify` slice (#1324) covers `null` / `undefined` /
   `boolean` standalone, but **`number` is NOT standalone-safe**: that slice
   lowers via `env::number_toString`, a host import absent in standalone/wasi.
@@ -182,3 +216,9 @@ Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolc
   (`json-stringify.ts`) + recursive-descent parser (`json-parse.ts`) over the
   WasmGC value graph. Acceptance: `JSON.stringify({a:1,b:[2,3]})` →
   `'{"a":1,"b":[2,3]}'` and `JSON.parse('{"x":42}').x === 42` standalone.
+
+### Validation — 2026-06-01
+
+- `pnpm exec vitest run tests/issue-1599-json-standalone-refuse.test.ts` —
+  12 tests passed after adding the standalone `JSON.stringify(number)` refusal
+  regression case.
