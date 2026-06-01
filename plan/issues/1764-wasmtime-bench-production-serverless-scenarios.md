@@ -167,6 +167,39 @@ context/instance from a warm engine (µs–ms)."** Expected effect:
   is a much closer race than process boot vs process boot, which is the
   honest story.
 
+## Measured cold-cost anatomy (2026-05-31, aarch64 dev container, wasmtime 44)
+
+Direct measurement decomposing the `string-hash` cold number — to correct the
+prior (wrong) assumption that it reflected a large module. **It does not: the
+module is tiny; cold is dominated by fixed per-instance `wasmtime run`
+instantiation, not module weight or AOT slowness.**
+
+- `string-hash.js` source: 28 lines / 601 B.
+- Compiled module (`target: wasi, nativeStrings, optimize: 3`): **1.4 KB wasm**
+  (gzip 0.7 KB). Precompiled artifact: **201 KB `.cwasm`** (native code +
+  wasmtime AOT format overhead).
+- **Bare `wasmtime run` of an empty no-op module: ~2 ms** (warm disk cache) —
+  i.e. wasmtime's own process startup is *not* the bottleneck.
+- Cold `wasmtime run --allow-precompiled --invoke run` (best-of-3):
+  - `run(1)`   (≈zero compute): **24 ms**
+  - `run(1000)`               : **22 ms**
+  - `run(50000)` (heavy build+hash): **56 ms**
+
+**Interpretation:** `run(1)` does essentially no work yet costs ~24 ms, so
+**~22 ms is fixed per-instance instantiation overhead** over the ~2 ms bare
+floor — loading the precompiled module + building the **WasmGC heap / type
+definitions** + **WASI** context init + linear-memory growth + first-touch page
+faults. Only the jump to 56 ms at n=50000 is actual compute. The published
+~30 ms cold ≈ this ~22 ms fixed instantiate + the workload run once.
+
+**Why this matters for the two-lane redesign above:** that ~22 ms is precisely
+what a warm-engine / pre-instantiated-module / Wizer-snapshot model removes —
+dropping cold toward the ~2 ms floor and revealing AOT's real cold-start lead
+(which the current fresh-instantiate-per-call measurement masks). It is also
+why the interpreter lanes cluster at ~28–31 ms: they pay the analogous
+per-instance engine-setup cost. So Lane B (Wasm pre-instantiated pool) should
+report this ~22 ms instantiate cost **once at pool warm-up**, not per request.
+
 ## Acceptance criteria
 
 - [x] **Company-agnostic labels** throughout the harness header and landing
