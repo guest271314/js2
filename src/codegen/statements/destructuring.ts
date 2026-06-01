@@ -389,13 +389,9 @@ export function ensureAsyncIterator(ctx: CodegenContext, fctx: FunctionContext):
  * JS impl: (v: unknown) => v === undefined ? 1 : 0
  */
 export function ensureExternIsUndefined(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
-  const idx = ctx.funcMap.get("__extern_is_undefined");
-  if (idx !== undefined) return idx;
-  const importsBefore = ctx.numImportFuncs;
-  const fnType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__extern_is_undefined", { kind: "func", typeIdx: fnType });
-  shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-  return ctx.funcMap.get("__extern_is_undefined");
+  const idx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  flushLateImportShifts(ctx, fctx);
+  return idx;
 }
 
 /**

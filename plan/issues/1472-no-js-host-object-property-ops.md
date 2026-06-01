@@ -1,10 +1,9 @@
 ---
 id: 1472
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
-status: done
+status: in-progress
 created: 2026-05-20
-updated: 2026-05-24
-completed: 2026-05-24
+updated: 2026-06-01
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,7 +11,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: objects, property access, prototype chain
 goal: host-independence
-sprint: 55
+sprint: 58
 related: []
 ---
 # #1472 — Eliminate JS host object/property ops for standalone Wasm
@@ -79,6 +78,20 @@ Why this blocks standalone: `let o = {x:1}; o.y = 2; console.log(o.y);`
 goes through `__new_plain_object` → `__extern_set` → `__extern_get`.
 Wasmtime: "unknown import env::__new_plain_object". The most pervasive
 host-import dependency in the compiler.
+
+## Evidence: real standalone test262 run 2026-06-01
+
+Artifacts:
+`benchmarks/results/test262-standalone-report-20260601-213702.json` and
+`benchmarks/results/test262-standalone-results-20260601-213702.jsonl`.
+
+Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
+baseline of 30,480 / 43,106 (70.7%). The dynamic-shape object/property cluster
+accounts for 22,986 priority-classified failures. Top helper signatures in that
+cluster are `__extern_get` (11,841), `__extern_is_undefined` (7,476),
+`__get_builtin` (6,410), `__extern_length` (5,460), `__extern_set` (5,459),
+`__new_plain_object` (4,632), `__extern_get_idx` (4,618), and
+`__extern_method_call` (4,322).
 
 ## Standalone alternative
 
@@ -257,6 +270,23 @@ gates (the plan's per-site retargeting is Phase B work):
 Closed-shape struct access (the `getFieldEntry` fast path) never reaches
 the gate — it emits struct.get/struct.set and never calls
 `ensureLateImport` for these names, so it works standalone unchanged.
+
+2026-06-01 follow-up slice:
+
+- Routed the statements destructuring `ensureExternIsUndefined` helper through
+  `ensureLateImport` instead of raw `addImport`, so `--target standalone`
+  applies the same #1472 Phase A refusal to `__extern_is_undefined` instead of
+  leaking `env::__extern_is_undefined`.
+- Added a regression for array destructuring defaults in
+  `tests/issue-1472-standalone-object-imports.test.ts`; the suite now has 5
+  tests.
+- Spec reference checked: ECMA-262 §14.3.3 Keyed/Iterator binding
+  initialization defaults trigger when the bound value is `undefined`.
+- Validation: `pnpm exec prettier --write
+  src/codegen/statements/destructuring.ts
+  tests/issue-1472-standalone-object-imports.test.ts` (unchanged);
+  `pnpm exec vitest run tests/issue-1472-standalone-object-imports.test.ts`
+  (1 file passed, 5 tests passed). Full test262 was not run.
 
 **Phase B** (Wasm-native open-object runtime) and **Phase C** (Proxy
 refusal + Reflect dispatch) remain as follow-up work — see plan below.

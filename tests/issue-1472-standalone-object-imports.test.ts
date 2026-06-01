@@ -94,6 +94,23 @@ describe("#1472 Phase A — --target standalone dynamic-object refusal", () => {
     assertNoHostObjectImports(r.imports);
   });
 
+  it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
+    const r = await compile(
+      `
+        export function pick(a: any[]): any {
+          const [x = 1] = a;
+          return x;
+        }
+      `,
+      { target: "standalone" },
+    );
+    expect(r.success).toBe(false);
+    const joined = r.errors.map((e) => e.message).join("\n");
+    expect(joined).toMatch(/__extern_is_undefined/);
+    expect(joined).toMatch(/#1472 Phase B/);
+    assertNoHostObjectImports(r.imports);
+  });
+
   it("default target (gc) still uses the JS-host object machinery", async () => {
     // Regression guard: standalone is opt-in. Default mode keeps the host
     // object imports so browser-targeted modules work with the JS runtime.
