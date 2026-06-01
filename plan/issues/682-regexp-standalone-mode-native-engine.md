@@ -1,18 +1,31 @@
 ---
 id: 682
 title: "RegExp standalone mode: native engine or embedded library for non-JS targets"
-status: ready
+status: in-progress
+owner: Raman
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-06-01
 priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: standalone-mode
-sprint: Backlog
+sprint: 58
 files:
   src/codegen/expressions.ts:
     new:
       - "standalone-mode RegExp lowering to a native engine or embedded regexp backend"
+  src/codegen/regexp-standalone.ts:
+    new:
+      - "typed native standalone RegExp ABI scaffold and engine availability hook"
+  src/codegen/context/types.ts:
+    new:
+      - "nullable CodegenContext.standaloneRegExpEngine hook"
+  src/codegen/context/create-context.ts:
+    new:
+      - "initialize standaloneRegExpEngine to null while #1474 gate remains closed"
+  tests/issue-682-regexp-standalone-abi.test.ts:
+    new:
+      - "pins closed gate and non-JS-host ABI shape"
 ---
 # #682 — RegExp standalone mode: native engine or embedded library for non-JS targets
 
@@ -28,6 +41,17 @@ completion work is tracked separately in `#1002`.
 
 In standalone mode (wasmtime/WASI/native strings), there is no JS `RegExp`
 object to delegate to. We need an embedded regex backend.
+
+## Evidence: real standalone test262 run 2026-06-01
+
+Artifacts:
+`benchmarks/results/test262-standalone-report-20260601-213702.json` and
+`benchmarks/results/test262-standalone-results-20260601-213702.jsonl`.
+
+Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
+baseline of 30,480 / 43,106 (70.7%). RegExp unsupported appears in 1,882
+non-exclusive failures, confirming that a native RegExp backend is now a
+material standalone test262 root cause rather than only a portability gap.
 
 ## Goal
 
@@ -135,6 +159,36 @@ standalone subset.
 starting with **QuickJS libregexp** (option 5) extracted as a C
 file compiled to wasm via wasi-sdk; QuickJS libregexp is the only
 candidate with explicit JS-spec semantics.)
+
+### Implementation note — 2026-06-01 first mergeable slice
+
+Added an implementation-neutral scaffold in `src/codegen/regexp-standalone.ts`
+and threaded `CodegenContext.standaloneRegExpEngine` as a nullable hook
+initialized to `null`. This deliberately keeps #1474's standalone refusal gate
+closed while establishing the future native-engine contract:
+
+- selected engine kind: `quickjs-libregexp`
+- ABI version: `1`
+- in-module native symbols only, not JS-host imports:
+  `__re_compile`, `__re_exec`, `__re_free`, `__re_group_start`,
+  `__re_group_end`
+- pointer/handle ABI shape pinned as `i32` values for the first slice
+
+The scaffold does not implement RegExp semantics yet and does not alter the
+current `RegExp` constructor, literal, or `String.prototype` RegExp-argument
+refusals. Next slice can link/register the embedded engine and then open the
+#1474 gate by querying `hasStandaloneRegExpEngine(...)`.
+
+Validation for this slice:
+
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/context/types.ts src/codegen/context/create-context.ts tests/issue-682-regexp-standalone-abi.test.ts`
+  - result: passed
+- `pnpm run typecheck`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 2 files / 18 tests
+
+Full test262 was not run; this was intentionally limited to scoped checks.
 
 ### Phase 0 — Decision and ABI
 

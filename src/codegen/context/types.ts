@@ -8,6 +8,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
+import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 
 export interface CodegenError {
   message: string;
@@ -806,6 +807,9 @@ export interface CodegenContext {
    *  compile-error so a single source construct emits at most one error per
    *  import name. Lazily initialized in late-imports.ts. */
   standaloneRefusedImports?: Set<string>;
+  /** (#682) Native standalone RegExp engine hook. Null until the embedded
+   *  engine/link step lands; #1474 keeps owning the current refusal gate. */
+  standaloneRegExpEngine: StandaloneRegExpEngineConfig | null;
   /**
    * (#1373b) When true, async functions flow through the IR's CPS lowering
    * (Phase C). When false (default), the IR selector buckets async functions

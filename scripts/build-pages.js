@@ -343,9 +343,6 @@ copyFileIfExists(
   join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, "test262-report.json"),
 );
 
-// Iframe nav-sync glue (referenced from the landing page header at /).
-copyFileIfExists(join(WEBSITE, "frame-nav-sync.js"), join(PAGES_DIST, "frame-nav-sync.js"));
-
 // Disable Jekyll processing so all generated assets are published as-is.
 writeFileSync(join(PAGES_DIST, ".nojekyll"), "");
 
