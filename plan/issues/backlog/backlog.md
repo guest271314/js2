@@ -57,6 +57,7 @@ From the dev-1553b destructuring-lane verification sweep.
 ## CI quality gate hardening (2026-06-01)
 
 - [#1771](../1771-prepush-issue-integrity-committed-tree.md) — Pre-push issue integrity must check the committed tree so dangling `depends_on` edges cannot be masked by uncommitted sibling issue files — medium, easy, **DONE (sprint 58)**.
+- [#1773](../1773-generate-graph-data-in-ci-and-labs.md) — Generate `website/public/graph-data.json` in CI/build output and publish the snapshot to labs instead of tracking the generated JSON in public source — medium, easy, **DONE (sprint 58)**.
 
 ## Sprint 55 — repo structure / website (2026-05-24)
 
