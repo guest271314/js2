@@ -1870,7 +1870,6 @@ export function compileBinaryExpression(
           // For loose equality, `__host_loose_eq` calls JS `==` which
           // handles null==undefined and type coercion per §7.2.15. (#1065, #1134)
           addUnionImports(ctx);
-          const unboxIdx = ctx.funcMap.get("__unbox_number")!;
           if (isStrict) {
             // Strict equality: __host_eq (JS ===) for reference identity.
             // If that returns false, fall through to numeric unboxing for
@@ -1899,11 +1898,13 @@ export function compileBinaryExpression(
               [{ kind: "i32" }],
             );
             flushLateImportShifts(ctx, fctx);
+            const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
             const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: hostEqIdx } as Instr,
+              { op: "call", funcIdx: finalHostEqIdx } as Instr,
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
@@ -1948,10 +1949,11 @@ export function compileBinaryExpression(
               [{ kind: "i32" }],
             );
             flushLateImportShifts(ctx, fctx);
+            const finalHostLooseEqIdx = ctx.funcMap.get("__host_loose_eq") ?? hostLooseEqIdx;
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: hostLooseEqIdx } as Instr,
+              { op: "call", funcIdx: finalHostLooseEqIdx } as Instr,
               ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
             ] as Instr[];
           }
