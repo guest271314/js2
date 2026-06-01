@@ -3,13 +3,13 @@ import { compile } from "../src/index.js";
 
 describe("error reporting with source locations", () => {
   it("reports line and column for unsupported statement", async () => {
-    // 'with' has a dedicated #1387 diagnostic with source location.
-    const source = `function test() {
+    // 'with' is an unsupported statement kind that the codegen will reject
+    const source = `export function test(): void {
   with ({}) {}
 }`;
-    const result = await compile(source, { allowJs: true, fileName: "input.js" });
+    const result = await compile(source);
     // The compiler may or may not succeed overall, but it should collect errors
-    const codegenErrors = result.errors.filter((e) => e.message.includes("#1387"));
+    const codegenErrors = result.errors.filter((e) => e.message.includes("Unsupported statement"));
     expect(codegenErrors.length).toBeGreaterThan(0);
     const err = codegenErrors[0]!;
     expect(err.line).toBeGreaterThan(0);
@@ -53,24 +53,23 @@ describe("error reporting with source locations", () => {
   });
 
   it("propagates codegen errors to CompileResult", async () => {
-    // This source triggers a codegen diagnostic because 'with' cannot be
-    // lowered without a proven closed shape.
-    const source = `function run() {
+    // This source triggers a codegen error because 'with' is not supported
+    const source = `export function run(): void {
   with ({}) {
     const x = 1;
   }
 }`;
-    const result = await compile(source, { allowJs: true, fileName: "input.js" });
+    const result = await compile(source);
     // Errors should be propagated (not silently swallowed)
-    const hasCodegenError = result.errors.some((e) => e.message.includes("#1387"));
+    const hasCodegenError = result.errors.some((e) => e.message.includes("Unsupported"));
     expect(hasCodegenError).toBe(true);
   });
 
   it("error severity is set correctly", async () => {
-    const source = `function run() {
+    const source = `export function run(): void {
   with ({}) {}
 }`;
-    const result = await compile(source, { allowJs: true, fileName: "input.js" });
+    const result = await compile(source);
     for (const err of result.errors) {
       expect(["error", "warning"]).toContain(err.severity);
     }
@@ -89,12 +88,12 @@ describe("error reporting with source locations", () => {
 
   it("error line numbers are 1-based", async () => {
     // Put the problematic statement on line 3
-    const source = `function test() {
-  const x = 1;
+    const source = `export function test(): void {
+  const x: number = 1;
   with ({}) {}
 }`;
-    const result = await compile(source, { allowJs: true, fileName: "input.js" });
-    const err = result.errors.find((e) => e.message.includes("#1387"));
+    const result = await compile(source);
+    const err = result.errors.find((e) => e.message.includes("Unsupported statement"));
     expect(err).toBeDefined();
     if (err) {
       // 'with' is on line 3 (1-based)
