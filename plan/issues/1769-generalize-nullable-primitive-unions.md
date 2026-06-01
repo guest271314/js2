@@ -13,7 +13,7 @@ task_type: architecture
 area: type-system
 goal: platform
 related: [389, 1765]
-depends_on: [1765]
+depends_on: []
 sprint: 58
 origin: "Follow-up to narrow #1765 nullable number typed-array byte-write fix"
 ---
