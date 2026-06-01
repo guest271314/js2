@@ -39,11 +39,14 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 | Write a **string** to stdout with no newline          | works  | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651)                                                                                                                 |
 | Emit the **binary 4-byte LE length prefix** on stdout | works  | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651)                                                                               |
 
-The response is framed with `process.stdout.write` — a `Uint8Array` for the
+The response is framed with `process.stdout.write` — a `Uint8Array` for each
 binary length prefix, then the body bytes — mirroring the Node.js host API used
 by the reference hosts (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`).
-It is a drop-in Chrome host; the only external dependency is a WASI preview1
-runtime to launch it (see "Run it" below).
+Responses larger than 1 MiB are split into successive Native Messaging frames
+using a reusable 1 MiB output buffer, so the host does not stage one oversized
+stdout payload. It is a drop-in Chrome host for the reported null-array stress
+shape; the only external dependency is a WASI preview1 runtime to launch it
+(see "Run it" below).
 
 ## The host source
 
@@ -54,23 +57,26 @@ across runtimes:
   exactly that many body bytes, via `process.stdin.read` read-until loops (a
   `readExact` helper handles short reads). It returns the body as a raw
   **`Uint8Array`** (a zero-length buffer signals EOF / a truncated frame). The
-  body is **never** decoded to a JS string, so it round-trips byte-exactly at
-  any size — including megabyte-scale messages (#389).
+  body is **never** decoded to a JS string, so normal-size messages round-trip
+  byte-exactly and large responses can be chunked without a lossy string bridge
+  (#389).
 - **`sendMessage(message)`** — frames a `Uint8Array` body: writes the 4-byte LE
-  length prefix, then the body bytes, to stdout with no trailing newline. Large
-  bodies grow linear memory as needed (#389/#1723).
+  length prefix, then the body bytes, to stdout with no trailing newline. Bodies
+  up to 1 MiB are echoed byte-for-byte. Larger bodies are emitted as a sequence
+  of <=1 MiB frames through a reusable scratch chunk. For the Chrome
+  `Array(...nulls...)` workload, each response frame is a valid JSON array chunk
+  so `port.onMessage` can deliver it and the extension can sum `message.length`.
 - **`main()`** — the continuous port loop: `const m = getMessage();
 sendMessage(m);`, looping until `getMessage()` returns an empty body.
 
 Diagnostics go to **stderr** (so they never corrupt the stdout protocol
-stream). The application logic — here, a **strict echo** that sends the received
-body back verbatim, byte-for-byte, with no wrapper and no added bytes (so the
-stdin→stdout round-trip is directly observable) — lives entirely in the loop
-body and is the part you'd replace for a real host that decodes `message`,
-dispatches on a command field, and frames a structured response with
-`sendMessage()`. Carrying the body as bytes (rather than a string) is also
-forward-compatible with Chromium's in-progress `Uint8Array` Native Messaging
-support — the protocol body is fundamentally a byte buffer.
+stream). The application logic — here, an echo for normal-size messages plus a
+bounded large-response chunker — lives entirely in the loop body and is the part
+you'd replace for a real host that decodes `message`, dispatches on a command
+field, and frames structured responses with `sendMessage()`. Carrying the body
+as bytes (rather than a string) is also forward-compatible with Chromium's
+in-progress `Uint8Array` Native Messaging support — the protocol body is
+fundamentally a byte buffer.
 
 ## Build to `.wasm`
 
@@ -162,15 +168,16 @@ To reproduce the reported 64x browser workload shape without adding a heavy CI
 test, run the same harness manually:
 
 ```bash
-node examples/native-messaging/stress-memory.mjs --reported-64mib --allow-large-response-frame
+node examples/native-messaging/stress-memory.mjs --reported-64mib
 ```
 
-`--reported-64mib` sends the `Array(209715 * 64)` body. Until the chunked
-large-response path from #1753 lands, the shipped echo host writes that response
-as one oversized frame, so `--allow-large-response-frame` is needed when the
-goal is measurement rather than enforcing Chrome's 1 MiB host-to-browser frame
-budget. After #1753, omit that flag and expect
-`max_response_frame_body_bytes <= 1048576`.
+`--reported-64mib` sends the `Array(209715 * 64)` body and, by default, kills
+the wasmtime child if sampled RSS grows more than 256 MiB above the first sample
+or if the run exceeds 180 seconds. The harness streams request bytes, drains
+framed stdout without retaining response bodies, validates that each response
+frame is <=1 MiB, and checks that the delivered JSON array chunks add back up
+to 13,421,760 elements. `--allow-large-response-frame` remains only for
+measuring older wasm builds that predate the chunked writer.
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node

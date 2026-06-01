@@ -50,3 +50,18 @@ the existing frame writer, not new compiler work.
 This is an **example/protocol** completeness item, not a conformance fix. The
 #389 thread stays open as the public feedback channel; this issue is internal
 tracking so the large-payload work doesn't get lost.
+
+## Partial unblock via #1767 — 2026-06-01
+
+The #1767 memory-growth branch implements the write-side slice needed for the
+reported 64 MiB path:
+
+- large native-messaging responses are emitted as successive <=1 MiB frames;
+- the writer uses one reusable 1 MiB scratch buffer instead of staging the full
+  response or every response chunk at once;
+- the Chrome `Array(...nulls...)` stress shape is emitted as valid JSON array
+  chunks of at most 209,715 elements per frame.
+
+This does not close #1753 by itself. The broader read-side aggregation /
+multi-frame request contract remains open here, and the 64 MiB guarded memory
+measurement remains tracked by #1767.
