@@ -1,9 +1,10 @@
 ---
 id: 1742
 title: "Closure `this`-receiver member reads trap 'illegal cast' when `this` is a compiled vec/struct (CPR prerequisite, shared with #1629)"
-status: in-progress
+status: done
 created: 2026-05-30
-updated: 2026-05-31
+updated: 2026-06-02
+completed: 2026-05-30
 priority: high
 feasibility: medium
 task_type: bugfix

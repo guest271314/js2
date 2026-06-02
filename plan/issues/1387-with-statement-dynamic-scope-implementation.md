@@ -1,10 +1,10 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: in-progress
+status: ready
 owner: Hooke
 created: 2026-05-08
-updated: 2026-06-01
+updated: 2026-06-02
 priority: high
 feasibility: medium  # Tier 1 (IR-proven static routing) is medium and dispatchable; Tier 2 (dynamic fallback) is hard and overlaps the object-representation ceiling — slice & ship Tier 1 first.
 reasoning_effort: max

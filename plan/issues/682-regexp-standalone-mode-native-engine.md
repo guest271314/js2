@@ -1,10 +1,10 @@
 ---
 id: 682
 title: "RegExp standalone mode: native engine or embedded library for non-JS targets"
-status: in-progress
+status: ready
 owner: Raman
 created: 2026-03-20
-updated: 2026-06-01
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max

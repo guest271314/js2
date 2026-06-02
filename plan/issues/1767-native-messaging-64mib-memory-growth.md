@@ -1,9 +1,9 @@
 ---
 id: 1767
 title: "native-messaging 64 MiB run grows wasmtime memory toward OOM"
-status: in-progress
+status: ready
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: high

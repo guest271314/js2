@@ -1,10 +1,10 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: in-progress
+status: ready
 owner: Copernicus
 created: 2026-05-24
-updated: 2026-06-01
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max
