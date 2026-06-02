@@ -1,0 +1,45 @@
+{
+  "timestamp": "2026-06-01T21:37:02Z",
+  "baseline_generated_at": "2026-06-01T21:37:02Z",
+  "mode": {
+    "target": "standalone",
+    "label": "standalone no-JS-host test262",
+    "summary_only": true
+  },
+  "summary": {
+    "total": 43106,
+    "pass": 4368,
+    "fail": 38738,
+    "compile_error": 0,
+    "compile_timeout": 0,
+    "skip": 0,
+    "compilable": 43106,
+    "stale": 0,
+    "summary_only": true
+  },
+  "official_summary": {
+    "total": 43106,
+    "pass": 4368,
+    "fail": 38738,
+    "compile_error": 0,
+    "compile_timeout": 0,
+    "skip": 0,
+    "compilable": 43106,
+    "stale": 0,
+    "summary_only": true
+  },
+  "source": {
+    "artifacts": [
+      "benchmarks/results/test262-standalone-report-20260601-213702.json",
+      "benchmarks/results/test262-standalone-results-20260601-213702.jsonl"
+    ],
+    "documented_in": [
+      "plan/issues/1776-standalone-issamevalue-externref-invalid-wasm.md",
+      "plan/issues/1472-no-js-host-object-property-ops.md",
+      "plan/issues/682-regexp-standalone-mode-native-engine.md",
+      "plan/issues/1599-json-standalone.md",
+      "plan/issues/1387-with-statement-dynamic-scope-implementation.md"
+    ],
+    "note": "The full generated artifacts are not committed; sprint 58 issue notes preserved the measured pass/total summary only."
+  }
+}
