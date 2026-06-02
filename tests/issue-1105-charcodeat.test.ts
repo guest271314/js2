@@ -18,13 +18,14 @@ const ENV_STUB = {
 };
 
 async function compileNative(source: string): Promise<Record<string, unknown>> {
-  const r = compile(source, {
+  const r = await compile(source, {
     nativeStrings: true,
     testRuntime: true,
     fileName: "issue-1105-charcodeat.ts",
   });
   if (!r.success) {
-    throw new Error(`compile failed: ${r.errors[0]?.message ?? "unknown"}`);
+    const errors = Array.isArray(r.errors) ? r.errors.map((err) => err.message).join("; ") : "no errors array";
+    throw new Error(`compile failed: ${errors}`);
   }
   expect(r.imports.some((imp) => imp.module === "env" && imp.name === "string_charCodeAt")).toBe(false);
   const built = buildImports(r.imports, ENV_STUB, r.stringPool);
