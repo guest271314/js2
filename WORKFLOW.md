@@ -57,4 +57,15 @@ Rules:
 - Write focused tests in `tests/issue-{{ issue.identifier }}.test.ts` unless the issue says otherwise.
 - Run scoped validation only; do not run full local test262.
 - Update the issue file on the implementation branch with final findings and status.
-- Report changed files, validation, branch/PR state, and blockers before exiting.
+- Commit all issue changes on the assigned branch with a Claude Code-style message and a
+  `Co-authored-by: Codex <codex@openai.com>` trailer.
+- Merge or rebase `origin/main` into the assigned branch before publishing so the PR is based on
+  current main.
+- Push the assigned branch to `origin`.
+- Open a ready, non-draft pull request against `main`; do not mark the issue `done` until the PR
+  exists.
+- Enqueue the PR in the merge queue when GitHub accepts it. If required checks are still pending,
+  enable auto-merge/merge-queue entry so GitHub queues it as soon as checks pass.
+- Report changed files, validation, commit SHA, PR URL, and merge-queue or auto-merge state before
+  exiting. If any publish or enqueue step fails, leave the issue `in-progress` and report the
+  blocker instead of calling the task complete.
