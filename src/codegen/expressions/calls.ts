@@ -1668,7 +1668,12 @@ function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expressi
   return out;
 }
 
-function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
+function compileCallExpression(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  expectedType?: ValType,
+): InnerResult {
   // Optional chaining on calls: obj?.method()
   if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
@@ -6123,7 +6128,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Array method calls
     {
-      const arrMethodResult = compileArrayMethodCall(ctx, fctx, propAccess, expr, receiverType);
+      const arrMethodResult = compileArrayMethodCall(
+        ctx,
+        fctx,
+        propAccess,
+        expr,
+        receiverType,
+        undefined,
+        expectedType,
+      );
       if (arrMethodResult !== undefined) return arrMethodResult;
     }
 

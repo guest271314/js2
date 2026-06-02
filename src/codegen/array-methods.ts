@@ -171,6 +171,42 @@ function isReceiverNonNull(expr: ts.Expression, checker: ts.TypeChecker): boolea
   return false;
 }
 
+function typeIncludesUndefined(type: ts.Type): boolean {
+  if ((type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return true;
+  if (type.isUnion()) return type.types.some((member) => typeIncludesUndefined(member));
+  return false;
+}
+
+function shouldReturnUndefinedCapableResult(
+  ctx: CodegenContext,
+  callExpr: ts.CallExpression,
+  expectedType?: ValType,
+): boolean {
+  let parent: ts.Node | undefined = callExpr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isNonNullExpression(parent))
+  ) {
+    parent = parent.parent;
+  }
+  if (parent && ts.isExpressionStatement(parent)) return false;
+  if (expectedType && expectedType.kind !== "externref" && expectedType.kind !== "ref_extern") return false;
+  return typeIncludesUndefined(ctx.checker.getTypeAtLocation(callExpr));
+}
+
+function arrayElementToExternrefInstrs(ctx: CodegenContext, fctx: FunctionContext, elemType: ValType): Instr[] {
+  if (elemType.kind === "i16") {
+    return coercionInstrs(ctx, { kind: "i32" }, { kind: "externref" }, fctx);
+  }
+  if (elemType.kind === "f32") {
+    return [{ op: "f64.promote_f32" } as Instr, ...coercionInstrs(ctx, { kind: "f64" }, { kind: "externref" }, fctx)];
+  }
+  return coercionInstrs(ctx, elemType, { kind: "externref" }, fctx);
+}
+
 // ── Bounds-checked array access ───────────────────────────────────────
 
 /**
@@ -2381,6 +2417,7 @@ export function compileArrayMethodCall(
   callExpr: ts.CallExpression,
   receiverType: ts.Type,
   overrideMethodName?: string,
+  expectedType?: ValType,
 ): ValType | null | undefined | typeof VOID_RESULT {
   const methodName =
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
@@ -2510,10 +2547,10 @@ export function compileArrayMethodCall(
       result = compileArrayPush(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "pop":
-      result = compileArrayPop(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      result = compileArrayPop(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType, expectedType);
       break;
     case "shift":
-      result = compileArrayShift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      result = compileArrayShift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType, expectedType);
       break;
     case "slice":
       result = compileArraySlice(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -3760,25 +3797,27 @@ function compileArrayPop(
   ctx: CodegenContext,
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
-  _callExpr: ts.CallExpression,
+  callExpr: ts.CallExpression,
   vecTypeIdx: number,
   arrTypeIdx: number,
   elemType: ValType,
+  expectedType?: ValType,
 ): ValType | null {
+  const resultType: ValType = shouldReturnUndefinedCapableResult(ctx, callExpr, expectedType)
+    ? { kind: "externref" }
+    : elemType;
   const vecTmp = allocLocal(fctx, `__arr_pop_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const newLenTmp = allocLocal(fctx, `__arr_pop_nl_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_pop_res_${fctx.locals.length}`, elemType);
+  const resultTmp = allocLocal(fctx, `__arr_pop_res_${fctx.locals.length}`, resultType);
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
   const lenTmp = allocLocal(fctx, `__arr_pop_len_${fctx.locals.length}`, { kind: "i32" });
 
-  // (#1377) Initialize result to JS `undefined` for externref/anyref element
-  // types so empty-array `arr.pop()` returns spec-compliant undefined (not
-  // the wasm default `ref.null.extern`, which JS sees as `null`). f64 keeps
-  // its NaN default (matches `[].pop()` returning undefined which coerces
-  // to NaN in numeric context). i32 keeps 0 (best-effort; never mixed with
-  // null arrays).
-  if (elemType.kind === "externref" || elemType.kind === "anyref") {
+  // ECMA-262 §23.1.3.22: when length is 0, pop sets length to +0 and
+  // returns undefined. Preserve the old primitive result only for numeric
+  // hint contexts; otherwise use an externref result that can carry
+  // undefined for the Array<T>.pop(): T | undefined signature.
+  if (resultType.kind === "externref" || resultType.kind === "anyref") {
     emitUndefined(ctx, fctx);
     fctx.body.push({ op: "local.set", index: resultTmp });
   }
@@ -3808,6 +3847,7 @@ function compileArrayPop(
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
     { op: "local.get", index: newLenTmp } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // Decrement length: vec.length = newLen
     { op: "local.get", index: vecTmp } as Instr,
@@ -3819,7 +3859,7 @@ function compileArrayPop(
 
   // Return result (default value if empty, popped value if non-empty)
   fctx.body.push({ op: "local.get", index: resultTmp });
-  return elemType;
+  return resultType;
 }
 
 /**
@@ -3829,22 +3869,25 @@ function compileArrayShift(
   ctx: CodegenContext,
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
-  _callExpr: ts.CallExpression,
+  callExpr: ts.CallExpression,
   vecTypeIdx: number,
   arrTypeIdx: number,
   elemType: ValType,
+  expectedType?: ValType,
 ): ValType | null {
+  const resultType: ValType = shouldReturnUndefinedCapableResult(ctx, callExpr, expectedType)
+    ? { kind: "externref" }
+    : elemType;
   const vecTmp = allocLocal(fctx, `__arr_sft_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_sft_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_sft_len_${fctx.locals.length}`, { kind: "i32" });
   const newLenTmp = allocLocal(fctx, `__arr_sft_nl_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_sft_res_${fctx.locals.length}`, elemType);
+  const resultTmp = allocLocal(fctx, `__arr_sft_res_${fctx.locals.length}`, resultType);
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // (#1377) Initialize result to JS `undefined` for externref/anyref so
-  // empty-array `arr.shift()` returns spec-compliant undefined.
-  if (elemType.kind === "externref" || elemType.kind === "anyref") {
+  // ECMA-262 §23.1.3.27 mirrors pop's empty-array branch for shift.
+  if (resultType.kind === "externref" || resultType.kind === "anyref") {
     emitUndefined(ctx, fctx);
     fctx.body.push({ op: "local.set", index: resultTmp });
   }
@@ -3873,6 +3916,7 @@ function compileArrayShift(
     { op: "local.get", index: dataTmp } as Instr,
     { op: "i32.const", value: 0 } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // newLen = len - 1
     { op: "local.get", index: lenTmp } as Instr,
@@ -3896,7 +3940,7 @@ function compileArrayShift(
 
   // Return result (default value if empty, shifted value if non-empty)
   fctx.body.push({ op: "local.get", index: resultTmp });
-  return elemType;
+  return resultType;
 }
 
 /**
