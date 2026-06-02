@@ -198,10 +198,10 @@ export function compileNullishCoalescing(
   if (isUndefIdx !== undefined) {
     fctx.body.push({ op: "local.get", index: tmp });
     if (resultKind.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-    fctx.body.push({ op: "i32.or" } as unknown as Instr);
+    fctx.body.push({ op: "i32.or" });
   }
 
   // Compile RHS in a side buffer to discover its natural type
@@ -296,6 +296,11 @@ function emitMappedArgParamSync(
   // Check if this local index corresponds to a mapped parameter
   const argIndex = paramIdx - info.paramOffset;
   if (argIndex < 0 || argIndex >= info.paramCount) return;
+  // #1511: the param↔arguments link for this slot may have been severed
+  // (defineProperty writable:false / accessor, or delete arguments[i]) per
+  // §10.4.4.2 — once severed, a parameter write must NOT propagate to
+  // arguments[i].
+  if (info.unmappedIndices?.has(argIndex)) return;
 
   // Save the expression result (currently on stack from local.tee)
   const tmp = allocLocal(fctx, `__arg_sync_${fctx.locals.length}`, resultType);
@@ -307,16 +312,16 @@ function emitMappedArgParamSync(
   if (paramType.kind === "f64") {
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx !== undefined) {
-      coerceInstrs.push({ op: "call", funcIdx: boxIdx } as unknown as Instr);
+      coerceInstrs.push({ op: "call", funcIdx: boxIdx });
     }
   } else if (paramType.kind === "i32") {
-    coerceInstrs.push({ op: "f64.convert_i32_s" } as unknown as Instr);
+    coerceInstrs.push({ op: "f64.convert_i32_s" });
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx !== undefined) {
-      coerceInstrs.push({ op: "call", funcIdx: boxIdx } as unknown as Instr);
+      coerceInstrs.push({ op: "call", funcIdx: boxIdx });
     }
   } else if (paramType.kind === "ref" || paramType.kind === "ref_null") {
-    coerceInstrs.push({ op: "extern.convert_any" } as unknown as Instr);
+    coerceInstrs.push({ op: "extern.convert_any" });
   }
   // externref: no coercion needed
 
@@ -356,6 +361,9 @@ function emitMappedArgReverseSync(
 
   // For each mapped parameter, check if the index matches and sync
   for (let i = 0; i < info.paramCount; i++) {
+    // #1511: skip slots whose param↔arguments link has been severed
+    // (§10.4.4.2) — an arguments[i] write must not flow back into the param.
+    if (info.unmappedIndices?.has(i)) continue;
     const paramType = info.paramTypes[i]!;
     const localIdx = i + info.paramOffset;
 
@@ -365,18 +373,18 @@ function emitMappedArgReverseSync(
     if (paramType.kind === "f64") {
       const unboxIdx = ctx.funcMap.get("__unbox_number");
       if (unboxIdx !== undefined) {
-        convertInstrs.push({ op: "call", funcIdx: unboxIdx } as unknown as Instr);
+        convertInstrs.push({ op: "call", funcIdx: unboxIdx });
       }
     } else if (paramType.kind === "i32") {
       const unboxIdx = ctx.funcMap.get("__unbox_number");
       if (unboxIdx !== undefined) {
-        convertInstrs.push({ op: "call", funcIdx: unboxIdx } as unknown as Instr);
+        convertInstrs.push({ op: "call", funcIdx: unboxIdx });
       }
-      convertInstrs.push({ op: "i32.trunc_sat_f64_s" } as unknown as Instr);
+      convertInstrs.push({ op: "i32.trunc_sat_f64_s" });
     } else if (paramType.kind === "ref" || paramType.kind === "ref_null") {
-      convertInstrs.push({ op: "any.convert_extern" } as unknown as Instr);
+      convertInstrs.push({ op: "any.convert_extern" });
       if (paramType.kind === "ref") {
-        convertInstrs.push({ op: "ref.cast", typeIdx: (paramType as any).typeIdx } as unknown as Instr);
+        convertInstrs.push({ op: "ref.cast", typeIdx: (paramType as any).typeIdx });
       }
     }
     // externref → externref: just local.get valLocal (already in convertInstrs)

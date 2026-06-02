@@ -66,6 +66,8 @@ import {
   type IrValueId,
 } from "../nodes.js";
 import type { ValType } from "../types.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { forkAllocInInstr } from "./alloc-discipline.js";
 
 /** Maximum number of distinct type tuples we'll clone a single callee for. */
 const MAX_VARIANTS_PER_CALLEE = 4;
@@ -94,7 +96,7 @@ export interface MonomorphizeResult {
  * module unchanged (and an empty signature map) when no profitable clones
  * exist or the growth budget would be exceeded.
  */
-export function monomorphize(mod: IrModule): MonomorphizeResult {
+export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): MonomorphizeResult {
   const byName = new Map<string, IrFunction>();
   for (const fn of mod.functions) byName.set(fn.name, fn);
 
@@ -244,7 +246,7 @@ export function monomorphize(mod: IrModule): MonomorphizeResult {
   for (const [calleeName, plans] of planByCallee) {
     const callee = byName.get(calleeName)!;
     for (const plan of plans) {
-      const { fn: clone, returnType } = cloneWithParamTypes(callee, plan.cloneName, plan.argTypes);
+      const { fn: clone, returnType } = cloneWithParamTypes(callee, plan.cloneName, plan.argTypes, registry);
       clonedFuncs.push(clone);
       cloneSignatures.set(plan.cloneName, {
         params: plan.argTypes,
@@ -486,6 +488,7 @@ function cloneWithParamTypes(
   callee: IrFunction,
   cloneName: string,
   newParamTypes: readonly IrType[],
+  registry?: AllocSiteRegistry,
 ): { fn: IrFunction; returnType: IrType } {
   if (newParamTypes.length !== callee.params.length) {
     throw new Error(
@@ -508,7 +511,11 @@ function cloneWithParamTypes(
     id: asBlockId(0),
     blockArgs: oldBlock.blockArgs,
     blockArgTypes: oldBlock.blockArgTypes,
-    instrs: oldBlock.instrs.map((i) => i), // shallow copy is fine — instrs are frozen-shaped
+    // Fork allocation ids per specialization — a clone is a distinct runtime
+    // allocation set, so its alloc sites must not share the source's ids
+    // (#1586 fork rule). `forkAllocInInstr` is a no-op for non-alloc instrs and
+    // when no registry is wired, preserving the prior shallow-copy behavior.
+    instrs: oldBlock.instrs.map((i) => forkAllocInInstr(i, registry)),
     terminator: oldBlock.terminator,
   };
 
@@ -623,6 +630,20 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.rand];
     case "select":
       return [instr.condition, instr.whenTrue, instr.whenFalse];
+    case "if": {
+      // (#1392) Surface cond + carrier values plus uses inside the arms.
+      // Arm-buffer instrs may reference outer SSA values; the
+      // monomorphize pass needs to see them for use-counting.
+      const out: IrValueId[] = [instr.cond, instr.thenValue, instr.elseValue];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectUses(sub)) out.push(u);
+        }
+      };
+      walk(instr.then);
+      walk(instr.else);
+      return out;
+    }
     case "box":
     case "unbox":
     case "tag.test":
@@ -764,5 +785,12 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [instr.condValue];
+    // (#1373 Phase B) Async / await IR nodes — single operand.
+    case "await":
+      return [instr.operand];
+    case "async.return":
+      return [instr.value];
+    case "async.throw":
+      return [instr.reason];
   }
 }

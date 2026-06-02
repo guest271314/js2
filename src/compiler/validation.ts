@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { ts, forEachChild } from "../ts-api.js";
 import type { CompileError, CompileOptions } from "../index.js";
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { forEachChild, ts } from "../ts-api.js";
 
 // Default blocked members on extern classes in safe mode
 const DEFAULT_BLOCKED_MEMBERS = new Set([
@@ -14,7 +14,10 @@ const DEFAULT_BLOCKED_MEMBERS = new Set([
   "insertAdjacentHTML",
 ]);
 
-function getApproxSourceLocation(sourceFile: ts.SourceFile): { line: number; column: number } {
+function getApproxSourceLocation(sourceFile: ts.SourceFile): {
+  line: number;
+  column: number;
+} {
   const anchor = sourceFile.statements[0] ?? sourceFile;
   const { line, character } = sourceFile.getLineAndCharacterOfPosition(anchor.getStart(sourceFile));
   return { line: line + 1, column: character + 1 };
@@ -340,18 +343,25 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
    * property/element access are valid — no destructuring patterns.
    */
   function isInvalidAssignmentTarget(node: ts.Expression, allowDestructuring = false): boolean {
+    // (#1722) A destructuring AssignmentPattern is only a valid target when it
+    // appears *directly* as the LHS — a parenthesized object/array literal
+    // (`({}) = 1`, `({a:1}) = 1`) is NOT a valid target and is an early
+    // SyntaxError per §13.15.1 (CoverParenthesizedExpression cannot be
+    // refined to an AssignmentPattern). So test the destructuring forms on
+    // the un-unwrapped node before stripping parens. Note `({} = 1)` is fine
+    // because there the parens wrap the whole assignment, not the pattern.
+    if (allowDestructuring) {
+      if (ts.isObjectLiteralExpression(node)) return false;
+      if (ts.isArrayLiteralExpression(node)) return false;
+    }
     let expr: ts.Node = node;
     while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
-    // Valid: identifiers, property access, element access
+    // Valid: identifiers, property access, element access (parens are
+    // transparent for these — `(x) = 1` / `(o.p) = 1` are valid).
     if (ts.isIdentifier(expr)) return false;
     if (ts.isPropertyAccessExpression(expr)) return false;
     if (ts.isElementAccessExpression(expr)) return false;
-    // Valid only in simple assignment: destructuring patterns
-    if (allowDestructuring) {
-      if (ts.isObjectLiteralExpression(expr)) return false;
-      if (ts.isArrayLiteralExpression(expr)) return false;
-    }
-    // Everything else is invalid
+    // Everything else (incl. parenthesized object/array literals) is invalid.
     return true;
   }
 
@@ -726,6 +736,19 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           if (isLexical && init.declarations.length > 1) {
             addError(node, "Only a single declaration is allowed in a for-in statement");
           }
+          // ES spec: It is a Syntax Error if BoundNames of ForDeclaration
+          // contains any duplicate entries (lexical only) — e.g.
+          // `for (let [x, x] in {}) {}` / `for (const [x, x] in {}) {}`.
+          if (isLexical) {
+            const seen = new Set<string>();
+            const dupes = new Set<string>();
+            for (const decl of init.declarations) {
+              collectBindingNamesWithDuplicateCheck(decl.name, seen, dupes);
+            }
+            for (const name of dupes) {
+              addError(node, `Duplicate binding '${name}' in for-in declaration`);
+            }
+          }
         }
       }
     }
@@ -1005,7 +1028,10 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       // label: let x; or label: const x;
       if (ts.isVariableStatement(stmt)) {
         const flags = stmt.declarationList.flags;
-        if ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) {
+        if (
+          ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) &&
+          !isAsiLetExpressionStatement(stmt, flags)
+        ) {
           addError(node, "Lexical declaration (let/const) cannot appear in a labeled statement");
         }
       }
@@ -1022,7 +1048,7 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       const flags = node.declarationList.flags;
       if ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) {
         const parent = node.parent;
-        if (parent && isStatementPosition(parent, node)) {
+        if (parent && isStatementPosition(parent, node) && !isAsiLetExpressionStatement(node, flags)) {
           addError(node, "Lexical declaration cannot appear in a single-statement context");
         }
       }
@@ -1415,22 +1441,34 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       }
     }
 
-    // ── import.defer(...) / import.source(...) — Stage 3 proposals ──
-    // Reported as SyntaxError so negative parse/early test262 tests covering
-    // the import-defer / source-phase-imports proposals correctly count as
-    // detecting the unsupported syntax. This walk runs over the whole AST
-    // (including unreferenced async arrow bodies) so we catch the constructs
-    // even in dead code where the codegen pipeline never visits them. (#1315)
-    if (
-      ts.isCallExpression(node) &&
-      ts.isMetaProperty(node.expression) &&
-      node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
-      (node.expression.name.text === "defer" || node.expression.name.text === "source")
-    ) {
-      addError(
-        node,
-        `SyntaxError: import.${node.expression.name.text}(...) is not supported (Stage 3 proposal — import-defer / source-phase-imports)`,
-      );
+    // ── import.X meta-property validation — covers Stage 3 proposals + unknown names ──
+    // ES spec (§13.3.10): the only standardized `import.<name>` meta-property is
+    // `import.meta`. The Stage 3 proposals add `import.source(...)` (source-phase
+    // imports) and `import.defer(...)` (import-defer). Any other meta-property
+    // name like `import.UNKNOWN` is a SyntaxError.
+    //
+    // Test262 has ~190 negative tests under
+    // `language/expressions/dynamic-import/syntax/invalid/` covering bare
+    // `import.source`, `import.source.X`, `import.UNKNOWN(...)`, `typeof
+    // import.source`, etc. The sharded test runner compiles with
+    // `skipSemanticDiagnostics: true`, suppressing TS's own diagnostics for these
+    // shapes, so the SyntaxError must be emitted by this syntactic pass (#1512).
+    //
+    // We catch the MetaProperty node itself, which fires for every position the
+    // meta-property appears in (call target, bare expression, typeof operand,
+    // PropertyAccessExpression base, etc.). The earlier call-only check (#1315)
+    // is subsumed by this. The walk runs over the whole AST including
+    // unreferenced bodies so we catch dead-code constructs too.
+    if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && node.name.text !== "meta") {
+      const name = node.name.text;
+      if (name === "defer" || name === "source") {
+        addError(
+          node,
+          `SyntaxError: import.${name}(...) is not supported (Stage 3 proposal — import-defer / source-phase-imports)`,
+        );
+      } else {
+        addError(node, `SyntaxError: 'import.${name}' is not a valid meta-property; only 'import.meta' is allowed`);
+      }
     }
 
     // ── new import() — always a SyntaxError ────────────────────────
@@ -1751,9 +1789,40 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       if (node.arguments.length === 0) {
         addError(node, "import() requires at least one argument");
       }
+      // ES spec / import-attributes proposal: at most 2 arguments (specifier,
+      // options). 3+ args is a SyntaxError — covered by the test262
+      // `not-extensible-args` negative tests (#1512).
+      if (node.arguments.length > 2) {
+        addError(node, "import() takes at most two arguments (specifier and options)");
+      }
       for (const arg of node.arguments) {
         if (ts.isSpreadElement(arg)) {
           addError(arg, "import() does not allow spread arguments");
+        }
+      }
+    }
+    // Same arg-count / spread restrictions for the Stage 3 `import.source(...)` and
+    // `import.defer(...)` calls. The meta-property itself is already rejected as a
+    // SyntaxError above, but test262 has negative tests that combine the bare
+    // proposal with extra args or spread, e.g. `import.source('a', {}, '')`. Emit
+    // an additional error so the test still fails parse phase even if the prior
+    // meta-property diagnostic is later relaxed for the proposal. (#1512)
+    if (
+      ts.isCallExpression(node) &&
+      ts.isMetaProperty(node.expression) &&
+      node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (node.expression.name.text === "source" || node.expression.name.text === "defer")
+    ) {
+      const name = node.expression.name.text;
+      if (node.arguments.length === 0) {
+        addError(node, `import.${name}() requires at least one argument`);
+      }
+      if (node.arguments.length > 2) {
+        addError(node, `import.${name}() takes at most two arguments`);
+      }
+      for (const arg of node.arguments) {
+        if (ts.isSpreadElement(arg)) {
+          addError(arg, `import.${name}() does not allow spread arguments`);
         }
       }
     }
@@ -2414,7 +2483,10 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
 
         const existing = privateNames.get(name);
         if (!existing) {
-          privateNames.set(name, { kinds: new Set([kind]), isStatic: memberIsStatic });
+          privateNames.set(name, {
+            kinds: new Set([kind]),
+            isStatic: memberIsStatic,
+          });
         } else {
           // get+set pair is allowed ONLY if both have the same staticness
           const combined = new Set([...existing.kinds, kind]);
@@ -2535,6 +2607,36 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
         return false; // Found a non-generator function boundary
       }
       current = current.parent;
+    }
+    return false;
+  }
+
+  /**
+   * TypeScript parses `let` followed by a LineTerminator and then an identifier
+   * or `{` (e.g. `if (false) let\nx = 1;`) as a LexicalDeclaration, but per
+   * ECMA-262 the ExpressionStatement lookahead restriction is only `let [`
+   * (with NO `[no LineTerminator here]`). So `let` + newline + (anything but
+   * `[`) is actually an ExpressionStatement (`let` identifier reference) closed
+   * by ASI, which is valid in single-statement position. `let [` stays a
+   * lexical declaration even across a newline, and `const` is always a reserved
+   * word so it is never an expression statement.
+   */
+  function isAsiLetExpressionStatement(node: ts.VariableStatement, flags: ts.NodeFlags): boolean {
+    if ((flags & ts.NodeFlags.Let) === 0) return false;
+    const decls = node.declarationList.declarations;
+    if (decls.length !== 1) return false;
+    const binding = decls[0].name;
+    // `let [` is a lexical declaration / array destructuring even after a newline.
+    if (ts.isArrayBindingPattern(binding)) return false;
+    // Source text between the `let` keyword and the first binding: a line
+    // terminator there means ASI applies and `let` is an identifier reference.
+    const declList = node.declarationList;
+    const keywordEnd = declList.getStart(sourceFile) + "let".length;
+    const between = sourceFile.text.slice(keywordEnd, binding.getStart(sourceFile));
+    for (const ch of between) {
+      const c = ch.charCodeAt(0);
+      // LF, CR, LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029)
+      if (c === 0x0a || c === 0x0d || c === 0x2028 || c === 0x2029) return true;
     }
     return false;
   }
@@ -3268,7 +3370,12 @@ function hasExportModifier(node: ts.Node): boolean {
 function validateHardenedMode(
   sourceFile: ts.SourceFile,
 ): Array<{ message: string; line: number; column: number; severity: "error" }> {
-  const errors: Array<{ message: string; line: number; column: number; severity: "error" }> = [];
+  const errors: Array<{
+    message: string;
+    line: number;
+    column: number;
+    severity: "error";
+  }> = [];
 
   function visit(node: ts.Node): void {
     // Reject eval() calls

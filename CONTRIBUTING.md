@@ -1,12 +1,12 @@
 # Contributing to js2wasm
 
-`js2wasm` is developed as the core compiler product of **Loopdive GmbH**. This guide covers the technical workflow and the contributor licensing terms required for accepted contributions.
+`js2wasm` is an open-source project stewarded by **Loopdive GmbH** — a technical foundation for the next generation of the internet, developed fully in the open. This guide covers the technical workflow and the contributor licensing terms required for accepted contributions.
 
 ## Development Setup
 
 ```bash
-git clone https://github.com/loopdive/js2wasm.git
-cd js2wasm
+git clone https://github.com/loopdive/js2.git
+cd js2
 pnpm install
 ```
 
@@ -85,7 +85,39 @@ By contributing code, documentation, tests, or other material to this repository
 
 If you do not agree to these terms, do not submit a contribution.
 
-This CLA requirement exists so the project can maintain an Apache 2.0 with LLVM Exceptions community distribution while also supporting commercial and proprietary licensing arrangements for infrastructure partners.
+This CLA exists so Loopdive GmbH can sustainably steward the project over the long term — keeping it maintained, funded, and relicensable should open-source license standards evolve — while the source is distributed under the Apache 2.0 with LLVM Exceptions license.
+
+### How acceptance is recorded (the `cla-check` gate)
+
+Acceptance is recorded affirmatively and audibly — there is no third-party
+service. The `cla-check` GitHub Action (`.github/workflows/cla-check.yml`)
+gates every pull request:
+
+1. When you open a PR, the gate checks whether your GitHub account has a
+   recorded acceptance in `.github/cla/signatures.json` at the **current CLA
+   version**.
+2. If not, the gate fails and a bot posts a one-time comment asking you to
+   accept. **Comment this exact phrase on your PR:**
+
+   > I have read and agree to the CLA
+
+3. The Action then appends a signature record
+   (`{login, name, pr, commit_sha, cla_version, signed_at}`) to
+   `.github/cla/signatures.json`, commits it as `github-actions[bot]`, and the
+   `cla-check` turns green. Your acceptance is now part of the repo's history.
+
+**Exempt contributors** — members of the `loopdive` organization, the
+maintainer, and automation bots (`github-actions[bot]`, `dependabot[bot]`, any
+`*[bot]`) are exempt and pass the gate automatically with no signature. Only
+external (non-member) human contributors need to comment the phrase. The
+exemption is resolved live via the GitHub org-membership API, with an explicit
+fallback allowlist at `.github/cla/allowlist.json`.
+
+**CLA version / re-acceptance** — the CLA version is derived from the content
+hash of [`CLA.md`](./CLA.md) (`CLA_VERSION` in `.github/cla/cla-gate.mjs`). A
+signature is only valid for the version it was recorded against, so if the CLA
+terms ever change, the version bumps and contributors are asked to re-accept
+the updated terms. Past acceptances of the old terms remain in the audit trail.
 
 ## Pull Requests
 
@@ -95,7 +127,9 @@ When opening a PR:
 - describe any conformance or behavior impact
 - include the relevant tests or rationale if tests are not added
 
-PRs may be subject to an automated CLA check workflow placeholder until a dedicated signature flow is wired in.
+PRs are gated by the `cla-check` workflow described above. For external
+contributors this means: open the PR, then comment the agreement phrase so the
+gate can record your acceptance.
 
 ## License
 

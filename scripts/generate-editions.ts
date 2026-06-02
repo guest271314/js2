@@ -38,9 +38,13 @@ function findTest262Root(base: string): string {
 }
 
 const TEST262_ROOT = findTest262Root(ROOT);
+// #1528 — the JSONL is no longer committed to the main repo. Prefer the
+// on-demand fetched cache, then fall back to the legacy in-repo paths
+// (which workflows still populate locally as build inputs).
+const BASELINE_CACHE_JSONL = join(ROOT, ".test262-cache", "test262-current.jsonl");
 const CURRENT_RESULTS_JSONL = join(ROOT, "benchmarks", "results", "test262-current.jsonl");
 const RESULTS_JSONL = join(ROOT, "benchmarks", "results", "test262-results.jsonl");
-const OUTPUT_PATH = join(ROOT, "public", "benchmarks", "results", "test262-editions.json");
+const OUTPUT_PATH = join(ROOT, "website", "public", "benchmarks", "results", "test262-editions.json");
 const CURRENT_DRAFT_EDITION = 2026;
 
 // ---------------------------------------------------------------------------
@@ -457,6 +461,25 @@ function normalizeStatus(s: string): StatusKey {
   return "fail";
 }
 
+/**
+ * (#1398) Derive a category path from a test file path. Mirrors the runner's
+ * categorization (top two path segments after the leading `test/`), so the
+ * resulting key matches `test262-report.json`'s `categories[].name`.
+ *
+ * Examples:
+ *   "test/language/expressions/class/elements/foo.js" → "language/expressions"
+ *   "test/built-ins/Array/prototype/push/length.js"  → "built-ins/Array"
+ *   "test/annexB/built-ins/escape/length.js"          → "annexB/built-ins"
+ */
+function deriveCategoryFromFile(file: string): string {
+  const parts = file.split("/");
+  if (parts[0] === "test") parts.shift();
+  // Two-segment grouping mirrors the existing runner output. The compiled
+  // report joins these with `/`.
+  if (parts.length >= 2) return parts.slice(0, 2).join("/");
+  return parts[0] ?? "unknown";
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -466,6 +489,7 @@ interface ResultRecord {
   status: string;
   scope?: string;
   scope_official?: boolean;
+  category?: string;
 }
 
 interface EditionBucket {
@@ -487,7 +511,12 @@ async function main() {
   // Parse CLI args
   const args = process.argv.slice(2);
   const resultsPath =
-    getArg(args, "--results") ?? (existsSync(CURRENT_RESULTS_JSONL) ? CURRENT_RESULTS_JSONL : RESULTS_JSONL);
+    getArg(args, "--results") ??
+    (existsSync(BASELINE_CACHE_JSONL)
+      ? BASELINE_CACHE_JSONL
+      : existsSync(CURRENT_RESULTS_JSONL)
+        ? CURRENT_RESULTS_JSONL
+        : RESULTS_JSONL);
   const outputPath = getArg(args, "--output") ?? OUTPUT_PATH;
   const test262Root = getArg(args, "--test262") ?? TEST262_ROOT;
 
@@ -509,6 +538,12 @@ async function main() {
   for (const yr of EDITION_ORDER) {
     buckets[yr] = { pass: 0, fail: 0, ce: 0, skip: 0 };
   }
+
+  // (#1398) Per-category × per-edition buckets. Keyed by category path
+  // (e.g. "test/language/expressions") then by edition year (e.g. 2022).
+  // Used to populate `test262-category-editions.json` so the report's
+  // category table can filter to a selected edition.
+  const categoryBuckets: Record<string, Record<number, { pass: number; fail: number; ce: number; skip: number }>> = {};
 
   let classified = 0;
   let unclassified = 0;
@@ -545,6 +580,17 @@ async function main() {
 
     const bucket = buckets[edition] ?? (buckets[edition] = { pass: 0, fail: 0, ce: 0, skip: 0 });
     bucket[key]++;
+
+    // (#1398) Also accumulate into per-category × per-edition buckets.
+    // Use the JSONL `category` field if present (the runner sets it to the
+    // top-level path prefix, e.g. "language/expressions"); fall back to
+    // deriving from the file path.
+    const category = record.category ?? deriveCategoryFromFile(file);
+    if (category && edition !== 0 && edition !== -1) {
+      const catMap = categoryBuckets[category] ?? (categoryBuckets[category] = {});
+      const catBucket = catMap[edition] ?? (catMap[edition] = { pass: 0, fail: 0, ce: 0, skip: 0 });
+      catBucket[key]++;
+    }
   }
 
   // Build output array in edition order
@@ -581,6 +627,44 @@ async function main() {
   const accounted = output.reduce((sum, bucket) => sum + bucket.total, 0);
   if (accounted !== processed) {
     throw new Error(`Edition totals (${accounted}) do not match processed results (${processed}).`);
+  }
+
+  // (#1398) Write the per-category × per-edition breakdown alongside the
+  // overall per-edition output. The report's category table consumes this
+  // to filter rows when an edition is selected on the timeline slider.
+  //
+  // Output shape:
+  //   {
+  //     "language/expressions": {
+  //       "ES2022": { "pass": 42, "fail": 18, "ce": 3, "skip": 0 },
+  //       "ES2015": { "pass": 10, "fail": 5,  "ce": 0, "skip": 0 }
+  //     },
+  //     ...
+  //   }
+  //
+  // Only edition-classified buckets are emitted (year > 0); proposal-only
+  // and unclassified records are dropped here since the slider only
+  // operates on official edition rank.
+  const categoryEditionOutput: Record<
+    string,
+    Record<string, { pass: number; fail: number; ce: number; skip: number }>
+  > = {};
+  for (const [category, byYear] of Object.entries(categoryBuckets)) {
+    const yearMap: Record<string, { pass: number; fail: number; ce: number; skip: number }> = {};
+    for (const [yr, counts] of Object.entries(byYear)) {
+      const yearNum = Number(yr);
+      if (yearNum <= 0) continue;
+      const name = EDITION_NAMES[yearNum] ?? `ES${yearNum}`;
+      yearMap[name] = counts;
+    }
+    if (Object.keys(yearMap).length > 0) {
+      categoryEditionOutput[category] = yearMap;
+    }
+  }
+  const categoriesPath = outputPath.replace(/test262-editions\.json$/, "test262-category-editions.json");
+  if (categoriesPath !== outputPath) {
+    writeFileSync(categoriesPath, JSON.stringify(categoryEditionOutput, null, 2) + "\n");
+    console.log(`Wrote ${Object.keys(categoryEditionOutput).length} category × edition buckets to: ${categoriesPath}`);
   }
 }
 

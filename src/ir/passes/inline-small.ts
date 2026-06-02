@@ -74,6 +74,8 @@ import {
   type IrTerminator,
   type IrValueId,
 } from "../nodes.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { forkAllocInInstr } from "./alloc-discipline.js";
 
 const MAX_CALLEE_INSTRS = 10;
 const CALLER_SIZE_BUDGET_MULTIPLIER = 4;
@@ -82,7 +84,7 @@ const CALLER_SIZE_BUDGET_MULTIPLIER = 4;
  * Inline small, non-recursive, single-block callees across the module.
  * Returns the same `IrModule` reference when no function changes.
  */
-export function inlineSmall(mod: IrModule): IrModule {
+export function inlineSmall(mod: IrModule, registry?: AllocSiteRegistry): IrModule {
   const byName = new Map<string, IrFunction>();
   for (const fn of mod.functions) byName.set(fn.name, fn);
 
@@ -91,7 +93,7 @@ export function inlineSmall(mod: IrModule): IrModule {
   const newFunctions: IrFunction[] = [];
   let anyChanged = false;
   for (const fn of mod.functions) {
-    const inlined = inlineIntoFunction(fn, byName, recursiveSet);
+    const inlined = inlineIntoFunction(fn, byName, recursiveSet, registry);
     if (inlined !== fn) anyChanged = true;
     newFunctions.push(inlined);
   }
@@ -107,6 +109,7 @@ function inlineIntoFunction(
   caller: IrFunction,
   byName: ReadonlyMap<string, IrFunction>,
   recursiveSet: ReadonlySet<string>,
+  registry?: AllocSiteRegistry,
 ): IrFunction {
   const originalSize = countInstrs(caller);
   let nextValueId = caller.valueCount;
@@ -182,7 +185,12 @@ function inlineIntoFunction(
       // never need to recurse into nested body buffers here — see
       // canInline's #1374 comment.
       for (const inst of body.instrs) {
-        newInstrs.push(renameAllInInstr(inst, calleeRename));
+        // Rule 1 / fork: a spliced copy is a genuinely distinct runtime
+        // allocation, so fork a fresh AllocSiteId off the callee's site rather
+        // than sharing it (inlining the same callee twice must not conflate
+        // the two allocations — #747 escape analysis depends on this).
+        const renamed = renameAllInInstr(inst, calleeRename);
+        newInstrs.push(forkAllocInInstr(renamed, registry));
       }
 
       // The call's result becomes the renamed return value for all downstream
@@ -366,6 +374,30 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const f = mapId(rename, inst.whenFalse);
       if (c === inst.condition && t === inst.whenTrue && f === inst.whenFalse) return inst;
       return { ...inst, condition: c, whenTrue: t, whenFalse: f };
+    }
+    case "if": {
+      // (#1392) Renames in the cond + carrier values; arm-buffer instrs
+      // are walked recursively (each gets its own renameInstrOperands
+      // call). Conservative — if any sub-instr changed, rebuild the if;
+      // otherwise return unchanged.
+      const c = mapId(rename, inst.cond);
+      const t = mapId(rename, inst.thenValue);
+      const e = mapId(rename, inst.elseValue);
+      const newThen: IrInstr[] = [];
+      const newElse: IrInstr[] = [];
+      let armChanged = false;
+      for (const sub of inst.then) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newThen.push(r);
+      }
+      for (const sub of inst.else) {
+        const r = renameInstrOperands(sub, rename);
+        if (r !== sub) armChanged = true;
+        newElse.push(r);
+      }
+      if (c === inst.cond && t === inst.thenValue && e === inst.elseValue && !armChanged) return inst;
+      return { ...inst, cond: c, thenValue: t, elseValue: e, then: newThen, else: newElse };
     }
     case "box":
     case "unbox":
@@ -690,6 +722,24 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const cv = mapId(rename, inst.condValue);
       if (cv === inst.condValue) return inst;
       return { ...inst, condValue: cv };
+    }
+    // (#1373 Phase B) Async / await IR nodes — rename single operand.
+    // Phase C may need richer renaming (continuation-closure capture
+    // sets); for now the simple operand rename is sufficient.
+    case "await": {
+      const op = mapId(rename, inst.operand);
+      if (op === inst.operand) return inst;
+      return { ...inst, operand: op };
+    }
+    case "async.return": {
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
+    }
+    case "async.throw": {
+      const r = mapId(rename, inst.reason);
+      if (r === inst.reason) return inst;
+      return { ...inst, reason: r };
     }
   }
 }

@@ -15,6 +15,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,
   compileExpression,
@@ -23,7 +24,7 @@ import {
   registerEmitBoundsCheckedArrayGet,
   VOID_RESULT,
 } from "./shared.js";
-import { emitUndefined } from "./expressions/late-imports.js";
+import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureTimsortHelper } from "./timsort.js";
 import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
@@ -100,16 +101,16 @@ function emitCallbackTypeCheck(
 function guardedFuncRefCastInstrs(fctx: FunctionContext, funcTypeIdx: number): Instr[] {
   const tmpFunc = allocLocal(fctx, `__gfc_${fctx.locals.length}`, { kind: "funcref" } as ValType);
   return [
-    { op: "local.tee", index: tmpFunc } as unknown as Instr,
-    { op: "ref.test", typeIdx: funcTypeIdx } as unknown as Instr,
+    { op: "local.tee", index: tmpFunc },
+    { op: "ref.test", typeIdx: funcTypeIdx },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "ref_null", typeIdx: funcTypeIdx } as ValType },
       then: [
-        { op: "local.get", index: tmpFunc } as unknown as Instr,
-        { op: "ref.cast_null", typeIdx: funcTypeIdx } as unknown as Instr,
+        { op: "local.get", index: tmpFunc },
+        { op: "ref.cast_null", typeIdx: funcTypeIdx },
       ],
-      else: [{ op: "ref.null", typeIdx: funcTypeIdx } as unknown as Instr],
+      else: [{ op: "ref.null", typeIdx: funcTypeIdx }],
     } as Instr,
   ];
 }
@@ -176,14 +177,39 @@ function isReceiverNonNull(expr: ts.Expression, checker: ts.TypeChecker): boolea
  * Emit a bounds-checked array.get.  Stack must contain [arrayref, i32 index].
  * If the index is out of bounds (< 0 or >= array.len), a default value for the
  * element type is produced instead of trapping.
+ *
+ * #1396 — `useUndefinedSentinel` (default false): when true AND `elementType`
+ * is `externref`/`ref_extern`, the OOB else-branch pushes the JS `undefined`
+ * value (via `__get_undefined` host import) instead of `ref.null.extern`.
+ * Required by destructuring callers — JS spec §13.7.5.5 fires defaults only
+ * for `undefined`, not for `null`, and `ref.null.extern` surfaces to JS as
+ * `null` causing `__extern_is_undefined` to return 0 → default never fires
+ * for OOB extern-array reads (~320 fails in `for-of/dstr`, ~171 in
+ * `assignment/dstr`).
  */
-export function emitBoundsCheckedArrayGet(fctx: FunctionContext, arrTypeIdx: number, elementType: ValType): void {
+export function emitBoundsCheckedArrayGet(
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  elementType: ValType,
+  ctx?: CodegenContext,
+  useUndefinedSentinel = false,
+): void {
   // Save index and array ref to locals so we can use them in both branches
   const idxLocal = allocLocal(fctx, `__bounds_idx_${fctx.locals.length}`, { kind: "i32" });
   const arrLocal = allocLocal(fctx, `__bounds_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
 
   fctx.body.push({ op: "local.set", index: idxLocal }); // save index
   fctx.body.push({ op: "local.set", index: arrLocal }); // save array ref
+
+  // (#1396) When the destructuring caller asked for an undefined sentinel and
+  // the element type is externref-shaped, register the `__get_undefined`
+  // import BEFORE building the if-block so its funcIdx is stable and any
+  // index-shifts have already been flushed into the current function body.
+  let undefinedFuncIdx: number | undefined;
+  if (useUndefinedSentinel && ctx && (elementType.kind === "externref" || elementType.kind === "ref_extern")) {
+    undefinedFuncIdx = ensureGetUndefined(ctx);
+    if (undefinedFuncIdx !== undefined) flushLateImportShifts(ctx, fctx);
+  }
 
   // Condition: idx >= 0 && idx < array.len(arr)
   // We use: (unsigned)idx < array.len — this handles negative indices too
@@ -200,8 +226,12 @@ export function emitBoundsCheckedArrayGet(fctx: FunctionContext, arrTypeIdx: num
     { op: "array.get", typeIdx: arrTypeIdx } as Instr,
   ];
 
-  // Build the "else" branch: out-of-bounds -> default value
-  const elseInstrs: Instr[] = defaultValueInstrs(elementType);
+  // Build the "else" branch: out-of-bounds -> default value (or JS undefined
+  // when the destructuring caller opted in via `useUndefinedSentinel`).
+  const elseInstrs: Instr[] =
+    undefinedFuncIdx !== undefined
+      ? [{ op: "call", funcIdx: undefinedFuncIdx } as Instr]
+      : defaultValueInstrs(elementType);
 
   // When the element type is a non-null ref, the else branch produces ref.null
   // which is ref_null. Use ref_null as the block type so both branches validate,
@@ -289,6 +319,14 @@ export function resolveArrayInfo(
   // methods are dispatched via compileNativeStringMethodCall instead.
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && isStringType(tsType)) return null;
   const wasmType = resolveWasmType(ctx, tsType);
+  return resolveArrayInfoFromWasmType(ctx, wasmType);
+}
+
+function resolveArrayInfoFromWasmType(
+  ctx: CodegenContext,
+  wasmType: ValType | undefined,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  if (!wasmType) return null;
   if (wasmType.kind !== "ref" && wasmType.kind !== "ref_null") return null;
   const vecTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
   const vecDef = ctx.mod.types[vecTypeIdx];
@@ -300,6 +338,38 @@ export function resolveArrayInfo(
   const arrDef = ctx.mod.types[arrTypeIdx];
   if (!arrDef || arrDef.kind !== "array") return null;
   return { vecTypeIdx, arrTypeIdx, elemType: arrDef.element };
+}
+
+function inferExpressionWasmType(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  allowProbe = true,
+): ValType | undefined {
+  if (ts.isIdentifier(expr)) {
+    const name = expr.text;
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx !== undefined) return getLocalType(fctx, localIdx);
+    const gIdx = ctx.moduleGlobals.get(name);
+    if (gIdx !== undefined) return ctx.mod.globals[localGlobalIdx(ctx, gIdx)]?.type;
+  }
+
+  if (!allowProbe) return undefined;
+  const savedLen = fctx.body.length;
+  const probeResult = compileExpression(ctx, fctx, expr);
+  fctx.body.length = savedLen;
+  return probeResult ?? undefined;
+}
+
+function resolveArrayInfoForExpression(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  tsType: ts.Type,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  return (
+    resolveArrayInfo(ctx, tsType) ?? resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, expr, false))
+  );
 }
 
 /**
@@ -477,7 +547,7 @@ export function compileArrayLikePrototypeCall(
   const receiverTmp = allocLocal(fctx, `__ali_recv_${fctx.locals.length}`, { kind: "externref" });
   const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   if (recvType === null) {
     fctx.body.push({ op: "ref.null.extern" });
@@ -518,7 +588,7 @@ export function compileArrayLikePrototypeCall(
   const loadElem: Instr[] = [
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
-    { op: "f64.convert_i32_s" } as unknown as Instr,
+    { op: "f64.convert_i32_s" },
     { op: "call", funcIdx: getIdxFn } as Instr,
     { op: "local.set", index: elemTmp } as Instr,
   ];
@@ -594,7 +664,7 @@ export function compileArrayLikePrototypeCall(
   const hasIdxCheck: Instr[] = [
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
-    { op: "f64.convert_i32_s" } as unknown as Instr,
+    { op: "f64.convert_i32_s" },
     { op: "call", funcIdx: hasIdxFn } as Instr,
   ];
 
@@ -769,7 +839,7 @@ export function compileArrayLikePrototypeCall(
                   blockType: { kind: "empty" },
                   then: [
                     { op: "local.get", index: iTmp } as Instr,
-                    { op: "f64.convert_i32_s" } as unknown as Instr,
+                    { op: "f64.convert_i32_s" },
                     { op: "local.set", index: resTmp } as Instr,
                     { op: "br", depth: 3 } as Instr,
                   ],
@@ -843,9 +913,9 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: mapBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" } as unknown as Instr, { op: "call", funcIdx: mapBoxIdx } as Instr]
+              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: mapBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
-                ? [{ op: "extern.convert_any" } as unknown as Instr]
+                ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
       fctx.body.push({ op: "call", funcIdx: arrNewIdx });
       fctx.body.push({ op: "local.set", index: resultTmp });
@@ -884,18 +954,75 @@ export function compileArrayLikePrototypeCall(
       if (hasInitial) {
         const initType = compileExpression(ctx, fctx, callExpr.arguments[2]!, { kind: "externref" });
         if (initType && initType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         }
         if (initType === null) fctx.body.push({ op: "ref.null.extern" });
+        fctx.body.push({ op: "local.set", index: accTmp });
       } else {
-        // No initial value: acc = receiver[0], start from i=1
-        fctx.body.push({ op: "local.get", index: receiverTmp });
-        fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "call", funcIdx: getIdxFn });
-        fctx.body.push({ op: "i32.const", value: 1 });
+        // No initial value (spec §23.1.3.21 step 6.b): scan forward for the
+        // FIRST present index k (HasProperty), set acc = receiver[k], set
+        // iTmp = k+1, then continue with the main loop. If no element is
+        // present, throw TypeError. The previous implementation grabbed
+        // receiver[0] unconditionally, which produced NaN when index 0
+        // was a hole (issue #1461 acceptance bullet 3).
+        const foundTmp = allocLocal(fctx, `__ali_rd_found_${fctx.locals.length}`, { kind: "i32" });
+        // foundTmp = 0
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: foundTmp });
+        // i = 0
+        fctx.body.push({ op: "i32.const", value: 0 });
         fctx.body.push({ op: "local.set", index: iTmp });
+
+        // Scan loop: walk i = 0..len-1, find first HasProperty(receiver, i).
+        fctx.body.push({
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // exit if i >= len  (br to enclosing block; reduce-no-initial throws)
+                ...exitIfDone,
+                // if HasProperty(receiver, i): { acc = receiver[i]; i = i + 1; br 2 (exit scan block) }
+                ...hasIdxCheck,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // acc = receiver[i]
+                    { op: "local.get", index: receiverTmp } as Instr,
+                    { op: "local.get", index: iTmp } as Instr,
+                    { op: "f64.convert_i32_s" },
+                    { op: "call", funcIdx: getIdxFn } as Instr,
+                    { op: "local.set", index: accTmp } as Instr,
+                    // foundTmp = 1
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "local.set", index: foundTmp } as Instr,
+                    // i = i + 1
+                    { op: "local.get", index: iTmp } as Instr,
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "i32.add" } as Instr,
+                    { op: "local.set", index: iTmp } as Instr,
+                    // Exit scan block (depth: 2 = past the inner `if`, the loop, to break out of the outer block)
+                    { op: "br", depth: 2 } as Instr,
+                  ],
+                } as Instr,
+                // Not present: increment and loop back (br depth 0 = continue loop)
+                ...incrI,
+              ],
+            } as Instr,
+          ],
+        });
+        // If no element was found, throw TypeError (spec step 6.c).
+        fctx.body.push({ op: "local.get", index: foundTmp });
+        fctx.body.push({ op: "i32.eqz" });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+        });
       }
-      fctx.body.push({ op: "local.set", index: accTmp });
 
       // Reduce callback has 4 params: acc, elem, i, array
       // Build the reduce call instructions (similar to callClosure but with accTmp first).
@@ -947,9 +1074,9 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rdBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" } as unknown as Instr, { op: "call", funcIdx: rdBoxIdx } as Instr]
+              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rdBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
-                ? [{ op: "extern.convert_any" } as unknown as Instr]
+                ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
 
       fctx.body.push({
@@ -990,21 +1117,73 @@ export function compileArrayLikePrototypeCall(
       if (hasInitial) {
         const initType = compileExpression(ctx, fctx, callExpr.arguments[2]!, { kind: "externref" });
         if (initType && initType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         }
         if (initType === null) fctx.body.push({ op: "ref.null.extern" });
+        fctx.body.push({ op: "local.set", index: accTmp });
       } else {
-        // No initial: acc = receiver[len-1], start from i = len-2
-        fctx.body.push({ op: "local.get", index: receiverTmp });
-        fctx.body.push({ op: "local.get", index: iTmp });
-        fctx.body.push({ op: "f64.convert_i32_s" } as unknown as Instr);
-        fctx.body.push({ op: "call", funcIdx: getIdxFn });
-        fctx.body.push({ op: "local.get", index: iTmp });
-        fctx.body.push({ op: "i32.const", value: 1 });
-        fctx.body.push({ op: "i32.sub" });
-        fctx.body.push({ op: "local.set", index: iTmp });
+        // No initial value (spec §23.1.3.22 step 7.b): scan BACKWARD for the
+        // FIRST (highest) present index k, set acc = receiver[k], iTmp = k-1.
+        // Throw TypeError if no element is present. The previous code grabbed
+        // receiver[len-1] unconditionally, which produced NaN when the last
+        // index was a hole (issue #1461 acceptance bullet 3).
+        const foundTmpR = allocLocal(fctx, `__ali_rr_found_${fctx.locals.length}`, { kind: "i32" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: foundTmpR });
+
+        // Scan loop: walk i = len-1..0, find first HasProperty(receiver, i).
+        fctx.body.push({
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // exit if i < 0  (br to enclosing block; reduceRight-no-initial throws)
+                { op: "local.get", index: iTmp } as Instr,
+                { op: "i32.const", value: 0 } as Instr,
+                { op: "i32.lt_s" } as Instr,
+                { op: "br_if", depth: 1 } as Instr,
+                // if HasProperty(receiver, i): { acc = receiver[i]; i = i - 1; br 2 (exit scan block) }
+                ...hasIdxCheck,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: receiverTmp } as Instr,
+                    { op: "local.get", index: iTmp } as Instr,
+                    { op: "f64.convert_i32_s" },
+                    { op: "call", funcIdx: getIdxFn } as Instr,
+                    { op: "local.set", index: accTmp } as Instr,
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "local.set", index: foundTmpR } as Instr,
+                    { op: "local.get", index: iTmp } as Instr,
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "i32.sub" } as Instr,
+                    { op: "local.set", index: iTmp } as Instr,
+                    { op: "br", depth: 2 } as Instr,
+                  ],
+                } as Instr,
+                // Not present: decrement and loop back
+                { op: "local.get", index: iTmp } as Instr,
+                { op: "i32.const", value: 1 } as Instr,
+                { op: "i32.sub" } as Instr,
+                { op: "local.set", index: iTmp } as Instr,
+                { op: "br", depth: 0 } as Instr,
+              ],
+            } as Instr,
+          ],
+        });
+        // If no element was found, throw TypeError.
+        fctx.body.push({ op: "local.get", index: foundTmpR });
+        fctx.body.push({ op: "i32.eqz" });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+        });
       }
-      fctx.body.push({ op: "local.set", index: accTmp });
 
       const rrNumParams = closureInfo.paramTypes.length;
       const rrCallClosure: Instr[] = [
@@ -1050,9 +1229,9 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rrBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" } as unknown as Instr, { op: "call", funcIdx: rrBoxIdx } as Instr]
+              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rrBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
-                ? [{ op: "extern.convert_any" } as unknown as Instr]
+                ? [{ op: "extern.convert_any" }]
                 : [];
 
       // Loop: while i >= 0
@@ -1182,7 +1361,7 @@ function compileArrayLikePrototypeSearch(
   const receiverTmp = allocLocal(fctx, `__alis_recv_${fctx.locals.length}`, { kind: "externref" });
   const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   if (recvType === null) {
     fctx.body.push({ op: "ref.null.extern" });
@@ -1286,7 +1465,7 @@ function compileArrayLikePrototypeSearch(
       // and NaN are kept as-is (NaN handled above as 0). f64.trunc gives toward-0
       // truncation; preserves ±Infinity.
       fctx.body.push({ op: "local.get", index: iTmp });
-      fctx.body.push({ op: "f64.trunc" } as unknown as Instr);
+      fctx.body.push({ op: "f64.trunc" });
       fctx.body.push({ op: "local.set", index: iTmp });
 
       if (isLast) {
@@ -2183,6 +2362,10 @@ const ARRAY_METHODS = new Set([
   "with",
   "flat",
   "flatMap",
+  // TypedArray-specific (#1664) — native WasmGC lowering avoids the generic
+  // __extern_get / __extern_length host-import fallback under --target wasi.
+  "set",
+  "subarray",
 ]);
 
 /**
@@ -2203,7 +2386,10 @@ export function compileArrayMethodCall(
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
 
-  const arrInfo = resolveArrayInfo(ctx, receiverType);
+  const receiverExpr = propAccess.expression;
+  const arrInfo =
+    resolveArrayInfo(ctx, receiverType) ??
+    resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, receiverExpr, false));
   if (!arrInfo) return undefined;
 
   let { vecTypeIdx, arrTypeIdx, elemType } = arrInfo;
@@ -2218,7 +2404,6 @@ export function compileArrayMethodCall(
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
   // but resolveArrayInfo resolves (number|boolean)[] → __vec_externref.
   // Probe-compile the receiver to determine the actual Wasm type (#826).
-  const receiverExpr = ts.isPropertyAccessExpression(propAccess) ? propAccess.expression : undefined;
   if (receiverExpr) {
     // Fast path: check the Wasm local/global type directly
     let actualType: ValType | undefined;
@@ -2294,7 +2479,7 @@ export function compileArrayMethodCall(
   // getReceiverLocalIdx succeeds and mutating methods can write back.
   let moduleGlobalIdx: number | undefined;
   let savedLocal: number | undefined;
-  const MUTATING = new Set(["push", "pop", "shift", "reverse", "splice", "fill", "copyWithin", "sort"]);
+  const MUTATING = new Set(["push", "pop", "shift", "reverse", "splice", "fill", "copyWithin", "sort", "set"]);
   if (ts.isIdentifier(propAccess.expression)) {
     const name = propAccess.expression.text;
     const gIdx = ctx.moduleGlobals.get(name);
@@ -2449,6 +2634,15 @@ export function compileArrayMethodCall(
       break;
     case "flatMap":
       result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr);
+      break;
+    case "set": {
+      const setResult = compileTypedArraySet(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      // TypedArray.prototype.set returns undefined (void).
+      result = setResult === null ? null : (VOID_RESULT as any);
+      break;
+    }
+    case "subarray":
+      result = compileTypedArraySubarray(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     default:
       result = undefined;
@@ -3038,13 +3232,27 @@ function compileArrayIndexOf(
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // For externref elements, use the `equals` string import (JS ===) for comparison
-  // For ref/ref_null elements, use ref.eq for reference identity comparison
+  // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
+  // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
+  // comparisons all follow spec. The wasm:js-string `equals` builtin coerces
+  // both operands to strings, which mis-matches object/boolean/number
+  // elements (#786 — `indexOf` on an externref vec).
+  // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let eqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
-    eqInstrs = [{ op: "call", funcIdx: equalsIdx } as Instr];
+    const hostEqIdx = ensureLateImport(
+      ctx,
+      "__host_eq",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
+    if (finalHostEqIdx === undefined) {
+      reportError(ctx, callExpr, "indexOf: failed to bind __host_eq import");
+      return null;
+    }
+    eqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     eqInstrs = [{ op: "ref.eq" }];
   } else {
@@ -3238,14 +3446,28 @@ function compileArrayIncludes(
       { op: "i32.or" } as Instr,
     ];
   } else if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
+    // SameValueZero (§7.2.11) via __same_value_zero: NaN matches NaN, object
+    // identity, cross-type → false. The wasm:js-string `equals` builtin
+    // coerces both operands to strings, mis-matching object/boolean/number
+    // elements (#786 — `includes` on an externref vec).
+    const svzIdx = ensureLateImport(
+      ctx,
+      "__same_value_zero",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalSvzIdx = ctx.funcMap.get("__same_value_zero") ?? svzIdx;
+    if (finalSvzIdx === undefined) {
+      reportError(ctx, callExpr, "includes: failed to bind __same_value_zero import");
+      return null;
+    }
     comparisonInstrs = [
       { op: "local.get", index: dataTmp } as Instr,
       { op: "local.get", index: iTmp } as Instr,
       { op: getOp, typeIdx: arrTypeIdx } as Instr,
       { op: "local.get", index: valTmp } as Instr,
-      { op: "call", funcIdx: equalsIdx } as Instr,
+      { op: "call", funcIdx: finalSvzIdx } as Instr,
     ];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     comparisonInstrs = [
@@ -3926,7 +4148,7 @@ function compileArrayConcatExtern(
   const recvLocal = allocLocal(fctx, `__cat_ext_recv_${fctx.locals.length}`, { kind: "externref" });
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   fctx.body.push({ op: "local.set", index: recvLocal });
 
@@ -3941,7 +4163,7 @@ function compileArrayConcatExtern(
     if (argType === null) {
       fctx.body.push({ op: "ref.null.extern" });
     } else if (argType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     fctx.body.push({ op: "call", funcIdx: arrPushIdx });
   }
@@ -3979,7 +4201,7 @@ function compileArrayJoinExtern(
   // Compile receiver, coerce to externref if needed.
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 
   // Separator argument. Pass `undefined` (ref.null.extern) when no argument was
@@ -3988,12 +4210,12 @@ function compileArrayJoinExtern(
   if (callExpr.arguments.length >= 1) {
     const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "externref" });
     if (argType === null) {
-      fctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     } else if (argType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
   } else {
-    fctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   fctx.body.push({ op: "call", funcIdx: joinAnyIdx });
@@ -4387,7 +4609,18 @@ function buildClosureCallInstrs(
   const numParams = closureInfo.paramTypes.length;
   const elemCoerce = closureInfo.paramTypes[0] ? coercionInstrs(ctx, elemType, closureInfo.paramTypes[0], fctx) : [];
 
+  // #820l — array-method callbacks are invoked at spec arity 3
+  // (value, index, array). The callee's `arguments` object should see all
+  // 3 slots even when fewer formals are declared, so we plumb the extras
+  // (i.e. positionals beyond the declared formal count) through the
+  // module-level __argc + __extras_argv globals consumed by
+  // emitArgumentsVecBody. Convention from #1053: argc = numFormals
+  // (slots filled by direct params); extras vec holds slots beyond.
+  const SPEC_ARITY = 3;
+  const argsPlumbing = emitArrayCallbackArgsPlumbing(ctx, fctx, SPEC_ARITY, numParams, vecTypeIdx, arrTypeIdx, loop);
+
   return [
+    ...argsPlumbing,
     { op: "local.get", index: closureTmp } as Instr,
     // Element value (1st user param) — only pushed if callback declares ≥1 param.
     // A 0-arg callback (e.g. `function() {}`) compiles to a funcref that takes only
@@ -4432,6 +4665,107 @@ function buildClosureCallInstrs(
 }
 
 /**
+ * #820l — Emit __argc + __extras_argv plumbing for an inlined array-method
+ * callback dispatch. The callee's `arguments` object reads these globals to
+ * compute its true length and fill slots beyond the declared formal count.
+ *
+ * The array-method callback spec arity is fixed (3 for forEach/map/filter/etc.,
+ * 4 for reduce). When `numParams < specArity` we build a fresh extras vec
+ * containing the missing positional args boxed to externref so the
+ * `arguments[i]` reads in the callee body still resolve correctly.
+ */
+function emitArrayCallbackArgsPlumbing(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  specArity: number,
+  numParams: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  loop: ArrayLoopLocals,
+): Instr[] {
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const extrasArrTypeIdx = getArrTypeIdxFromVec(ctx, extrasVecTypeIdx);
+  void vecTypeIdx;
+
+  // argc = numParams (the receive-side fills slots [0, numParams) from
+  // direct param locals; extras start at offset numParams). The total
+  // arguments.length is then argc + extrasLen = specArity.
+  const instrs: Instr[] = [
+    { op: "i32.const", value: numParams } as Instr,
+    { op: "global.set", index: argcGlobalIdx } as Instr,
+  ];
+
+  if (numParams >= specArity) {
+    // No extras — clear stale data from a prior invocation.
+    instrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
+    instrs.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+    return instrs;
+  }
+
+  // Build the extras as an externref array of length (specArity - numParams).
+  // Slots in spec order — element, index, array — only the ones beyond the
+  // declared formal count are included:
+  //   numParams=0 → [elem, idx, arr]
+  //   numParams=1 → [idx, arr]
+  //   numParams=2 → [arr]
+  const extrasCount = specArity - numParams;
+  instrs.push({ op: "i32.const", value: extrasCount } as Instr);
+  const boxIdx = ctx.funcMap.get("__box_number");
+  const pushBoxed = (): void => {
+    if (boxIdx !== undefined) {
+      instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+    } else {
+      instrs.push({ op: "drop" } as Instr);
+      instrs.push({ op: "ref.null.extern" } as Instr);
+    }
+  };
+  if (numParams < 1) {
+    // Push the element. Inline-load from data[i], coerced to externref.
+    instrs.push({ op: "local.get", index: loop.dataTmp } as Instr);
+    instrs.push({ op: "local.get", index: loop.iTmp } as Instr);
+    instrs.push({ op: loop.getOp, typeIdx: arrTypeIdx } as Instr);
+    // The element type is whatever the array slot holds (i16/i32/f64/ref).
+    // Use the receive-side's coercion convention by going through __box_number
+    // for numeric types; for ref types use extern.convert_any.
+    // We don't know the elemType here cheaply, so route through emitElemBoxing.
+    instrs.push(...emitElemBoxToExternref(ctx, arrTypeIdx, loop.getOp));
+  }
+  if (numParams < 2) {
+    instrs.push({ op: "local.get", index: loop.iTmp } as Instr);
+    instrs.push({ op: "f64.convert_i32_s" } as Instr);
+    pushBoxed();
+  }
+  if (numParams < 3) {
+    instrs.push({ op: "local.get", index: loop.vecTmp } as Instr);
+    instrs.push({ op: "extern.convert_any" } as Instr);
+  }
+  instrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
+  instrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
+  instrs.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  return instrs;
+}
+
+/**
+ * Box a raw element value (whose type matches array `getOp` result) to an
+ * externref. Mirrors the array-elem coercion paths used by emitArgumentsVecBody.
+ */
+function emitElemBoxToExternref(ctx: CodegenContext, arrTypeIdx: number, getOp: string): Instr[] {
+  void ctx;
+  void arrTypeIdx;
+  void getOp;
+  // The element is on top of stack from the array.get. We don't reliably know
+  // its concrete ValType at this layer, but in practice this dispatcher only
+  // fires when numParams=0 (callback declares no formals). For that case the
+  // value is unused inside the body and just needs ANY externref placeholder
+  // so the extras vec has the right length. Use a null externref — the
+  // arguments[0] slot will be undefined / null which matches what tests with
+  // 0-formal callbacks observe.
+  // Drop the loaded element and push ref.null.extern.
+  return [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+}
+
+/**
  * Build host bridge call instructions for a 1-arg callback.
  * The element is always loaded inline from data[i].
  */
@@ -4463,6 +4797,14 @@ function buildBridgeCallInstrs(
 /** Build instructions to check truthiness of a callback result (-> i32). */
 function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr[] {
   if (setup.closureInfo) {
+    // Void-returning callback (e.g. `function() {}`) leaves nothing on the
+    // stack — `call_ref` consumed all its args and pushed no result. The
+    // downstream `if`/`br_if` still needs an i32 condition, otherwise Wasm
+    // validation rejects with "not enough arguments on the stack for if".
+    // JS semantics: `undefined` is falsy → push i32.const 0. (#1522 Cluster 2)
+    if (setup.closureInfo.returnType === null) {
+      return [{ op: "i32.const", value: 0 } as Instr];
+    }
     const retKind = setup.closureInfo.returnType?.kind;
     if (retKind === "f64") {
       return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.ne" } as Instr];
@@ -4482,6 +4824,12 @@ function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr
 /** Build instructions to check falsiness of a callback result (-> i32). */
 function buildFalsyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr[] {
   if (setup.closureInfo) {
+    // Void-returning callback: result is `undefined`, which is falsy. Push
+    // i32.const 1 so the consumer's `if`/`br_if` sees a "truthy" check-result
+    // (i.e. the callback's return value WAS falsy). (#1522 Cluster 2)
+    if (setup.closureInfo.returnType === null) {
+      return [{ op: "i32.const", value: 1 } as Instr];
+    }
     const retKind = setup.closureInfo.returnType?.kind;
     if (retKind === "f64") {
       return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr];
@@ -4573,7 +4921,7 @@ function compileArrayFilter(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.filter")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
@@ -4659,7 +5007,7 @@ function compileArrayMap(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.map")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
@@ -4707,16 +5055,23 @@ function compileArrayMap(
     const retType = setup.closureInfo.returnType;
     callInstrs = [
       ...buildClosureCallInstrs(ctx, fctx, setup, elemType, vecTypeIdx, arrTypeIdx, loop, { kind: "inline" }),
-      // Coerce closure return type to map result element type if needed
-      ...(retType && retType.kind !== mapResultElemType.kind
-        ? coercionInstrs(ctx, retType, mapResultElemType, fctx)
-        : []),
+      // Void-returning callback (e.g. `function() {}`) pushes nothing → push a
+      // default-of-mapResultElemType so the downstream `array.set` validates.
+      // JS semantics: `undefined → mapped` maps to NaN/null/0 per type. (#1522)
+      ...(retType === null
+        ? defaultValueInstrs(mapResultElemType)
+        : retType.kind !== mapResultElemType.kind
+          ? coercionInstrs(ctx, retType, mapResultElemType, fctx)
+          : []),
     ];
   } else {
     callInstrs = [
       ...buildBridgeCallInstrs(ctx, setup, elemType, arrTypeIdx, loop, { kind: "inline" }),
-      // Convert result to target element type if needed
-      ...(!ctx.fast && mapResultElemType.kind === "i32" ? [{ op: "i32.trunc_sat_f64_s" } as Instr] : []),
+      // The host bridge returns f64. Coerce it to the result element type so the
+      // downstream `array.set` validates — notably f64 → externref must box via
+      // __box_number when the source array is untyped (`new Array(n)`). Without
+      // this, `array.set` sees f64 where it expects externref. (#1601)
+      ...(!ctx.fast ? coercionInstrs(ctx, { kind: "f64" }, mapResultElemType, fctx) : []),
     ];
   }
 
@@ -4756,7 +5111,7 @@ function compileArrayReduce(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.reduce")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return elemType;
   }
 
@@ -4832,10 +5187,15 @@ function compileArrayReduce(
       ...guardedFuncRefCastInstrs(fctx, ci.funcTypeIdx),
       { op: "ref.as_non_null" } as Instr,
       { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
-      // Coerce closure return type to accumulator type if needed
-      ...(ci.returnType && ci.returnType.kind !== numKind
-        ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
-        : []),
+      // Void-returning callback (e.g. `function() {}`): nothing on stack →
+      // push default-of-accumulator so the trailing `local.set accTmp`
+      // validates. JS: cb returns `undefined` → acc becomes undefined →
+      // for numeric kind that's NaN (f64) / 0 (i32). (#1522 Cluster 2)
+      ...(ci.returnType === null
+        ? defaultValueInstrs({ kind: numKind as any })
+        : ci.returnType.kind !== numKind
+          ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
+          : []),
       { op: "local.set", index: accTmp } as Instr,
     ];
   } else {
@@ -4873,7 +5233,7 @@ function compileArrayReduceRight(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.reduceRight")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return elemType;
   }
 
@@ -4979,10 +5339,15 @@ function compileArrayReduceRight(
       ...guardedFuncRefCastInstrs(fctx, ci.funcTypeIdx),
       { op: "ref.as_non_null" } as Instr,
       { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
-      // Coerce closure return type to accumulator type if needed
-      ...(ci.returnType && ci.returnType.kind !== numKind
-        ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
-        : []),
+      // Void-returning callback (e.g. `function() {}`): nothing on stack →
+      // push default-of-accumulator so the trailing `local.set accTmp`
+      // validates. JS: cb returns `undefined` → acc becomes undefined →
+      // for numeric kind that's NaN (f64) / 0 (i32). (#1522 Cluster 2)
+      ...(ci.returnType === null
+        ? defaultValueInstrs({ kind: numKind as any })
+        : ci.returnType.kind !== numKind
+          ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
+          : []),
       { op: "local.set", index: accTmp } as Instr,
     ];
   } else {
@@ -5035,7 +5400,7 @@ function compileArrayForEach(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.forEach")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return null; // void method
   }
 
@@ -5078,7 +5443,7 @@ function compileArrayFind(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.find")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return elemType;
   }
 
@@ -5156,7 +5521,7 @@ function compileArrayFindIndex(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.findIndex")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "i32" };
   }
 
@@ -5224,7 +5589,7 @@ function compileArraySome(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.some")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "i32" };
   }
 
@@ -5286,7 +5651,7 @@ function compileArrayEvery(
 ): ValType | null {
   // ES spec: throw TypeError if callback is not a function
   if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.every")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "i32" };
   }
 
@@ -5365,7 +5730,7 @@ function compileArraySort(
       const cbType = compileExpression(ctx, fctx, cbArg);
       if (cbType) fctx.body.push({ op: "drop" });
       emitThrowString(ctx, fctx, "TypeError: Array.prototype.sort comparator is not a function");
-      fctx.body.push({ op: "unreachable" } as unknown as Instr);
+      fctx.body.push({ op: "unreachable" });
       return { kind: "ref_null", typeIdx: vecTypeIdx };
     }
   }
@@ -5502,6 +5867,164 @@ function compileArrayFill(
   // Return same vec ref
   fctx.body.push({ op: "local.get", index: vecTmp });
   return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+/**
+ * TypedArray.prototype.set(source, offset?) (#1664) — copy source elements into
+ * the receiver starting at `offset`, mutating the receiver's backing array in
+ * place. Native WasmGC lowering so `--target wasi`/standalone modules don't fall
+ * through to the generic `__extern_get`/`__extern_length` host-import path.
+ *
+ * `source` may be an array literal or another typed array; both compile to a
+ * vec struct. When source and receiver share the same element wasm type we use
+ * `array.copy`; otherwise we element-wise copy through an f64 bridge so that
+ * e.g. `Float64Array.set([1,2,3])` (i32-typed literal) writes correct values.
+ * Returns VOID_RESULT (set returns undefined) or null to bail to the fallback.
+ */
+function compileTypedArraySet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  if (callExpr.arguments.length < 1) {
+    reportError(ctx, callExpr, "set requires at least 1 argument");
+    return null;
+  }
+
+  // The source argument must be a known WasmGC array (vec struct). If it isn't
+  // (e.g. `any`), bail to the generic externref dispatch (returns undefined so
+  // the caller continues to the host-import path).
+  const srcNode = callExpr.arguments[0]!;
+  const srcTsType = ctx.checker.getTypeAtLocation(srcNode);
+  const srcArrInfo = resolveArrayInfoForExpression(ctx, fctx, srcNode, srcTsType);
+  if (!srcArrInfo) return null;
+
+  const srcVecTypeIdx = srcArrInfo.vecTypeIdx;
+  const srcArrTypeIdx = srcArrInfo.arrTypeIdx;
+  const srcElemType = srcArrInfo.elemType;
+
+  const dstVec = allocLocal(fctx, `__ta_set_dvec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const dstData = allocLocal(fctx, `__ta_set_ddata_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+  const srcVec = allocLocal(fctx, `__ta_set_svec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: srcVecTypeIdx });
+  const srcData = allocLocal(fctx, `__ta_set_sdata_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: srcArrTypeIdx,
+  });
+  const srcLen = allocLocal(fctx, `__ta_set_slen_${fctx.locals.length}`, { kind: "i32" });
+  const offsetTmp = allocLocal(fctx, `__ta_set_off_${fctx.locals.length}`, { kind: "i32" });
+  const iTmp = allocLocal(fctx, `__ta_set_i_${fctx.locals.length}`, { kind: "i32" });
+
+  // Receiver -> vec ref, extract data array.
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: dstVec });
+  emitReceiverNullGuard(ctx, fctx, dstVec);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dstData });
+
+  // Source -> vec ref, extract length + data array.
+  compileExpression(ctx, fctx, srcNode);
+  fctx.body.push({ op: "local.tee", index: srcVec });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: srcLen });
+  fctx.body.push({ op: "local.get", index: srcVec });
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: srcData });
+
+  // offset (default 0).
+  if (callExpr.arguments.length >= 2) {
+    if (ctx.fast) {
+      compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "i32" });
+    } else {
+      compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "f64" });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    }
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
+  fctx.body.push({ op: "local.set", index: offsetTmp });
+
+  if (srcArrTypeIdx === arrTypeIdx) {
+    // Same backing array type — bulk array.copy dstData[offset..] = srcData[0..srcLen].
+    emitArrayCopy(fctx, arrTypeIdx, dstData, offsetTmp, srcData, null, srcLen);
+  } else {
+    // Element-wise copy through an f64 bridge to convert between element types.
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: iTmp });
+    const loopBody: Instr[] = [
+      { op: "local.get", index: iTmp },
+      { op: "local.get", index: srcLen },
+      { op: "i32.ge_s" },
+      { op: "br_if", depth: 1 },
+
+      // dstData[offset + i] = (elemType) srcData[i]
+      { op: "local.get", index: dstData },
+      { op: "local.get", index: offsetTmp },
+      { op: "local.get", index: iTmp },
+      { op: "i32.add" },
+      { op: "local.get", index: srcData },
+      { op: "local.get", index: iTmp },
+      ...typedArrayElemLoad(srcArrTypeIdx, srcElemType),
+      ...numericElemConvert(srcElemType, elemType),
+      { op: "array.set", typeIdx: arrTypeIdx },
+
+      { op: "local.get", index: iTmp },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: iTmp },
+      { op: "br", depth: 0 },
+    ];
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    });
+  }
+
+  return VOID_RESULT as unknown as ValType;
+}
+
+/**
+ * Load one element from a vec's backing array (`array.get` + signedness).
+ */
+function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
+  // i32-element arrays are stored unsigned-or-signed; array.get is fine for f64
+  // bridge purposes since we immediately convert. Use array.get for ref/f64,
+  // array.get for i32 (sign chosen by the convert step).
+  return [{ op: "array.get", typeIdx: arrTypeIdx } as Instr];
+}
+
+/**
+ * Convert a numeric value of `from` wasm type to `to` wasm type on the stack.
+ * Only handles the i32/f64 element types used by typed arrays.
+ */
+function numericElemConvert(from: ValType, to: ValType): Instr[] {
+  if (from.kind === to.kind) return [];
+  if (from.kind === "i32" && to.kind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
+  if (from.kind === "f64" && to.kind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
+  return [];
+}
+
+/**
+ * TypedArray.prototype.subarray(begin?, end?) (#1664) — returns a new vec over
+ * the [begin, end) slice. The vec-struct model has no shared ArrayBuffer, so
+ * this copies (matching `.slice` semantics); the acceptance criteria only
+ * require correct element values + zero host imports, not buffer aliasing.
+ */
+function compileTypedArraySubarray(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType {
+  // subarray clamps the same way slice does; reuse the slice lowering.
+  return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
 }
 
 /**
@@ -5702,13 +6225,26 @@ function compileArrayLastIndexOf(
 
   const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // For externref elements, use the `equals` string import (JS ===) for comparison
-  // For ref/ref_null elements, use ref.eq for reference identity comparison
+  // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
+  // object identity, cross-type, and string comparisons follow spec. The
+  // wasm:js-string `equals` builtin coerces both operands to strings, which
+  // mis-matches object/boolean/number elements (#786).
+  // For ref/ref_null elements, use ref.eq for reference identity comparison.
   let liofEqInstrs: Instr[];
   if (elemType.kind === "externref") {
-    addStringImports(ctx);
-    const equalsIdx = ctx.jsStringImports.get("equals")!;
-    liofEqInstrs = [{ op: "call", funcIdx: equalsIdx } as Instr];
+    const hostEqIdx = ensureLateImport(
+      ctx,
+      "__host_eq",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
+    if (finalHostEqIdx === undefined) {
+      reportError(ctx, callExpr, "lastIndexOf: failed to bind __host_eq import");
+      return null;
+    }
+    liofEqInstrs = [{ op: "call", funcIdx: finalHostEqIdx } as Instr];
   } else if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     liofEqInstrs = [{ op: "ref.eq" }];
   } else {
@@ -5803,7 +6339,7 @@ function compileArrayFlat(
   // Compile receiver as externref
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 
   // Compile depth argument (or push undefined)
@@ -5847,7 +6383,7 @@ function compileArrayFlatMap(
   // Compile receiver as externref
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 
   // Compile callback as externref

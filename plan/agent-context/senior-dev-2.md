@@ -20,7 +20,7 @@
 
 ## #1343 follow-up slices (not done — for next dev)
 
-The issue file `plan/issues/sprints/50/1343-spec-gap-date-prototype-formatters.md` has the full revised 5-slice plan. Slice 2 landed; remaining:
+The issue file `plan/issues/1343-spec-gap-date-prototype-formatters.md` has the full revised 5-slice plan. Slice 2 landed; remaining:
 
 - **Slice 1**: NaN propagation / Invalid Date sentinel (~7 fails). The current Date impl uses `i64.trunc_sat_f64_s` which silently turns NaN into 0 — there's no Invalid Date sentinel. Adding one requires touching all getters and setters consistently (use `i64.MIN` as sentinel or switch struct field to f64).
 - **Slice 3**: calendar setters `setDate` / `setMonth` / `setFullYear` and UTC variants (~36 fails). Need a new helper `__date_components_from_timestamp` that returns (y, mo, d, h, mi, s, ms) so the existing `__date_days_from_civil` can recompose with replaced fields.

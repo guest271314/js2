@@ -19,7 +19,7 @@
 
 ## Commit verification
 
-Include the phrase **Checklist completed.** in your commit message (anywhere in the message body). The pre-commit hook will reject commits without it.
+End your commit message with a **✓** (checkmark) once you've completed the checklist. The pre-commit hook rejects commits without it.
 
 ## Red flags (stop and ask tech lead)
 

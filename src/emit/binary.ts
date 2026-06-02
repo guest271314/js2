@@ -804,6 +804,12 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
     case "f64.reinterpret_i64":
       enc.byte(OP.f64_reinterpret_i64);
       break;
+    case "i32.reinterpret_f32":
+      enc.byte(OP.i32_reinterpret_f32);
+      break;
+    case "f32.reinterpret_i32":
+      enc.byte(OP.f32_reinterpret_i32);
+      break;
     case "f64.const":
       enc.byte(OP.f64_const);
       enc.f64(instr.value);

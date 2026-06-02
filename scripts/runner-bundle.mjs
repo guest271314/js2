@@ -64094,7 +64094,7 @@ async function handleNegativeTest(source, meta, relPath, category) {
     let compileMs = 0;
     const compileStart = performance.now();
     try {
-      const result = compile(minimalWrapped, {
+      const result = await compile(minimalWrapped, {
         fileName: "test.ts",
         emitWat: false,
       });
@@ -64309,7 +64309,7 @@ async function runTest262File(filePath, category, timeoutMs = TEST_TIMEOUT_MS) {
   const compileStart = performance.now();
   let compileMs = 0;
   try {
-    result = compile(wrappedSource, {
+    result = await compile(wrappedSource, {
       fileName: "test.ts",
       sourceMap: true,
       emitWat: false,

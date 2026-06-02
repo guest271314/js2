@@ -135,7 +135,13 @@ export function compileArrowAsClosure(
 
 // ── emitBoundsCheckedArrayGet ─────────────────────────────────────────
 
-type EmitBoundsCheckedArrayGetFn = (fctx: FunctionContext, arrTypeIdx: number, elementType: ValType) => void;
+type EmitBoundsCheckedArrayGetFn = (
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  elementType: ValType,
+  ctx?: CodegenContext,
+  useUndefinedSentinel?: boolean,
+) => void;
 
 let _emitBoundsCheckedArrayGet: EmitBoundsCheckedArrayGetFn = () => {
   throw new Error("emitBoundsCheckedArrayGet not yet registered");
@@ -145,8 +151,14 @@ export function registerEmitBoundsCheckedArrayGet(fn: EmitBoundsCheckedArrayGetF
   _emitBoundsCheckedArrayGet = fn;
 }
 
-export function emitBoundsCheckedArrayGet(fctx: FunctionContext, arrTypeIdx: number, elementType: ValType): void {
-  _emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType);
+export function emitBoundsCheckedArrayGet(
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  elementType: ValType,
+  ctx?: CodegenContext,
+  useUndefinedSentinel?: boolean,
+): void {
+  _emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, useUndefinedSentinel);
 }
 
 // ── resolveEnclosingClassName ─────────────────────────────────────────
@@ -256,6 +268,26 @@ let _ensureAnyHelpers: EnsureAnyHelpersFn = () => {
 
 export function registerEnsureAnyHelpers(fn: EnsureAnyHelpersFn): void {
   _ensureAnyHelpers = fn;
+}
+
+// ── addUnionImports (lazy binding to avoid index.ts ↔ late-imports.ts cycle) ──
+// #1471: late-imports.ts needs to route box/unbox/typeof/is_truthy helper
+// names to the in-module native funcs under no-JS-host mode, but
+// addUnionImports lives in index.ts which already imports ensureLateImport.
+// Break the cycle the same way ensureAnyHelpers does.
+
+type AddUnionImportsFn = (ctx: CodegenContext) => void;
+
+let _addUnionImports: AddUnionImportsFn = () => {
+  throw new Error("addUnionImports not yet registered");
+};
+
+export function registerAddUnionImports(fn: AddUnionImportsFn): void {
+  _addUnionImports = fn;
+}
+
+export function addUnionImportsViaRegistry(ctx: CodegenContext): void {
+  _addUnionImports(ctx);
 }
 
 export function ensureAnyHelpers(ctx: CodegenContext): void {
@@ -371,6 +403,7 @@ type EmitDefaultValueCheckFn = (
   localIdx: number,
   initializer: ts.Expression,
   targetType?: ValType,
+  objectPropertySemantics?: boolean,
 ) => void;
 
 let _emitDefaultValueCheck: EmitDefaultValueCheckFn = () => {
@@ -388,8 +421,9 @@ export function emitDefaultValueCheck(
   localIdx: number,
   initializer: ts.Expression,
   targetType?: ValType,
+  objectPropertySemantics?: boolean,
 ): void {
-  _emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, initializer, targetType);
+  _emitDefaultValueCheck(ctx, fctx, fieldType, localIdx, initializer, targetType, objectPropertySemantics);
 }
 
 // ── emitArgumentsObject ───────────────────────────────────────────────
@@ -399,6 +433,7 @@ type EmitArgumentsObjectFn = (
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped?: boolean,
 ) => void;
 
 let _emitArgumentsObject: EmitArgumentsObjectFn = () => {
@@ -409,13 +444,19 @@ export function registerEmitArgumentsObject(fn: EmitArgumentsObjectFn): void {
   _emitArgumentsObject = fn;
 }
 
+/**
+ * `unmapped`: when true (strict-mode functions, §10.4.4) the param↔arguments
+ * sync is suppressed so writes to `arguments[i]` do not flow back into the
+ * named parameter (#779e). Defaults to false (sloppy, mapped).
+ */
 export function emitArgumentsObject(
   ctx: CodegenContext,
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped = false,
 ): void {
-  _emitArgumentsObject(ctx, fctx, paramTypes, paramOffset);
+  _emitArgumentsObject(ctx, fctx, paramTypes, paramOffset, unmapped);
 }
 
 // ── compileStringLiteral ──────────────────────────────────────────────

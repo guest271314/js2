@@ -4,6 +4,16 @@ import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
+declare const __JS2WASM_CLI_VERSION__: string | undefined;
+
+function getCliVersion(): string {
+  const bundledVersion = typeof __JS2WASM_CLI_VERSION__ === "string" ? __JS2WASM_CLI_VERSION__ : undefined;
+  if (bundledVersion) return bundledVersion;
+  const require = createRequire(import.meta.url);
+  const pkg = require("../package.json") as { version?: string };
+  return pkg.version ?? "0.0.0";
+}
+
 const args = process.argv.slice(2);
 
 // `--ts7` swaps the parser/checker frontend to `@typescript/native-preview`
@@ -18,9 +28,7 @@ const { compile } = await import("./index.js");
 const { buildDefaultDefines } = await import("./compiler/define-substitution.js");
 
 if (args.includes("--version") || args.includes("-v")) {
-  const require = createRequire(import.meta.url);
-  const pkg = require("../package.json");
-  console.log(pkg.version);
+  console.log(getCliVersion());
   process.exit(0);
 }
 
@@ -31,13 +39,30 @@ Compile a TypeScript file to WebAssembly (GC proposal).
 
 Options:
   -o, --out <dir>   Output directory (default: same as input)
-  --target <t>      Compilation target: gc (default), linear, wasi
+  --target <t>      Compilation target: gc (default), linear, wasi, standalone
+  --standalone      Shorthand for --target standalone (pure WasmGC, no JS host,
+                    no WASI). Forces nativeStrings: true and refuses to emit
+                    wasm:js-string or env JS-host imports.
+  --allow-fs        Allow node:fs JS-host imports (readFileSync, writeFileSync)
+                    for non-WASI targets (#1491). Off by default to prevent
+                    accidental capability leakage.
+  --utf8-storage    Dual i8/i16 string storage (#1588): store strings proven
+                    UTF-8 (literals, JSON, decoder results, ...) as i8-backed
+                    Utf8String for a cheaper Component Model boundary. Implies
+                    nativeStrings on the WasmGC backend. Off by default
+                    (byte-identical output when off).
   --wat             Emit only WAT (no binary)
   --no-wat          Skip WAT output
   --no-dts          Skip .d.ts output
   --wit             Generate WIT interface file for Component Model
   -O, --optimize    Run Binaryen wasm-opt optimizer (default: -O3)
   -O1..-O4          Set optimization level (1-4)
+  --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
+                    the allowlist (#1524). Implied by --target wasi.
+  --allow-host-imports
+                    Escape hatch: disable strict dual-mode for a WASI build
+                    (debug-only). Useful when temporarily mixing host + WASI
+                    imports while migrating to standalone mode.
   --define K=V      Substitute identifier path K with literal V before parsing.
                     Repeatable. Example:
                       --define process.env.NODE_ENV='"production"'
@@ -49,6 +74,7 @@ Options:
   --ts7             Use @typescript/native-preview (TypeScript 7 Go-port) as
                     the parser/checker frontend (preview; full migration
                     tracked in #1029). Equivalent to JS2WASM_TS7=1.
+  -q, --quiet       Suppress the post-compile "how to run" hint
   -v, --version     Print version and exit
   -h, --help        Show this help
 
@@ -67,8 +93,15 @@ let emitWat = true;
 let emitDts = true;
 let watOnly = false;
 let optimize: boolean | 1 | 2 | 3 | 4 = false;
-let target: "gc" | "linear" | "wasi" | undefined;
+let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
 let emitWit = false;
+let allowFs = false;
+let quiet = false;
+let utf8Storage = false;
+// #1524 — dual-mode strict gate. `undefined` = let the compiler use its
+// default (strict-on under `--target wasi`); `true` / `false` = explicit
+// override from `--no-host-imports` / `--allow-host-imports`.
+let strictNoHostImports: boolean | undefined;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
@@ -77,12 +110,14 @@ for (let i = 0; i < args.length; i++) {
     outDir = args[++i];
   } else if (arg === "--target") {
     const t = args[++i];
-    if (t === "gc" || t === "linear" || t === "wasi") {
+    if (t === "gc" || t === "linear" || t === "wasi" || t === "standalone") {
       target = t;
     } else {
-      console.error(`Unknown target: ${t} (expected gc, linear, or wasi)`);
+      console.error(`Unknown target: ${t} (expected gc, linear, wasi, or standalone)`);
       process.exit(1);
     }
+  } else if (arg === "--standalone") {
+    target = "standalone";
   } else if (arg === "--wat") {
     watOnly = true;
   } else if (arg === "--no-wat") {
@@ -91,6 +126,16 @@ for (let i = 0; i < args.length; i++) {
     emitDts = false;
   } else if (arg === "--wit") {
     emitWit = true;
+  } else if (arg === "--allow-fs") {
+    allowFs = true;
+  } else if (arg === "--quiet" || arg === "-q") {
+    quiet = true;
+  } else if (arg === "--utf8-storage") {
+    utf8Storage = true;
+  } else if (arg === "--no-host-imports") {
+    strictNoHostImports = true;
+  } else if (arg === "--allow-host-imports") {
+    strictNoHostImports = false;
   } else if (arg === "-O" || arg === "--optimize") {
     optimize = true;
   } else if (/^-O[1-4]$/.test(arg)) {
@@ -138,15 +183,26 @@ if (!inputPath) {
   process.exit(1);
 }
 
+// #1554 — `--standalone` refuses all JS-host imports; `--allow-fs` enables
+// node:fs JS-host imports. Combining them silently violates standalone mode,
+// so reject at parse time.
+if (target === "standalone" && allowFs) {
+  console.error("error: --standalone and --allow-fs are mutually exclusive");
+  process.exit(1);
+}
+
 const absInput = resolve(inputPath);
 const source = readFileSync(absInput, "utf-8");
 const name = basename(absInput, ".ts");
 const dir = outDir ? resolve(outDir) : dirname(absInput);
 
-const result = compile(source, {
+const result = await compile(source, {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
   ...(emitWit ? { wit: true } : {}),
+  ...(allowFs ? { allowFs: true } : {}),
+  ...(utf8Storage ? { utf8Storage: true } : {}),
+  ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
 });
 
@@ -170,10 +226,12 @@ if (watOnly) {
   process.exit(0);
 }
 
+let emittedWasmPath: string | undefined;
 if (emitWasm) {
   const wasmPath = resolve(dir, `${name}.wasm`);
   writeFileSync(wasmPath, result.binary);
   console.log(`${wasmPath}  (${result.binary.byteLength} bytes)`);
+  emittedWasmPath = wasmPath;
 }
 
 if (emitWat) {
@@ -198,4 +256,25 @@ if (emitWit && result.wit) {
   const witPath = resolve(dir, `${name}.wit`);
   writeFileSync(witPath, result.wit);
   console.log(`${witPath}  (${result.wit.length} chars)`);
+}
+
+// Post-compile run hint (#1590). Tells the user how to actually execute the
+// output, which otherwise requires trial-and-error (Wasmtime needs explicit
+// proposal flags; JS-host output needs the generated imports helper). Suppress
+// with --quiet for scripted use.
+if (!quiet && emittedWasmPath) {
+  if (target === "wasi" || target === "standalone" || target === "linear") {
+    // Pure Wasm, no JS host required — runnable directly under Wasmtime.
+    console.log(`\nTo run: wasmtime -W all-proposals=y ${emittedWasmPath}`);
+  } else {
+    // Default (gc) target emits JS-host imports; needs the generated helper.
+    console.log(
+      `\nThis is a JS-host build (default --target gc) — it needs the generated` +
+        ` ${name}.imports.js helper. To run with Node.js:\n` +
+        `  node --experimental-wasm-imported-strings -e "import('./${name}.imports.js')` +
+        `.then(async ({ createImports }) => { const { instance } = await WebAssembly.instantiate(` +
+        `require('fs').readFileSync('${emittedWasmPath}'), createImports()); /* call instance.exports.* */ })"\n` +
+        `For a pure-Wasm build runnable under Wasmtime, recompile with --standalone.`,
+    );
+  }
 }

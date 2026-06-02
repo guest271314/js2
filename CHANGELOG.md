@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+### Added: relocatable standalone CLI bundle (#1775, GH #986 follow-up)
+
+- Added `pnpm run build:standalone-cli`, which writes
+  `dist/js2wasm-standalone.mjs` for `deno compile` / `bun build --compile`
+  workflows. This build bundles the core compiler dependencies and injects
+  TypeScript's `lib.*.d.ts` files into the existing bundled-lib hook, so the
+  generated file does not need to stay next to `node_modules/typescript/lib`.
+- Standalone bundles now get the package version injected at build time, so
+  `--version` does not rely on `../package.json` after the file is moved.
+- Binaryen is now an optional peer/dev dependency and is no longer bundled into
+  the standalone CLI artifact; `-O` can use an installed `binaryen` package or a
+  `wasm-opt` binary on PATH, and the emitted `.wasm` can be optimized afterward.
+- The standalone docs now recommend `--minify`, which brings the no-Binaryen
+  bundle down to roughly 8.5 MB before native runtime embedding.
+
+### Breaking: `compile()` API is now async (#1757)
+
+- The public compiler entry points — `compile`, `compileMulti`, `compileFiles`,
+  `compileToWat`, `compileProject`, and `createIncrementalCompiler().compile`
+  (plus the lower-level `compileSource` / `compileMultiSource` /
+  `compileFilesSource`) — now return a `Promise`. **Every caller must `await`
+  them.** A synchronous `compileSourceSync` (no Binaryen optimization) is
+  retained for the few contexts that cannot await (the `eval` host shim).
+- **Why:** the optional Binaryen optimizer now loads via
+  `await import("binaryen")` instead of a synchronous `require`. Binaryen ships
+  a top-level `await` that a sync `require` cannot load, which is what blocked
+  embedding it in a `bun build --compile` / `deno compile` standalone binary
+  (GH #986). With the async path the optimizer is bundled and the single-file
+  binary runs `--optimize` with Binaryen embedded — no `wasm-opt` on `PATH`
+  required. Follow-up to the #1756 `createRequire` stopgap.
+
+  Migration: `const r = compile(src)` → `const r = await compile(src)`.
+
+### Repository rename
+
+- The repo has been renamed `loopdive/js2wasm` → `loopdive/js2`.
+  GitHub provides a permanent redirect for the old URL, so existing
+  clones and PR links continue to work. New clones and CI should use
+  the new name. The `loopdive/js2wasm-baselines` baselines repo is
+  tracked separately and will be renamed in a follow-up.
+
 ## Historical sprint tags
 
 This file records the historical sprint boundary tags created from the sprint history in `plan/sprints/` and the Git history on `main`.
@@ -1341,3 +1384,42 @@ Latest complete archived full-suite entry: `20260331-215747` from [benchmarks/re
 - #876 Sprint dashboard — kanban board, burndown, agent status, metrics
 - #877 Agile criteria — Definition of Ready, Definition of Done, velocity tracking
 - #891 Apply test262 infrastructure learnings to equivalence tests
+
+## Sprint 52 - v0.52.0
+
+- Tags: `sprint/52`, `v0.52.0`
+- Date range: 2026-05-20
+- Goal: Spec-completeness continuation + host platform imports — spec gap fixes, WASI extensions, Node.js/browser host imports, method closure caching, builtin subclassing
+- Baseline: 22,412 pass / 43,160 total (51.9%) at v0.41.0
+- Final result: 28,171 pass / 43,160 total (65.3%)
+- test262: `28,171 / 43,160`
+- Delta: +5,759 pass from v0.41.0 baseline (+25.7 pp)
+
+### Highlights
+
+- **Node.js host imports**: `fs.readFileSync`/`writeFileSync`/`existsSync` (gated behind `--allow-fs`), `crypto.randomBytes`/`randomUUID`, `console.error`/`warn` stderr routing, `process.argv`/`env`/`cwd`/`exit`, `__dirname`/`__filename`/`import.meta.url`
+- **Browser host imports**: `fetch`, `setTimeout`/`setInterval`/`clearTimeout`, `localStorage`/`sessionStorage`, `crypto.getRandomValues`, export return-type interop
+- **WASI extensions**: stdin via `fd_read`, console stderr via `fd_write`, `environ_get`/`environ_sizes_get`, `clock_time_get`, async stubs
+- **Builtin subclassing**: `instanceof Sub` and `instanceof Parent` both true for `class Sub extends Map/Float32Array/WeakRef/Set` (tag-chain runtime approach)
+- **Method closure caching**: fixes repeated `obj.method` creating new function objects each time
+- **Spec gap fixes**: assignment-operator destructuring completion, rest-parameter destructuring, `ToNumber`/`ToNumeric` coercion, named-evaluation destructuring defaults, for-loop per-iteration let binding, iterator protocol destructuring close, private reference readonly TypeError, `Object.defineProperty` descriptor fidelity, `Array.prototype` generic arraylike, `Promise` combinators, generator prototype, `Array.fromAsync`, and 30+ more
+- **Test262 CI**: 3× speedup via cross-PR baseline cache and per-scope test filter; sharded run time ~8 min
+- **ESLint valid-wasm plugin**: `@loopdive/eslint-plugin-js2` package entries fixed
+
+### Issues worked on (done)
+
+- #1392 Refresh benchmarks — browser runtime hang
+- #1394 Method closure caching
+- #1396 for-of destructuring externref array defaults
+- #1397 Static dispatch on method reassignment
+- #1398 Report edition filter and category table
+- #1400 ESLint package entry valid-wasm
+- #1431 Assignment-operator destructuring completion
+- #1432 Parameter list rest destructuring
+- #1434 ToNumber/ToNumeric unary coercion
+- #1437 Math numeric edge cases
+- #1455 Subclassing builtins — instanceof and prototype chain
+- #1481 WASI stdin fd_read
+- #1491 Node.js fs host imports (non-WASI)
+- #1493 Node.js console.error/warn stderr routing
+- #1521 Test262 CI speedup — cross-PR cache and scope filter

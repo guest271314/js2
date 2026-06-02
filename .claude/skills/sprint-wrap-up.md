@@ -27,6 +27,16 @@ For each worktree:
 - If all merged: `git worktree remove --force <wt>`
 - If unmerged: document in the issue file as Suspended Work
 
+Then prune dead agent-status heartbeats and resync the shared checkout:
+
+```bash
+node /workspace/scripts/prune-agent-status.mjs          # clears stale ✕ records
+bash /workspace/scripts/sync-workspace-main.sh          # FF /workspace to origin/main
+```
+
+(`prune-agent-status` also runs automatically on every SessionStart; this is
+the belt-and-suspenders end-of-sprint sweep.)
+
 ## Step 3: Clean up branches
 
 ```bash
@@ -93,7 +103,10 @@ Invoke the harvest-errors skill (or spawn a dedicated harvester agent)
 ```
 
 The harvester:
-- Clusters failures in `benchmarks/results/test262-current.jsonl` by normalized error pattern
+- Clusters failures in the baseline JSONL by normalized error pattern (run
+  `node scripts/fetch-baseline-jsonl.mjs` first to populate
+  `.test262-cache/test262-current.jsonl` — the file is no longer
+  committed; see #1528)
 - Cross-references with existing issues in `plan/issues/`
 - Files new issue files in `plan/issues/` for unaddressed buckets above the threshold (default: >50 occurrences)
 - Reports a summary table

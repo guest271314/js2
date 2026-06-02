@@ -8,6 +8,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
+import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 
 export interface CodegenError {
   message: string;
@@ -30,10 +31,18 @@ export interface CodegenOptions {
   fast?: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings?: boolean;
+  /** #1588 PR-B: dual i8/i16 string storage (default false → byte-identical). */
+  utf8Storage?: boolean;
   /** Test-only: emit `__test_str_from_externref` / `__test_str_to_externref` exports (#1187). */
   testRuntime?: boolean;
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
   wasi?: boolean;
+  /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
+   *  runtime. Implies `nativeStrings: true` and refuses to emit any
+   *  `wasm:js-string` namespace or `env::__concat_*` / `__extern_toString` /
+   *  `__unbox_string` JS-host string imports. Used so the compiled module is
+   *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
+  standalone?: boolean;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
    * (see `src/ir/`). Defaults to off. Leave off in production until the IR
@@ -42,8 +51,22 @@ export interface CodegenOptions {
   experimentalIR?: boolean;
   /** Node builtin modules detected during import preprocessing (#1044) */
   nodeBuiltins?: import("../../import-resolver.js").NodeBuiltinImport[];
-  /** Set of function names imported from node:fs (detected pre-preprocessing) */
+  /** Set of function names imported from node:fs (detected pre-preprocessing).
+   *  Used by both the WASI fs syscall path (#1035) and the JS-host fs imports (#1491). */
   wasiNodeFsFuncs?: Set<string>;
+  /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
+  allowFs?: boolean;
+  /**
+   * Enforce dual-mode discipline (#1524): when set, `addImport` rejects any
+   * JS-host `env` import that is not on the
+   * `src/codegen/host-import-allowlist.ts` baseline. WASI builds enable this
+   * by default unless `allowHostImports` is set. Set this directly via
+   * `--no-host-imports` on the CLI or `strictNoHostImports: true` in
+   * `CompileOptions`.
+   */
+  strictNoHostImports?: boolean;
+  /** JSX runtime import detected during preprocessing (#1540). */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 /** Info about an externally declared class. */
@@ -136,6 +159,15 @@ export interface FunctionContext {
   isDerivedConstructor?: boolean;
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
+  /**
+   * (#1042) True while {@link emitAsyncStateMachine} is driving an async
+   * function body through the CPS transform. Read by the `AwaitExpression`
+   * dispatcher in expressions.ts to decide between the legacy pass-through and
+   * a continuation split. Inert in #1042 PR1 (the activation hook is unwired
+   * and `ASYNC_CPS_ENABLED` is false), so it stays undefined/false and the
+   * emitted Wasm is byte-identical.
+   */
+  asyncCpsActive?: boolean;
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;
   /** Set of variable names that are const bindings — assignment throws TypeError at runtime */
@@ -146,8 +178,42 @@ export interface FunctionContext {
   hoistedFuncs?: Set<string>;
   /** Enclosing class name — propagated to closures for super keyword resolution */
   enclosingClassName?: string;
+  /**
+   * (#1395) True when compiling a static class member context (static field
+   * initializer, static method body, or a closure spawned from inside one).
+   * In a static context, `this` resolves to the class constructor object
+   * (the `__class_<Name>` singleton), NOT to a per-instance struct. Per
+   * ECMA-262 §15.7.1.1 step 5.b, DefineField is called with the class as
+   * receiver for static fields, so `this` inside `static f = () => this`
+   * is the class itself. Propagated through closure spawning the same way
+   * `enclosingClassName` is.
+   */
+  isStaticContext?: boolean;
+  /**
+   * (#1636-S1) True only for closure bodies that can be dispatched from the
+   * host via `__call_fn_method_N` (lifted free closures and anonymous
+   * callbacks passed to e.g. `JSON.stringify`'s replacer / a value's
+   * `toJSON`). Those dispatchers install the host-supplied receiver into the
+   * `__current_this` module global before the inner `call_ref`, so the
+   * closure's `this` must read that global when it has no other binding.
+   *
+   * Named function declarations, methods, and constructors are NOT dispatched
+   * through `__call_fn_method_N` — they are called directly via `call $f`,
+   * where `__current_this` is never installed for them. They must keep the
+   * spec-correct `undefined` (strict) / globalObject (sloppy) `this`, so they
+   * must NOT read `__current_this`. The flag gates the fallback to exactly the
+   * bodies that can observe a host-installed receiver. Without it, every
+   * `this` in a free function in any module that emits a closure regressed to
+   * the global's `ref.null.extern` initial value (#1636-S1 regression: 171
+   * test262 failures in `function-code/10.4.3-1-*` and `Array/prototype/*`).
+   */
+  readsCurrentThis?: boolean;
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
+  /** Const boolean aliases for null guards, e.g. `const ok = x !== null`. */
+  nullGuardAliases?: Map<string, { varName: string; narrowedBranch: "then" | "else" }>;
+  /** Variables narrowed through a const boolean null-guard alias in the active branch. */
+  aliasedNullGuardNonNull?: Set<string>;
   /**
    * Set of "arrayVar:indexVar" keys where bounds checks can be elided.
    * Populated when a for-loop condition guarantees indexVar < arrayVar.length.
@@ -228,6 +294,16 @@ export interface FunctionContext {
     paramCount: number;
     paramOffset: number;
     paramTypes: ValType[];
+    /**
+     * Argument indices whose param↔arguments mapping has been severed at
+     * compile time (#1511). Per ECMA-262 §10.4.4.2, a `defineProperty` that
+     * makes a mapped slot non-writable (or turns it into an accessor) or a
+     * `delete arguments[i]` removes the link: later parameter writes must no
+     * longer reflect into `arguments[i]` and vice-versa. The mapped-sync
+     * emitters consult this set and skip severed indices. Populated lazily
+     * during body codegen — order matters, since the emitters read it live.
+     */
+    unmappedIndices?: Set<number>;
   };
   /**
    * #1210: bindings detected as `let s = ""; for (...) s += <expr>` builders
@@ -305,6 +381,16 @@ export interface CodegenContext {
   stringLiteralValues: Map<string, string>;
   /** Counter for string literal imports */
   stringLiteralCounter: number;
+  /**
+   * #1463 — Source text per function declaration, keyed by function name.
+   * Populated in `collectDeclarations` from `stmt.getText(sourceFile)` so
+   * `Function.prototype.toString` can return spec-compliant source instead
+   * of the `function () { [native code] }` placeholder for identifier-typed
+   * receivers (`add.toString()` where `add` is a top-level declaration).
+   * Not populated for class methods, arrow functions, or expressions —
+   * those still fall back to the placeholder.
+   */
+  funcSourceText: Map<string, string>;
   /** Map from string literal value → global import index */
   stringGlobalMap: Map<string, number>;
   /** Number of imported globals (string constants) */
@@ -319,6 +405,12 @@ export interface CodegenContext {
   arrayTypeMap: Map<string, number>;
   /** Map from element kind (e.g. "f64") → registered vec struct type index */
   vecTypeMap: Map<string, number>;
+  /**
+   * Per-export TypedArray classification populated during user-function
+   * declaration emission (#1700). Read by the runtime `wrapExports` to
+   * marshal `Uint8Array` params/results across the JS↔Wasm boundary.
+   */
+  exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
   /** Map from global name (e.g. "document") → import info */
@@ -345,8 +437,59 @@ export interface CodegenContext {
   staticMethodSet: Set<string>;
   /** Map from "ClassName_propName" → global index for static properties */
   staticProps: Map<string, number>;
-  /** Static property initializer expressions to compile into __module_init */
-  staticInitExprs: { globalIdx: number; initializer: ts.Expression }[];
+  /**
+   * (#1719 CPR — compiled prototype record) Captured prototype-member overrides.
+   *
+   * `Array.prototype[Symbol.iterator] = fn` / `Array.prototype.values = fn` have
+   * no compiled landing spot today and are silently dropped — the override is
+   * never observed (#1719 root cause). CPR captures such writes here. The OUTER
+   * key is a **proto-owner identity token** (today a builtin name, e.g.
+   * `"Array"`); the INNER key is the well-known member key (`"@@iterator"`,
+   * `"values"`). The value is the lifted override closure's funcref index plus
+   * the funcTypeIdx needed to `call_ref` it. Read sites (array destructuring,
+   * for-of, spread) consult this when the whole-program brand
+   * (`arrayIteratorMaybeOverridden`) is set and drive the stored closure as the
+   * value's `@@iterator` (§7.4.2 GetIterator) instead of the backing-store walk.
+   *
+   * The proto-owner key is typed as an open string TOKEN (not a narrow union) so
+   * it can later carry user-class / struct-type identities — probe-1 showed
+   * `C.prototype.m=` is dropped for user classes too — without rebuilding the
+   * table; the cluster (#1130/#1320) grafts on by widening the token. This is the
+   * prototype-OVERRIDE substrate, kept conceptually distinct from instance-level
+   * own-property descriptors (`_wasmStructAccessors` / #1629), which live on
+   * values, not prototypes.
+   */
+  protoOverrides: Map<string, Map<string, { funcIdx: number; funcTypeIdx: number; globalIdx: number }>>;
+  /**
+   * (#1719 CPR read-drive) True once the in-Wasm
+   * `__drive_proto_iterator(thisVal: externref, closure: externref) -> externref`
+   * driver placeholder has been reserved (pushed + registered in `funcMap` under
+   * `"__drive_proto_iterator"`). The read-drive sites (array dstr / for-of /
+   * spread) are emitted during body compilation, BEFORE the post-processing
+   * phase that can see the fully-populated `closureInfoByTypeIdx` needed to
+   * dispatch the override closure. So the FIRST read-drive site pushes a
+   * placeholder function (fixing its append-position funcIdx) and registers it in
+   * `funcMap`; the body is filled in post-processing (calls the registered
+   * `__call_fn_method_0`). The placeholder is never reserved when the brand is
+   * clear, so override-free modules stay byte-identical. Storing the funcIdx in
+   * `funcMap` (not a raw number here) is load-bearing: `shiftLateImportIndices`
+   * patches both the `funcMap` entry and the emitted `call` by the same delta, so
+   * a late-import index shift never desyncs the reservation.
+   */
+  protoIteratorDriverReserved?: boolean;
+  /**
+   * Static property initializer expressions to compile into __module_init.
+   * `className` (#1395) is the owning class name — used to set
+   * `enclosingClassName` + `isStaticContext` on the initFctx so `this`
+   * inside the initializer (and any closures it spawns) resolves to the
+   * class-object singleton via `emitLazyClassObjectGet`.
+   */
+  staticInitExprs: {
+    globalIdx?: number;
+    initializer?: ts.Expression;
+    staticBlock?: ts.ClassStaticBlockDeclaration;
+    className?: string;
+  }[];
   /** Counter for generated closure types/functions */
   closureCounter: number;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
@@ -377,6 +520,15 @@ export interface CodegenContext {
    * to functions that use `arguments`. -1 = not yet created.
    */
   argcGlobalIdx: number;
+  /**
+   * Absolute Wasm global index for the `__current_this` (mut externref) module
+   * global (#1636-S1). Set by `__call_fn_method_N` to the host-supplied
+   * receiver before invoking the closure body; restored after the call.
+   * A `ThisKeyword` reference in a free-function closure (no local `this`
+   * binding, not in static context) reads from this global instead of the
+   * previous `undefined` fallback. -1 = not yet created.
+   */
+  currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
   /** Tag index for the exception tag (-1 if not yet registered) */
@@ -463,11 +615,36 @@ export interface CodegenContext {
   fast: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings: boolean;
+  /** #1719 S1 — `ITER_OVERRIDDEN` whole-program brand for the array
+   *  object-value representation track. Set by the `sourceOverridesArrayIterator`
+   *  pre-scan (in index.ts) when the program may monkeypatch
+   *  `Array.prototype[Symbol.iterator]` / `Array.prototype.values`
+   *  (assignment or `Object.define{Property,Properties}(Array.prototype, …)`).
+   *  When `false` (the common case) every array-destructuring site emits
+   *  byte-identical output and takes the existing backing-store fast path.
+   *  The S2 slice consults this flag to route a branded array RHS through the
+   *  host-Array reflection + host `GetIterator` so an overridden `@@iterator`
+   *  is observed (§7.4.2 / §8.5.2). Default `false`. */
+  arrayIteratorMaybeOverridden: boolean;
+  /** #1588 PR-B: dual i8/i16 storage. When true (and `nativeStrings`),
+   *  string allocation sites proven `ascii`/`utf8-guaranteed` by the encoding
+   *  analysis use an i8-backed `Utf8String`; everything else stays i16.
+   *  Default false → byte-identical to today (the Utf8String types are not
+   *  even registered when off). */
+  utf8Storage: boolean;
   /** Native string support type indices */
   nativeStrDataTypeIdx: number;
   anyStrTypeIdx: number;
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
+  /** #1588 PR-B: i8 backing array + Utf8String subtype indices. -1 when
+   *  `utf8Storage` is off (types not registered). */
+  utf8StrDataTypeIdx: number;
+  utf8StrTypeIdx: number;
+  /** #1588 PR-B: the live AllocSiteRegistry from the IR pipeline, threaded so
+   *  the string-lowering sites can read the `encoding` annotation. Undefined
+   *  for non-IR / legacy front-end paths (→ encoding reads back `wtf16`). */
+  allocRegistry?: import("../../ir/alloc-registry.js").AllocSiteRegistry;
   /** Whether native string helper functions have been emitted */
   nativeStrHelpersEmitted: boolean;
   /** Whether native string host bridge helpers have been emitted */
@@ -478,6 +655,12 @@ export interface CodegenContext {
   testRuntime: boolean;
   /** Map from native string helper name → function index */
   nativeStrHelpers: Map<string, number>;
+  /** #1677: import-function count captured the instant the native-string
+   *  helpers were first emitted (mid-finalize). Used by
+   *  `reconcileNativeStrFinalizeShift` to shift the helper bodies + map by the
+   *  number of imports added afterwards during the rest of finalize. -1 until
+   *  helpers are emitted; reset to -1 once reconciled. */
+  nativeStrHelperImportBase: number;
   /** Map from value type kind → ref cell struct type index */
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
@@ -494,6 +677,8 @@ export interface CodegenContext {
   templateCacheCounter: number;
   /** Type index for template vec struct */
   templateVecTypeIdx: number;
+  /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
+  errorStructTypeIdx: number;
   /** Extra properties for empty object variables */
   widenedTypeProperties: Map<string, { name: string; type: ValType }[]>;
   /** Map from widened variable name to its registered struct name */
@@ -512,6 +697,45 @@ export interface CodegenContext {
   externrefAccessorVars: Set<string>;
   /** Math methods that need inline Wasm implementations */
   pendingMathMethods: Set<string>;
+  /**
+   * (#1602) Object-method-as-closure trampolines whose body forwards the
+   * method's params positionally. The method's `func.typeIdx` can be
+   * re-resolved (param types / order finalized) AFTER the trampoline was
+   * emitted, which would leave the eagerly-built forwarding body referencing a
+   * stale signature and produce an invalid module. We rebuild each trampoline
+   * body against the method's FINAL signature in a post-pass after all function
+   * bodies are compiled.
+   */
+  pendingMethodTrampolines: {
+    trampolineBody: Instr[];
+    /** The trampoline's own func index. */
+    trampolineFuncIdx: number;
+    methodFuncIdx: number;
+    objStructTypeIdx: number;
+    /** User-param count the wrapper func type was built with (excludes self). */
+    userParamCount: number;
+    /**
+     * (#1669) The wrapper func type's user-param types and result, captured at
+     * emit time. These are the static types of the `local.get`s the forwarding
+     * body reads, and the type the trampoline must return. The method's
+     * signature can drift away from these during later body compilation; the
+     * finalize pass coerces each forwarded arg from `wrapperUserParams[i]` to
+     * the method's final param type, and the method's result back to
+     * `wrapperResult`, so the rebuilt body validates against both signatures.
+     * Captured directly (not re-derived from `trampolineFuncIdx`) because late
+     * import shifting can move that index relative to the recorded value.
+     */
+    wrapperUserParams: ValType[];
+    wrapperResult: ValType | undefined;
+    /**
+     * (#1340) True when the underlying callable is a plain function declaration
+     * with no hidden `this` param (so the finalizer must NOT slice off the
+     * first param of `sig.params` and must NOT emit a `ref.null` prologue for
+     * `this`). Methods leave this false/undefined and keep the legacy
+     * `this`-drop behaviour.
+     */
+    noThisParam?: boolean;
+  }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
   /** Map from class name → class AST declaration node */
@@ -549,16 +773,95 @@ export interface CodegenContext {
   classMethodNames: Map<string, string[]>;
   /** Map from class name → global idx of the method-name CSV string constant (see #1047) */
   classMethodsCsvGlobal: Map<string, number>;
+  /** Map from class name → global index of the class-object externref singleton (#1395). Used so `C` resolves to a real object whose static-method descriptors are queryable. */
+  classObjectGlobals: Map<string, number>;
+  /** Map from class name → own static method names (for the static method allowlist; #1395) */
+  classStaticMethodNames: Map<string, string[]>;
+  /** Map from class name → global idx of the static-method-name CSV string constant (#1395) */
+  classStaticMethodsCsvGlobal: Map<string, number>;
+  /** (#1394) Map from `${className}_${methodName}` → global idx of the cached
+   *  externref singleton closure for the method. Lazily allocated on first
+   *  property-access of `C.prototype.<method>` or `instance.<method>` (as
+   *  value). Reused on every subsequent access so `c.m === C.prototype.m`
+   *  holds (verifyProperty identity assertions across ~478 class/elements
+   *  tests). The companion canonical trampoline is named
+   *  `__obj_meth_tramp_${className}_${methodName}_cached` and is also reused
+   *  across all access sites to avoid bloating mod.functions. */
+  methodClosureGlobals: Map<string, number>;
+  /** (#1340) Singleton closure-struct externref globals for top-level function
+   *  declarations used as first-class values. Keyed by function name. Ensures
+   *  `foo === foo` and so sidecar writes on `foo.prototype` are observed by
+   *  later reads. Mirrors `methodClosureGlobals` (#1394) for the function-decl
+   *  case where the same JS identifier is read as a value at multiple sites. */
+  funcClosureGlobals: Map<string, number>;
   /** Whether targeting WASI */
   wasi: boolean;
+  /** Whether targeting standalone (no JS host, no WASI runtime — #1470).
+   *  When true, the emitter MUST NOT add `wasm:js-string` namespace imports
+   *  or JS-host string helpers (`__concat_N`, `__extern_toString`,
+   *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
+   *  `__str_extern_len`). Implies `nativeStrings === true`. */
+  standalone: boolean;
+  /** (#1472 Phase A) Set of dynamic-shape object/property host-import names
+   *  already refused under `--target standalone`, used to deduplicate the
+   *  compile-error so a single source construct emits at most one error per
+   *  import name. Lazily initialized in late-imports.ts. */
+  standaloneRefusedImports?: Set<string>;
+  /** (#682) Native standalone RegExp engine hook. Null until the embedded
+   *  engine/link step lands; #1474 keeps owning the current refusal gate. */
+  standaloneRegExpEngine: StandaloneRegExpEngineConfig | null;
+  /**
+   * (#1373b) When true, async functions flow through the IR's CPS lowering
+   * (Phase C). When false (default), the IR selector buckets async functions
+   * into the `"async-function"` fallback reason and they take the legacy
+   * direct-codegen path. The first scaffolding slice (#1373b Slice 1)
+   * keeps this hardcoded `false`; subsequent slices (Slice 2: PENDING-path
+   * CPS continuations, Slice 3: gate-flip) wire it on incrementally once
+   * the lowering is parity-tested against the legacy path.
+   *
+   * Read by `src/ir/select.ts`'s `isAsyncIrReady(ctx)` helper; threaded
+   * through `src/ir/integration.ts` into the selector via the
+   * `IrPlanOptions.supportsAsyncIr` field.
+   */
+  supportsAsyncIr: boolean;
   /** WASI import indices */
   wasiFdWriteIdx: number;
+  wasiFdReadIdx?: number;
   wasiProcExitIdx: number;
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
+  wasiPollOneoffIdx?: number;
   wasiBumpPtrGlobalIdx: number;
-  /** Set of node:fs functions used in WASI mode */
+  /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
+  wasiEnvironSizesGetIdx: number;
+  /** #1482: wasi_snapshot_preview1::environ_get import index (-1 = not registered) */
+  wasiEnvironGetIdx: number;
+  /** #1482: env::__wasi_env_get_str late import index for JS-polyfill fast path (-1 = not registered) */
+  wasiEnvGetStrIdx: number;
+  /** (#1483) WASI clock_time_get import func idx — -1 if not yet registered. */
+  wasiClockTimeGetIdx?: number;
+  /** (#1483) Pending flag — emit `__wasi_write_string` after lib-globals scan. */
+  wasiPendingFdWriteHelper?: boolean;
+  /** (#1483 + #1493) Pending flag — emit `__wasi_write_string_stderr` after lib-globals scan. */
+  wasiPendingConsoleStderrHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_write_file_sync` after lib-globals scan. */
+  wasiPendingPathOpenHelper?: boolean;
+  /** (#1483) Pending flag — emit `__wasi_date_now` / `__wasi_performance_now` after lib-globals scan. */
+  wasiClockHelpersPending?: boolean;
+  /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
+  wasiPendingSleepMsHelper?: boolean;
+  /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
+  /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
+  allowFs: boolean;
+  /**
+   * #1524 — When true, `addImport` rejects any JS-host `env` import that is
+   * not on the dual-mode allowlist (`src/codegen/host-import-allowlist.ts`).
+   * Auto-enabled when `wasi: true` (unless the caller passes
+   * `strictNoHostImports: false` explicitly). Drives the architectural gate
+   * documented under "Architecture Principles → JS host optional" in CLAUDE.md.
+   */
+  strictNoHostImports: boolean;
   /** Map from let/const module global variable name → TDZ flag global index */
   tdzGlobals: Map<string, number>;
   /** Set of let/const module global variable names */
@@ -577,6 +880,16 @@ export interface CodegenContext {
   ensureStructPending: Set<ts.Type>;
   /** Node builtin modules registered as externref globals (#1044) */
   nodeBuiltinGlobals: Map<string, number>; // localName → funcIdx
+  /**
+   * JSX runtime import detected during preprocessing (#1540). The codegen
+   * intercepts call expressions whose callee identifier matches one of the
+   * recorded local names (`localJsx`/`localJsxs`/`localJsxDev`) and routes
+   * them to the matching `__jsx_runtime_*` host import. The `Fragment`
+   * binding is exposed as a no-arg externref-returning function under
+   * `nodeBuiltinGlobals` so identifier resolution treats it like any
+   * declared externref.
+   */
+  jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
 }
 
 export type { SourcePos };

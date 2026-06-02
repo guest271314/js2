@@ -36,9 +36,15 @@ function walk(dir, out = []) {
   return out;
 }
 
+const SPRINTS_DIR = path.join(ISSUES_DIR, "sprints");
+
 function isIssueFile(file) {
   if (NON_ISSUE_FILES.has(file)) return false;
-  return path.basename(file) !== "sprint.md";
+  // Sprint docs are `plan/issues/sprints/<N>.md` directly under the sprints
+  // dir (flattened from the legacy `sprints/<N>/sprint.md`). They are planning
+  // docs, not issues.
+  if (path.dirname(file) === SPRINTS_DIR && /^\d+\.md$/.test(path.basename(file))) return false;
+  return true;
 }
 
 function parseFrontmatter(text) {

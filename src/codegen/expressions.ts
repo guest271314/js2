@@ -12,10 +12,18 @@
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
 import { ts } from "../ts-api.js";
-import { mapTsTypeToWasm } from "../checker/type-mapper.js";
+import { isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
+import {
+  emitStandalonePromiseReject,
+  emitStandalonePromiseResolve,
+  getOrRegisterPromiseType,
+  isStandalonePromiseActive,
+  PROMISE_STATE_FULFILLED,
+  PROMISE_STATE_REJECTED,
+} from "./async-scheduler.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
-import { getLocalType } from "./context/locals.js";
+import { allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { InnerResult } from "./shared.js";
 import {
@@ -37,6 +45,7 @@ import { wasmFuncReturnsVoid, wasmFuncTypeReturnsVoid } from "./expressions/help
 import { emitUndefined, ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
 
 import { compileHostInstanceOf, compileIdentifier, resolveInstanceOfRHS } from "./expressions/identifiers.js";
+import { emitLazyClassObjectGet } from "./expressions/extern.js";
 
 import { compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js";
 
@@ -159,7 +168,85 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
     }
   }
 
+  // (#1151 Gap A1) Detector fallback for async calls the decl-modifier check
+  // above misses: a callee with no reachable declaration / no `async` modifier
+  // but whose call signature returns `Promise<T>`. Covers callbacks typed
+  // `() => Promise<T>`, variables holding async refs whose declared type is the
+  // function type (not the `async function` decl), and anonymous IIFEs. A
+  // function that *returns a Promise* must still convert a synchronous throw
+  // into a rejection (same contract), so wrapping these is correct.
+  //
+  // Excluded by construction:
+  //   - constructors — `getCallSignatures()` returns CALL signatures only, not
+  //     construct signatures, so `new Foo()` callees contribute nothing here.
+  //   - async generators — their call signatures return AsyncGenerator, not
+  //     Promise, so `isPromiseType` is already false for them.
+  const calleeType = ctx.checker.getTypeAtLocation(expr.expression);
+  for (const callSig of calleeType.getCallSignatures()) {
+    if (isPromiseType(callSig.getReturnType())) return true;
+  }
+
   return false;
+}
+
+/**
+ * Decide whether an async call's result is consumed as a raw value (`T`) rather
+ * than as a `Promise<T>` (#1727).
+ *
+ * In the synchronous-wasm async model the async function body already returns
+ * the unwrapped `T` (e.g. an f64), and the export boundary calls it directly to
+ * get that raw value. But for an INTERNAL call (`f()` inside another wasm fn)
+ * the default lowering runs `wrapAsyncReturn` — boxing the f64 and wrapping it
+ * in a real `Promise.resolve(...)` object. When the surrounding code then
+ * consumes the result as a primitive (`f() as unknown as number` feeding a
+ * numeric return / arithmetic), the consuming `coerceType(externref → f64)`
+ * emits `__unbox_number(Promise{42})` === `Number(Promise{42})` === **NaN**.
+ *
+ * The existing `await` consumer (handled at the call site) skips the wrap and
+ * leaves the raw `T` on the stack. This helper generalises that skip to the
+ * primitive/non-Promise cast sink: walk the wrapper chain
+ * (`Parenthesized`/`As`/`NonNull`/`TypeAssertion`) from `expr.parent` and
+ * return `true` when the immediate semantic consumer is:
+ *
+ *   1. an `AwaitExpression` (the existing case), or
+ *   2. a cast/assertion (`as T`, `<T>x`, `x!`) whose target type is NOT
+ *      `Promise<…>` — e.g. `as any`, `as unknown as number`, `as number`.
+ *      `as any`/`as unknown` resolve to the `any`/`unknown` type → not a
+ *      Promise → treated as a value consumer. This is the repro and the 7
+ *      `tests/equivalence/async-function.test.ts` cases.
+ *
+ * Returning `true` means: skip both `wrapAsyncReturn` and
+ * `wrapAsyncCallInTryCatch`, leaving the raw `f64`/`T` the sink wants. Genuine
+ * Promise consumers (`f().then(...)`, `const p: Promise<T> = f();`,
+ * `Promise.all([f()])`, a bare `return f()` from an async/Promise-returning fn)
+ * have NO non-Promise cast in the chain, so this returns `false` and the
+ * Promise wrap fires as before. The cast gate keeps the blast radius minimal:
+ * we only skip when an explicit non-Promise cast/assertion is present (#1727
+ * minimal-diff variant — scope 2).
+ */
+function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  let sawNonPromiseCast = false;
+  let parent: ts.Node | undefined = expr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isNonNullExpression(parent) ||
+      ts.isTypeAssertionExpression(parent))
+  ) {
+    if (ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isTypeAssertionExpression(parent)) {
+      // The cast/assertion's resolved type. For `f() as unknown as number`,
+      // each layer is inspected; the value-consumer signal is that at least one
+      // cast in the chain targets a non-Promise type.
+      const castType = ctx.checker.getTypeAtLocation(parent);
+      if (!isPromiseType(castType)) sawNonPromiseCast = true;
+    }
+    parent = parent.parent;
+  }
+  // (case 1) await consumer — raw-T passthrough (folds in the existing skip).
+  if (parent && ts.isAwaitExpression(parent)) return true;
+  // (case 2) non-Promise cast/assertion sink — raw value wanted.
+  return sawNonPromiseCast;
 }
 
 /**
@@ -188,6 +275,27 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
   } else if (resultType.kind !== "externref") {
     coerceType(ctx, fctx, resultType, { kind: "externref" });
   }
+  // (#1326 Phase 1B) In standalone (WASI) mode, replace
+  // `call $Promise_resolve_import` with a Wasm-native `$Promise`
+  // struct.new fulfilled with the value already on the stack. The host
+  // import `Promise_resolve` is unsatisfiable in WASI; this branch
+  // avoids the missing-import error at module instantiation.
+  //
+  // Wasm `struct.new` pops fields in declaration order (state | value |
+  // callbacks); the value is already on the stack but state must come
+  // BEFORE it. Stash via a temp local, then emit in the correct order.
+  if (isStandalonePromiseActive(ctx)) {
+    const valueLocal = allocTempLocal(fctx, { kind: "externref" });
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    fctx.body.push({ op: "local.set", index: valueLocal });
+    fctx.body.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+    fctx.body.push({ op: "local.get", index: valueLocal });
+    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+    releaseTempLocal(fctx, valueLocal);
+    return { kind: "externref" };
+  }
   const resolveIdx = ensureLateImport(ctx, "Promise_resolve", [{ kind: "externref" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   if (resolveIdx !== undefined) {
@@ -204,6 +312,37 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
  * exception (#1150).
  */
 function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, start: number): void {
+  // (#1326 Phase 1B) Standalone-mode rejection. The host
+  // `Promise_reject` import + `__get_caught_exception` are
+  // unsatisfiable in WASI; emit a Wasm-native rejected `$Promise`
+  // construction in the catch_all instead.
+  if (isStandalonePromiseActive(ctx)) {
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    const inner = fctx.body.splice(start);
+    // The thrown value is on the catch_all stack as externref (the
+    // `__exn` tag's externref payload); standalone catch_all consumes
+    // it and uses it as the rejection reason. We don't have access to
+    // the wasm exception payload op without `ensureExnTag`, so fall
+    // back to `ref.null.extern` as the reason — Phase 1B doesn't
+    // yet wire the catch-payload binding (Phase 1C will). Most async
+    // throws produce undefined-typed rejections at this stage, so
+    // null-extern is safe.
+    const catchAll: Instr[] = [
+      { op: "i32.const", value: PROMISE_STATE_REJECTED },
+      { op: "ref.null.extern" } as Instr,
+      { op: "ref.null.extern" },
+      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+      { op: "extern.convert_any" } as Instr,
+    ];
+    fctx.body.push({
+      op: "try",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      body: inner,
+      catches: [],
+      catchAll,
+    });
+    return;
+  }
   const rejectIdx = ensureLateImport(ctx, "Promise_reject", [{ kind: "externref" }], [{ kind: "externref" }]);
   const getCaughtIdx = ensureLateImport(ctx, "__get_caught_exception", [], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
@@ -219,7 +358,7 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
     body: inner,
     catches: [],
     catchAll,
-  } as unknown as Instr);
+  });
 }
 
 /**
@@ -344,8 +483,12 @@ function compileExpressionBody(
     }
   }
 
-  // Fast-path: null/undefined in struct ref context
-  if (expectedType && (expectedType.kind === "ref_null" || expectedType.kind === "ref")) {
+  // Fast-path: null/undefined in struct ref context (skip for $AnyValue — handled below)
+  if (
+    expectedType &&
+    (expectedType.kind === "ref_null" || expectedType.kind === "ref") &&
+    !isAnyValue(expectedType, ctx)
+  ) {
     let inner: ts.Expression = expr;
     while (
       ts.isAsExpression(inner) ||
@@ -499,7 +642,7 @@ function compileExpressionBody(
           const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }]);
           if (boxSymIdx !== undefined) {
             flushLateImportShifts(ctx, fctx);
-            fctx.body.push({ op: "call", funcIdx: boxSymIdx } as unknown as Instr);
+            fctx.body.push({ op: "call", funcIdx: boxSymIdx });
             return expectedType;
           }
         }
@@ -629,7 +772,7 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
     const text = expr.text.replace(/_/g, "").replace(/n$/i, "");
     const value = BigInt(text);
     fctx.body.push({ op: "i64.const", value });
-    return { kind: "i64" };
+    return { kind: "i64", bigint: true };
   }
 
   if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
@@ -680,6 +823,89 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       const localDef = fctx.locals[selfIdx - fctx.params.length];
       return localDef?.type ?? { kind: "externref" };
     }
+    // (#1395) Static-context fallback: in a static field initializer or
+    // static method body (or in any closure spawned from one), `this`
+    // refers to the class constructor object per ECMA-262 §15.7.1.1
+    // step 5.b. We emit the lazy class-object singleton load — same
+    // singleton used when the class identifier appears as a value, so
+    // `C.f() === C` (when `static f = () => this`) holds. Note: the
+    // lazy-load is invariant (a global), so no closure-capture wiring
+    // is needed — the arrow's body re-emits the load and gets the
+    // exact same externref each time.
+    if (fctx.isStaticContext && fctx.enclosingClassName && ctx.classObjectGlobals?.has(fctx.enclosingClassName)) {
+      if (emitLazyClassObjectGet(ctx, fctx, fctx.enclosingClassName)) {
+        return { kind: "externref" };
+      }
+    }
+    // (#1636-S1) Host-dispatched-closure fallback: when no local `this`
+    // binding exists and we're not in a static-class context, read the
+    // host-supplied receiver from the `__current_this` module global —
+    // but ONLY for closure bodies that can actually be dispatched through
+    // `__call_fn_method_N` (`fctx.readsCurrentThis`). Those dispatchers
+    // install the host receiver into `__current_this` before the inner
+    // `call_ref`, so this is the only context in which the global holds a
+    // meaningful value.
+    //
+    // The earlier (#1636-S1) version gated this on `ctx.currentThisGlobalIdx
+    // >= 0` alone, but `ensureCurrentThisGlobal` is called eagerly for every
+    // module that emits any closure, so that condition was true for the whole
+    // module. Named function declarations / methods / constructors (compiled
+    // via function-body.ts / class-bodies.ts, NOT through the closure-lift
+    // path) are called directly via `call $f`, where `__current_this` is never
+    // installed — they read its `ref.null.extern` initial value as `null`
+    // instead of the spec-correct `undefined` (strict) / globalObject (sloppy).
+    // That regressed 171 test262 cases (`function-code/10.4.3-1-*`,
+    // `Array/prototype/*` callback `this`). Gating on `readsCurrentThis`
+    // restricts the global read to exactly the lifted-closure / anonymous-
+    // callback bodies that the host can dispatch, leaving direct-call `this`
+    // to fall through to `undefined` as before.
+    if (fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0) {
+      // (#1702) Null-guard the `__current_this` read. A lifted closure body can
+      // be reached two ways:
+      //   (a) host dispatch via `__call_fn_method_N` — installs a real receiver
+      //       (a non-null externref) into `__current_this` before the call_ref;
+      //   (b) a *direct* call (`f1()` where `f1` is a closure local / module
+      //       global) — which never installs anything, so `__current_this` still
+      //       holds its `ref.null.extern` initial value (or a leftover from an
+      //       unrelated host dispatch that has since been restored to null).
+      //
+      // #1636-S1 / #895 narrowed this fallback to `readsCurrentThis` bodies, but
+      // for the *direct-call* case the raw `global.get` surfaces JS `null`, not
+      // the spec-correct `undefined`. That made strict free-function /
+      // function-expression `this` observe `null` (`typeof this === "object"`,
+      // `this === undefined` ⇒ false), regressing the residual
+      // `language/function-code/10.4.3-1-*-s` + class-method strict-`this`
+      // shapes (#873 follow-up).
+      //
+      // The receiver a host installs is always a non-null externref, so the
+      // null/non-null distinction cleanly separates the two reach paths: when
+      // the global is non-null use it (host dispatch), otherwise fall through to
+      // `undefined` (direct call — `undefined` for strict, and the prior
+      // pre-#1636-S1 fallback for sloppy free functions). This is additive to
+      // #895's gating: it only changes the *value* the existing
+      // `readsCurrentThis` branch yields when the global is null, never widening
+      // which bodies read the global. The Array.prototype.{every,…} callbacks
+      // and top-level strict `this` (#873/#895-fixed) are unaffected — those
+      // either bind `this` via a local or do not set `readsCurrentThis`.
+      const thisTmp = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: thisTmp });
+      fctx.body.push({ op: "ref.is_null" });
+      const elseBody: Instr[] = [{ op: "local.get", index: thisTmp }];
+      const savedBody = fctx.body;
+      const thenBody: Instr[] = [];
+      fctx.body = thenBody;
+      emitUndefined(ctx, fctx);
+      fctx.body = savedBody;
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenBody,
+        else: elseBody,
+      } as unknown as Instr);
+      releaseTempLocal(fctx, thisTmp);
+      return { kind: "externref" };
+    }
     emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
@@ -713,12 +939,34 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       // dispatch to compileInstanceOf for an externref-backed RHS.
       if (ctx.classExternrefBackedSet.has(rhsResult)) {
         const lhsTsType = ctx.checker.getTypeAtLocation(expr.left);
-        const lhsName = lhsTsType.getSymbol()?.name;
+        let lhsName = lhsTsType.getSymbol()?.name;
+        // (#1455) TypeScript reports `__class` as the synthetic symbol name
+        // for anonymous class expressions (`const Sub = class extends Map {}`).
+        // Resolve via `typeToString` — for a const-bound class expression
+        // this returns the binding name, which we can look up in
+        // `classExprNameMap` to recover the synthetic class id.
+        if (lhsName === "__class") {
+          const typeStr = ctx.checker.typeToString(lhsTsType);
+          const mapped = ctx.classExprNameMap.get(typeStr);
+          if (mapped !== undefined) {
+            lhsName = mapped;
+          } else if (ctx.classTagMap.has(typeStr)) {
+            lhsName = typeStr;
+          }
+        }
+        // (#1455) Canonicalize class names through `classExprNameMap` so
+        // `const Sub = class extends Map {}` (where the binding name `Sub`
+        // and the synthetic name `__anonClass_N` both register independently
+        // as classes) compare equal.
+        const canon = (n: string | undefined): string | undefined =>
+          n === undefined ? undefined : (ctx.classExprNameMap.get(n) ?? n);
+        const canonLhs = canon(lhsName);
+        const canonRhs = canon(rhsResult);
         let staticAnswer: boolean | undefined;
-        if (lhsName !== undefined) {
-          if (lhsName === rhsResult) {
+        if (lhsName !== undefined && ctx.classTagMap.has(lhsName)) {
+          if (canonLhs === canonRhs) {
             staticAnswer = true;
-          } else if (ctx.classTagMap.has(lhsName)) {
+          } else {
             // LHS is a known user class. Walk its parent chain — true iff the
             // RHS class is an ancestor of the LHS class.
             let cur: string | undefined = lhsName;
@@ -741,12 +989,11 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
           fctx.body.push({ op: "i32.const", value: staticAnswer ? 1 : 0 });
           return { kind: "i32" };
         }
-        // Could not decide statically — return false (host-side
-        // __instanceof against MyError name would return 0 anyway).
-        const leftType = compileExpression(ctx, fctx, expr.left);
-        if (leftType) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        return { kind: "i32" };
+        // (#1455) LHS type could not be resolved statically (TS often infers
+        // `any` for `class Sub extends WeakRef {}` because WeakRef<T> requires
+        // type args). Fall through to the host runtime check, which consults
+        // the user-class tag registry attached at construction time.
+        return compileHostInstanceOf(ctx, fctx, expr);
       }
     }
     return compileBinaryExpression(ctx, fctx, expr);
@@ -817,19 +1064,19 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       // raw-T consumer, every other consumer as Promise consumer. Both
       // shapes are observable in test262 today; this PR keeps both
       // working while eliminating the `[object Promise]` stringification.
-      let parent: ts.Node | undefined = expr.parent;
-      while (
-        parent &&
-        (ts.isParenthesizedExpression(parent) ||
-          ts.isAsExpression(parent) ||
-          ts.isNonNullExpression(parent) ||
-          ts.isTypeAssertionExpression(parent))
-      ) {
-        parent = parent.parent;
-      }
-      if (parent && ts.isAwaitExpression(parent)) {
-        // Skip the wrap; await's passthrough lowering will leave the raw
-        // value on the stack for the consumer.
+      //
+      // (#1727) Generalised: ALSO skip the wrap when the result is consumed
+      // as a raw value through a non-Promise cast/assertion
+      // (`f() as unknown as number`, `as any`, `as number`). Otherwise the
+      // internal call boxes the f64 and wraps it in a real Promise object, and
+      // the consuming numeric sink unboxes `Number(Promise{42})` === NaN. The
+      // raw `T` already on the stack is exactly what the sink wants. Genuine
+      // Promise consumers (`.then`, `const p: Promise<T> = f()`,
+      // `Promise.all`, bare `return f()`) have no non-Promise cast, so the
+      // wrap still fires. See `asyncResultConsumedAsValue` above.
+      if (asyncResultConsumedAsValue(ctx, expr)) {
+        // Skip the wrap; the raw value on the stack is what the consumer
+        // (await passthrough or primitive cast sink) expects.
         return callResult;
       }
       const wrappedType = wrapAsyncReturn(ctx, fctx, callResult);

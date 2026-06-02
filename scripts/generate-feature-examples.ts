@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { createHighlighter } from "shiki";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const OUT_FILE = join(ROOT, "public", "feature-examples.json");
+const OUT_FILE = join(ROOT, "website", "public", "feature-examples.json");
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -1112,7 +1112,7 @@ async function main() {
     }
 
     try {
-      const result = compile(feat.js, { emitWat: true, fileName: "snippet.ts" });
+      const result = await compile(feat.js, { emitWat: true, fileName: "snippet.ts" });
 
       if (!result.success) {
         const msg = result.errors[0]?.message ?? "unknown error";
@@ -1166,7 +1166,7 @@ async function main() {
     features: results,
   };
 
-  mkdirSync(join(ROOT, "public"), { recursive: true });
+  mkdirSync(join(ROOT, "website", "public"), { recursive: true });
   writeFileSync(OUT_FILE, JSON.stringify(output, null, 2) + "\n");
   console.log(`\nWrote ${OUT_FILE}`);
 }

@@ -37,7 +37,11 @@ const BUILTIN_TYPES = new Set([
 
 export function mapTsTypeToWasm(type: ts.Type, checker: ts.TypeChecker, fast?: boolean): ValType {
   if (type.flags & ts.TypeFlags.BigInt || type.flags & ts.TypeFlags.BigIntLiteral) {
-    return { kind: "i64" };
+    // (#1644) Brand the i64 as bigint so coercion sites box/unbox it as a JS
+    // bigint (not a number). A `: bigint`-typed local/param/return carries the
+    // brand, so reads re-emit it. Native `type i64 = number` resolves through a
+    // different path and stays unbranded.
+    return { kind: "i64", bigint: true };
   }
   if (type.flags & ts.TypeFlags.Number || type.flags & ts.TypeFlags.NumberLiteral) {
     return { kind: fast ? "i32" : "f64" };
@@ -60,9 +64,16 @@ export function mapTsTypeToWasm(type: ts.Type, checker: ts.TypeChecker, fast?: b
     return { kind: "i32" };
   }
 
-  // Union with null/undefined → unwrap to inner type
+  // Union with null/undefined/void → unwrap to inner type
+  // (#1550) Treat `void` the same as `undefined` here — JS-runtime-equivalent.
+  // TS infers binding types like `void | null` for `function f({w = counter()} = {w: null})`
+  // because `counter()` has return type `void`. Without filtering Void, the union
+  // collapses to just `void` → i32, losing the actual null/string/number type info
+  // and erasing the destructured value at runtime.
   if (type.isUnion()) {
-    const nonNullish = type.types.filter((t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined));
+    const nonNullish = type.types.filter(
+      (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined) && !(t.flags & ts.TypeFlags.Void),
+    );
     if (nonNullish.length === 1) {
       const inner = mapTsTypeToWasm(nonNullish[0]!, checker, fast);
       if (inner.kind === "ref") return { kind: "ref_null", typeIdx: inner.typeIdx };
@@ -180,6 +191,33 @@ export function isVoidType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Void) !== 0 || (type.flags & ts.TypeFlags.Undefined) !== 0;
 }
 
+/**
+ * Resolve the Wasm type of a destructuring binding element's local (#821).
+ *
+ * For `{ s: t = counter() }` where `counter()` returns `void`, TS infers `t`'s
+ * type as `void` (or `void | undefined`) — its only evidence is the default
+ * initializer. `resolveWasmType` then maps that to `i32`, so the *actual*
+ * property value (`null`/`0`/`false`/`''`, an externref) gets coerced into an
+ * i32 local and is destroyed — the spec requires the present, non-`undefined`
+ * value to be preserved and the default skipped (§13.3.3.6/§13.3.3.7).
+ *
+ * When an element has a default initializer AND the resolved type is the
+ * void/undefined sentinel, the local must be `externref` so it can faithfully
+ * hold whatever real value flows in. `resolve` is the caller's
+ * `resolveWasmType(ctx, tsType)` (passed in to avoid a circular import).
+ */
+export function resolveBindingElementType(
+  element: ts.BindingElement,
+  tsType: ts.Type,
+  resolve: (t: ts.Type) => ValType,
+): ValType {
+  const resolved = resolve(tsType);
+  if (element.initializer && isVoidType(tsType)) {
+    return { kind: "externref" };
+  }
+  return resolved;
+}
+
 /** Check if a ts.Type represents bigint */
 export function isBigIntType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.BigInt) !== 0 || (type.flags & ts.TypeFlags.BigIntLiteral) !== 0;
@@ -188,6 +226,22 @@ export function isBigIntType(type: ts.Type): boolean {
 /** Check if a ts.Type represents number */
 export function isNumberType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Number) !== 0 || (type.flags & ts.TypeFlags.NumberLiteral) !== 0;
+}
+
+/** Check if a type is a nullable numeric sentinel, e.g. number | null. */
+export function isNullableNumberType(type: ts.Type): boolean {
+  if (!type.isUnion()) return false;
+  let hasNull = false;
+  const nonNullTypes: ts.Type[] = [];
+  for (const part of type.types) {
+    if (part.flags & ts.TypeFlags.Null) {
+      hasNull = true;
+      continue;
+    }
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) return false;
+    nonNullTypes.push(part);
+  }
+  return hasNull && nonNullTypes.length > 0 && nonNullTypes.every((part) => isNumberType(part));
 }
 
 /** Check if a ts.Type represents boolean */

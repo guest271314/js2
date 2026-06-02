@@ -1,0 +1,9 @@
+[package]
+name = "wasmtime-cold-host"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[dependencies]
+wasmtime = "45.0.0"

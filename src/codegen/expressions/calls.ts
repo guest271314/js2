@@ -5,15 +5,25 @@
  */
 import { ts, forEachChild } from "../../ts-api.js";
 import {
+  isBigIntType,
   isBooleanType,
+  isBooleanWrapperType,
   isExternalDeclaredClass,
   isGeneratorType,
   isNumberType,
+  isNumberWrapperType,
   isStringType,
+  isStringWrapperType,
+  isSymbolType,
   isVoidType,
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import {
+  emitStandalonePromiseReject,
+  emitStandalonePromiseResolve,
+  isStandalonePromiseActive,
+} from "../async-scheduler.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
@@ -51,8 +61,9 @@ import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js"
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
-import { emitSetExtrasArgv, ensureArgcGlobal } from "../statements/nested-declarations.js";
+import { emitSetExtrasArgv, ensureArgcGlobal, ensureExtrasArgvGlobal } from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
+import { tryCompileNodeProcessCall } from "../node-process-api.js";
 import {
   defaultValueInstrs,
   emitGuardedFuncRefCast,
@@ -78,12 +89,20 @@ import {
 import { compileOptionalCallExpression } from "./calls-optional.js";
 import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
-import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
+import {
+  emitThrowTypeError,
+  getFuncParamTypes,
+  getWasmFuncReturnType,
+  isEffectivelyVoidReturn,
+  noJsHost,
+  wasmFuncReturnsVoid,
+} from "./helpers.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
-import { ensureNativeStringExternBridge } from "../native-strings.js";
+import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "../native-strings.js";
+import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
  * Known built-in global class/object names that compile to ref.null.extern
@@ -139,6 +158,125 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * Statically evaluate `ToBoolean(expr)` for descriptor flag literals.
+ * Per §6.2.6 ToPropertyDescriptor each attribute flag is ToBoolean-coerced —
+ * `configurable: 123` / `'x'` / `{}` / `[]` are all truthy. Used by the
+ * Object.create/defineProperties static-expansion fast path so the emitted
+ * descriptor flags reflect the spec rather than degrading every non-`true`
+ * literal to `false`. Returns `undefined` when the value isn't statically
+ * resolvable (caller should fall back to the runtime path).
+ */
+function staticToBoolean(expr: ts.Expression): boolean | undefined {
+  while (
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isParenthesizedExpression(expr) ||
+    ts.isSatisfiesExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = (
+      expr as
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.ParenthesizedExpression
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
+  switch (expr.kind) {
+    case ts.SyntaxKind.TrueKeyword:
+      return true;
+    case ts.SyntaxKind.FalseKeyword:
+    case ts.SyntaxKind.NullKeyword:
+      return false;
+    case ts.SyntaxKind.NumericLiteral:
+      return Number((expr as ts.NumericLiteral).text) !== 0;
+    case ts.SyntaxKind.BigIntLiteral: {
+      const t = (expr as ts.BigIntLiteral).text;
+      return BigInt(t.slice(0, -1)) !== 0n;
+    }
+    case ts.SyntaxKind.StringLiteral:
+    case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+      return (expr as ts.StringLiteralLike).text.length > 0;
+    case ts.SyntaxKind.ObjectLiteralExpression:
+    case ts.SyntaxKind.ArrayLiteralExpression:
+    case ts.SyntaxKind.RegularExpressionLiteral:
+    case ts.SyntaxKind.FunctionExpression:
+    case ts.SyntaxKind.ArrowFunction:
+    case ts.SyntaxKind.ClassExpression:
+      return true;
+    case ts.SyntaxKind.Identifier: {
+      const text = (expr as ts.Identifier).text;
+      if (text === "undefined") return false;
+      if (text === "NaN") return false;
+      if (text === "Infinity") return true;
+      return undefined;
+    }
+    case ts.SyntaxKind.VoidExpression:
+      return false;
+    case ts.SyntaxKind.PrefixUnaryExpression: {
+      const u = expr as ts.PrefixUnaryExpression;
+      if (u.operator === ts.SyntaxKind.ExclamationToken) {
+        const inner = staticToBoolean(u.operand);
+        return inner === undefined ? undefined : !inner;
+      }
+      if (u.operator === ts.SyntaxKind.MinusToken || u.operator === ts.SyntaxKind.PlusToken) {
+        if (u.operand.kind === ts.SyntaxKind.NumericLiteral) {
+          return Number((u.operand as ts.NumericLiteral).text) !== 0;
+        }
+      }
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Coerce an already-pushed Number.prototype method argument (toFixed /
+ * toPrecision / toExponential digits) to f64. These runtime helpers take an
+ * f64 argument, but the source argument may be i32 (boolean) or externref/ref
+ * (e.g. a Symbol). Per §21.1.3.x the argument runs through ToInteger, which
+ * begins with ToNumber — and ToNumber(Symbol) throws TypeError (§7.1.4).
+ * Routing externref/ref through coerceType funnels Symbols into the throwing
+ * ToNumber path (#1564) and keeps the value stack f64-typed for the
+ * subsequent local.tee/local.set into an f64 local.
+ */
+function coerceNumberMethodArgToF64(ctx: CodegenContext, fctx: FunctionContext, argType: ValType | null): void {
+  if (!argType) return;
+  if (argType.kind === "f64") return;
+  if (argType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return;
+  }
+  coerceType(ctx, fctx, argType, { kind: "f64" });
+}
+
+/**
+ * (#1735) Normalise an f64 local holding a Number.prototype.{toExponential,
+ * toPrecision} digits/precision argument so that NaN becomes 0, matching
+ * ToIntegerOrInfinity (§7.1.5 / §21.1.3.{3,5} step 5: NaN → +0).
+ *
+ * The `number_toExponential` / `number_toPrecision` runtime helpers overload
+ * NaN as their "no argument supplied" sentinel (the codegen no-arg branch
+ * pushes `f64.const NaN`). Without this normalisation an *explicit* NaN
+ * argument (`(1).toExponential(NaN)`, `(1).toExponential(0/0)`) carries the
+ * same bits as the sentinel and is wrongly handled as no-arg. Rewriting the
+ * local in place — `local = (d == d) ? d : 0` via `f64.eq` self-compare (false
+ * only for NaN) feeding `select` — keeps the subsequent range-check and call
+ * reading a spec-correct value with no host-side change.
+ */
+function normalizeNaNToZero(fctx: FunctionContext, f64Local: number): void {
+  fctx.body.push({ op: "local.get", index: f64Local }); // val-if-true: d
+  fctx.body.push({ op: "f64.const", value: 0 }); // val-if-false: 0
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.eq" }); // condition: d == d (0 only when NaN)
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: f64Local });
+}
+
+/**
  * Look up closure info for a variable by checking if its local type
  * is a ref to a known closure struct. Handles cases like:
  *   var f = function() { ... }; f();
@@ -161,17 +299,17 @@ function resolveClosureInfoFromLocal(
 
 /**
  * (#1324 primitives slice) Try to emit `JSON.stringify(arg)` for a
- * statically-typed primitive value as pure Wasm — no JS host call.
+ * statically-typed primitive value without the `JSON_stringify` JS host call.
  *
  * Supported shapes (all leave an externref string on the stack):
  *   - `null`       → string `"null"`
- *   - `undefined`  → undefined (ref.null.extern) — per spec §25.5.2,
+ *   - `undefined`  → undefined (ref.null.extern) — per spec §25.5.4.2,
  *                    `JSON.stringify(undefined)` returns `undefined`,
  *                    not the string "null"
  *   - `boolean`    → string `"true"` or `"false"`
- *   - `number`     → result of `number_toString(value)`, except
+ *   - `number`     → result of `number_toString(value)` when available, except
  *                    `NaN`/`±Infinity` serialize to the string `"null"`
- *                    per §25.5.2 step 11
+ *                    per §25.5.4.2 step 9
  *
  * Deferred to #1353 (full architect spec):
  *   - `string`  — needs runtime JSON-escape helper
@@ -289,12 +427,564 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
  * Skips nested function/function-expression scopes (they have their own `arguments`),
  * but traverses arrow functions (which inherit the enclosing `arguments`).
  */
+/**
+ * (#1465) Emit an iterable argument for a host-bound Promise combinator
+ * (Promise.all / race / allSettled / any).
+ *
+ * The runtime helper delegates to native `Promise.METHOD.call(C, iter)` which
+ * drives the spec's `GetIterator(iter)` algorithm — strings, arguments,
+ * generators, custom Symbol.iterator objects, Set/Map/TypedArrays all "just
+ * work" when the host engine sees them as real iterables.
+ *
+ * The pain point is array literals: by default `[p1, p2]` compiles to a
+ * wasm vec or tuple struct, which is opaque to the host engine. Native
+ * GetIterator on an opaque externref throws "object is not iterable".
+ *
+ * Fix: when the iterable argument is a syntactic ArrayLiteralExpression,
+ * compile each element to externref and push it into a JS array via
+ * `__js_array_new` / `__js_array_push`. For any other shape (variables,
+ * function returns, spread, …) fall back to plain externref coercion and
+ * trust the runtime helper's `_toIterable` to dispatch (it handles strings,
+ * known JS iterables, and wasm vec via __vec_len/__vec_get).
+ */
+function emitIterableArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): void {
+  // Strip parens/as so `(p as any[])` and similar wrappers still match.
+  let inner: ts.Expression = argExpr;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+    inner = inner.expression;
+  }
+  if (ts.isArrayLiteralExpression(inner)) {
+    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+    flushLateImportShifts(ctx, fctx);
+    if (arrNewIdx !== undefined && arrPushIdx !== undefined) {
+      // Build a JS array eagerly, push each element coerced to externref.
+      fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+      const jsArrLocal = allocLocal(fctx, `__promise_iter_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: jsArrLocal });
+      for (const el of inner.elements) {
+        // Spread inside the array literal: fall back to a generic coercion of
+        // the entire literal to externref. Native engine will iterate the
+        // spread source on our behalf.
+        if (ts.isSpreadElement(el)) {
+          fctx.body.push({ op: "drop" } as Instr);
+          compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: jsArrLocal });
+        // OmittedExpression (sparse array hole) — push undefined sentinel.
+        if (ts.isOmittedExpression(el)) {
+          emitUndefined(ctx, fctx);
+        } else {
+          const elType = compileExpression(ctx, fctx, el, { kind: "externref" });
+          if (elType && elType.kind !== "externref") {
+            // compileExpression with target externref should coerce already;
+            // belt-and-braces fallback.
+            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: arrPushIdx });
+      }
+      fctx.body.push({ op: "local.get", index: jsArrLocal });
+      return;
+    }
+  }
+  // Default: coerce to externref and let the runtime helper dispatch.
+  compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+}
+
+/**
+ * (#1632a) Static-resolve the name of a function-like expression for the
+ * `__bind_function` nameHint argument. Returns "" when no static name is
+ * available (anonymous function, complex expression). The host falls back to
+ * the wrapped callable's own `.name` when the hint is empty.
+ *
+ * Per spec §15.2.5 / NamedEvaluation: a named function expression
+ * `function namedFn(){}` keeps its inner name even when bound to a different
+ * identifier (`const fn = function namedFn(){}`); the inner name wins.
+ */
+function resolveStaticFunctionName(ctx: CodegenContext, expr: ts.Expression): string {
+  let cursor: ts.Expression = expr;
+  while (
+    ts.isParenthesizedExpression(cursor) ||
+    ts.isAsExpression(cursor) ||
+    ts.isTypeAssertionExpression(cursor) ||
+    ts.isSatisfiesExpression(cursor) ||
+    ts.isNonNullExpression(cursor)
+  ) {
+    cursor = (cursor as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(cursor)) {
+    // Look through `const fn = function namedFn(){}` to prefer the inner name
+    // (named function expression) over the binding identifier.
+    const sym = ctx.checker.getSymbolAtLocation(cursor);
+    const decl = sym?.valueDeclaration;
+    if (decl && (ts.isVariableDeclaration(decl) || ts.isBindingElement(decl)) && decl.initializer) {
+      let init: ts.Expression = decl.initializer;
+      while (ts.isParenthesizedExpression(init)) init = init.expression;
+      if (ts.isFunctionExpression(init) && init.name) return init.name.text;
+    }
+    return cursor.text;
+  }
+  if (ts.isPropertyAccessExpression(cursor)) return cursor.name.text;
+  // Named function expression: `(function namedFn(){}).bind(...)`
+  if (ts.isFunctionExpression(cursor) && cursor.name) return cursor.name.text;
+  return "";
+}
+
+/**
+ * (#1632a) Static-resolve the declared parameter count of a function-like
+ * expression for the `__bind_function` lengthHint. Returns -1 when no static
+ * arity is available; the host falls back to the wrapped callable's `.length`.
+ *
+ * Spec §20.2.4.2: `Function.prototype.length` is the count of formal parameters
+ * before the first default-valued, rest, or destructured parameter.
+ */
+function resolveStaticFunctionLength(ctx: CodegenContext, expr: ts.Expression): number {
+  let cursor: ts.Expression = expr;
+  while (
+    ts.isParenthesizedExpression(cursor) ||
+    ts.isAsExpression(cursor) ||
+    ts.isTypeAssertionExpression(cursor) ||
+    ts.isSatisfiesExpression(cursor) ||
+    ts.isNonNullExpression(cursor)
+  ) {
+    cursor = (cursor as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  // Inline function expression / arrow — read parameters directly.
+  if (ts.isFunctionExpression(cursor) || ts.isArrowFunction(cursor)) {
+    return countSpecLength(cursor.parameters);
+  }
+  // Try the TS checker's call signatures.
+  const tsType = ctx.checker.getTypeAtLocation(cursor);
+  const sigs = tsType?.getCallSignatures?.() ?? [];
+  if (sigs.length > 0) {
+    const sig = sigs[0]!;
+    const decl = sig.getDeclaration?.();
+    if (decl && decl.parameters) {
+      return countSpecLength(decl.parameters);
+    }
+    // Fallback: signature parameter count (less precise — counts optional/rest).
+    const minArity = (sig as unknown as { minArgumentCount?: number }).minArgumentCount;
+    if (typeof minArity === "number") return minArity;
+    return sig.parameters.length;
+  }
+  return -1;
+}
+
+function countSpecLength(params: ts.NodeArray<ts.ParameterDeclaration>): number {
+  let count = 0;
+  for (const p of params) {
+    // Skip the TypeScript `this` pseudo-parameter — it's not part of
+    // Function.prototype.length per spec.
+    if (ts.isIdentifier(p.name) && p.name.text === "this") continue;
+    // Stop at first default, rest, or optional — per spec.
+    if (p.questionToken !== undefined) break;
+    if (p.dotDotDotToken !== undefined) break;
+    if (p.initializer !== undefined) break;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * (#1632a) Compile `target.bind(thisArg, ...partialArgs)` to a
+ * `__bind_function(target, thisArg, argsArray, nameHint, lengthHint)` host
+ * import call. The host delegates to `Function.prototype.bind.apply(wrapped,
+ * [thisArg, ...partial])` and returns a real JS bound-function exotic.
+ *
+ * Standalone mode falls back to identity-bind (drops partial args, returns
+ * the receiver). Returns `undefined` to signal "no codegen happened, caller
+ * should fall through" — this can only happen if `compileExpression` for the
+ * receiver returns null (e.g. unresolvable identifier); callers retain the
+ * old "throws on missing receiver" behaviour in that case.
+ */
+function compileFunctionBind(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): InnerResult | undefined {
+  const externRef: ValType = { kind: "externref" };
+  const i32Ty: ValType = { kind: "i32" };
+
+  // Standalone (--target wasi / noJsHost): no JS host → identity-bind degraded.
+  // Drop partial args, push the receiver as externref, return it unchanged.
+  if (ctx.standalone || noJsHost(ctx)) {
+    for (const arg of expr.arguments) {
+      const t = compileExpression(ctx, fctx, arg);
+      if (t !== null) fctx.body.push({ op: "drop" });
+    }
+    const recvType = compileExpression(ctx, fctx, propAccess.expression, externRef);
+    if (recvType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (recvType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    }
+    return externRef;
+  }
+
+  // Static hints from the receiver expression (host falls back when -1 / "").
+  const targetName = resolveStaticFunctionName(ctx, propAccess.expression);
+  const targetLength = resolveStaticFunctionLength(ctx, propAccess.expression);
+
+  // 1. Push target externref.
+  const recvType = compileExpression(ctx, fctx, propAccess.expression, externRef);
+  if (recvType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (recvType.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+  }
+
+  // 2. Push thisArg externref (or ref.null.extern when omitted).
+  const args = expr.arguments;
+  if (args.length >= 1) {
+    const t = compileExpression(ctx, fctx, args[0]!, externRef);
+    if (t === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (t.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+
+  // 3. Build argsArray as a JS Array of partial args (args[1..]).
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [externRef]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [externRef, externRef], []);
+  flushLateImportShifts(ctx, fctx);
+  const arrNewResolvedIdx = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+  const arrPushResolvedIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+  if (arrNewResolvedIdx === undefined || arrPushResolvedIdx === undefined) {
+    // Late-import setup failed (very unusual). Bail to identity-bind for safety.
+    fctx.body.push({ op: "drop" } as Instr); // drop thisArg
+    return externRef;
+  }
+  fctx.body.push({ op: "call", funcIdx: arrNewResolvedIdx });
+  const argsArrayLocal = allocLocal(fctx, `__bind_args_${fctx.locals.length}`, externRef);
+  fctx.body.push({ op: "local.set", index: argsArrayLocal });
+  for (let i = 1; i < args.length; i++) {
+    fctx.body.push({ op: "local.get", index: argsArrayLocal });
+    const argExpr = args[i]!;
+    if (ts.isSpreadElement(argExpr)) {
+      // Spread in bind partials is rare — coerce the spread argument to
+      // externref and let the host accept it as a single value. Real spread
+      // handling would need iterable expansion at compile time.
+      const t = compileExpression(ctx, fctx, argExpr.expression, externRef);
+      if (t === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (t.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      }
+    } else {
+      const t = compileExpression(ctx, fctx, argExpr, externRef);
+      if (t === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (t.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      }
+    }
+    fctx.body.push({ op: "call", funcIdx: arrPushResolvedIdx });
+  }
+  fctx.body.push({ op: "local.get", index: argsArrayLocal });
+
+  // 4. Push nameHint (string externref or ref.null.extern).
+  if (targetName) {
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, targetName));
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+
+  // 5. Push lengthHint i32 (-1 = unknown).
+  fctx.body.push({ op: "i32.const", value: targetLength });
+
+  // 6. Call __bind_function. Result is externref.
+  const bindIdx = ensureLateImport(
+    ctx,
+    "__bind_function",
+    [externRef, externRef, externRef, externRef, i32Ty],
+    [externRef],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const bindResolvedIdx = ctx.funcMap.get("__bind_function") ?? bindIdx;
+  if (bindResolvedIdx === undefined) {
+    // Should not happen in host mode — drop the staged args and degrade.
+    fctx.body.push({ op: "drop" } as Instr); // length hint
+    fctx.body.push({ op: "drop" } as Instr); // name hint
+    fctx.body.push({ op: "drop" } as Instr); // args array
+    fctx.body.push({ op: "drop" } as Instr); // thisArg
+    // Leave receiver on the stack as identity-bind fallback.
+    return externRef;
+  }
+  fctx.body.push({ op: "call", funcIdx: bindResolvedIdx });
+  return externRef;
+}
+
+/**
+ * (#1337) True when the callee expression denotes a variable whose initializer
+ * is a `Function.prototype.bind` result — i.e. its runtime value is a host
+ * bound-function externref. Mirrors the `isBindHostCall` detector in
+ * statements/variables.ts (which forces the local to externref). Only the
+ * single-assignment `const`/`let`/`var = fn.bind(...)` form is recognised; this
+ * matches the bulk of the test262 bound-function-invocation corpus.
+ */
+function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(expr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+  const init = decl.initializer;
+  if (!ts.isCallExpression(init)) return false;
+  const callee = init.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  // Direct `<receiver>.bind(...)`.
+  if (callee.name.text === "bind") return true;
+  // Indirect `Function.prototype.bind.call(fn, ...)`.
+  if (
+    callee.name.text === "call" &&
+    ts.isPropertyAccessExpression(callee.expression) &&
+    callee.expression.name.text === "bind" &&
+    ts.isPropertyAccessExpression(callee.expression.expression) &&
+    callee.expression.expression.name.text === "prototype" &&
+    ts.isIdentifier(callee.expression.expression.expression) &&
+    callee.expression.expression.expression.text === "Function"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * (#1337) Emit a call to a host bound-function externref via the
+ * `__call_function(fn, thisArg, argsArray)` host helper. The bound function
+ * already carries [[BoundThis]] and [[BoundArguments]], so `thisArg` is passed
+ * as `undefined` (ref.null.extern) and only the call-site arguments are packed.
+ *
+ * Returns `{ kind: "externref" }` on success, or `null` to let the caller fall
+ * through to the normal dispatch (e.g. if late-import wiring fails).
+ */
+function emitBoundFunctionCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | null {
+  const externRef: ValType = { kind: "externref" };
+
+  // 1. Compile callee → externref, stash in a local.
+  const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
+  if (calleeType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (calleeType.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+  }
+  const calleeLocal = allocLocal(fctx, `__bfn_callee_${fctx.locals.length}`, externRef);
+  fctx.body.push({ op: "local.set", index: calleeLocal });
+
+  // 2. Build the arguments array (JS Array externref).
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [externRef]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [externRef, externRef], []);
+  flushLateImportShifts(ctx, fctx);
+  const arrNewResolvedIdx = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+  const arrPushResolvedIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+  if (arrNewResolvedIdx === undefined || arrPushResolvedIdx === undefined) return null;
+
+  fctx.body.push({ op: "call", funcIdx: arrNewResolvedIdx });
+  const argsArrayLocal = allocLocal(fctx, `__bfn_args_${fctx.locals.length}`, externRef);
+  fctx.body.push({ op: "local.set", index: argsArrayLocal });
+  for (const argExpr of expr.arguments) {
+    fctx.body.push({ op: "local.get", index: argsArrayLocal });
+    const inner = ts.isSpreadElement(argExpr) ? argExpr.expression : argExpr;
+    const t = compileExpression(ctx, fctx, inner, externRef);
+    if (t === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (t.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    }
+    fctx.body.push({ op: "call", funcIdx: arrPushResolvedIdx });
+  }
+
+  // 3. Call __call_function(callee, undefined, argsArray).
+  const callIdx = ensureLateImport(ctx, "__call_function", [externRef, externRef, externRef], [externRef]);
+  flushLateImportShifts(ctx, fctx);
+  const callResolvedIdx = ctx.funcMap.get("__call_function") ?? callIdx;
+  if (callResolvedIdx === undefined) return null;
+
+  fctx.body.push({ op: "local.get", index: calleeLocal });
+  fctx.body.push({ op: "ref.null.extern" }); // thisArg — bound fn carries [[BoundThis]]
+  fctx.body.push({ op: "local.get", index: argsArrayLocal });
+  fctx.body.push({ op: "call", funcIdx: callResolvedIdx });
+  return externRef;
+}
+
+/**
+ * (#1116b) Resolve a Promise-combinator `thisArg`/receiver that names a
+ * Wasm-compiled `class X extends Promise`.
+ *
+ * Such a class is externref-backed (#1366a/b): its instances are real host
+ * Promises (built via `__new_Promise`), but the class *identifier itself* has
+ * no class-object singleton global, so `compileExpression(MyPromise)` yields
+ * `null`/opaque — and `Promise.all.call(MyPromise, iter)` then throws
+ * `[object Object] is not a constructor` in V8. The fix: resolve the
+ * identifier to a real JS-callable Promise subclass synthesized (and cached)
+ * by the `__promise_subclass_ctor` host import, keyed on the class name.
+ *
+ * Returns true if it emitted a JS-constructor externref for `argExpr`; false
+ * if the caller should fall back to plain `compileExpression`.
+ */
+function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): boolean {
+  // (E7) Standalone (WASI) mode has no JS host, so `__promise_subclass_ctor`
+  // is unsatisfiable. Never emit the import there.
+  if (isStandalonePromiseActive(ctx)) return false;
+  // Only fires for a bare identifier (or class-expr alias) naming a class.
+  if (!ts.isIdentifier(argExpr)) return false;
+  const resolved = ctx.classExprNameMap.get(argExpr.text) ?? argExpr.text;
+  // Walk the parent chain so a chained subclass (E3 — `class B extends A`,
+  // `class A extends Promise`) still resolves: `classBuiltinParentMap` only
+  // records the *immediate* builtin parent, so B maps to "A", not "Promise".
+  let cursor: string | undefined = resolved;
+  let extendsPromise = false;
+  const seen = new Set<string>();
+  while (cursor !== undefined && !seen.has(cursor)) {
+    seen.add(cursor);
+    if (ctx.classBuiltinParentMap.get(cursor) === "Promise") {
+      extendsPromise = true;
+      break;
+    }
+    cursor = ctx.classParentMap.get(cursor);
+  }
+  if (!extendsPromise) return false;
+  const importName = "__promise_subclass_ctor";
+  let funcIdx =
+    ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
+  if (funcIdx === undefined) return false;
+  // Push the class name (the synthesized subclass is cached per name). Use the
+  // same host-string mechanism as extern method dispatch so it works in both
+  // string backends.
+  addStringConstantGlobal(ctx, resolved);
+  const nameIdx = ctx.stringGlobalMap.get(resolved);
+  if (nameIdx !== undefined) {
+    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
+  } else {
+    compileStringLiteral(ctx, fctx, resolved);
+  }
+  fctx.body.push({ op: "call", funcIdx });
+  return true;
+}
+
 function usesArguments(node: ts.Node): boolean {
   if (ts.isIdentifier(node) && node.text === "arguments") return true;
   if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) {
     return false;
   }
   return forEachChild(node, usesArguments) ?? false;
+}
+
+/**
+ * (#1397) Conservative scope-level reassignment scan: returns true if the
+ * source file contains any assignment expression of the form `X.<method> = ...`
+ * (any LHS expression, member name === `methodName`).
+ *
+ * Used to gate static-dispatch fast-paths for wrapper-type method calls
+ * (`new String(...).toString()`, `new Number(...).valueOf()`, etc.) so that
+ * sources that explicitly reassign these methods fall through to the
+ * dynamic-dispatch path (`__extern_method_call`) and pick up the override
+ * at runtime — preserving spec semantics where transferred prototype methods
+ * throw TypeError on the wrong receiver type.
+ *
+ * Conservative scan rationale: scope-narrowing (only the enclosing function)
+ * would miss patterns like `obj.toString = OtherType.prototype.toString`
+ * defined at module scope and used inside a function. False positives
+ * (sources that reassign in some unrelated branch) only cost the static
+ * fast-path on wrapper objects — not a measurable perf hit because wrappers
+ * are uncommon at runtime in real code.
+ *
+ * Cached per `(sourceFile, methodName)` so repeated calls are O(1).
+ */
+const _reassignmentCache = new WeakMap<ts.SourceFile, Map<string, boolean>>();
+function sourceHasMethodReassignment(ctx: CodegenContext, anchor: ts.Node, methodName: string): boolean {
+  const sf = anchor.getSourceFile();
+  if (!sf) return false;
+  let perFile = _reassignmentCache.get(sf);
+  if (perFile === undefined) {
+    perFile = new Map<string, boolean>();
+    _reassignmentCache.set(sf, perFile);
+  }
+  const cached = perFile.get(methodName);
+  if (cached !== undefined) return cached;
+
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      ts.isIdentifier(node.left.name) &&
+      node.left.name.text === methodName
+    ) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  }
+  visit(sf);
+  perFile.set(methodName, found);
+  // Reference ctx so the parameter isn't unused — the cache is keyed on the
+  // SourceFile (not ctx) but we keep ctx in the signature for future
+  // refinements that need scope-narrowing or per-symbol resolution.
+  void ctx;
+  return found;
+}
+
+/**
+ * (#1397) Emit a dynamic-dispatch method call on a wrapper-object receiver:
+ *
+ *   __extern_method_call(receiver, methodName, [])
+ *
+ * Used by the wrapper-reassignment branch at the top of compileMethodCall
+ * to bypass the static fast-paths when source has reassigned the method.
+ * Returns the result type (externref) on success, null if the necessary
+ * runtime imports cannot be registered (caller falls through to the
+ * static path as a best-effort fallback).
+ */
+function emitWrapperDynamicMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvExpr: ts.Expression,
+  methodName: string,
+): ValType | null {
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  const methodCallIdx = ensureLateImport(
+    ctx,
+    "__extern_method_call",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (arrNewIdx === undefined || methodCallIdx === undefined) return null;
+
+  // Compile receiver as externref.
+  const recvType = compileExpression(ctx, fctx, recvExpr, { kind: "externref" });
+  if (recvType && recvType.kind !== "externref") {
+    fctx.body.push({ op: "extern.convert_any" });
+  }
+  if (recvType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+
+  // Push method name as a string constant.
+  addStringConstantGlobal(ctx, methodName);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+
+  // Empty args array: __js_array_new() → externref.
+  fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+
+  // Re-lookup methodCallIdx in case args compilation triggered shifts.
+  const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
+  fctx.body.push({ op: "call", funcIdx: finalMcIdx });
+  return { kind: "externref" };
 }
 
 /**
@@ -312,6 +1002,103 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
   const argc = Math.min(actualArgCount, paramCount);
   fctx.body.push({ op: "i32.const", value: argc });
   fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+}
+
+/**
+ * Reset the __argc and __extras_argv globals to their sentinel values
+ * (-1 / null). Used after closure / indirect call paths where we set the
+ * globals unconditionally but can't be sure the callee consumed them
+ * (its prologue only consumes when the body reads `arguments`). Without
+ * cleanup, a subsequent function that does read `arguments` would
+ * inherit a stale extras_argv and produce a wrong arguments.length.
+ * (#1511)
+ */
+export function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+}
+
+/**
+ * For indirect (closure / call_ref) call paths where the callee is not
+ * statically known, set `__argc` and (if there are overflow args) build
+ * `__extras_argv` from the call-site args beyond `paramCount`. The
+ * lifted callee's prologue reads these to compute `arguments.length`
+ * correctly even when more args were passed than the lifted function's
+ * formal signature accepts.
+ *
+ * Must be called AFTER the formal args have been compiled / pushed onto
+ * the stack (or saved to locals), but BEFORE the call_ref. Pair with
+ * `emitResetArgcExtras` after the call to prevent stale-extras leaking
+ * into a subsequent callee that DOES read `arguments`. (#1511)
+ */
+export function emitClosureCallArgcExtras(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+  paramCount: number,
+): void {
+  if (args.length > paramCount) {
+    emitSetExtrasArgv(ctx, fctx, args as unknown as ts.Expression[], paramCount);
+  }
+  emitSetArgc(ctx, fctx, args.length, paramCount);
+}
+
+/**
+ * Build the wasm instructions that set `__extras_argv` from a list of
+ * pre-saved externref locals, and `__argc` to (paramCount + extrasLocals.length).
+ *
+ * Used by indirect-call paths that have already compiled overflow args
+ * into externref locals (so we don't re-evaluate side effects). The
+ * returned instruction list leaves the wasm value stack unchanged.
+ * (#1511)
+ */
+function buildArgcExtrasSetupFromLocals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  paramCount: number,
+  extrasLocals: number[],
+): Instr[] {
+  const out: Instr[] = [];
+  const callArgCount = paramCount + extrasLocals.length;
+  if (extrasLocals.length > 0) {
+    const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+    const extrasArrTi = getArrTypeIdxFromVec(ctx, extrasVecTi);
+    for (const el of extrasLocals) {
+      out.push({ op: "local.get", index: el } as Instr);
+    }
+    out.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+    const arrTmp = allocLocal(fctx, `__extras_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: extrasArrTi });
+    out.push({ op: "local.set", index: arrTmp } as Instr);
+    out.push({ op: "i32.const", value: extrasLocals.length } as Instr);
+    out.push({ op: "local.get", index: arrTmp } as Instr);
+    out.push({ op: "struct.new", typeIdx: extrasVecTi } as Instr);
+    out.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  }
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  out.push({ op: "i32.const", value: Math.min(callArgCount, paramCount) } as Instr);
+  out.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  return out;
+}
+
+/**
+ * Build the wasm instructions that reset `__argc` and `__extras_argv` to
+ * their sentinel values. Useful for inlining into dispatch arms / if
+ * bodies. The returned list leaves the wasm value stack unchanged.
+ * (#1511)
+ */
+function buildArgcExtrasReset(ctx: CodegenContext): Instr[] {
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  return [
+    { op: "ref.null", typeIdx: extrasVecTi } as Instr,
+    { op: "global.set", index: extrasGlobalIdx } as Instr,
+    { op: "i32.const", value: -1 } as Instr,
+    { op: "global.set", index: argcGlobalIdx } as Instr,
+  ];
 }
 
 /**
@@ -379,7 +1166,7 @@ function compileOptionalDirectCall(ctx: CodegenContext, fctx: FunctionContext, e
     fctx.body.push({ op: "local.tee", index: closureTmp });
     fctx.body.push({ op: "local.get", index: closureTmp });
     for (const arg of expr.arguments) compileExpression(ctx, fctx, arg);
-    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as unknown as Instr);
+    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
     resolved = true;
   } else if (funcIdx !== undefined) {
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
@@ -476,6 +1263,10 @@ function tryEvalAsRegExpPeephole(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
+  // #1474 — this peephole desugars `eval("/" + X + "/")` to a RegExp_new
+  // host call. RegExp has no Wasm-native engine yet, so refuse to register
+  // the host import in --target standalone (eval itself is also host-only).
+  if (ctx.standalone) return undefined;
   if (expr.arguments.length !== 1) return undefined;
 
   // Strip parens around the argument.
@@ -843,17 +1634,110 @@ function emitVirtualMethodDispatchByTag(
   return resultType;
 }
 
+/**
+ * Statically flatten an array literal's elements into a positional argument
+ * list, expanding spreads of nested array literals (`[...[a, b]]` → `a, b`).
+ * Returns undefined when the literal contains an element we cannot expand at
+ * compile time (a spread of a non-literal, or an elided hole). Used by the
+ * `fn.apply(thisArg, [...])` rewrite (#1596).
+ */
+function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expression[] | undefined {
+  const out: ts.Expression[] = [];
+  for (const el of arr.elements) {
+    if (ts.isOmittedExpression(el)) return undefined;
+    if (ts.isSpreadElement(el)) {
+      let inner: ts.Expression = el.expression;
+      while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+      if (!ts.isArrayLiteralExpression(inner)) return undefined;
+      const nested = flattenStaticArrayElements(inner);
+      if (nested === undefined) return undefined;
+      out.push(...nested);
+    } else {
+      out.push(el);
+    }
+  }
+  return out;
+}
+
 function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
   // Optional chaining on calls: obj?.method()
   if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // (#1540) JSX runtime call intercept — `_jsx(type, props, key?)` /
+  // `_jsxs(type, props, key?)` / `_jsxDEV(...)`. TypeScript emits these
+  // automatically when `jsx: react-jsx` is set; preprocessImports recorded
+  // the actual local-binding names in `ctx.jsxRuntime`. We route the call
+  // to the matching `__jsx_runtime_*` host import (registered in
+  // `registerJsxRuntimeImports`), passing args as externref.
+  if (ctx.jsxRuntime && ts.isIdentifier(expr.expression)) {
+    const name = expr.expression.text;
+    let method: "jsx" | "jsxs" | "jsxDEV" | undefined;
+    let arity = 3;
+    if (ctx.jsxRuntime.localJsx === name) {
+      method = "jsx";
+      arity = 3;
+    } else if (ctx.jsxRuntime.localJsxs === name) {
+      method = "jsxs";
+      arity = 3;
+    } else if (ctx.jsxRuntime.localJsxDev === name) {
+      method = "jsxDEV";
+      arity = 6;
+    }
+    if (method) {
+      const importName = `__jsx_runtime_${method}`;
+      const ext: ValType = { kind: "externref" };
+      const params: ValType[] = Array.from({ length: arity }, () => ext);
+      const funcIdx = ensureLateImport(ctx, importName, params, [ext]);
+      if (funcIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        // Compile up to `arity` args as externref, padding shortfalls with
+        // ref.null.extern. Excess args (rare) are evaluated and dropped.
+        const argCount = Math.min(arity, expr.arguments.length);
+        for (let i = 0; i < argCount; i++) {
+          compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+        }
+        for (let i = argCount; i < arity; i++) {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        for (let i = arity; i < expr.arguments.length; i++) {
+          const t = compileExpression(ctx, fctx, expr.arguments[i]!);
+          if (t) fctx.body.push({ op: "drop" });
+        }
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+    }
+  }
+
+  // Node-shaped process APIs are lowered in their own module so the generic
+  // call-expression compiler does not accumulate host API special cases.
+  const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
+  if (nodeProcessCall !== undefined) return nodeProcessCall;
+
   // RegExp(pattern, flags) called without `new` — per spec, equivalent to
   // `new RegExp(pattern, flags)` (unless pattern is already a RegExp with
   // flags undefined, an edge case we accept). Emit the RegExp_new host call
   // directly so the host constructor runs and validates modifier syntax,
   // throwing SyntaxError on invalid patterns. (#1055)
+  // #1474 — RegExp delegates to the JS host engine; refuse `RegExp(...)`
+  // (no `new`) in --target standalone (Phase 1: refuse-and-document).
+  if (
+    ctx.standalone &&
+    !expr.questionDotToken &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "RegExp"
+  ) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: RegExp(...) is not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone.",
+    );
+    return null;
+  }
+
   if (
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
@@ -875,6 +1759,102 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       fctx.body.push({ op: "call", funcIdx: finalIdx });
       return { kind: "externref" };
     }
+  }
+
+  // `Object(x)` called without `new` — ECMAScript §20.1.1.1 / §7.1.18 ToObject.
+  // Per spec: Object() / Object(null) / Object(undefined) → fresh empty object;
+  // Object(number)  → new Number wrapper (typeof === "object");
+  // Object(string)  → new String wrapper (typeof === "object");
+  // Object(boolean) → new Boolean wrapper (typeof === "object");
+  // Object(object)  → return the argument unchanged.
+  // (#1129) Without this, `Object(42)` previously fell through to the generic
+  // builtin path which produced `ref.null.extern` — `typeof` was correct
+  // ("object" since `typeof null === "object"`) but `.valueOf()` returned 0.
+  if (!expr.questionDotToken && ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
+    const args = expr.arguments ?? [];
+
+    // Object() / Object(null) / Object(undefined) → fresh empty object via
+    // `__new_plain_object`. Mirrors the `new Object()` path in new-super.ts
+    // so the result is a real object with the ordinary `Object.prototype`
+    // (Boolean(...) === true, and ToPrimitive finds toString/valueOf so
+    // `Object() == 0` etc. don't throw — #1525).
+    const isNullOrUndefinedArg = (a: ts.Expression): boolean => {
+      if (a.kind === ts.SyntaxKind.NullKeyword) return true;
+      if (ts.isIdentifier(a) && a.text === "undefined") return true;
+      const t = ctx.checker.getTypeAtLocation(a);
+      const f = t.getFlags();
+      // Type-only check — only treat as null/undefined when the static type
+      // is *exactly* null/undefined/void (not unions that include other types).
+      const NULL_UNDEFINED_VOID = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void;
+      return (f & NULL_UNDEFINED_VOID) !== 0 && (f & ~NULL_UNDEFINED_VOID) === 0;
+    };
+
+    if (args.length === 0 || isNullOrUndefinedArg(args[0]!)) {
+      const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalCreateIdx = ctx.funcMap.get("__new_plain_object") ?? createIdx;
+      if (finalCreateIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalCreateIdx });
+        return { kind: "externref" };
+      }
+      // Fallback if host import unavailable (standalone) — emit null externref.
+      // typeof null === "object" still satisfies the §20.1.1.1 typeof contract.
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+
+    // Object(primitive) — wrap into the corresponding wrapper object.
+    const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
+
+    if (isNumberType(argTsType)) {
+      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      const newNumIdx = ensureLateImport(ctx, "__new_Number", [{ kind: "f64" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalNumIdx = ctx.funcMap.get("__new_Number") ?? newNumIdx;
+      if (finalNumIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalNumIdx });
+        return { kind: "externref" };
+      }
+    } else if (isStringType(argTsType)) {
+      compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+      const newStrIdx = ensureLateImport(ctx, "__new_String", [{ kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalStrIdx = ctx.funcMap.get("__new_String") ?? newStrIdx;
+      if (finalStrIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalStrIdx });
+        return { kind: "externref" };
+      }
+    } else if (isBooleanType(argTsType)) {
+      // __new_Boolean takes f64 — coerce bool→f64.
+      compileExpression(ctx, fctx, args[0]!, { kind: "i32" });
+      fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      const newBoolIdx = ensureLateImport(ctx, "__new_Boolean", [{ kind: "f64" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalBoolIdx = ctx.funcMap.get("__new_Boolean") ?? newBoolIdx;
+      if (finalBoolIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalBoolIdx });
+        return { kind: "externref" };
+      }
+    } else if (isBigIntType(argTsType)) {
+      // (#1568) Object(bigint) → BigInt wrapper object (§7.1.18 Table 13).
+      // BigInt is i64-represented; `__new_BigInt` boxes via the spec's literal
+      // `Object(v)` — `BigInt` is not a constructor, so `new BigInt(v)` throws.
+      compileExpression(ctx, fctx, args[0]!, { kind: "i64" });
+      const newBigIntIdx = ensureLateImport(ctx, "__new_BigInt", [{ kind: "i64" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalBigIntIdx = ctx.funcMap.get("__new_BigInt") ?? newBigIntIdx;
+      if (finalBigIntIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalBigIntIdx });
+        return { kind: "externref" };
+      }
+    }
+    // Unknown / object / externref / union — per spec, `Object(o)` returns `o`
+    // unchanged for objects. We can't distinguish primitive-boxed-as-externref
+    // from real objects statically, so the best static behavior is identity.
+    // (A future revision could call a `__to_object` host helper for runtime
+    // ToObject of any-typed values; out of scope for this issue.)
+    compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+    return { kind: "externref" };
   }
 
   // Optional chaining on direct call: fn?.()
@@ -927,6 +1907,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (expr.arguments.length === 0) {
         // eval() with no args returns undefined per spec.  Avoid the host
         // round-trip entirely.
+        // NOTE(#1095): preserved as-is — original used `{ op: "ref.null", refType: "extern" }`
+        // with `as unknown as Instr` to bypass typecheck. The `refType` field is not part of
+        // the Instr union and is ignored by the emitter (which would read `typeIdx` as undefined).
+        // The semantically-correct form is `{ op: "ref.null.extern" }`; left as legacy to keep
+        // this refactor byte-identical. See follow-up.
         fctx.body.push({ op: "ref.null", refType: "extern" } as unknown as Instr);
         return { kind: "externref" };
       }
@@ -993,6 +1978,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     } else {
       // No argument — pass undefined (null externref)
+      // NOTE(#1095): see eval() note above; original used `{ op: "ref.null", refType: "extern" }`
+      // bypass-cast. Preserved verbatim for byte-identical output.
       fctx.body.push({ op: "ref.null", refType: "extern" } as unknown as Instr);
     }
 
@@ -1101,6 +2088,104 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     return compileSuperMethodCall(ctx, fctx, expr);
   }
 
+  // (#1467) AggregateError(errors, message, options?) — called WITHOUT `new`.
+  // Per ES §20.5.7.1, AggregateError called as a function must construct
+  // normally (same effective semantics as `new`). Mirror the codegen in
+  // new-super.ts so the without-new and with-new failures resolve together.
+  // Must run BEFORE the property-access dispatch since the expression is a
+  // bare identifier, and BEFORE the BUILTIN_CLASS_NAMES generic path which
+  // would otherwise emit a host-method call without spec coercion.
+  // Unwrap parenthesized expressions and as/satisfies casts so
+  // `(AggregateError as any)([], 'msg')` also reaches this dispatch.
+  let _aggCallee: ts.Expression = expr.expression;
+  while (
+    ts.isParenthesizedExpression(_aggCallee) ||
+    ts.isAsExpression(_aggCallee) ||
+    ts.isTypeAssertionExpression(_aggCallee) ||
+    ts.isSatisfiesExpression(_aggCallee) ||
+    ts.isNonNullExpression(_aggCallee)
+  ) {
+    _aggCallee = (_aggCallee as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(_aggCallee) && _aggCallee.text === "AggregateError") {
+    const args = expr.arguments ?? [];
+    if (args.length >= 1) {
+      const errorsType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+      if (errorsType && errorsType.kind !== "externref") {
+        coerceType(ctx, fctx, errorsType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    if (args.length >= 2) {
+      const msgType = compileExpression(ctx, fctx, args[1]!, { kind: "externref" });
+      if (msgType && msgType.kind !== "externref") {
+        coerceType(ctx, fctx, msgType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    if (args.length >= 3) {
+      const optsType = compileExpression(ctx, fctx, args[2]!, { kind: "externref" });
+      if (optsType && optsType.kind !== "externref") {
+        coerceType(ctx, fctx, optsType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_AggregateError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
+  // (#1634) SuppressedError(error, suppressed, message, options?) — called
+  // WITHOUT `new`. Per ES §20.5.10.1, called as a function it constructs
+  // normally. Mirror the new-super.ts codegen so without-new and with-new
+  // resolve together. Unwrap parenthesized/cast wrappers like the AggregateError
+  // dispatch above.
+  let _suppCallee: ts.Expression = expr.expression;
+  while (
+    ts.isParenthesizedExpression(_suppCallee) ||
+    ts.isAsExpression(_suppCallee) ||
+    ts.isTypeAssertionExpression(_suppCallee) ||
+    ts.isSatisfiesExpression(_suppCallee) ||
+    ts.isNonNullExpression(_suppCallee)
+  ) {
+    _suppCallee = (_suppCallee as ts.AsExpression | ts.ParenthesizedExpression).expression;
+  }
+  if (ts.isIdentifier(_suppCallee) && _suppCallee.text === "SuppressedError") {
+    const args = expr.arguments ?? [];
+    for (let i = 0; i < 4; i++) {
+      if (args.length > i) {
+        const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+        if (t && t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+    }
+    const funcIdx = ensureLateImport(
+      ctx,
+      "__new_SuppressedError",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+    }
+    return { kind: "externref" };
+  }
+
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
@@ -1111,13 +2196,55 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (callResult !== undefined) return callResult;
     }
 
-    // Handle fn.bind(thisArg, ...partialArgs) — identity bind.
-    // Drops all bind arguments for side effects and returns the receiver as externref.
-    // This is an intentional simplification: we don't synthesize a new bound closure.
-    // It covers the common test262 pattern where bind's result is treated as a function
-    // value (property access, direct call without relying on bound `this`). Tests that
-    // rely on bound-this semantics or partial-arg prepending are not fully satisfied,
-    // but they no longer error out with "bind is not a function".
+    // (#1337) Function.prototype.bind.call(fn, thisArg, ...args) reshape.
+    // Mirrors the #1596 reshape for Function.prototype.{apply,call}.call: rewrite
+    // to `fn.bind(thisArg, ...args)` so the existing #1632a bind dispatch fires
+    // and routes through __bind_function instead of leaking to the host's
+    // Function.prototype.bind on a wasm-struct receiver ("Bind must be called
+    // on a function"). Only the outer `.call` form is matched —
+    // `Function.prototype.bind.apply(fn, [thisArg, ...args])` is rare.
+    //
+    // Narrowing: only fires when the `fn` target has TS call signatures.
+    // This preserves the legacy "Function.prototype.bind.call(undefined, ...)
+    // throws TypeError" behaviour for spec tests like S15.3.4.5_A13 — the
+    // bind dispatch only intercepts callable receivers; non-callable
+    // targets fall through to the legacy host path which throws correctly.
+    if (
+      propAccess.name.text === "call" &&
+      ts.isPropertyAccessExpression(propAccess.expression) &&
+      propAccess.expression.name.text === "bind" &&
+      ts.isPropertyAccessExpression(propAccess.expression.expression) &&
+      propAccess.expression.expression.name.text === "prototype" &&
+      ts.isIdentifier(propAccess.expression.expression.expression) &&
+      propAccess.expression.expression.expression.text === "Function" &&
+      expr.arguments.length >= 1
+    ) {
+      const fnExpr = expr.arguments[0]!;
+      const fnTsType = ctx.checker.getTypeAtLocation(fnExpr);
+      const fnHasCallSig = (fnTsType?.getCallSignatures?.()?.length ?? 0) > 0;
+      if (fnHasCallSig) {
+        const reshapedArgs = expr.arguments.slice(1);
+        const reshapedProp = ts.factory.createPropertyAccessExpression(fnExpr as ts.LeftHandSideExpression, "bind");
+        ts.setTextRange(reshapedProp, propAccess);
+        const reshapedCall = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+        ts.setTextRange(reshapedCall, expr);
+        (reshapedCall as any).parent = expr.parent;
+        return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+    }
+
+    // Handle fn.bind(thisArg, ...partialArgs).
+    //
+    // (#1632a) JS-host mode: lower to `__bind_function(target, thisArg, argsArray,
+    // nameHint, lengthHint)` which delegates to `Function.prototype.bind` on the host.
+    // The host owns [[BoundTargetFunction]] / [[BoundThis]] / [[BoundArguments]] /
+    // .name (`"bound " + target.name`) / .length (max(0, target.length - bound.length)) /
+    // [[Call]] / [[Construct]] — see runtime.ts:__bind_function. Wasm closure structs
+    // are wrapped via `_wrapWasmClosure` so the host receives a real JS callable.
+    //
+    // Standalone (--target wasi / noJsHost): fall back to identity-bind (drop partial
+    // args, return target unchanged). Documented gap: standalone needs a native
+    // bound-function struct, tracked as a follow-up to #1632a.
     //
     // Narrowing: only fires when the receiver's TS type has call signatures. This
     // preserves the legacy "throws on non-function receiver" behavior that a
@@ -1130,19 +2257,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const recvTsType = ctx.checker.getTypeAtLocation(propAccess.expression);
       const recvHasCallSig = (recvTsType?.getCallSignatures?.()?.length ?? 0) > 0;
       if (recvHasCallSig) {
-        for (const arg of expr.arguments) {
-          const t = compileExpression(ctx, fctx, arg);
-          // Only drop values that actually pushed onto the stack.
-          // null = failed-to-compile or normalized-void (nothing pushed).
-          if (t !== null) fctx.body.push({ op: "drop" });
-        }
-        const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
-        if (recvType === null) {
-          fctx.body.push({ op: "ref.null.extern" });
-        } else if (recvType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
-        }
-        return { kind: "externref" };
+        const bindResult = compileFunctionBind(ctx, fctx, expr, propAccess);
+        if (bindResult !== undefined) return bindResult;
       }
     }
 
@@ -1152,6 +2268,90 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (propAccess.name.text === "call" || propAccess.name.text === "apply") {
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
+
+      // Sub-fix 3 (#1596): Function.prototype.{apply,call}.call(fn, ...) reshape.
+      // Rewrite `Function.prototype.apply.call(fn, thisArg, argsArr)` to
+      // `fn.apply(thisArg, argsArr)` (and analogous for .call.call) so the
+      // existing Case 0 / Case 1 handlers fire. Only the outer `.call` form is
+      // matched — `Function.prototype.apply.apply(fn, [thisArg, argsArr])` is
+      // rare and would need a packed-args reshape.
+      if (
+        isCall &&
+        ts.isPropertyAccessExpression(innerExpr) &&
+        (innerExpr.name.text === "apply" || innerExpr.name.text === "call") &&
+        ts.isPropertyAccessExpression(innerExpr.expression) &&
+        innerExpr.expression.name.text === "prototype" &&
+        ts.isIdentifier(innerExpr.expression.expression) &&
+        innerExpr.expression.expression.text === "Function" &&
+        expr.arguments.length >= 1
+      ) {
+        const innerMethod = innerExpr.name.text; // "apply" or "call"
+        const fnExpr = expr.arguments[0]!;
+        const reshapedArgs = expr.arguments.slice(1);
+        const reshapedProp = ts.factory.createPropertyAccessExpression(
+          fnExpr as ts.LeftHandSideExpression,
+          innerMethod,
+        );
+        ts.setTextRange(reshapedProp, propAccess);
+        const reshapedCall = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+        ts.setTextRange(reshapedCall, expr);
+        (reshapedCall as any).parent = expr.parent;
+        return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+
+      // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
+      // A compiled function is a WasmGC funcref/struct, not a JS Function, so a
+      // host-side `.apply`/`.call` lookup fails ("apply is not a function").
+      // Rewrite statically to a direct invocation of the function expression,
+      // dropping thisArg (standalone functions ignore `this`). This reuses the
+      // IIFE-inlining path, which also binds `arguments` correctly (#1596).
+      {
+        let fnExpr: ts.Expression = innerExpr;
+        while (ts.isParenthesizedExpression(fnExpr)) fnExpr = fnExpr.expression;
+        const isFnLiteral =
+          (ts.isFunctionExpression(fnExpr) && fnExpr.asteriskToken === undefined) || ts.isArrowFunction(fnExpr);
+        if (isFnLiteral) {
+          let directArgs: readonly ts.Expression[] | undefined;
+          if (isCall) {
+            // fn.call(thisArg, a, b, ...) → fn(a, b, ...)
+            directArgs = expr.arguments.slice(1);
+          } else if (expr.arguments.length < 2) {
+            // fn.apply(thisArg) / fn.apply() → fn()
+            directArgs = [];
+          } else {
+            // fn.apply(thisArg, [a, b, ...]) → fn(a, b, ...). Statically flatten
+            // the args-array literal into positional call arguments so the
+            // IIFE-inlining path sees a fixed argument count (it binds
+            // `arguments` from the literal arg list and does not expand spreads
+            // itself). A spread of a nested array literal (`[...[3,4,5]]`, the
+            // common test262 shape) is flattened recursively. Anything we
+            // cannot statically flatten (dynamic spread source, elided holes)
+            // is left to the generic path.
+            const argsExpr = expr.arguments[1]!;
+            if (ts.isArrayLiteralExpression(argsExpr)) {
+              const flattened = flattenStaticArrayElements(argsExpr);
+              if (flattened !== undefined) directArgs = flattened;
+            }
+          }
+          if (directArgs !== undefined) {
+            // Evaluate the receiver-position thisArg for side effects (spec:
+            // arguments are evaluated even though standalone functions ignore
+            // `this`). For .call/.apply the thisArg is expr.arguments[0].
+            if (expr.arguments.length > 0) {
+              const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
+              if (thisType !== null) fctx.body.push({ op: "drop" });
+            }
+            const directCall = ts.factory.createCallExpression(
+              fnExpr as ts.LeftHandSideExpression,
+              undefined,
+              directArgs,
+            );
+            ts.setTextRange(directCall, expr);
+            (directCall as any).parent = expr.parent;
+            return compileCallExpression(ctx, fctx, directCall as ts.CallExpression);
+          }
+        }
+      }
 
       // Case 1: identifier.call(thisArg, args...) — standalone function
       if (ts.isIdentifier(innerExpr)) {
@@ -1420,30 +2620,46 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             if (protoCallIdx !== undefined && arrNewIdx !== undefined && arrPushIdx !== undefined) {
               // Push typeName string
               addStringConstantGlobal(ctx, typeName);
-              const typeNameIdx = ctx.stringGlobalMap.get(typeName);
-              if (typeNameIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: typeNameIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, typeName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, typeName));
 
               // Push methodName string
               addStringConstantGlobal(ctx, methodName);
-              const methodNameIdx = ctx.stringGlobalMap.get(methodName);
-              if (methodNameIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: methodNameIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, methodName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
-              // Compile receiver (first argument to .call)
+              // Compile receiver (first argument to .call).
+              // (#1442) When the receiver's static TS type is `boolean`, the
+              // i32 → externref auto-coercion uses `__box_number` and arrives
+              // host-side as `Number(0)` / `Number(1)`. That makes
+              // `String.prototype.trim.call(true)` return `"1"` instead of
+              // `"true"`. Box booleans through `__box_boolean` so the host
+              // gets a real `Boolean` wrapper, then String() / ToString
+              // produces the spec-correct `"true"` / `"false"`.
               const receiverArg = expr.arguments[0]!;
-              const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
-              if (recvType && recvType.kind !== "externref") {
-                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
-              }
-              if (recvType === null) {
-                fctx.body.push({ op: "ref.null.extern" });
+              const receiverTsType = ctx.checker.getTypeAtLocation(receiverArg);
+              if (isBooleanType(receiverTsType)) {
+                const recvWasm = compileExpression(ctx, fctx, receiverArg);
+                if (recvWasm && recvWasm.kind === "i32") {
+                  addUnionImports(ctx);
+                  flushLateImportShifts(ctx, fctx);
+                  const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+                  if (boxBoolIdx !== undefined) {
+                    fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+                  } else {
+                    fctx.body.push({ op: "extern.convert_any" });
+                  }
+                } else if (recvWasm && recvWasm.kind !== "externref") {
+                  fctx.body.push({ op: "extern.convert_any" });
+                } else if (recvWasm === null) {
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else {
+                const recvType = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
+                if (recvType && recvType.kind !== "externref") {
+                  fctx.body.push({ op: "extern.convert_any" });
+                }
+                if (recvType === null) {
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
               }
 
               // Build args array from remaining arguments
@@ -1455,7 +2671,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 fctx.body.push({ op: "local.get", index: argsLocal });
                 const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
                 if (argType && argType.kind !== "externref") {
-                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                  fctx.body.push({ op: "extern.convert_any" });
                 }
                 if (argType === null) {
                   fctx.body.push({ op: "ref.null.extern" });
@@ -1509,7 +2725,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             ) {
               const selfTypeIdx = (selfParamType as { typeIdx: number }).typeIdx;
               if (thisArgType.kind === "externref") {
-                fctx.body.push({ op: "any.convert_extern" } as unknown as Instr);
+                fctx.body.push({ op: "any.convert_extern" });
               }
               const thisTmpType: ValType = { kind: "anyref" };
               const thisTmp = allocTempLocal(fctx, thisTmpType);
@@ -1598,6 +2814,98 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         propAccess.name.text === "debug")
     ) {
       return compileConsoleCall(ctx, fctx, expr, propAccess.name.text);
+    }
+
+    // (#1490) Non-WASI Node.js host mode: process.exit(code) and process.cwd().
+    // process.exit routes to the __process_exit host import (calls real process.exit
+    // when running under Node). process.cwd() returns a string via __get_process_cwd.
+    if (!ctx.wasi && ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "process") {
+      const isShadowed = fctx.localMap.has("process") || (fctx.boxedCaptures?.has("process") ?? false);
+      if (!isShadowed) {
+        const procMethod = propAccess.name.text;
+        if (procMethod === "exit") {
+          const idx = ensureLateImport(ctx, "__process_exit", [{ kind: "f64" }], []);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            if (expr.arguments.length >= 1) {
+              compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+            } else {
+              fctx.body.push({ op: "f64.const", value: 0 });
+            }
+            fctx.body.push({ op: "call", funcIdx: idx });
+          }
+          return VOID_RESULT;
+        }
+        if (procMethod === "cwd") {
+          const idx = ensureLateImport(ctx, "__get_process_cwd", [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+      }
+    }
+
+    // (#1503) Web Crypto host imports: crypto.randomUUID() / crypto.getRandomValues(buf).
+    // Available wherever the host exposes a `crypto` global (browsers + Node 19+).
+    // In WASI mode there is no JS host, so the imports are still added but resolve
+    // to a throw at runtime (no silent fallback to Math.random — that would be a
+    // security trap, see issue #1503). Shadow-aware.
+    if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "crypto") {
+      const isShadowed = fctx.localMap.has("crypto") || (fctx.boxedCaptures?.has("crypto") ?? false);
+      if (!isShadowed) {
+        const cryptoMethod = propAccess.name.text;
+        if (cryptoMethod === "randomUUID") {
+          const idx = ensureLateImport(ctx, "__crypto_random_uuid", [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+        if (cryptoMethod === "getRandomValues") {
+          // Compile the typed-array argument. Uint8Array compiles to a vec
+          // struct typed `ref_null $vec_f64`. We need to pass the RAW
+          // extern-wrapped vec to the host (so the host can call back
+          // `__vec_set_byte(vec, i, byte)` and mutate the same struct).
+          // The generic coerceType path would wrap the vec with
+          // `__make_iterable` (so JS sees a real iterable) — but that
+          // wrapping strips the vec identity, leaving the host unable to
+          // ref.test against the vec type. Emit `extern.convert_any`
+          // directly to bypass `__make_iterable`.
+          const idx = ensureLateImport(
+            ctx,
+            "__crypto_get_random_values",
+            [{ kind: "externref" }],
+            [{ kind: "externref" }],
+          );
+          if (expr.arguments.length >= 1) {
+            const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+            if (argType?.kind === "ref" || argType?.kind === "ref_null") {
+              fctx.body.push({ op: "extern.convert_any" } as Instr);
+            } else if (argType && argType.kind !== "externref") {
+              // Fall back to the standard coerce for non-ref result types.
+              coerceType(ctx, fctx, argType, { kind: "externref" });
+            }
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          flushLateImportShifts(ctx, fctx);
+          if (idx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: idx });
+          } else {
+            // Fallback: pop the arg and push null so the stack stays balanced.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+      }
     }
 
     // WASI mode: process.exit(code) -> proc_exit(code)
@@ -1721,6 +3029,35 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
+    // (#1467) Error.isError(v) — ES2025 static method.
+    // Returns true for any value with an [[ErrorData]] internal slot. Host
+    // import returns i32 (0/1); coerce to f64 / leave as i32 depending on
+    // caller context — we return i32 so callers can use it as a boolean.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Error" &&
+      propAccess.name.text === "isError" &&
+      expr.arguments.length >= 1
+    ) {
+      const isErrorIdx = ensureLateImport(ctx, "__error_isError", [{ kind: "externref" }], [{ kind: "i32" }]);
+      if (isErrorIdx !== undefined) {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") {
+          if (argType.kind === "ref" || argType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else {
+            // Numbers, bools, etc. aren't errors — drop and push 0.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            return { kind: "i32" };
+          }
+        }
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: isErrorIdx });
+        return { kind: "i32" };
+      }
+    }
+
     // Handle Array.isArray(x) — compile-time type check
     if (
       ts.isIdentifier(propAccess.expression) &&
@@ -1731,6 +3068,66 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       // Check the TypeScript type of the argument at compile time
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
+      // externref args carry values whose array-ness can't be decided
+      // statically. Two runtime cases must both be handled:
+      //   (#1678) a compiled native array materialised into the externref slot
+      //     (e.g. a rest/array binding default whose value is `any`-typed
+      //     becomes a __vec_externref) — detected via `ref.test` against every
+      //     registered vec struct type. Pure Wasm, works in standalone/WASI.
+      //   (#1328) a genuine host JS value (e.g. a RegExp match result) — these
+      //     are not WasmGC vec structs, so fall back to the host predicate
+      //     `__extern_is_array` when a JS host is present.
+      // We OR the two checks so neither case regresses; in standalone mode the
+      // host predicate is simply absent and only the `ref.test` path runs.
+      if (argWasmType.kind === "externref") {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") {
+          // Non-externref values (numbers, bools) are never arrays.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
+        const isArrIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
+        if (vecTypeIdxs.length === 0 && isArrIdx === undefined) {
+          // No WasmGC array types registered and no host predicate available
+          // (e.g. standalone with no arrays in the module) — never an array.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        // Keep the externref value live in a temp; both the ref.test scan
+        // (needs an anyref) and the host predicate (needs the externref)
+        // consume it, so we can't leave it on the stack.
+        const externTmp = allocLocal(fctx, `__isarr_ext_${fctx.locals.length}`, { kind: "externref" } as ValType);
+        fctx.body.push({ op: "local.set", index: externTmp });
+        let emittedTerm = false;
+        if (vecTypeIdxs.length > 0) {
+          const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "local.set", index: anyTmp });
+          // result = ref.test(t0) | ref.test(t1) | ...
+          for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
+            fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
+            if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+          }
+          emittedTerm = true;
+        }
+        if (isArrIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+          fctx.body.push({ op: "call", funcIdx: isArrIdx });
+          if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
+          emittedTerm = true;
+        }
+        if (!emittedTerm) {
+          // Should be unreachable given the guard above, but stay safe.
+          fctx.body.push({ op: "i32.const", value: 0 });
+        }
+        return { kind: "i32" };
+      }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
       const isArr = argWasmType.kind === "ref" || argWasmType.kind === "ref_null";
       // Still compile the argument for side effects, then drop it
@@ -1740,13 +3137,39 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return { kind: "i32" };
     }
 
-    // Handle String.fromCharCode(code) — host import
+    // Handle String.fromCharCode(code) — native helper (nativeStrings) or host import
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "String" &&
       propAccess.name.text === "fromCharCode" &&
       expr.arguments.length >= 1
     ) {
+      // #1598: nativeStrings mode (forced on for --target wasi / standalone) uses
+      // a pure-Wasm __str_fromCharCode helper — no env.String_fromCharCode import.
+      if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        const helperIdx = ctx.nativeStrHelpers.get("__str_fromCharCode");
+        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+        if (helperIdx !== undefined) {
+          // First arg → string
+          const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+          if (a0 && a0.kind !== "i32") {
+            fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          }
+          fctx.body.push({ op: "call", funcIdx: helperIdx });
+          // Multi-arg: concat each subsequent code unit's string (spec: join).
+          if (expr.arguments.length > 1 && concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind !== "i32") {
+                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx: helperIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+          return nativeStringType(ctx);
+        }
+      }
       const funcIdx = ctx.funcMap.get("String_fromCharCode");
       if (funcIdx !== undefined) {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
@@ -1801,6 +3224,55 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
+    // Handle Array.fromAsync(items, mapFn?, thisArg?) — ES2024 (#1517)
+    // Delegates to host import which implements the spec algorithm using
+    // native `for await...of` over async iterables, sync iterables (awaiting
+    // each value), and array-likes. Returns a Promise externref; the outer
+    // `await` unwraps it via the standard async/await machinery.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Array" &&
+      propAccess.name.text === "fromAsync"
+    ) {
+      // items
+      if (expr.arguments.length >= 1) {
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // mapFn
+      if (expr.arguments.length >= 2) {
+        const mapType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+        if (mapType && mapType.kind !== "externref") coerceType(ctx, fctx, mapType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // thisArg
+      if (expr.arguments.length >= 3) {
+        const thisType = compileExpression(ctx, fctx, expr.arguments[2]!, { kind: "externref" });
+        if (thisType && thisType.kind !== "externref") coerceType(ctx, fctx, thisType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const fromAsyncIdx = ensureLateImport(
+        ctx,
+        "__array_from_async",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (fromAsyncIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: fromAsyncIdx });
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+
     // Handle Array.from(arr) — array copy
     if (
       ts.isIdentifier(propAccess.expression) &&
@@ -1810,8 +3282,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     ) {
       const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
       const argWasmType = resolveWasmType(ctx, argTsType);
+      // (#1382 Phase 2) The native fast-path applies only when there's
+      // NO mapFn. With a mapFn, route to the host fallback below — the
+      // runtime's `__array_from` materializes the wasm vec via
+      // `__vec_len`/`__vec_get` and wraps the mapFn closure via
+      // `_wrapWasmClosure`. The fast path's `array.copy` would silently
+      // drop the mapFn.
+      const hasMapFn = expr.arguments.length >= 2;
       // Only handle array arguments — create a shallow copy
-      if (argWasmType.kind === "ref" || argWasmType.kind === "ref_null") {
+      if (!hasMapFn && (argWasmType.kind === "ref" || argWasmType.kind === "ref_null")) {
         const arrInfo = resolveArrayInfo(ctx, argTsType);
         if (arrInfo) {
           const { vecTypeIdx, arrTypeIdx, elemType } = arrInfo;
@@ -1848,14 +3327,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             fieldIdx: 1,
           });
           fctx.body.push({ op: "local.set", index: srcData });
-          // Create new data array with default value
-          const defaultVal =
-            elemType.kind === "f64"
-              ? { op: "f64.const", value: 0 }
-              : elemType.kind === "i32"
-                ? { op: "i32.const", value: 0 }
-                : { op: "ref.null", typeIdx: (elemType as any).typeIdx ?? -1 };
-          fctx.body.push(defaultVal as Instr);
+          // Create new data array with default value — defaultValueInstrs
+          // handles externref/ref/ref_null/i32/f64/i64 uniformly. Hand-rolling
+          // `ref.null typeIdx: -1` for the externref element case produced
+          // "Unknown heap type -1" wasm_compile errors (#1338).
+          for (const ins of defaultValueInstrs(elemType)) fctx.body.push(ins);
           fctx.body.push({ op: "local.get", index: lenTmp });
           fctx.body.push({ op: "array.new", typeIdx: arrTypeIdx });
           fctx.body.push({ op: "local.set", index: dstData });
@@ -2035,8 +3511,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "drop" });
       } else if (argType) {
         fctx.body.push({ op: "drop" });
+        // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.13/14;
+        // isFrozen/isSealed on a primitive returns TRUE.
+        fctx.body.push({ op: "i32.const", value: 1 });
+        return { kind: "i32" };
       }
-      // Fallback: not frozen/sealed (conservative)
+      // Fallback (no argType): treat as not frozen/sealed
       fctx.body.push({ op: "i32.const", value: 0 });
       return { kind: "i32" };
     }
@@ -2070,8 +3550,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "drop" });
       } else if (argType) {
         fctx.body.push({ op: "drop" });
+        // (#1462) Primitive (f64/i32/i64) is not an Object per ES2015+ §19.1.2.12;
+        // isExtensible on a primitive returns FALSE.
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
       }
-      // Fallback: extensible (conservative)
+      // Fallback (no argType): extensible (conservative)
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
@@ -2119,6 +3603,43 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // Base class with no parent: return null (Object.prototype not modeled)
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
+      }
+
+      // (#1516) `Object.getPrototypeOf(g)` where `g` is a generator function
+      // declaration must return `%GeneratorFunction.prototype%` (= `%Generator%`)
+      // — the object whose `.prototype` is `%GeneratorPrototype%`. The compiled
+      // closure is opaque to the host, so we resolve the call statically here
+      // by routing to a dedicated runtime import.
+      //
+      // Same shape for `async function*`. Tests rely on this:
+      //   var GeneratorPrototype = Object.getPrototypeOf(g).prototype;
+      //   GeneratorPrototype.next.call(non_gen);  // → TypeError
+      if (ts.isIdentifier(arg0)) {
+        const argName = arg0.text;
+        const isGen = ctx.generatorFunctions.has(argName);
+        // ctx.asyncFunctions excludes async generators by design — codegen
+        // checks the original AST for the async keyword. Re-derive the flag
+        // from the symbol declaration so we route async-generators correctly.
+        let isAsyncGen = false;
+        if (isGen) {
+          const sym = ctx.checker.getSymbolAtLocation(arg0);
+          const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+          if (decl && (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl))) {
+            isAsyncGen = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+          }
+        }
+        if (isGen) {
+          const helperName = isAsyncGen
+            ? "__get_async_generator_function_prototype"
+            : "__get_generator_function_prototype";
+          const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (helperIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: helperIdx });
+            return { kind: "externref" };
+          }
+          // Standalone mode (no host): fall through to legacy null path.
+        }
       }
 
       const argTsType = ctx.checker.getTypeAtLocation(arg0);
@@ -2199,23 +3720,37 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             // Expression produced no value — push null as fallback
             fctx.body.push({ op: "ref.null.extern" });
           } else if (argType.kind !== "externref") {
-            // Coerce to externref for the host import
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            // (#1462) Use coerceType — handles f64 → __box_number, i32 → boxed,
+            // ref/ref_null → extern.convert_any. Bare extern.convert_any here would
+            // emit an illegal cast on primitive types (e.g. `Object.create(5)`).
+            coerceType(ctx, fctx, argType, { kind: "externref" });
           }
         }
         fctx.body.push({ op: "call", funcIdx: hostIdx });
 
         // If there's a second argument (property descriptors), expand at compile time.
-        // Only use static expansion when every descriptor value is an object literal —
-        // non-literal values (identifiers, expressions) may inherit descriptor flags from
-        // their prototype, which static expansion can't see at compile time.
+        // Only use static expansion when every descriptor value is an object literal AND
+        // every writable/enumerable/configurable flag inside each descriptor is
+        // statically ToBoolean-resolvable (per §6.2.6). Non-resolvable flags
+        // (`configurable: someVar`) need runtime ToBoolean — fall through to the
+        // non-fast-path so the runtime honors §7.1.2 instead of silently degrading
+        // to `false`.
         if (
           expr.arguments.length >= 2 &&
           ts.isObjectLiteralExpression(expr.arguments[1]!) &&
-          (expr.arguments[1] as ts.ObjectLiteralExpression).properties.every(
-            (p) =>
-              !ts.isPropertyAssignment(p) || ts.isObjectLiteralExpression((p as ts.PropertyAssignment).initializer),
-          )
+          (expr.arguments[1] as ts.ObjectLiteralExpression).properties.every((p) => {
+            if (!ts.isPropertyAssignment(p)) return true;
+            const init = (p as ts.PropertyAssignment).initializer;
+            if (!ts.isObjectLiteralExpression(init)) return false;
+            for (const dp of init.properties) {
+              if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+              const n = dp.name.text;
+              if (n === "writable" || n === "enumerable" || n === "configurable") {
+                if (staticToBoolean(dp.initializer) === undefined) return false;
+              }
+            }
+            return true;
+          })
         ) {
           const descsLiteral = expr.arguments[1] as ts.ObjectLiteralExpression;
           // Save created object to local for repeated use
@@ -2248,14 +3783,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                   if (dp.name.text === "value") valueExpr = dp.initializer;
                   if (dp.name.text === "get") getExpr = dp.initializer;
                   if (dp.name.text === "set") setExpr = dp.initializer;
+                  // Per §6.2.6 ToPropertyDescriptor: each flag is ToBoolean-coerced —
+                  // `configurable: 123` / `'x'` / `{}` are all truthy. Statically
+                  // evaluate ToBoolean for literal-shape initializers; bail to the
+                  // runtime fallback (descWritable left undefined → handled below)
+                  // for anything we can't resolve at compile time.
                   if (dp.name.text === "writable") {
-                    descWritable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descWritable = staticToBoolean(dp.initializer);
                   }
                   if (dp.name.text === "enumerable") {
-                    descEnumerable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descEnumerable = staticToBoolean(dp.initializer);
                   }
                   if (dp.name.text === "configurable") {
-                    descConfigurable = dp.initializer.kind === ts.SyntaxKind.TrueKeyword;
+                    descConfigurable = staticToBoolean(dp.initializer);
                   }
                 }
               }
@@ -2377,7 +3917,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             if (!descType) {
               fctx.body.push({ op: "ref.null.extern" });
             } else if (descType.kind !== "externref") {
-              fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+              fctx.body.push({ op: "extern.convert_any" });
             }
             fctx.body.push({ op: "call", funcIdx: dpIdx });
           } else {
@@ -2452,10 +3992,19 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           const entry = userFields.find((e) => e.field.name === propLiteral);
 
           if (entry) {
-            // Look up flags from shapePropFlags
+            // #1629b: Object.defineProperty updates `definedPropertyFlags`
+            // (keyed `varName:propName`) but `shapePropFlags` is built AFTER
+            // body compilation finishes, so per-variable updates made during
+            // codegen are lost when the table is initialized with defaults.
+            // Read the per-variable map first, then fall back to the shape table.
             const flagsArr = ctx.shapePropFlags.get(structTypeIdx);
             const userFieldIdx = userFields.indexOf(entry);
-            const flags = flagsArr && userFieldIdx >= 0 ? flagsArr[userFieldIdx]! : 0x07; // default WEC
+            let flags = flagsArr && userFieldIdx >= 0 ? flagsArr[userFieldIdx]! : 0x07; // default WEC
+            if (ts.isIdentifier(arg0)) {
+              const dpfKey = `${arg0.text}:${propLiteral}`;
+              const dpfFlags = ctx.definedPropertyFlags.get(dpfKey);
+              if (dpfFlags !== undefined) flags = dpfFlags & 0x0f;
+            }
 
             // Compile the object expression
             const objType = compileExpression(ctx, fctx, arg0);
@@ -2469,7 +4018,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             {
               let needsCast = false;
               if (objType.kind === "externref") {
-                fctx.body.push({ op: "any.convert_extern" } as unknown as Instr);
+                fctx.body.push({ op: "any.convert_extern" });
                 needsCast = true;
               } else if (objType.kind === "ref_null" && objType.typeIdx !== structTypeIdx) {
                 needsCast = true;
@@ -2553,7 +4102,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 fctx.body.push({ op: "call", funcIdx: boxIdx });
               }
             } else if (fieldType.kind === "i64") {
-              fctx.body.push({ op: "f64.convert_i64_s" } as unknown as Instr);
+              fctx.body.push({ op: "f64.convert_i64_s" });
               const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
               flushLateImportShifts(ctx, fctx);
               if (boxIdx !== undefined) {
@@ -2563,7 +4112,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               fctx.body.push({ op: "extern.convert_any" });
             } else if (fieldType.kind !== "externref") {
               // Other types: try extern.convert_any
-              fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+              fctx.body.push({ op: "extern.convert_any" });
             }
 
             // Push flags as i32 constant
@@ -2582,12 +4131,34 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             }
             return { kind: "externref" };
           }
-          // Property not found in struct — return undefined
-          // (own property doesn't exist on this shape)
-          const argResult = compileExpression(ctx, fctx, arg0);
-          if (argResult) fctx.body.push({ op: "drop" });
-          fctx.body.push({ op: "ref.null.extern" });
-          return { kind: "externref" };
+          // #1364a — if the property is a registered class method, fall
+          // through to the dynamic `__getOwnPropertyDescriptor` host import
+          // path (which now handles proto-method allowlists by returning a
+          // descriptor with `enumerable: false, configurable: true,
+          // writable: true`). Without this, the fast path returns
+          // `ref.null.extern` (undefined) for any class method lookup, and
+          // `verifyProperty(C.prototype, "m", {...})` fails before checking
+          // any flag.
+          //
+          // (#1395) Same logic for static methods on the class object —
+          // `verifyProperty(C, "m", {...})` lookups need the runtime arm to
+          // fire instead of returning `ref.null.extern` here.
+          const methodNames = ctx.classMethodNames.get(structName);
+          const staticMethodNames = ctx.classStaticMethodNames.get(structName);
+          const isMethodLookup =
+            (methodNames && methodNames.includes(propLiteral)) ||
+            (staticMethodNames && staticMethodNames.includes(propLiteral));
+          if (isMethodLookup) {
+            // Skip the fast-path null-return; let the dynamic fallback below
+            // handle the method case via the host import.
+          } else {
+            // Property not found in struct — return undefined
+            // (own property doesn't exist on this shape)
+            const argResult = compileExpression(ctx, fctx, arg0);
+            if (argResult) fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
         }
       }
 
@@ -2927,6 +4498,13 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Symbol") {
       const symMethod = propAccess.name.text;
       if (symMethod === "for" && expr.arguments.length >= 1) {
+        // §20.4.2.2 step 1: stringKey = ? ToString(key). A Symbol key makes
+        // ToString throw TypeError before the registry lookup runs.
+        const keyTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+        if (isSymbolType(keyTsType)) {
+          emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a string");
+          return { kind: "externref" };
+        }
         const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
         if (keyType && keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
         const funcIdx = ensureLateImport(ctx, "__symbol_for", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -2974,209 +4552,215 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return { kind: "i32" };
     }
 
-    // ── Reflect API — compile-time rewrites to equivalent operations ──────
+    // ── Reflect API — host dispatch via __reflect_* imports (#1466) ──────
+    // Replaces the previous compile-time rewrites that bypassed the Proxy MOP.
+    // Each method routes through a thin host wrapper around Reflect.X so
+    // Proxy targets see their traps fire and boolean returns are preserved.
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Reflect") {
       const reflectMethod = propAccess.name.text;
 
-      // Reflect.get(obj, prop) → obj[prop]
+      // Helper — compile each argument as externref, padding missing positions with ref.null.extern.
+      const emitReflectArgs = (count: number): void => {
+        const externRef: ValType = { kind: "externref" };
+        for (let i = 0; i < count; i++) {
+          const arg = expr.arguments[i];
+          if (arg !== undefined) {
+            const argTy = compileExpression(ctx, fctx, arg, externRef);
+            if (argTy && argTy.kind !== "externref") {
+              coerceType(ctx, fctx, argTy, externRef);
+            } else if (argTy === null) {
+              // Expression had no value — push null externref to keep arity.
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+        }
+      };
+
+      // Helper — drop N pushed args and return a fallback constant when the import is unavailable.
+      const fallbackReturn = (n: number, ret: "i32-true" | "extern-null"): InnerResult => {
+        for (let i = 0; i < n; i++) fctx.body.push({ op: "drop" });
+        if (ret === "i32-true") {
+          fctx.body.push({ op: "i32.const", value: 1 });
+          return { kind: "i32" };
+        }
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      };
+
+      const externRef: ValType = { kind: "externref" };
+      const i32Ty: ValType = { kind: "i32" };
+
+      // Reflect.get(target, key, [receiver]) — returns externref.
       if (reflectMethod === "get" && expr.arguments.length >= 2) {
-        const syntheticElemAccess = ts.factory.createElementAccessExpression(
-          expr.arguments[0] as ts.Expression,
-          expr.arguments[1] as ts.Expression,
-        );
-        ts.setTextRange(syntheticElemAccess, expr);
-        (syntheticElemAccess as any).parent = expr.parent;
-        return compileExpression(ctx, fctx, syntheticElemAccess);
-      }
-
-      // Reflect.set(obj, prop, val) → (obj[prop] = val, true)
-      if (reflectMethod === "set" && expr.arguments.length >= 3) {
-        const syntheticElemAccess = ts.factory.createElementAccessExpression(
-          expr.arguments[0] as ts.Expression,
-          expr.arguments[1] as ts.Expression,
-        );
-        const syntheticAssign = ts.factory.createBinaryExpression(
-          syntheticElemAccess,
-          ts.factory.createToken(ts.SyntaxKind.EqualsToken),
-          expr.arguments[2] as ts.Expression,
-        );
-        ts.setTextRange(syntheticAssign, expr);
-        (syntheticAssign as any).parent = expr.parent;
-        const assignType = compileExpression(ctx, fctx, syntheticAssign);
-        if (assignType) {
-          fctx.body.push({ op: "drop" });
+        emitReflectArgs(3);
+        const funcIdx = ensureLateImport(ctx, "__reflect_get", [externRef, externRef, externRef], [externRef]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
         }
-        fctx.body.push({ op: "i32.const", value: 1 });
-        return { kind: "i32" };
+        return fallbackReturn(3, "extern-null");
       }
 
-      // Reflect.has(obj, prop) → prop in obj
+      // Reflect.set(target, key, value, [receiver]) — returns i32 (boolean).
+      if (reflectMethod === "set" && expr.arguments.length >= 2) {
+        emitReflectArgs(4);
+        const funcIdx = ensureLateImport(ctx, "__reflect_set", [externRef, externRef, externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
+        }
+        return fallbackReturn(4, "i32-true");
+      }
+
+      // Reflect.has(target, key) — returns i32 (boolean).
       if (reflectMethod === "has" && expr.arguments.length >= 2) {
-        const syntheticIn = ts.factory.createBinaryExpression(
-          expr.arguments[1] as ts.Expression,
-          ts.factory.createToken(ts.SyntaxKind.InKeyword),
-          expr.arguments[0] as ts.Expression,
-        );
-        ts.setTextRange(syntheticIn, expr);
-        (syntheticIn as any).parent = expr.parent;
-        return compileExpression(ctx, fctx, syntheticIn);
-      }
-
-      // Reflect.apply(fn, thisArg, args) → fn.apply(thisArg, args)
-      if (reflectMethod === "apply" && expr.arguments.length >= 3) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          expr.arguments[0] as ts.Expression as ts.LeftHandSideExpression,
-          "apply",
-        );
-        const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, [
-          expr.arguments[1] as ts.Expression,
-          expr.arguments[2] as ts.Expression,
-        ]);
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        return compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
-      }
-
-      // Reflect.construct(C, args) → new C(...args)
-      // For now, only handle array literal args: Reflect.construct(C, [a, b])
-      if (reflectMethod === "construct" && expr.arguments.length >= 2) {
-        const ctorExpr = expr.arguments[0] as ts.Expression as ts.LeftHandSideExpression;
-        const argsExpr = expr.arguments[1]!;
-        // If args is an array literal, spread it as positional args
-        let newArgs: readonly ts.Expression[];
-        if (ts.isArrayLiteralExpression(argsExpr)) {
-          newArgs = argsExpr.elements;
-        } else {
-          // Fallback: pass args array as-is (single arg)
-          newArgs = [argsExpr as ts.Expression];
+        emitReflectArgs(2);
+        const funcIdx = ensureLateImport(ctx, "__reflect_has", [externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
         }
-        const syntheticNew = ts.factory.createNewExpression(ctorExpr, undefined, newArgs as ts.Expression[]);
-        ts.setTextRange(syntheticNew, expr);
-        (syntheticNew as any).parent = expr.parent;
-        return compileExpression(ctx, fctx, syntheticNew);
+        return fallbackReturn(2, "i32-true");
       }
 
-      // Reflect.ownKeys(obj) → Object.getOwnPropertyNames(obj)
-      // (includes non-enumerable string keys; per spec should also include symbols,
-      // but getOwnPropertyNames is a closer approximation than Object.keys)
-      if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          ts.factory.createIdentifier("Object"),
-          "getOwnPropertyNames",
-        );
-        const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, [
-          expr.arguments[0] as ts.Expression,
-        ]);
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        return compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
-      }
-
-      // Reflect.defineProperty(obj, prop, desc) → (Object.defineProperty(obj, prop, desc), true)
-      if (reflectMethod === "defineProperty" && expr.arguments.length >= 3) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          ts.factory.createIdentifier("Object"),
-          "defineProperty",
-        );
-        const syntheticCall = ts.factory.createCallExpression(
-          syntheticPropAccess,
-          undefined,
-          Array.from(expr.arguments) as ts.Expression[],
-        );
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        const resultType = compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
-        if (resultType) {
-          fctx.body.push({ op: "drop" });
-        }
-        fctx.body.push({ op: "i32.const", value: 1 });
-        return { kind: "i32" };
-      }
-
-      // Reflect.getPrototypeOf(obj) → Object.getPrototypeOf(obj)
-      if (reflectMethod === "getPrototypeOf" && expr.arguments.length >= 1) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          ts.factory.createIdentifier("Object"),
-          "getPrototypeOf",
-        );
-        const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, [
-          expr.arguments[0] as ts.Expression,
-        ]);
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        return compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
-      }
-
-      // Reflect.setPrototypeOf(obj, proto) → (Object.setPrototypeOf(obj, proto), true)
-      if (reflectMethod === "setPrototypeOf" && expr.arguments.length >= 2) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          ts.factory.createIdentifier("Object"),
-          "setPrototypeOf",
-        );
-        const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, [
-          expr.arguments[0] as ts.Expression,
-          expr.arguments[1] as ts.Expression,
-        ]);
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        const resultType = compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
-        if (resultType) {
-          fctx.body.push({ op: "drop" });
-        }
-        fctx.body.push({ op: "i32.const", value: 1 });
-        return { kind: "i32" };
-      }
-
-      // Reflect.deleteProperty(obj, prop) → (delete obj[prop], result as boolean)
+      // Reflect.deleteProperty(target, key) — returns i32 (boolean).
       if (reflectMethod === "deleteProperty" && expr.arguments.length >= 2) {
-        const syntheticElemAccess = ts.factory.createElementAccessExpression(
-          expr.arguments[0] as ts.Expression,
-          expr.arguments[1] as ts.Expression,
-        );
-        const syntheticDelete = ts.factory.createDeleteExpression(syntheticElemAccess as ts.UnaryExpression);
-        ts.setTextRange(syntheticDelete, expr);
-        (syntheticDelete as any).parent = expr.parent;
-        return compileExpression(ctx, fctx, syntheticDelete);
-      }
-
-      // Reflect.isExtensible(obj) → check compile-time non-extensible state
-      if (reflectMethod === "isExtensible" && expr.arguments.length >= 1) {
-        const arg0 = expr.arguments[0]!;
-        const argType = compileExpression(ctx, fctx, arg0);
-        if (argType) fctx.body.push({ op: "drop" });
-        let result = 1;
-        if (ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
-          result = 0;
+        emitReflectArgs(2);
+        const funcIdx = ensureLateImport(ctx, "__reflect_deleteProperty", [externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
         }
-        fctx.body.push({ op: "i32.const", value: result });
-        return { kind: "i32" };
+        return fallbackReturn(2, "i32-true");
       }
 
-      // Reflect.preventExtensions(obj) → mark non-extensible, return true
+      // Reflect.defineProperty(target, key, desc) — returns i32 (boolean).
+      if (reflectMethod === "defineProperty" && expr.arguments.length >= 3) {
+        emitReflectArgs(3);
+        const funcIdx = ensureLateImport(ctx, "__reflect_defineProperty", [externRef, externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
+        }
+        return fallbackReturn(3, "i32-true");
+      }
+
+      // Reflect.getOwnPropertyDescriptor(target, key) — returns externref.
+      if (reflectMethod === "getOwnPropertyDescriptor" && expr.arguments.length >= 2) {
+        emitReflectArgs(2);
+        const funcIdx = ensureLateImport(
+          ctx,
+          "__reflect_getOwnPropertyDescriptor",
+          [externRef, externRef],
+          [externRef],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
+        }
+        return fallbackReturn(2, "extern-null");
+      }
+
+      // Reflect.getPrototypeOf(target) — returns externref.
+      if (reflectMethod === "getPrototypeOf" && expr.arguments.length >= 1) {
+        emitReflectArgs(1);
+        const funcIdx = ensureLateImport(ctx, "__reflect_getPrototypeOf", [externRef], [externRef]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
+        }
+        return fallbackReturn(1, "extern-null");
+      }
+
+      // Reflect.setPrototypeOf(target, proto) — returns i32 (boolean).
+      if (reflectMethod === "setPrototypeOf" && expr.arguments.length >= 2) {
+        emitReflectArgs(2);
+        const funcIdx = ensureLateImport(ctx, "__reflect_setPrototypeOf", [externRef, externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
+        }
+        return fallbackReturn(2, "i32-true");
+      }
+
+      // Reflect.ownKeys(target) — returns externref (Array including Symbol keys, per §28.1.13).
+      if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
+        emitReflectArgs(1);
+        const funcIdx = ensureLateImport(ctx, "__reflect_ownKeys", [externRef], [externRef]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
+        }
+        return fallbackReturn(1, "extern-null");
+      }
+
+      // Reflect.isExtensible(target) — returns i32 (boolean).
+      // Preserve ctx.nonExtensibleVars marking (used by Object.isFrozen / Object.preventExtensions
+      // compile-time tracking at calls.ts:2089/2180) for identifiers so legacy callers still see
+      // the same answer; but the runtime answer always comes from the host.
+      if (reflectMethod === "isExtensible" && expr.arguments.length >= 1) {
+        emitReflectArgs(1);
+        const funcIdx = ensureLateImport(ctx, "__reflect_isExtensible", [externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
+        }
+        return fallbackReturn(1, "i32-true");
+      }
+
+      // Reflect.preventExtensions(target) — returns i32 (boolean).
+      // Keep ctx.nonExtensibleVars side-effect for identifiers so the Object.* compile-time
+      // fast path stays consistent with the host's runtime answer.
       if (reflectMethod === "preventExtensions" && expr.arguments.length >= 1) {
         const arg0 = expr.arguments[0]!;
         if (ts.isIdentifier(arg0)) {
           ctx.nonExtensibleVars.add(arg0.text);
         }
-        const argType = compileExpression(ctx, fctx, arg0);
-        if (argType) fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 1 });
-        return { kind: "i32" };
+        emitReflectArgs(1);
+        const funcIdx = ensureLateImport(ctx, "__reflect_preventExtensions", [externRef], [i32Ty]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "i32" };
+        }
+        return fallbackReturn(1, "i32-true");
       }
 
-      // Reflect.getOwnPropertyDescriptor(obj, prop) → rewrite to Object.getOwnPropertyDescriptor
-      if (reflectMethod === "getOwnPropertyDescriptor" && expr.arguments.length >= 2) {
-        const syntheticPropAccess = ts.factory.createPropertyAccessExpression(
-          ts.factory.createIdentifier("Object"),
-          "getOwnPropertyDescriptor",
-        );
-        const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, [
-          expr.arguments[0] as ts.Expression,
-          expr.arguments[1] as ts.Expression,
-        ]);
-        ts.setTextRange(syntheticCall, expr);
-        (syntheticCall as any).parent = expr.parent;
-        return compileCallExpression(ctx, fctx, syntheticCall as ts.CallExpression);
+      // Reflect.apply(fn, thisArg, argList) — returns externref. Host performs CreateListFromArrayLike.
+      if (reflectMethod === "apply" && expr.arguments.length >= 3) {
+        emitReflectArgs(3);
+        const funcIdx = ensureLateImport(ctx, "__reflect_apply", [externRef, externRef, externRef], [externRef]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
+        }
+        return fallbackReturn(3, "extern-null");
+      }
+
+      // Reflect.construct(C, args, [newTarget]) — returns externref.
+      // Passing ref.null.extern for omitted newTarget lets the host wrapper default to `C`.
+      if (reflectMethod === "construct" && expr.arguments.length >= 2) {
+        emitReflectArgs(3);
+        const funcIdx = ensureLateImport(ctx, "__reflect_construct", [externRef, externRef, externRef], [externRef]);
+        flushLateImportShifts(ctx, fctx);
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "externref" };
+        }
+        return fallbackReturn(3, "extern-null");
       }
     }
 
@@ -3186,13 +4770,32 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     // helper can construct via `thisArg.call(...)` for subclass support.
     // Resolve/reject keep their original 1-arg signature (no thisArg needed).
     {
+      const isAggregatorMethod =
+        propAccess.name.text === "all" ||
+        propAccess.name.text === "race" ||
+        propAccess.name.text === "allSettled" ||
+        propAccess.name.text === "any";
+      // (#1116b, E1) `Sub.all(iter)` where `Sub` is a `class extends Promise`
+      // is a subclass static inherited from Promise. Recognise the subclass
+      // receiver here too so it reaches the aggregator lowering (the thisArg
+      // resolution below switches it to directCall=0).
+      const isPromiseSubclassReceiver =
+        ts.isIdentifier(propAccess.expression) &&
+        (() => {
+          const name = ctx.classExprNameMap.get(propAccess.expression.text) ?? propAccess.expression.text;
+          let cursor: string | undefined = name;
+          const seen = new Set<string>();
+          while (cursor !== undefined && !seen.has(cursor)) {
+            seen.add(cursor);
+            if (ctx.classBuiltinParentMap.get(cursor) === "Promise") return true;
+            cursor = ctx.classParentMap.get(cursor);
+          }
+          return false;
+        })();
       const isAggregator =
         ts.isIdentifier(propAccess.expression) &&
-        propAccess.expression.text === "Promise" &&
-        (propAccess.name.text === "all" ||
-          propAccess.name.text === "race" ||
-          propAccess.name.text === "allSettled" ||
-          propAccess.name.text === "any");
+        (propAccess.expression.text === "Promise" || isPromiseSubclassReceiver) &&
+        isAggregatorMethod;
       const isResolveReject =
         ts.isIdentifier(propAccess.expression) &&
         propAccess.expression.text === "Promise" &&
@@ -3200,29 +4803,82 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (isAggregator) {
         const methodName = propAccess.name.text;
         const importName = `Promise_${methodName}`;
-        // Two-arg signature: (thisArg, iterable) → result
+        // Three-arg signature: (thisArg, iterable, directCall) → result
+        // (#1116) directCall=1 means "no explicit `.call` was used; default to
+        // globalThis.Promise". directCall=0 means "user wrote `.call(thisArg, …)`;
+        // pass thisArg through unchanged so the runtime / V8 can apply the
+        // spec-mandated TypeError when thisArg is non-Object."
         let funcIdx =
           ctx.funcMap.get(importName) ??
-          ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+          ensureLateImport(
+            ctx,
+            importName,
+            [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+            [{ kind: "externref" }],
+          );
         flushLateImportShifts(ctx, fctx);
         funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
         if (funcIdx !== undefined) {
-          // thisArg = ref.null.extern → runtime defaults to globalThis.Promise.
-          // (Subclass `Sub.all(iter)` is handled below via the receiver-detection branch.)
-          fctx.body.push({ op: "ref.null.extern" });
+          // (#1116b, E1) Subclass static `Sub.all(iter)` — the receiver
+          // `Sub` is a `class extends Promise`. Resolve it to the synthesized
+          // JS subclass as thisArg and switch to directCall=0 so the runtime
+          // uses it instead of substituting globalThis.Promise.
+          const subclassThisArg = resolvePromiseSubclassThisArg(ctx, fctx, propAccess.expression);
+          if (!subclassThisArg) {
+            // Direct `Promise.METHOD(iter)` — no explicit thisArg.
+            fctx.body.push({ op: "ref.null.extern" });
+          }
           if (expr.arguments.length >= 1) {
-            compileExpression(ctx, fctx, expr.arguments[0]!, {
-              kind: "externref",
-            });
+            // (#1465) The runtime helper delegates to native
+            // `Promise.METHOD.call(C, iter)` which drives `GetIterator(iter)`
+            // per spec. For that to work the host engine must see a real JS
+            // iterable. Array literals tend to compile to a wasm tuple/vec
+            // struct that's opaque to the host, so materialise them into a
+            // JS array eagerly here. Other expressions fall back to plain
+            // externref coercion (the runtime helper handles strings, JS
+            // arrays, generators, custom iterables, and known wasm vec
+            // shapes via __vec_len/__vec_get).
+            emitIterableArg(ctx, fctx, expr.arguments[0]!);
           } else {
             fctx.body.push({ op: "ref.null.extern" });
           }
+          // directCall=1 — runtime substitutes globalThis.Promise. When a
+          // subclass receiver was resolved (E1), directCall=0 so the runtime
+          // uses the synthesized thisArg ctor instead.
+          fctx.body.push({ op: "i32.const", value: subclassThisArg ? 0 : 1 });
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "externref" };
         }
       }
       if (isResolveReject) {
         const methodName = propAccess.name.text;
+        // (#1326 Phase 1B) Standalone-mode `Promise.resolve(v)` /
+        // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new
+        // instead of calling the JS-host `Promise_resolve_import` /
+        // `Promise_reject_import` (unsatisfiable in WASI).
+        if (isStandalonePromiseActive(ctx)) {
+          // Compile the value/reason argument FIRST into a side buffer
+          // so the helper controls the final Wasm op order
+          // (state | value | null | struct.new | extern.convert_any).
+          const argInstrs: Instr[] = [];
+          const savedBody = fctx.body;
+          fctx.body = argInstrs;
+          try {
+            if (expr.arguments.length >= 1) {
+              compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } finally {
+            fctx.body = savedBody;
+          }
+          if (methodName === "resolve") {
+            emitStandalonePromiseResolve(ctx, fctx, argInstrs);
+          } else {
+            emitStandalonePromiseReject(ctx, fctx, argInstrs);
+          }
+          return { kind: "externref" };
+        }
         const importName = `Promise_${methodName}`;
         let funcIdx =
           ctx.funcMap.get(importName) ??
@@ -3259,22 +4915,42 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         propAccess.expression.name.text === "any") &&
       expr.arguments.length >= 1
     ) {
+      // (#1326 Phase 1B note) The `.call(...)` aggregator pattern only
+      // fires for all/race/allSettled/any (see `condition above`), NOT
+      // for Promise.resolve/reject. Phase 1B's standalone path lives at
+      // the earlier direct-call site (`Promise.resolve(v)` /
+      // `Promise.reject(r)` without `.call`) and does not apply here.
       const methodName = propAccess.expression.name.text;
       const importName = `Promise_${methodName}`;
+      // Three-arg signature: (thisArg, iterable, directCall) → result. See (#1116)
+      // comment at the direct-call branch above.
       let funcIdx =
         ctx.funcMap.get(importName) ??
-        ensureLateImport(ctx, importName, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+        ensureLateImport(
+          ctx,
+          importName,
+          [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+          [{ kind: "externref" }],
+        );
       flushLateImportShifts(ctx, fctx);
       funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
       if (funcIdx !== undefined) {
-        // arg0 = thisArg
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
-        // arg1 = iterable (or ref.null if missing)
+        // arg0 = thisArg (user-provided — may be undefined/null/primitive,
+        // in which case the runtime / V8 throws TypeError per spec §27.2.4.X step 2).
+        // (#1116b) When thisArg names a `class X extends Promise`, resolve it to
+        // a synthesized JS-callable Promise subclass; otherwise compile normally.
+        if (!resolvePromiseSubclassThisArg(ctx, fctx, expr.arguments[0]!)) {
+          compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        }
+        // arg1 = iterable (or ref.null if missing). #1465: materialise array
+        // literals to JS arrays so native GetIterator can drive them.
         if (expr.arguments.length >= 2) {
-          compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+          emitIterableArg(ctx, fctx, expr.arguments[1]!);
         } else {
           fctx.body.push({ op: "ref.null.extern" });
         }
+        // directCall=0 — user invoked via `.call`, so thisArg is meaningful.
+        fctx.body.push({ op: "i32.const", value: 0 });
         fctx.body.push({ op: "call", funcIdx });
         return { kind: "externref" };
       }
@@ -3285,8 +4961,10 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const method = propAccess.name.text;
       if ((method === "stringify" || method === "parse") && expr.arguments.length >= 1) {
         // (#1324 primitives slice) For JSON.stringify of statically-typed
-        // primitive values (null / undefined / boolean / number), emit the
-        // result as pure Wasm so standalone-mode (no JS host) builds work.
+        // primitive values (null / undefined / boolean, plus number when the
+        // target has a number_toString helper), emit the result without the
+        // JSON_stringify host import. Standalone/WASI number stringify falls
+        // through to the #1599 refusal until Phase 2 has pure-Wasm formatting.
         // Object/array/string/bigint cases fall through to the existing
         // JSON_stringify host import — full pure-Wasm shape walking is
         // tracked under #1353 (architect-spec follow-up).
@@ -3294,7 +4972,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           if (tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!)) {
             // Compile remaining args (replacer, space) for their side
             // effects only — primitive stringify ignores them per spec
-            // §25.5.2 (replacer doesn't observe primitives, space only
+            // §25.5.4 (replacer doesn't observe primitives, space only
             // affects nested output).
             for (let i = 1; i < expr.arguments.length; i++) {
               const t = compileExpression(ctx, fctx, expr.arguments[i]!);
@@ -3302,6 +4980,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             }
             return { kind: "externref" };
           }
+        }
+        // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
+        // WASI mode there is no `env::JSON_*` host import to fall back to.
+        // The primitive `JSON.stringify` slice above (#1324) already handles
+        // null / undefined / boolean as pure Wasm; everything else
+        // (objects, arrays, strings, and all `JSON.parse`) needs the pure-Wasm
+        // codec from Phase 2, which is not yet implemented. Emit a clear
+        // compile error rather than a module that traps at instantiation.
+        if (ctx.standalone || ctx.wasi) {
+          reportError(
+            ctx,
+            expr,
+            `Codegen error: JSON.${method} of this value is not yet supported in --target standalone/wasi (#1599). ` +
+              `Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; ` +
+              `numbers, objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
+              `Avoid JSON for these shapes in standalone/WASI targets for now.`,
+          );
+          return null;
         }
         const importName = `JSON_${method}`;
         const funcIdx = ctx.funcMap.get(importName);
@@ -3319,7 +5015,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 coerceType(ctx, fctx, repType, { kind: "externref" });
               }
             } else {
-              fctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+              fctx.body.push({ op: "ref.null.extern" });
             }
             if (expr.arguments.length >= 3) {
               const spType = compileExpression(ctx, fctx, expr.arguments[2]!);
@@ -3327,7 +5023,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
                 coerceType(ctx, fctx, spType, { kind: "externref" });
               }
             } else {
-              fctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+              fctx.body.push({ op: "ref.null.extern" });
             }
           }
           fctx.body.push({ op: "call", funcIdx });
@@ -3336,10 +5032,30 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
     }
 
+    // (#1483) performance.now() under --target wasi → clock_time_get
+    // (CLOCK_MONOTONIC). In JS-host mode we leave existing behaviour (declared
+    // global) alone so this branch only fires when a WASI helper exists.
+    if (
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "performance" &&
+      propAccess.name.text === "now" &&
+      ctx.wasi &&
+      ctx.funcMap.has("__wasi_performance_now")
+    ) {
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_performance_now")! } as Instr);
+      return { kind: "f64" };
+    }
+
     // Handle Date.now() and Date.UTC() — pure Wasm static methods
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Date") {
       const method = propAccess.name.text;
       if (method === "now") {
+        // (#1483) Under --target wasi, route to clock_time_get instead of the
+        // env::__date_now host import (which wasmtime does not provide).
+        if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+          return { kind: "f64" };
+        }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
@@ -3546,6 +5262,47 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return compilePropertyIntrospection(ctx, fctx, propAccess, expr);
     }
 
+    // #1654 — native DataView accessors in no-JS-host mode. In JS-host mode the
+    // runtime materializes a real DataView over the byte array; standalone/WASI
+    // has no JS runtime, so emit Wasm-native byte read/write into the i32_byte
+    // backing array directly. Must run BEFORE the extern-class dispatch, which
+    // would otherwise route DataView_setUint32 to an unsatisfiable host import
+    // (or silently drop the call).
+    if (noJsHost(ctx) && isDataViewAccessor(propAccess.name.text)) {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "DataView") {
+        const dvResult = emitDataViewAccessor(
+          ctx,
+          fctx,
+          propAccess.name.text,
+          propAccess.expression,
+          expr.arguments,
+          (e, hint) => compileExpression(ctx, fctx, e, hint),
+        );
+        if (dvResult) {
+          return dvResult.kind === "get" ? dvResult.result : VOID_RESULT;
+        }
+      }
+    }
+
+    // #1698 / #1717 — native ArrayBuffer.prototype.slice. The ArrayBuffer
+    // backing store is the same `i32_byte` vec struct in BOTH JS-host and
+    // standalone modes, so the byte-by-byte copy is mode-agnostic. In JS-host
+    // mode `slice` was previously dropped by the extern-class dispatch
+    // (`slice is not a function`, #1717); in standalone there is no runtime
+    // (#1698). Route both through the same native emitter — emit a byte copy
+    // into a fresh i32_byte vec. (SharedArrayBuffer is filtered out: it has no
+    // i32_byte struct, so the cast would trap.)
+    if (propAccess.name.text === "slice") {
+      const recvSym = receiverType.getSymbol()?.name;
+      if (recvSym === "ArrayBuffer") {
+        const sliceResult = emitArrayBufferSlice(ctx, fctx, propAccess.expression, expr.arguments, (e, hint) =>
+          compileExpression(ctx, fctx, e, hint),
+        );
+        if (sliceResult) return sliceResult;
+      }
+    }
+
     if (isExternalDeclaredClass(receiverType, ctx.checker)) {
       const externResult = compileExternMethodCall(ctx, fctx, propAccess, expr);
       // undefined means method not found in extern class hierarchy — fall through to generic handlers
@@ -3649,6 +5406,42 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             return { kind: "externref" };
           }
         }
+      }
+    }
+
+    // (#1397) Wrapper-object dynamic dispatch on reassigned methods.
+    //
+    // For wrapper-object receivers (`new String/Number/Boolean(...)`) where
+    // `.toString` or `.valueOf` has been reassigned somewhere in the source,
+    // skip every static fast-path and route through `__extern_method_call`
+    // so the runtime property lookup picks up the override. Required for
+    // spec compliance with transferred prototype methods (S15.7.4.2_A4_*,
+    // S15.7.4.4_A2_*, S15.6.4.2_A2_*, S15.6.4.3_A2_*):
+    //
+    //   var s1 = new String();
+    //   s1.toString = Number.prototype.toString;
+    //   s1.toString();   // spec: TypeError; we used to return s1 itself.
+    //
+    // Primitives keep the static fast-path — primitives can't have own
+    // properties, so `"abc".toString = …` is a no-op and the short-circuit
+    // is correct. Wrappers without any matching reassignment in the source
+    // also keep the static fast-path (no perf regression for the common
+    // case). The reassignment scan is conservative — any
+    // `<expr>.<method> = …` anywhere in the source disables the static
+    // path for wrappers; that's a narrower hit than Option B (always
+    // dynamic) and matches the architect's Option D feasibility study.
+    {
+      const wrapperMethodName = propAccess.name.text;
+      const isWrapperReceiver =
+        isStringWrapperType(receiverType) || isNumberWrapperType(receiverType) || isBooleanWrapperType(receiverType);
+      if (
+        isWrapperReceiver &&
+        (wrapperMethodName === "valueOf" || wrapperMethodName === "toString") &&
+        expr.arguments.length === 0 &&
+        sourceHasMethodReassignment(ctx, propAccess.expression, wrapperMethodName)
+      ) {
+        const dynResult = emitWrapperDynamicMethodCall(ctx, fctx, propAccess.expression, wrapperMethodName);
+        if (dynResult) return dynResult;
       }
     }
 
@@ -4265,7 +6058,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       if (expr.arguments.length > 0) {
         compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
         // Floor the radix (ToInteger semantics: NaN→0, 2.5→2, etc.)
-        fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+        fctx.body.push({ op: "f64.floor" });
         radixLocalIdx = allocLocal(fctx, `__radix_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: radixLocalIdx });
         // Check radix < 2 (also catches NaN since NaN < 2 after floor(NaN)=NaN is still false)
@@ -4284,12 +6077,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         {
           const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -4318,6 +6110,58 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return { kind: "externref" };
       }
     }
+    // (#1644 Slice D) BigInt.prototype.toString — bigint receivers cross the
+    // boundary as i64. Mirror the number branch: validate radix range (2-36),
+    // throw RangeError otherwise, then call bigint_toString_radix (or the
+    // 1-arg bigint_toString for the default radix-10 case).
+    if (isBigIntType(receiverType) && propAccess.name.text === "toString") {
+      let radixLocalIdx: number | undefined;
+      if (expr.arguments.length > 0) {
+        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+        fctx.body.push({ op: "f64.floor" });
+        radixLocalIdx = allocLocal(fctx, `__bi_radix_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.tee", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.const", value: 2 });
+        fctx.body.push({ op: "f64.lt" });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.const", value: 36 });
+        fctx.body.push({ op: "f64.gt" });
+        fctx.body.push({ op: "i32.or" });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "local.get", index: radixLocalIdx });
+        fctx.body.push({ op: "f64.ne" });
+        fctx.body.push({ op: "i32.or" });
+        {
+          const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
+          addStringConstantGlobal(ctx, rangeErrMsg);
+          const tagIdx = ensureExnTag(ctx);
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            else: [],
+          });
+        }
+      }
+      const exprType = compileExpression(ctx, fctx, propAccess.expression);
+      if (exprType && exprType.kind === "i32") {
+        fctx.body.push({ op: "i64.extend_i32_s" });
+      }
+      if (radixLocalIdx !== undefined) {
+        const radixFuncIdx = ctx.funcMap.get("bigint_toString_radix");
+        if (radixFuncIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: radixLocalIdx });
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          fctx.body.push({ op: "call", funcIdx: radixFuncIdx });
+          return { kind: "externref" };
+        }
+      }
+      const funcIdx = ctx.funcMap.get("bigint_toString");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+    }
     if (isNumberType(receiverType) && propAccess.name.text === "toFixed") {
       const exprType = compileExpression(ctx, fctx, propAccess.expression);
       if (exprType && exprType.kind === "i32") {
@@ -4325,7 +6169,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
       // Compile the digits argument (default 0)
       if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!);
+        // ToInteger(fractionDigits) begins with ToNumber (§21.1.3.3 step 4).
+        // A non-f64 argument (externref/ref, e.g. a Symbol) must funnel through
+        // ToNumber, which throws TypeError on Symbol; coerce to f64 here so the
+        // subsequent f64 local.tee is type-correct and Symbols throw (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         // RangeError: fractionDigits must be 0-100
         const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -4340,12 +6188,11 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         {
           const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -4366,39 +6213,82 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "f64.convert_i32_s" });
       }
       if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!);
-        // RangeError: precision must be 1-100 (NaN → 0 → invalid since 0 < 1)
+        // (#49) Spec §21.1.3.5 step 4 says: if x is non-finite, return
+        // Number::toString(x) BEFORE the precision range check. Save the
+        // receiver into a local, check finiteness, and only run the
+        // range check when x is finite. Non-finite v with bad precision
+        // (e.g. `(NaN).toPrecision(Infinity)`) must return "NaN" not
+        // throw RangeError.
+        const recvLocalP = allocLocal(fctx, `__toPrecision_recv_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.set", index: recvLocalP });
+        // ToNumber(precision) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const precLocal = allocLocal(fctx, `__toPrecision_prec_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.tee", index: precLocal });
-        fctx.body.push({ op: "f64.const", value: 1 });
-        fctx.body.push({ op: "f64.lt" });
-        fctx.body.push({ op: "local.get", index: precLocal });
-        fctx.body.push({ op: "f64.const", value: 100 });
-        fctx.body.push({ op: "f64.gt" });
-        fctx.body.push({ op: "i32.or" });
-        // NaN check: NaN != NaN
-        fctx.body.push({ op: "local.get", index: precLocal });
-        fctx.body.push({ op: "local.get", index: precLocal });
-        fctx.body.push({ op: "f64.ne" });
-        fctx.body.push({ op: "i32.or" });
-        {
-          const rangeErrMsg = "RangeError: toPrecision() argument must be between 1 and 100";
-          addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
-          const tagIdx = ensureExnTag(ctx);
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
-            else: [],
-          });
-        }
+        fctx.body.push({ op: "local.set", index: precLocal });
+
+        // (#1735) §21.1.3.5 step 5: p = ToIntegerOrInfinity(precision), NaN → 0.
+        // The `number_toPrecision` runtime helper uses NaN as its "no precision
+        // supplied" sentinel, so an explicit NaN precision (`(1).toPrecision(NaN)`)
+        // must be normalised to 0 here so it isn't mistaken for no-arg. (A 0
+        // precision then trips the RangeError gate below — 0 is out of [1,100] —
+        // which matches V8: explicit NaN precision throws RangeError.)
+        normalizeNaNToZero(fctx, precLocal);
+
+        // Re-push receiver for the runtime call.
+        fctx.body.push({ op: "local.get", index: recvLocalP });
+
+        // Range-check fires only when receiver is finite.
+        // isFinite(v) ⇔ v - v == 0 ⇔ v != NaN AND |v| != Infinity. We
+        // detect non-finite via `v + (-v) != 0`: NaN gives NaN (≠ 0),
+        // ±Infinity gives NaN (≠ 0). Equivalent to `!Number.isFinite(v)`.
+        // Use the simpler `v == v` (false for NaN) followed by
+        // `abs(v) != Infinity` — but Wasm has no abs/Infinity literal in
+        // f64 const. Use the spec-equivalent `!isNaN(v) && v != ±Inf`:
+        //   isFinite(v)  ≡  (v - v) == 0
+        // The `i32.eqz` of that is "is non-finite".
+        const isFiniteLocal = allocLocal(fctx, `__toPrecision_finite_${fctx.locals.length}`, { kind: "i32" });
+        fctx.body.push({ op: "local.get", index: recvLocalP });
+        fctx.body.push({ op: "local.get", index: recvLocalP });
+        fctx.body.push({ op: "f64.sub" });
+        fctx.body.push({ op: "f64.const", value: 0 });
+        fctx.body.push({ op: "f64.eq" });
+        fctx.body.push({ op: "local.set", index: isFiniteLocal });
+
+        // RangeError gate: only when v is finite.
+        fctx.body.push({ op: "local.get", index: isFiniteLocal });
+        const rangeErrMsg = "RangeError: toPrecision() argument must be between 1 and 100";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        const rangeCheckBody: Instr[] = [];
+        // Build: if (p < 1 || p > 100 || p != p) throw RangeError
+        rangeCheckBody.push({ op: "local.get", index: precLocal });
+        rangeCheckBody.push({ op: "f64.const", value: 1 });
+        rangeCheckBody.push({ op: "f64.lt" });
+        rangeCheckBody.push({ op: "local.get", index: precLocal });
+        rangeCheckBody.push({ op: "f64.const", value: 100 });
+        rangeCheckBody.push({ op: "f64.gt" });
+        rangeCheckBody.push({ op: "i32.or" });
+        rangeCheckBody.push({ op: "local.get", index: precLocal });
+        rangeCheckBody.push({ op: "local.get", index: precLocal });
+        rangeCheckBody.push({ op: "f64.ne" });
+        rangeCheckBody.push({ op: "i32.or" });
+        rangeCheckBody.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: rangeCheckBody,
+          else: [],
+        });
+
         fctx.body.push({ op: "local.get", index: precLocal });
       } else {
         // No argument → push NaN sentinel; the `number_toPrecision` host runtime
         // recognises NaN as "no precision provided" and returns String(v).
-        // (Fixes a Wasm-validation crash when a program calls `n.toPrecision()`
-        // with no args without separately triggering `number_toString` registration.)
         fctx.body.push({ op: "f64.const", value: NaN });
       }
       const funcIdx = ctx.funcMap.get("number_toPrecision");
@@ -4414,28 +6304,68 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "f64.convert_i32_s" });
       }
       if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!);
-        // RangeError: fractionDigits must be 0-100
+        // (#49) Spec §21.1.3.3 step 3: if x is non-finite, return
+        // Number::toString(x) BEFORE the fractionDigits range check.
+        // Save receiver, run range check only when x is finite. The
+        // runtime helper `number_toExponential` short-circuits for
+        // non-finite x; pre-check would fire for
+        // `(NaN).toExponential(101)` which spec requires to return "NaN".
+        const recvLocalE = allocLocal(fctx, `__toExponential_recv_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.set", index: recvLocalE });
+        // ToNumber(fractionDigits) funnel — Symbol args must throw TypeError (#1564).
+        coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         const digitsLocal = allocLocal(fctx, `__toExponential_digits_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.tee", index: digitsLocal });
+        fctx.body.push({ op: "local.set", index: digitsLocal });
+
+        // (#1735) §21.1.3.3 step 5: f = ToIntegerOrInfinity(fractionDigits),
+        // which maps NaN → 0. The `number_toExponential` runtime helper reads
+        // NaN as its "no argument supplied" sentinel (see else-branch below),
+        // so an *explicit* NaN argument — e.g. `(1).toExponential(NaN)` or
+        // `(1).toExponential(0/0)` — must be normalised to 0 here, otherwise it
+        // collides with the sentinel and is wrongly treated as no-arg (variable
+        // digits) instead of 0 digits. Spec: explicit NaN → 0 → "Ne+E"; genuine
+        // no-arg → variable digits. test262
+        // Number/prototype/toExponential/tointeger-fractiondigits.js.
+        normalizeNaNToZero(fctx, digitsLocal);
+
+        // Re-push receiver for the runtime call.
+        fctx.body.push({ op: "local.get", index: recvLocalE });
+
+        // isFinite(v): (v - v) == 0 (NaN/Infinity give NaN ≠ 0).
+        const isFiniteLocal = allocLocal(fctx, `__toExponential_finite_${fctx.locals.length}`, { kind: "i32" });
+        fctx.body.push({ op: "local.get", index: recvLocalE });
+        fctx.body.push({ op: "local.get", index: recvLocalE });
+        fctx.body.push({ op: "f64.sub" });
         fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "f64.lt" });
-        fctx.body.push({ op: "local.get", index: digitsLocal });
-        fctx.body.push({ op: "f64.const", value: 100 });
-        fctx.body.push({ op: "f64.gt" });
-        fctx.body.push({ op: "i32.or" });
-        {
-          const rangeErrMsg = "RangeError: toExponential() argument must be between 0 and 100";
-          addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
-          const tagIdx = ensureExnTag(ctx);
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
-            else: [],
-          });
-        }
+        fctx.body.push({ op: "f64.eq" });
+        fctx.body.push({ op: "local.set", index: isFiniteLocal });
+
+        // Range check gate: only when v is finite.
+        const rangeErrMsg = "RangeError: toExponential() argument must be between 0 and 100";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        const rangeCheckBody: Instr[] = [];
+        rangeCheckBody.push({ op: "local.get", index: digitsLocal });
+        rangeCheckBody.push({ op: "f64.const", value: 0 });
+        rangeCheckBody.push({ op: "f64.lt" });
+        rangeCheckBody.push({ op: "local.get", index: digitsLocal });
+        rangeCheckBody.push({ op: "f64.const", value: 100 });
+        rangeCheckBody.push({ op: "f64.gt" });
+        rangeCheckBody.push({ op: "i32.or" });
+        rangeCheckBody.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+        fctx.body.push({ op: "local.get", index: isFiniteLocal });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: rangeCheckBody,
+          else: [],
+        });
+
         fctx.body.push({ op: "local.get", index: digitsLocal });
       } else {
         // No argument → pass NaN as sentinel for "no argument provided"
@@ -4452,9 +6382,22 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (isStringType(receiverType)) {
       const method = propAccess.name.text;
 
-      // string.toString() and string.valueOf() — identity, just return the string itself
+      // string.toString() and string.valueOf() — identity, just return the string itself.
+      // (#1397) Skip the identity short-circuit when the receiver is a String
+      // wrapper object (`new String(...)`) AND the source has a reassignment
+      // of the form `<id>.toString = ...` / `.valueOf = ...`. For wrappers
+      // the .toString / .valueOf property is reassignable, and the identity
+      // short-circuit silently ignores the override; the runtime spec
+      // requires dispatch through the actual property. Primitive strings
+      // can't have own properties, so the short-circuit stays correct.
       if (method === "toString" || method === "valueOf") {
-        return compileExpression(ctx, fctx, propAccess.expression);
+        const skipForReassignment =
+          isStringWrapperType(receiverType) && sourceHasMethodReassignment(ctx, propAccess.expression, method);
+        if (!skipForReassignment) {
+          return compileExpression(ctx, fctx, propAccess.expression);
+        }
+        // Fall through — let the generic externref method-call path at the
+        // bottom of compileMethodCall handle dynamic dispatch.
       }
 
       // Fast mode: native string method dispatch
@@ -4488,6 +6431,88 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const importName = `string_${method}`;
       const funcIdx = ctx.funcMap.get(importName);
       if (funcIdx !== undefined) {
+        // #1445 — ECMA-262 §7.1.4 ToNumber throws TypeError on BigInt /
+        // Symbol arguments. String.prototype methods feed certain args
+        // through ToInteger / ToLength (which call ToNumber). For those
+        // arg positions, emit a static TypeError throw when the arg's
+        // static TS type is `bigint` or `symbol`.
+        //
+        // Map: method → set of arg indices that are ToInteger-coerced.
+        const TO_INTEGER_ARG_INDICES: Record<string, ReadonlyArray<number>> = {
+          charAt: [0],
+          charCodeAt: [0],
+          codePointAt: [0],
+          at: [0],
+          substring: [0, 1],
+          slice: [0, 1],
+          substr: [0, 1],
+          indexOf: [1],
+          lastIndexOf: [1],
+          includes: [1],
+          startsWith: [1],
+          endsWith: [1],
+          padStart: [0],
+          padEnd: [0],
+          repeat: [0],
+        };
+        const integerArgs = TO_INTEGER_ARG_INDICES[method];
+        if (integerArgs) {
+          for (const idx of integerArgs) {
+            const arg = expr.arguments[idx];
+            if (!arg) continue;
+            let argTsType: ts.Type | undefined;
+            try {
+              argTsType = ctx.checker.getTypeAtLocation(arg);
+            } catch {
+              continue;
+            }
+            if (!argTsType) continue;
+            const isBig = isBigIntType(argTsType);
+            const isSym = isSymbolType(argTsType);
+            if (!isBig && !isSym) continue;
+            const msg = isBig
+              ? "TypeError: Cannot convert a BigInt value to a number"
+              : "TypeError: Cannot convert a Symbol value to a number";
+            addStringConstantGlobal(ctx, msg);
+            const strIdx = ctx.stringGlobalMap.get(msg)!;
+            // #1473 — no JS host: throw a TypeError INSTANCE via the in-module
+            // constructor (no `__throw_type_error` host import).
+            if (noJsHost(ctx)) {
+              emitThrowTypeError(ctx, fctx, msg);
+              fctx.body.push({ op: "unreachable" } as Instr);
+            } else {
+              const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
+              if (throwIdx !== undefined) {
+                flushLateImportShifts(ctx, fctx);
+                const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
+                fctx.body.push({ op: "unreachable" } as Instr);
+              } else {
+                const tagIdx = ensureExnTag(ctx);
+                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+                fctx.body.push({ op: "throw", tagIdx } as Instr);
+              }
+            }
+            // After unreachable / throw, the wasm stack is polymorphic.
+            // Push a sentinel matching the method's return type so any
+            // downstream consumer (the implicit drop / coercion in the
+            // statement context) still validates cleanly.
+            const returnsBool = method === "includes" || method === "startsWith" || method === "endsWith";
+            const returnsNum =
+              method === "indexOf" || method === "lastIndexOf" || method === "codePointAt" || method === "search";
+            if (returnsBool) {
+              fctx.body.push({ op: "i32.const", value: 0 });
+              return { kind: "i32" };
+            }
+            if (returnsNum) {
+              fctx.body.push({ op: "f64.const", value: 0 });
+              return { kind: "f64" };
+            }
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
+        }
         // #1248: substring/slice with a single argument default the missing
         // `end` to `s.length`, NOT 0. Without this, the generic padding loop
         // below pushes f64.const 0, and the host import calls
@@ -4497,9 +6522,16 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         // when padding the missing `end` arg.
         const args = expr.arguments;
         const paramTypes = getFuncParamTypes(ctx, funcIdx);
+        // #1248 + no-arg: substring/slice with a missing `end` (0 OR 1 args)
+        // default `end` to `s.length` per §22.1.3.24 (substring: end ?? len) /
+        // §22.1.3.21 (slice: ToIntegerOrInfinity(end ?? len)). With only the
+        // single-arg case handled, `s.substring()` / `s.slice()` padded BOTH
+        // start and end to 0 → host called `s.substring(0, 0)` → "" instead of
+        // the whole string. The pad loop's `pi === 2` branch supplies s.length
+        // for the missing end; the missing start (pi === 1) correctly pads to 0.
         const needsLengthDefault =
           (method === "substring" || method === "slice") &&
-          args.length === 1 &&
+          args.length <= 1 &&
           paramTypes !== undefined &&
           paramTypes.length === 3;
         let savedReceiverLocal: number | undefined;
@@ -4542,7 +6574,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Pad missing externref position args with JS undefined (via
           // `__get_undefined`) so the host sees the spec-correct "not passed"
           // value instead of `null`.
-          const padsUndefined = method === "endsWith" || method === "lastIndexOf";
+          // #1740 — padStart/padEnd: an OMITTED fillString must default to a
+          // single space " " (§22.1.3.17 StringPad: if fillString is
+          // undefined, set it to " "). Padding the missing externref arg with
+          // `ref.null.extern` makes the host see JS `null`, which ToString-
+          // coerces to "null" → e.g. `"abc".padStart(6)` returned "nulabc"
+          // instead of "   abc". Pass JS `undefined` so the host applies the
+          // spec default. (Same null-vs-undefined distinction as endsWith.)
+          const padsUndefined =
+            method === "endsWith" || method === "lastIndexOf" || method === "padStart" || method === "padEnd";
           let undefIdx: number | undefined;
           if (padsUndefined) {
             undefIdx = ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
@@ -4567,8 +6607,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               } else {
                 fctx.body.push({ op: "ref.null.extern" });
               }
-            } else if (pt.kind === "f64") fctx.body.push({ op: "f64.const", value: 0 });
-            else if (pt.kind === "i32") fctx.body.push({ op: "i32.const", value: 0 });
+            } else if (pt.kind === "f64") {
+              // #1441 — `split` uses NaN as the "limit was not provided"
+              // sentinel. ToUint32(NaN) === 0 would produce `[]` if the runtime
+              // passed it through verbatim, so the `string_method` host shim
+              // strips a trailing NaN limit before invoking the JS method.
+              if (method === "split") {
+                fctx.body.push({ op: "f64.const", value: Number.NaN });
+              } else {
+                fctx.body.push({ op: "f64.const", value: 0 });
+              }
+            } else if (pt.kind === "i32") fctx.body.push({ op: "i32.const", value: 0 });
           }
         }
         fctx.body.push({ op: "call", funcIdx });
@@ -4619,7 +6668,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         if (recvType === null) {
           fctx.body.push({ op: "ref.null.extern" });
         } else if (recvType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         }
         fctx.body.push({ op: "call", funcIdx: toLSIdx });
         return { kind: "externref" };
@@ -4629,6 +6678,21 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     // Fallback .toString() for any type not already handled above
     // Handles: function.toString(), object.toString(), array.toString(), class instance.toString()
     if (propAccess.name.text === "toString" && expr.arguments.length === 0) {
+      // #1463 — `someFn.toString()` where `someFn` is a top-level function
+      // declaration → return the captured source text directly. Must happen
+      // BEFORE the externref-routes-to-JS fallback below: top-level functions
+      // resolve to externref at the type system level, so the default path
+      // would call `__extern_toString` on a Wasm closure (which JS doesn't
+      // know how to stringify) and the spec text would be lost.
+      if (ts.isIdentifier(propAccess.expression)) {
+        const captured = ctx.funcSourceText.get(propAccess.expression.text);
+        if (captured) {
+          addStringConstantGlobal(ctx, captured);
+          const idx = ctx.stringGlobalMap.get(captured)!;
+          fctx.body.push({ op: "global.get", index: idx });
+          return { kind: "externref" };
+        }
+      }
       const tsType = ctx.checker.getTypeAtLocation(propAccess.expression);
       const wasm = resolveWasmType(ctx, tsType);
 
@@ -4667,8 +6731,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       const isFunc = callSigs && callSigs.length > 0 && !tsType.getProperties?.()?.length;
 
       if (isFunc) {
-        addStringConstantGlobal(ctx, "function () { [native code] }");
-        const idx = ctx.stringGlobalMap.get("function () { [native code] }")!;
+        // #1463 — return captured source text when the receiver is an
+        // identifier resolving to a known top-level function declaration.
+        // Falls back to the legacy placeholder for arrow functions, method
+        // references, or any receiver we can't resolve statically.
+        let toStrStr = "function () { [native code] }";
+        if (ts.isIdentifier(propAccess.expression)) {
+          const captured = ctx.funcSourceText.get(propAccess.expression.text);
+          if (captured) toStrStr = captured;
+        }
+        addStringConstantGlobal(ctx, toStrStr);
+        const idx = ctx.stringGlobalMap.get(toStrStr)!;
         fctx.body.push({ op: "global.get", index: idx });
       } else {
         const str = isArray ? "[object Array]" : "[object Object]";
@@ -4791,18 +6864,13 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             if (receiverIsBuiltin && getBuiltinIdx !== undefined) {
               const builtinName = (propAccess.expression as ts.Identifier).text;
               addStringConstantGlobal(ctx, builtinName);
-              const strIdx = ctx.stringGlobalMap.get(builtinName);
-              if (strIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-              } else {
-                compileStringLiteral(ctx, fctx, builtinName);
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
               fctx.body.push({ op: "call", funcIdx: getBuiltinIdx });
               recvType = { kind: "externref" };
             } else {
               recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
               if (recvType && recvType.kind !== "externref") {
-                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                fctx.body.push({ op: "extern.convert_any" });
               }
             }
             const recvLocal = allocLocal(fctx, `__emc_recv_${fctx.locals.length}`, { kind: "externref" });
@@ -4817,7 +6885,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               fctx.body.push({ op: "local.get", index: argsLocal });
               const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
               if (argType && argType.kind !== "externref") {
-                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                fctx.body.push({ op: "extern.convert_any" });
               }
               if (argType === null) {
                 fctx.body.push({ op: "ref.null.extern" });
@@ -4828,12 +6896,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             // Push receiver, method name, args array → call __extern_method_call
             fctx.body.push({ op: "local.get", index: recvLocal });
             addStringConstantGlobal(ctx, methodName);
-            const strIdx = ctx.stringGlobalMap.get(methodName);
-            if (strIdx !== undefined) {
-              fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-            } else {
-              compileStringLiteral(ctx, fctx, methodName);
-            }
+            fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
             fctx.body.push({ op: "local.get", index: argsLocal });
             fctx.body.push({ op: "call", funcIdx: methodCallIdx });
             return { kind: "externref" };
@@ -4855,6 +6918,81 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         }
       }
     }
+  }
+
+  // #1491 — non-WASI fs.readFileSync / writeFileSync as JS-host imports.
+  // Gated behind `--allow-fs` (CompileOptions.allowFs) to prevent accidental
+  // capability leakage. The corresponding host imports are bound at runtime via
+  // the `node_builtin_fn` ImportIntent. Initial scope: 2-arg shapes only —
+  // readFileSync(path, "utf-8") returns string, writeFileSync(path, data)
+  // returns void. Buffer-shaped reads are deferred to a follow-up.
+  if (
+    !ctx.wasi &&
+    ts.isIdentifier(expr.expression) &&
+    ctx.wasiNodeFsFuncs.has(expr.expression.text) &&
+    (expr.expression.text === "readFileSync" || expr.expression.text === "writeFileSync")
+  ) {
+    const fnName = expr.expression.text;
+    if (!ctx.allowFs) {
+      const { line, character } = expr.getSourceFile().getLineAndCharacterOfPosition(expr.getStart());
+      ctx.errors.push({
+        message:
+          `'node:fs' call to '${fnName}' requires the --allow-fs flag (or { allowFs: true } ` +
+          `in CompileOptions) for non-WASI targets (#1491). Refusing to emit the host import ` +
+          `to prevent accidental capability leakage.`,
+        line: line + 1,
+        column: character + 1,
+        severity: "error",
+      });
+      // Drop args, emit a safe placeholder so codegen can continue.
+      for (const arg of expr.arguments) {
+        const t = compileExpression(ctx, fctx, arg);
+        if (t) fctx.body.push({ op: "drop" });
+      }
+      if (fnName === "writeFileSync") return VOID_RESULT;
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+
+    // Lazily register the host import. Both fns are (externref, externref) -> externref|void.
+    // Use ensureLateImport so late additions correctly shift existing function
+    // indices (export tables, call instructions, etc.) — calling raw addImport
+    // here would otherwise misalign the exported function indices.
+    const importName = `__node_fs_${fnName}`;
+    const params: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
+    const results: ValType[] = fnName === "writeFileSync" ? [] : [{ kind: "externref" }];
+    const funcIdx = ensureLateImport(ctx, importName, params, results);
+    if (funcIdx === undefined) {
+      // Should be unreachable — emit a defensive placeholder.
+      for (const arg of expr.arguments) {
+        const t = compileExpression(ctx, fctx, arg);
+        if (t) fctx.body.push({ op: "drop" });
+      }
+      if (fnName === "writeFileSync") return VOID_RESULT;
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+    flushLateImportShifts(ctx, fctx);
+
+    // Compile 2 args as externref (pad missing with ref.null.extern so the call
+    // typechecks even when the user under-supplied args).
+    const argCount = Math.min(2, expr.arguments.length);
+    for (let i = 0; i < argCount; i++) {
+      compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+    }
+    for (let i = argCount; i < 2; i++) {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    // Drop extra args (e.g. callback overload) without emitting them — Initial
+    // scope is sync 2-arg shapes only.
+    for (let i = 2; i < expr.arguments.length; i++) {
+      const t = compileExpression(ctx, fctx, expr.arguments[i]!);
+      if (t) fctx.body.push({ op: "drop" });
+    }
+
+    fctx.body.push({ op: "call", funcIdx });
+    if (fnName === "writeFileSync") return VOID_RESULT;
+    return { kind: "externref" };
   }
 
   // WASI mode: writeFileSync(path, data) → __wasi_write_file_sync(pathPtr, pathLen, dataPtr, dataLen)
@@ -4992,6 +7130,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Number(x) — ToNumber coercion
     if (funcName === "Number" && expr.arguments.length >= 1) {
+      // ToNumber(Symbol) must throw TypeError (§7.1.4). Symbols are lowered to
+      // i32 ids, so a numeric pass-through would silently leak the id; detect
+      // the symbol TS type and throw instead.
+      if (isSymbolType(ctx.checker.getTypeAtLocation(expr.arguments[0]!))) {
+        const t = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (t !== null) fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+        return { kind: "f64" };
+      }
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
         // BigInt → number: f64.convert_i64_s
@@ -5010,6 +7157,27 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         }
       }
       if (argType?.kind === "ref" || argType?.kind === "ref_null") {
+        // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
+        // StringToNumber. The generic struct ToPrimitive path below has no
+        // string case and silently yields 0 in standalone (#1688), so detect
+        // the string struct type and route to the pure-Wasm __str_to_number.
+        const refTypeIdx = (argType as { typeIdx?: number }).typeIdx;
+        if (
+          ctx.nativeStrings &&
+          refTypeIdx !== undefined &&
+          (refTypeIdx === ctx.anyStrTypeIdx || refTypeIdx === ctx.nativeStrTypeIdx)
+        ) {
+          // Emitted upfront during the parseNeeded finalize (declarations.ts)
+          // when `Number` is referenced under native strings, so no mid-body
+          // function registration (which would shift func indices) happens here.
+          const s2nIdx = ctx.funcMap.get("__str_to_number");
+          if (s2nIdx !== undefined) {
+            // __str_to_number takes an externref; convert the ref first.
+            fctx.body.push({ op: "extern.convert_any" });
+            fctx.body.push({ op: "call", funcIdx: s2nIdx });
+            return { kind: "f64" };
+          }
+        }
         // Object → number: coerce via @@toPrimitive("number") or valueOf
         coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
         return { kind: "f64" };
@@ -5018,19 +7186,58 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
       return argType;
     }
 
-    // BigInt(x) — ToBigInt coercion
+    // BigInt(x) — §21.2.1.1 constructor. (#1644 Slice A+B) The result is
+    // brand-bigint so it boxes as a JS bigint at the externref frontier.
+    //
+    // - i32 / native-i64: already an integer Number representation, no
+    //   RangeError possible — extend/identity directly (avoids a host call).
+    // - f64: may be a non-safe-integer / NaN / ±Infinity → must throw
+    //   RangeError (NumberToBigInt). Box to externref, then __bigint_ctor.
+    // - string / object / boolean (externref): StringToBigInt (SyntaxError on
+    //   malformed syntax), ToPrimitive on objects, boolean → 0n/1n →
+    //   __bigint_ctor.
     if (funcName === "BigInt" && expr.arguments.length >= 1) {
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
-      if (argType?.kind === "f64") {
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
-        return { kind: "i64" };
+      // Compile-time numeric literal: fold to an i64.const when it is a safe
+      // integer (NumberToBigInt with no RangeError), avoiding a host call.
+      // A negative literal parses as a unary-minus on a NumericLiteral.
+      const litArg = expr.arguments[0]!;
+      let litNum: number | undefined;
+      if (ts.isNumericLiteral(litArg)) {
+        litNum = Number(litArg.text);
+      } else if (
+        ts.isPrefixUnaryExpression(litArg) &&
+        litArg.operator === ts.SyntaxKind.MinusToken &&
+        ts.isNumericLiteral(litArg.operand)
+      ) {
+        litNum = -Number(litArg.operand.text);
       }
+      if (litNum !== undefined && Number.isSafeInteger(litNum)) {
+        fctx.body.push({ op: "i64.const", value: BigInt(litNum) } as Instr);
+        return { kind: "i64", bigint: true };
+      }
+
+      const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i32") {
         fctx.body.push({ op: "i64.extend_i32_s" });
-        return { kind: "i64" };
+        return { kind: "i64", bigint: true };
       }
-      // Already i64 — no-op
-      return argType;
+      // Already i64 — tag as bigint-branded (native integer, no RangeError).
+      if (argType?.kind === "i64") {
+        return { kind: "i64", bigint: true };
+      }
+      addUnionImports(ctx);
+      // Coerce the argument to externref so the §21.2.1.1 host helper can run
+      // ToPrimitive + NumberToBigInt / StringToBigInt with the correct
+      // RangeError / SyntaxError / TypeError semantics.
+      if (argType && argType.kind !== "externref") {
+        coerceType(ctx, fctx, argType, { kind: "externref" }, "default");
+      }
+      const ctorIdx = ctx.funcMap.get("__bigint_ctor");
+      if (ctorIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: ctorIdx });
+        return { kind: "i64", bigint: true };
+      }
+      return { kind: "i64", bigint: true };
     }
 
     // Number() with 0 args → 0
@@ -5138,8 +7345,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Already a string — return as-is
           return { kind: "externref" };
         }
-        // Other externref — try extern_toString if available
-        const toStrIdx = ctx.funcMap.get("extern_toString");
+        // Other externref — coerce via __extern_toString, which routes
+        // through the runtime's `_toPrimitive` walker (valueOf/toString
+        // per §7.1.1.1 with hint "string"). Pre-#1525 this looked up
+        // "extern_toString" — missing the leading underscores that the
+        // runtime actually exposes — so the call was silently dropped
+        // and `String(obj)` returned the unchanged externref. The
+        // explicit hint also keeps the dispatch table in
+        // `__extern_method_call` honest for wasmGC structs that V8
+        // can't introspect natively.
+        const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
         if (toStrIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: toStrIdx });
         }
@@ -5193,6 +7409,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         fctx.body.push({ op: "i32.ne" } as Instr);
         return { kind: "i32" };
       }
+      if (argType?.kind === "i64") {
+        // BigInt (§7.1.2 ToBoolean): 0n → false, any other BigInt → true.
+        // i64.eqz yields 1 for 0n; invert with i32.eqz so nonzero → 1.
+        // Must NOT route through f64.convert_i64_s — that loses precision
+        // for |x| > 2^53 and would misreport large BigInts.
+        fctx.body.push({ op: "i64.eqz" } as Instr);
+        fctx.body.push({ op: "i32.eqz" } as Instr);
+        return { kind: "i32" };
+      }
       // String: truthy if length > 0
       if (
         (argType?.kind === "ref" || argType?.kind === "ref_null") &&
@@ -5211,9 +7436,14 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         return { kind: "i32" };
       }
       if (argType?.kind === "externref") {
-        // Check if this is a string type — use string length > 0 for truthiness
+        // Check if this is a primitive string type — use string length > 0 for truthiness.
+        // (#1343) Restrict to PRIMITIVE strings only; `new String("")` is a wrapper
+        // object (always truthy, even when empty per spec) and would be incorrectly
+        // reported as falsy by a length check. Same caveat for any other JS wrapper.
         const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-        if (isStringType(argTsType)) {
+        const isPrimString =
+          (argTsType.flags & ts.TypeFlags.String) !== 0 || (argTsType.flags & ts.TypeFlags.StringLiteral) !== 0;
+        if (isPrimString) {
           addStringImports(ctx);
           const lenIdx = ctx.jsStringImports.get("length");
           if (lenIdx !== undefined) {
@@ -5223,7 +7453,20 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             return { kind: "i32" };
           }
         }
-        // externref: truthy if non-null (and not "" or 0 — but we can't check that without host)
+        // (#1343) Use the host `__to_boolean` helper for full ECMA-262
+        // §7.1.2 semantics. Previously we only checked `ref.is_null`,
+        // which returned 1 for JS `undefined` (defined externref, not
+        // a null reference) and broke `Boolean(undefined) === false` plus
+        // every other ToBoolean edge case (NaN, +/-0, "", 0n, wrapper
+        // objects which must always be truthy).
+        const toBoolIdx = ensureLateImport(ctx, "__to_boolean", [{ kind: "externref" }], [{ kind: "i32" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (toBoolIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: toBoolIdx });
+          return { kind: "i32" };
+        }
+        // Fallback: the legacy null-only check (preserves prior behaviour
+        // when the host import couldn't be registered).
         fctx.body.push({ op: "ref.is_null" } as Instr);
         fctx.body.push({ op: "i32.const", value: 1 });
         fctx.body.push({ op: "i32.xor" } as Instr);
@@ -5311,6 +7554,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const nonNull = ctx.checker.getNonNullableType(calleeTsType);
         callSigs = nonNull.getCallSignatures?.();
       }
+      // (#1337) If the callee is a variable holding a `Function.prototype.bind`
+      // result, its runtime value is a host bound-function externref, NOT a
+      // wasm closure struct — the struct-cast + call_ref path below would null
+      // it and trap. Route the call through the `__call_function` host helper
+      // (Reflect.apply on the bound function, which already carries
+      // [[BoundThis]]/[[BoundArguments]]). JS-host mode only; standalone
+      // degrades bind to identity so the normal path applies.
+      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsBoundFunctionVar(ctx, expr.expression)) {
+        const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
+        if (hostCall !== null) return hostCall;
+      }
       if (callSigs && callSigs.length > 0) {
         const sig = callSigs[0]!;
         const sigParamCount = sig.parameters.length;
@@ -5318,6 +7572,27 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const sigRetWasm = isVoidType(sigRetType) ? null : resolveWasmType(ctx, sigRetType);
         const sigParamWasmTypes: ValType[] = [];
         for (let i = 0; i < sigParamCount; i++) {
+          // (#820d) Destructuring-pattern parameters (e.g. `method({ x = 5 } = {})`)
+          // are compiled by the callee as a single `externref` slot — the binding
+          // pattern is destructured inside the body from that externref, and the
+          // param-default check uses `__extern_is_undefined`. Resolving the TS
+          // type of such a param to a concrete struct ref (which `resolveWasmType`
+          // does once the anonymous object type gets a registered struct) produces
+          // a funcref wrapper type that mismatches the actual method/trampoline
+          // signature. The closure call then casts the trampoline funcref to the
+          // wrong (struct-param) type and traps with `illegal cast` — and for an
+          // unresolvable default the spec-correct ReferenceError never gets a
+          // chance to throw. Force `externref` for binding-pattern params so the
+          // call site agrees with the compiled callee.
+          const paramDecl = sig.parameters[i]!.valueDeclaration;
+          if (
+            paramDecl &&
+            ts.isParameter(paramDecl) &&
+            (ts.isObjectBindingPattern(paramDecl.name) || ts.isArrayBindingPattern(paramDecl.name))
+          ) {
+            sigParamWasmTypes.push({ kind: "externref" });
+            continue;
+          }
           const paramType = ctx.checker.getTypeOfSymbol(sig.parameters[i]!);
           sigParamWasmTypes.push(resolveWasmType(ctx, paramType));
         }
@@ -5420,8 +7695,14 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           // Compile call arguments with type coercion (only up to declared param count)
           // Save them to locals so they can be re-pushed in each dispatch branch.
           const argLocals: number[] = [];
+          const cpParamCnt = matchedClosureInfo.paramTypes.length;
+          // (#1511) Save overflow args to externref locals so we can pack them
+          // into __extras_argv right before the call (whichever dispatch arm
+          // wins). The lifted callee may read `arguments` and needs the full
+          // call-site arg list.
+          const cpExtrasLocals: number[] = [];
+          // biome-ignore lint/complexity/noUselessLoneBlockStatements: groups arg-emit + extras-pack as one logical unit
           {
-            const cpParamCnt = matchedClosureInfo.paramTypes.length;
             for (let i = 0; i < Math.min(expr.arguments.length, cpParamCnt); i++) {
               compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
               const argLocal = allocLocal(fctx, `__carg_${fctx.locals.length}`, matchedClosureInfo.paramTypes[i]!);
@@ -5429,10 +7710,32 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               argLocals.push(argLocal);
             }
             for (let i = cpParamCnt; i < expr.arguments.length; i++) {
-              const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-              if (extraType !== null) {
-                fctx.body.push({ op: "drop" });
+              const extraType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+              if (extraType === null) {
+                fctx.body.push({ op: "ref.null.extern" });
+              } else if (extraType.kind === "f64") {
+                const boxIdx = ctx.funcMap.get("__box_number");
+                if (boxIdx !== undefined) {
+                  fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else {
+                  fctx.body.push({ op: "drop" });
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else if (extraType.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+                const boxIdx = ctx.funcMap.get("__box_number");
+                if (boxIdx !== undefined) {
+                  fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else {
+                  fctx.body.push({ op: "drop" });
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+              } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
+                fctx.body.push({ op: "extern.convert_any" } as Instr);
               }
+              const extraLocal = allocLocal(fctx, `__cextra_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: extraLocal });
+              cpExtrasLocals.push(extraLocal);
             }
           }
 
@@ -5466,7 +7769,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             // Need: [self, ...args, funcref] for call_ref
             // Re-push self and args under the funcref by saving funcref first
             const funcrefLocal = allocLocal(fctx, `__frd_${fctx.locals.length}`, { kind: "funcref" } as ValType);
-            fctx.body.push({ op: "local.set", index: funcrefLocal } as unknown as Instr);
+            fctx.body.push({ op: "local.set", index: funcrefLocal });
             // Push self (null-check)
             fctx.body.push({ op: "local.get", index: closureLocal });
             emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
@@ -5474,21 +7777,35 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             for (const al of argLocals) {
               fctx.body.push({ op: "local.get", index: al });
             }
+            // (#1511) Set __extras_argv from saved overflow locals + __argc
+            for (const ins of buildArgcExtrasSetupFromLocals(ctx, fctx, cpParamCnt, cpExtrasLocals)) {
+              fctx.body.push(ins);
+            }
             // Push funcref back, guarded cast, call
-            fctx.body.push({ op: "local.get", index: funcrefLocal } as unknown as Instr);
+            fctx.body.push({ op: "local.get", index: funcrefLocal });
             emitGuardedFuncRefCast(fctx, matchedClosureInfo.funcTypeIdx);
             emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedClosureInfo.funcTypeIdx });
             fctx.body.push({
               op: "call_ref",
               typeIdx: matchedClosureInfo.funcTypeIdx,
             });
+            // (#1511) Reset globals (callee may not have consumed them).
+            // Return value already on stack — save, reset, restore.
+            if (expectedReturn !== null) {
+              const _retL = allocLocal(fctx, `__cp_ret_${fctx.locals.length}`, expectedReturn);
+              fctx.body.push({ op: "local.set", index: _retL });
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+              fctx.body.push({ op: "local.get", index: _retL });
+            } else {
+              for (const ins of buildArgcExtrasReset(ctx)) fctx.body.push(ins);
+            }
           } else {
             // (#1131) Multi-funcref-type dispatch: the closure may have a different
             // return type than declared (e.g. () => string passed as () => void).
             // Save funcref, then dispatch on funcref type. Each branch re-pushes
             // self + args + typed funcref for call_ref.
             const funcrefLocal = allocLocal(fctx, `__frd_${fctx.locals.length}`, { kind: "funcref" } as ValType);
-            fctx.body.push({ op: "local.set", index: funcrefLocal } as unknown as Instr);
+            fctx.body.push({ op: "local.set", index: funcrefLocal });
 
             const retBlockType =
               expectedReturn === null ? ({ kind: "empty" } as const) : ({ kind: "val", type: expectedReturn } as const);
@@ -5504,30 +7821,54 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               // closureLocal to the funcref's expected struct type.
               const fcCallBody: Instr[] = [];
               // Push self (cast to the funcref's expected struct type)
-              fcCallBody.push({ op: "local.get", index: closureLocal } as unknown as Instr);
+              fcCallBody.push({ op: "local.get", index: closureLocal });
               if (fc.structTypeIdx !== matchedStructTypeIdx) {
                 // V8 canonicalizes same-layout structs, so this cast succeeds
-                fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx } as unknown as Instr);
+                fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx });
               }
               // Push args
               for (const al of argLocals) {
-                fcCallBody.push({ op: "local.get", index: al } as unknown as Instr);
+                fcCallBody.push({ op: "local.get", index: al });
               }
               // Push typed funcref and call
-              fcCallBody.push({ op: "local.get", index: funcrefLocal } as unknown as Instr);
-              fcCallBody.push({ op: "ref.cast", typeIdx: fc.funcTypeIdx } as unknown as Instr);
-              fcCallBody.push({ op: "call_ref", typeIdx: fc.funcTypeIdx } as unknown as Instr);
+              fcCallBody.push({ op: "local.get", index: funcrefLocal });
+              fcCallBody.push({ op: "ref.cast", typeIdx: fc.funcTypeIdx });
+              fcCallBody.push({ op: "call_ref", typeIdx: fc.funcTypeIdx });
 
               // Coerce return to expected type
               if (expectedReturn === null && fc.returnType !== null) {
                 fcCallBody.push({ op: "drop" } as Instr);
               } else if (expectedReturn !== null && fc.returnType === null) {
                 fcCallBody.push(...defaultValueInstrs(expectedReturn));
+              } else if (
+                expectedReturn !== null &&
+                fc.returnType !== null &&
+                !valTypesMatch(fc.returnType, expectedReturn) &&
+                (expectedReturn.kind === "i32" || expectedReturn.kind === "f64" || expectedReturn.kind === "i64") &&
+                (fc.returnType.kind === "i32" || fc.returnType.kind === "f64" || fc.returnType.kind === "i64")
+              ) {
+                // (#1693) Numeric-primitive return-type mismatch in the multi-
+                // funcref dispatch ladder (e.g. expected i32, candidate returns
+                // f64). The if-block declares `(result <expectedReturn>)`, so we
+                // must coerce the call_ref result inline. Surfaces at full-module
+                // scale in axios/lib/utils.js where ~30 same-arity arrow
+                // predicates with diverging numeric returns populate
+                // ctx.closureInfoByTypeIdx.
+                //
+                // Narrowly gated to numeric-primitive pairs only — externref/
+                // ref/ref_null mismatches stay on the existing lossy-but-valid
+                // drop+default path that already validates and never executes
+                // (those synthesized candidates only catch funcrefs that the
+                // real signature didn't match).
+                const savedBody = fctx.body;
+                fctx.body = fcCallBody;
+                coerceType(ctx, fctx, fc.returnType, expectedReturn);
+                fctx.body = savedBody;
               }
 
               funcDispatch = [
-                { op: "local.get", index: funcrefLocal } as unknown as Instr,
-                { op: "ref.test", typeIdx: fc.funcTypeIdx } as unknown as Instr,
+                { op: "local.get", index: funcrefLocal },
+                { op: "ref.test", typeIdx: fc.funcTypeIdx },
                 {
                   op: "if",
                   blockType: retBlockType,
@@ -5566,12 +7907,23 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     const inlineInfo = ctx.inlinableFunctions.get(funcName);
     if (inlineInfo && !expr.arguments.some((a: any) => ts.isSpreadElement(a))) {
       // Inline the function body: compile arguments into temp locals, then emit body
+      const inlineOptInfo = ctx.funcOptionalParams.get(funcName);
       const argLocals: number[] = [];
       for (let i = 0; i < inlineInfo.paramCount; i++) {
         if (i < expr.arguments.length) {
           compileExpression(ctx, fctx, expr.arguments[i]!, inlineInfo.paramTypes[i]);
         } else {
-          pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          // #1658: a missing optional param must receive its default — either the
+          // inlined constant (callee prologue is skipped for constant defaults) or
+          // the sNaN sentinel that the inlined prologue checks for expression
+          // defaults. pushDefaultValue alone emits 0/ref.null and silently drops
+          // the default.
+          const opt = inlineOptInfo?.find((o) => o.index === i);
+          if (opt) {
+            pushParamSentinel(fctx, inlineInfo.paramTypes[i]!, ctx, opt);
+          } else {
+            pushDefaultValue(fctx, inlineInfo.paramTypes[i]!, ctx);
+          }
         }
         const tmpLocal = allocLocal(
           fctx,
@@ -6170,14 +8522,79 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
             fctx.body.push({ op: "local.get", index: retLocal });
             return iifeWasmRetType;
           } else {
-            // Void IIFE — just compile inline
+            // Void IIFE — wrap the body in a block so that `return` inside
+            // the IIFE exits ONLY the IIFE rather than the enclosing function
+            // (#1348). Without this wrapper, e.g.
+            //   (function () { for (var x of it) { return; } }());
+            // would emit a Wasm `return` from the outer function, dropping
+            // any `for-of`-followups (post-IIFE asserts) and breaking the
+            // §14.7.5 IteratorClose-on-return semantics expected by callers.
+            const savedBody = fctx.body;
+            fctx.savedBodies.push(savedBody);
+            const blockBody: Instr[] = [];
+            fctx.body = blockBody;
+
+            // Save and override returnType: void IIFE has no return value,
+            // so any `return <expr>;` inside the body should drop the value
+            // (we model this by setting returnType=null which causes
+            // compileReturnStatement to drop the expression value).
+            const savedReturnType = fctx.returnType;
+            fctx.returnType = null;
+
             // Hoist let/const with TDZ flags so accesses before init throw (#790)
             hoistLetConstWithTdz(ctx, fctx, bodyStmts as unknown as ts.Statement[]);
             // Hoist function declarations so they're available before textual position
             hoistFunctionDeclarations(ctx, fctx, bodyStmts as unknown as ts.Statement[]);
+
+            // Increase block depth so return→br targets the right level
+            fctx.blockDepth++;
             for (const stmt of bodyStmts) {
               compileStatement(ctx, fctx, stmt);
             }
+            fctx.blockDepth--;
+
+            // Restore outer function's return type
+            fctx.returnType = savedReturnType;
+            fctx.savedBodies.pop();
+            fctx.body = savedBody;
+
+            // Post-process: replace `return` / `return_call` / `return_call_ref`
+            // with `br <depth>`. Tail-call optimization in compileReturnStatement
+            // may have merged call+return into return_call; inside an IIFE we
+            // must undo that and lower it back to a plain call.
+            function patchVoidReturns(instrs: Instr[], depth: number): void {
+              for (let i = 0; i < instrs.length; i++) {
+                const op = instrs[i]!.op;
+                if (op === "return") {
+                  // void IIFE: no value to capture — replace with br
+                  instrs[i] = { op: "br", depth } as Instr;
+                } else if (op === "return_call" || op === "return_call_ref") {
+                  // Undo tail-call: rewrite as plain call + br
+                  const instr = instrs[i] as any;
+                  instr.op = op === "return_call" ? "call" : "call_ref";
+                  instrs.splice(i + 1, 0, { op: "br", depth } as Instr);
+                  i++; // skip inserted br
+                }
+                const instr = instrs[i] as any;
+                if (instr.then) patchVoidReturns(instr.then, depth + 1);
+                if (instr.else) patchVoidReturns(instr.else, depth + 1);
+                if (instr.body && Array.isArray(instr.body)) patchVoidReturns(instr.body, depth + 1);
+                if (instr.catchAll && Array.isArray(instr.catchAll)) patchVoidReturns(instr.catchAll, depth + 1);
+                if (Array.isArray(instr.catches)) {
+                  for (const c of instr.catches) {
+                    if (Array.isArray(c.body)) patchVoidReturns(c.body, depth + 1);
+                  }
+                }
+              }
+            }
+            patchVoidReturns(blockBody, 0);
+
+            // Emit: block { <body> }
+            fctx.body.push({
+              op: "block",
+              blockType: { kind: "empty" },
+              body: blockBody,
+            } as Instr);
             return VOID_RESULT;
           }
         }
@@ -6185,11 +8602,24 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
     }
   }
 
-  // Handle standalone super() calls (constructor chaining) — normally handled by
-  // compileClassBodies, but handle here as fallback
+  // Handle standalone super() calls (constructor chaining) — top-level super(...)
+  // statements are handled inline by compileClassBodies, which short-circuits the
+  // ExpressionStatement before it reaches this path. When `super(...)` appears
+  // nested inside control flow (try/catch, if/loop) inside the user constructor,
+  // the inline handler doesn't see it. To preserve §13.3.7.1 step 4 (ArgumentList­
+  // Evaluation + ReturnIfAbrupt) we evaluate every argument left-to-right here
+  // for side effects, dropping the resulting value. Parent-field assignment
+  // remains best-effort: nested-super field forwarding is handled by the
+  // inline path; this fallback ensures throws from arg expressions propagate
+  // to the user's try/catch (#1551).
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    // super() call in constructor — already handled by compileClassBodies inline
-    // Just return void since the work is done there
+    for (const arg of expr.arguments) {
+      const inner = ts.isSpreadElement(arg) ? arg.expression : arg;
+      const argResult = compileExpression(ctx, fctx, inner);
+      if (argResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+    }
     return null;
   }
 
@@ -6268,7 +8698,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         const recvType = compileExpression(ctx, fctx, elemAccess.expression);
         if (recvType) {
           if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           } else if (recvType.kind === "f64") {
             const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
             if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
@@ -6292,6 +8722,142 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "ref.null.extern" });
         }
         return { kind: "externref" };
+      }
+
+      // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
+      // protocol dispatch. `regex[Symbol.replace](str, replaceValue)` is the
+      // ECMAScript §22.2.5 mechanism that `String.prototype.replace` and
+      // friends delegate to. The receiver is an externref (RegExp lives in
+      // the host), so a direct call_ref on the property access would deref
+      // a null pointer — there's no Wasm function bound to the symbol key
+      // on a host object. Route to `__regex_symbol_call(regex, id, arg0, arg1)`
+      // which performs `regex[Symbol.X](arg0[, arg1])` in JS land.
+      {
+        const REGEX_SYMBOL_METHODS: Record<string, number> = {
+          "@@match": 7,
+          "@@replace": 8,
+          "@@search": 9,
+          "@@split": 10,
+          "@@matchAll": 15,
+        };
+        const protocolId = REGEX_SYMBOL_METHODS[methodName];
+        if (protocolId !== undefined) {
+          // Receiver is RegExp, or its static type is unresolvable (`any` /
+          // `unknown`) so we cannot prove it is *not* a RegExp. The latter
+          // covers `(re as any)[Symbol.split](str)`, a RegExp stored in an
+          // `any`/parameter slot, and `RegExp.prototype[Symbol.split]`
+          // accessed off a base that loses its type (#1331). In all these
+          // cases the host helper `__regex_symbol_call` does a fully dynamic
+          // `recv[Symbol.X](args)` lookup, so routing here is correct for any
+          // object that implements the well-known symbol method — not just
+          // RegExp. We must NOT catch receivers that resolve to a user-defined
+          // wasm class (handled by the ClassName_method dispatch below) or the
+          // `@@iterator`/`@@asyncIterator` cases (already handled above).
+          const recvSym = receiverType.getSymbol()?.name;
+          // (#1330) When a regex flows through an `any`/unresolved variable —
+          // the common test262 shape `re[Symbol.search](s)` with `re: any` —
+          // recvSym is undefined and the narrow `=== "RegExp"` guard rejects
+          // it, so dispatch falls through to generic method lookup which can't
+          // resolve the "@@search" string key → returns 0/undefined. Route
+          // these through `__regex_symbol_call` too: the host import validates
+          // the receiver at runtime (throws the correct TypeError if it isn't a
+          // RegExp), so widening here is spec-safe. Stay narrow for receivers
+          // that resolve to a *user* class/struct, which may define their own
+          // @@match/@@replace/etc.
+          const isRegExpRecv = recvSym === "RegExp" || recvSym === "RegExpConstructor";
+          let resolvedClassName = receiverType.getSymbol()?.name;
+          if (resolvedClassName && !ctx.classSet.has(resolvedClassName)) {
+            resolvedClassName = ctx.classExprNameMap.get(resolvedClassName) ?? resolvedClassName;
+          }
+          const recvIsUserClass = !!resolvedClassName && ctx.classSet.has(resolvedClassName);
+          const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+          if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
+            // Push receiver as externref (already a RegExp host object)
+            const recvType = compileExpression(ctx, fctx, elemAccess.expression);
+            if (recvType) {
+              if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+              } else if (recvType.kind === "f64") {
+                const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+              } else if (recvType.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+                const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+              }
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // symbol ID
+            fctx.body.push({ op: "i32.const", value: protocolId });
+            // arg0 (the string operand) — coerce to externref
+            if (expr.arguments.length > 0) {
+              const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+              if (a0) {
+                if (a0.kind === "ref" || a0.kind === "ref_null") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                } else if (a0.kind === "f64") {
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else if (a0.kind === "i32") {
+                  fctx.body.push({ op: "f64.convert_i32_s" });
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                }
+              } else {
+                fctx.body.push({ op: "ref.null.extern" });
+              }
+            } else {
+              // Spec: ToString(undefined) → "undefined" — but at the host
+              // boundary an `undefined` externref roundtrip is fine because
+              // the host method does its own ToString coercion.
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // arg1 (replaceValue / limit) — coerce to externref, default null
+            if (expr.arguments.length > 1) {
+              const a1 = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+              if (a1) {
+                if (a1.kind === "ref" || a1.kind === "ref_null") {
+                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                } else if (a1.kind === "f64") {
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                } else if (a1.kind === "i32") {
+                  fctx.body.push({ op: "f64.convert_i32_s" });
+                  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+                  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+                }
+              } else {
+                fctx.body.push({ op: "ref.null.extern" });
+              }
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            // Drop any extra arguments (evaluate for side effects)
+            for (let i = 2; i < expr.arguments.length; i++) {
+              const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
+              if (extra !== null) fctx.body.push({ op: "drop" });
+            }
+            const callIdx = ensureLateImport(
+              ctx,
+              "__regex_symbol_call",
+              [{ kind: "externref" }, { kind: "i32" }, { kind: "externref" }, { kind: "externref" }],
+              [{ kind: "externref" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            if (callIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: callIdx });
+            } else {
+              // Shouldn't happen, but be defensive
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            return { kind: "externref" };
+          }
+        }
       }
 
       // Try class instance method: ClassName_methodName
@@ -6525,7 +9091,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         if (methodName === "toString" && expr.arguments.length > 0) {
           compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
           // Floor the radix (ToInteger semantics)
-          fctx.body.push({ op: "f64.floor" } as unknown as Instr);
+          fctx.body.push({ op: "f64.floor" });
           const radixLocal = allocLocal(fctx, `__radix_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: radixLocal });
           fctx.body.push({ op: "f64.const", value: 2 });
@@ -6559,7 +9125,8 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         if (methodName === "toFixed" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
           // RangeError: fractionDigits must be 0-100
           const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
           fctx.body.push({ op: "local.tee", index: digitsLocal });
@@ -6586,34 +9153,12 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "f64.const", value: 0 });
         }
         if (methodName === "toPrecision" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
-          // RangeError: precision must be 1-100 (NaN → 0 → invalid since 0 < 1)
-          const precLocal = allocLocal(fctx, `__toPrecision_prec_${fctx.locals.length}`, { kind: "f64" });
-          fctx.body.push({ op: "local.tee", index: precLocal });
-          fctx.body.push({ op: "f64.const", value: 1 });
-          fctx.body.push({ op: "f64.lt" });
-          fctx.body.push({ op: "local.get", index: precLocal });
-          fctx.body.push({ op: "f64.const", value: 100 });
-          fctx.body.push({ op: "f64.gt" });
-          fctx.body.push({ op: "i32.or" });
-          // NaN check: NaN != NaN
-          fctx.body.push({ op: "local.get", index: precLocal });
-          fctx.body.push({ op: "local.get", index: precLocal });
-          fctx.body.push({ op: "f64.ne" });
-          fctx.body.push({ op: "i32.or" });
-          {
-            const rangeErrMsg = "RangeError: toPrecision() argument must be between 1 and 100";
-            addStringConstantGlobal(ctx, rangeErrMsg);
-            const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
-            const tagIdx = ensureExnTag(ctx);
-            fctx.body.push({
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
-              else: [],
-            });
-          }
-          fctx.body.push({ op: "local.get", index: precLocal });
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
+          // (#49) See `number.toPrecision` site above — the precision
+          // range check was moved into the runtime helper because per
+          // spec §21.1.3.5 step 4, non-finite receivers must return
+          // Number::toString(x) BEFORE the range check fires.
         } else if (methodName === "toPrecision") {
           // No argument → same as toString()
           const funcIdx = ctx.funcMap.get("number_toString");
@@ -6623,29 +9168,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           }
         }
         if (methodName === "toExponential" && expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!);
-          // RangeError: fractionDigits must be 0-100
-          const digitsLocal2 = allocLocal(fctx, `__toExponential_digits_${fctx.locals.length}`, { kind: "f64" });
-          fctx.body.push({ op: "local.tee", index: digitsLocal2 });
-          fctx.body.push({ op: "f64.const", value: 0 });
-          fctx.body.push({ op: "f64.lt" });
-          fctx.body.push({ op: "local.get", index: digitsLocal2 });
-          fctx.body.push({ op: "f64.const", value: 100 });
-          fctx.body.push({ op: "f64.gt" });
-          fctx.body.push({ op: "i32.or" });
-          {
-            const rangeErrMsg = "RangeError: toExponential() argument must be between 0 and 100";
-            addStringConstantGlobal(ctx, rangeErrMsg);
-            const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
-            const tagIdx = ensureExnTag(ctx);
-            fctx.body.push({
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
-              else: [],
-            });
-          }
-          fctx.body.push({ op: "local.get", index: digitsLocal2 });
+          // ToNumber funnel — Symbol args must throw TypeError (#1564).
+          coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
+          // (#49) See `number.toExponential` site above — the
+          // fractionDigits range check was moved into the runtime
+          // helper because per spec §21.1.3.3 step 3, non-finite
+          // receivers must return Number::toString(x) BEFORE the
+          // range check fires. Removing the codegen pre-check lets
+          // `(NaN).toExponential(101)` return "NaN" as the spec
+          // requires.
         } else if (methodName === "toExponential") {
           // No argument → pass NaN sentinel
           fctx.body.push({ op: "f64.const", value: NaN });
@@ -6731,8 +9262,30 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
   // Handle fn.bind(thisArg, ...partialArgs)(...remainingArgs) — immediate bind+call
   // Transform to fn(...partialArgs, ...remainingArgs), dropping thisArg.
+  // (#1337) Also accept the equivalent Function.prototype.bind.call(fn, thisArg, ...) form
+  // by reshaping bindCall to the method form before pattern-matching.
   if (ts.isCallExpression(expr.expression)) {
-    const bindCall = expr.expression;
+    let bindCall = expr.expression;
+    if (
+      ts.isPropertyAccessExpression(bindCall.expression) &&
+      bindCall.expression.name.text === "call" &&
+      ts.isPropertyAccessExpression(bindCall.expression.expression) &&
+      bindCall.expression.expression.name.text === "bind" &&
+      ts.isPropertyAccessExpression(bindCall.expression.expression.expression) &&
+      bindCall.expression.expression.expression.name.text === "prototype" &&
+      ts.isIdentifier(bindCall.expression.expression.expression.expression) &&
+      bindCall.expression.expression.expression.expression.text === "Function" &&
+      bindCall.arguments.length >= 1
+    ) {
+      const fnExpr = bindCall.arguments[0]!;
+      const reshapedArgs = bindCall.arguments.slice(1);
+      const reshapedProp = ts.factory.createPropertyAccessExpression(fnExpr as ts.LeftHandSideExpression, "bind");
+      ts.setTextRange(reshapedProp, bindCall.expression);
+      const reshapedInner = ts.factory.createCallExpression(reshapedProp, undefined, reshapedArgs);
+      ts.setTextRange(reshapedInner, bindCall);
+      (reshapedInner as any).parent = expr;
+      bindCall = reshapedInner;
+    }
     if (ts.isPropertyAccessExpression(bindCall.expression) && bindCall.expression.name.text === "bind") {
       const bindTarget = bindCall.expression.expression;
 
@@ -6950,23 +9503,25 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
 
         // Push call arguments (only up to declared param count)
+        const crParamCnt = matchedClosureInfo.paramTypes.length;
+        // biome-ignore lint/complexity/noUselessLoneBlockStatements: groups arg-emit + extras-pack as one logical unit
         {
-          const crParamCnt = matchedClosureInfo.paramTypes.length;
           for (let i = 0; i < Math.min(expr.arguments.length, crParamCnt); i++) {
             compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
-          }
-          for (let i = crParamCnt; i < expr.arguments.length; i++) {
-            const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-            if (extraType !== null) {
-              fctx.body.push({ op: "drop" });
-            }
           }
         }
 
         // Pad missing arguments with defaults
-        for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
+        for (let i = expr.arguments.length; i < crParamCnt; i++) {
           pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
         }
+
+        // (#1511) For indirect calls we cannot know whether the lifted target
+        // reads `arguments`; pack any overflow args into `__extras_argv` and
+        // set `__argc` so a callee that DOES read `arguments` sees the full
+        // call-site length. Overflow args are NOT pushed to the wasm stack —
+        // they live in the global. Cleanup happens after call_ref.
+        emitClosureCallArgcExtras(ctx, fctx, expr.arguments, crParamCnt);
 
         // Push the funcref from the closure struct (field 0) — null-check → TypeError (#728)
         fctx.body.push({ op: "local.get", index: closureLocal });
@@ -6985,6 +9540,18 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           op: "call_ref",
           typeIdx: matchedClosureInfo.funcTypeIdx,
         });
+
+        // (#1511) Reset __argc / __extras_argv. A callee that doesn't read
+        // `arguments` never consumed them and would otherwise leak stale
+        // values into the next call.
+        if (matchedClosureInfo.returnType === null) {
+          emitResetArgcExtras(ctx, fctx);
+        } else {
+          const _retLocal = allocLocal(fctx, `__cr_ret_${fctx.locals.length}`, matchedClosureInfo.returnType);
+          fctx.body.push({ op: "local.set", index: _retLocal });
+          emitResetArgcExtras(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: _retLocal });
+        }
 
         // Return VOID_RESULT for void closures so compileExpression doesn't
         // treat the null return as a compilation failure and roll back instructions
@@ -7131,10 +9698,37 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           fctx.body.push({ op: "local.set", index: argLocal });
           argLocals.push({ local: argLocal, type: closureInfo.paramTypes[i]! });
         }
-        // Excess args: compile for side effects, drop.
+        // (#1511) Excess args: compile and save to externref locals so we can
+        // pack them into __extras_argv inside the then branch without
+        // re-running side effects.
+        const extrasLocals: number[] = [];
         for (let i = ccParamCnt; i < expr.arguments.length; i++) {
-          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extraType !== null) fctx.body.push({ op: "drop" });
+          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+          if (extraType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          } else if (extraType.kind === "f64") {
+            const boxIdx = ctx.funcMap.get("__box_number");
+            if (boxIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: boxIdx });
+            } else {
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } else if (extraType.kind === "i32") {
+            fctx.body.push({ op: "f64.convert_i32_s" });
+            const boxIdx = ctx.funcMap.get("__box_number");
+            if (boxIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: boxIdx });
+            } else {
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+          }
+          const extraLocal = allocLocal(fctx, `__cb_cextra_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: extraLocal });
+          extrasLocals.push(extraLocal);
         }
         // Pad missing args. For non-nullable ref params widen to nullable so
         // `pushDefaultValue` emits a plain `ref.null` (no `ref.as_non_null`
@@ -7155,19 +9749,33 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         if (innerResultType.kind === "externref") {
           fctx.body.push({ op: "any.convert_extern" });
         }
-        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as unknown as Instr);
+        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
 
         // 5. then branch — ref.test passed, do the dispatch.
-        const savedBody = fctx.body;
-        const thenInstrs: Instr[] = [];
-        fctx.body = thenInstrs;
+        // (#1395 fix) Use pushBody/popBody so the saved body is tracked in
+        // fctx.savedBodies. Without this, late-import index shifts via
+        // `fixupModuleGlobalIndices` walking only `ctx.currentFunc.body` +
+        // `savedBodies` would miss `global.get`/`global.set` instructions
+        // that were emitted into the OUTER body before the swap. In
+        // particular, `compileExpression(C.f)` at line 7436 above pushes
+        // `global.get <staticPropIdx>` for a class static-field receiver
+        // into the outer body; if a string-constant import then gets
+        // added during dispatch compilation below (step 4b/5), the
+        // shifter's threshold/delta would correctly bump the static-prop
+        // map but skip the orphaned outer body, producing a stale index
+        // that points at a sibling global (e.g. `__class_C` instead of
+        // `__static_C_f`). Tests:
+        // language/statements/class/elements/static-field-init-this-
+        // inside-arrow-function.js (#1395 followup).
+        const savedBody = pushBody(fctx);
+        const thenInstrs = fctx.body;
 
         // Re-load callee + plain ref.cast (test already proved it succeeds).
         fctx.body.push({ op: "local.get", index: calleeLocal });
         if (innerResultType.kind === "externref") {
           fctx.body.push({ op: "any.convert_extern" });
         }
-        fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as unknown as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
         const closureLocal = allocLocal(fctx, `__cb_closure_${fctx.locals.length}`, {
           kind: "ref",
           typeIdx: structTypeIdx,
@@ -7179,6 +9787,28 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         for (const al of argLocals) {
           fctx.body.push({ op: "local.get", index: al.local });
         }
+
+        // (#1511) Set __extras_argv (from saved extras locals) and __argc so
+        // the lifted callee can compute the correct arguments.length when it
+        // reads `arguments`. Stack contributions are immediately consumed.
+        if (extrasLocals.length > 0) {
+          const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
+          const extrasArrTi = getArrTypeIdxFromVec(ctx, extrasVecTi);
+          for (const el of extrasLocals) {
+            fctx.body.push({ op: "local.get", index: el });
+          }
+          fctx.body.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+          const arrTmp = allocLocal(fctx, `__cb_extras_arr_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: extrasArrTi,
+          });
+          fctx.body.push({ op: "local.set", index: arrTmp });
+          fctx.body.push({ op: "i32.const", value: extrasLocals.length });
+          fctx.body.push({ op: "local.get", index: arrTmp });
+          fctx.body.push({ op: "struct.new", typeIdx: extrasVecTi });
+          fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+        }
+        emitSetArgc(ctx, fctx, expr.arguments.length, ccParamCnt);
 
         // Push funcref from closure struct, guarded cast + null-check, call_ref.
         fctx.body.push({ op: "local.get", index: closureLocal });
@@ -7194,12 +9824,20 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
         } else if (closureInfo.returnType.kind !== "externref") {
           coerceType(ctx, fctx, closureInfo.returnType, { kind: "externref" });
         }
+        // (#1511) Reset argc/extras after the call. Return value (externref) is
+        // on the stack at this point — save, reset, restore.
+        {
+          const _retL = allocLocal(fctx, `__cb_ret_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: _retL });
+          emitResetArgcExtras(ctx, fctx);
+          fctx.body.push({ op: "local.get", index: _retL });
+        }
 
         // 6. else branch — graceful null.
         const elseInstrs: Instr[] = [{ op: "ref.null.extern" } as Instr];
 
         // 7. Restore body, emit the if/else.
-        fctx.body = savedBody;
+        popBody(fctx, savedBody);
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
@@ -7547,23 +10185,22 @@ function compileExpressionCallee(
       emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
 
       // Push call arguments (only up to declared param count)
+      const ecParamCnt = matchedClosureInfo.paramTypes.length;
+      // biome-ignore lint/complexity/noUselessLoneBlockStatements: groups arg-emit + extras-pack as one logical unit
       {
-        const ecParamCnt = matchedClosureInfo.paramTypes.length;
         for (let i = 0; i < Math.min(expr.arguments.length, ecParamCnt); i++) {
           compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
-        }
-        for (let i = ecParamCnt; i < expr.arguments.length; i++) {
-          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extraType !== null) {
-            fctx.body.push({ op: "drop" });
-          }
         }
       }
 
       // Pad missing arguments
-      for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
+      for (let i = expr.arguments.length; i < ecParamCnt; i++) {
         pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
       }
+
+      // (#1511) Indirect call — propagate overflow args via __extras_argv so
+      // a callee reading `arguments` gets the correct length.
+      emitClosureCallArgcExtras(ctx, fctx, expr.arguments, ecParamCnt);
 
       // Push the funcref from closure struct and call_ref — null-check → TypeError (#728)
       fctx.body.push({ op: "local.get", index: closureLocal });
@@ -7580,6 +10217,16 @@ function compileExpressionCallee(
         op: "call_ref",
         typeIdx: matchedClosureInfo.funcTypeIdx,
       });
+
+      // (#1511) Cleanup
+      if (matchedClosureInfo.returnType === null) {
+        emitResetArgcExtras(ctx, fctx);
+      } else {
+        const _retLocal = allocLocal(fctx, `__ec_ret_${fctx.locals.length}`, matchedClosureInfo.returnType);
+        fctx.body.push({ op: "local.set", index: _retLocal });
+        emitResetArgcExtras(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: _retLocal });
+      }
 
       return matchedClosureInfo.returnType ?? VOID_RESULT;
     }

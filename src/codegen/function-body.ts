@@ -38,6 +38,7 @@ import {
 } from "./shared.js";
 import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
+import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { detectStringBuilders } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
@@ -767,8 +768,8 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // This distinguishes missing args from explicit NaN/0/any other value.
       // Sentinel: 0x7FF00000DEADC0DE (emitted by pushParamSentinel).
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "i64.reinterpret_f64" } as unknown as Instr);
-      fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den } as unknown as Instr);
+      fctx.body.push({ op: "i64.reinterpret_f64" });
+      fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
       fctx.body.push({ op: "i64.eq" });
       fctx.body.push({
         op: "if",
@@ -814,10 +815,15 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
 
     // Check if all params are simple identifiers (not destructuring patterns).
     // Mapped arguments only applies to simple parameter lists in non-strict mode.
+    // In strict mode the arguments object is *unmapped* (§10.4.4): writes to
+    // `arguments[i]` must not flow back into the named parameter, so skip
+    // mappedArgsInfo entirely and leave the built vec as an independent copy
+    // (#779e).
     const allSimpleParams = decl.parameters.every((p) => ts.isIdentifier(p.name) && !p.dotDotDotToken);
+    const mappedAllowed = allSimpleParams && !isStrictFunction(decl);
 
     // Set up mapped arguments info for param ↔ arguments sync (#849)
-    if (allSimpleParams && params.length > 0) {
+    if (mappedAllowed && params.length > 0) {
       fctx.mappedArgsInfo = {
         argsLocalIdx: argsLocal,
         arrTypeIdx,
@@ -850,7 +856,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
     fctx.body.push({ op: "call", funcIdx: createBufIdx });
     fctx.body.push({ op: "local.set", index: bufferLocal });
-    fctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     fctx.body.push({ op: "local.set", index: pendingThrowLocal });
 
     // Wrap the generator body in a block so that `return` statements inside
@@ -889,13 +895,10 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     // Wrap generator body block in try/catch to capture exceptions as pending throw
     const tagIdx = ensureExnTag(ctx);
     const getCaughtIdx = ctx.funcMap.get("__get_caught_exception");
-    const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal } as unknown as Instr];
+    const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
     const catchAllBody: Instr[] =
       getCaughtIdx !== undefined
-        ? [
-            { op: "call", funcIdx: getCaughtIdx } as Instr,
-            { op: "local.set", index: pendingThrowLocal } as unknown as Instr,
-          ]
+        ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
         : [];
     fctx.body.push({
       op: "try",
@@ -903,7 +906,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       body: [{ op: "block", blockType: { kind: "empty" }, body: bodyInstrs }],
       catches: [{ tagIdx, body: catchBody }],
       catchAll: catchAllBody.length > 0 ? catchAllBody : undefined,
-    } as unknown as Instr);
+    });
 
     // Return __create_generator or __create_async_generator depending on async flag.
     // Note: ctx.asyncFunctions excludes async generators (by design), so we check

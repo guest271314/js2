@@ -103,6 +103,9 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__unbox_boolean") return { type: "unbox", targetType: "boolean" };
   if (name === "__box_number") return { type: "box", targetType: "number" };
   if (name === "__box_boolean") return { type: "box", targetType: "boolean" };
+  if (name === "__box_bigint") return { type: "box", targetType: "bigint" };
+  if (name === "__to_bigint") return { type: "unbox", targetType: "bigint" };
+  if (name === "__bigint_ctor") return { type: "builtin", name: "__bigint_ctor" };
   if (name === "__is_truthy") return { type: "truthy_check" };
   if (name === "__typeof") return { type: "builtin", name: "__typeof" };
 
@@ -128,14 +131,76 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Used by Array.prototype.includes on array-like receivers (#1360).
   if (name === "__same_value_zero") return { type: "same_value_zero" };
 
-  // Node builtin modules (#1044)
+  // Browser Storage interface (#1502)
+  if (name === "__get_localStorage") return { type: "web_storage", which: "local" };
+  if (name === "__get_sessionStorage") return { type: "web_storage", which: "session" };
+
+  // Node-specific module-scope values (#1494)
+  if (name === "__get_dirname") return { type: "node_dirname" };
+  if (name === "__get_filename") return { type: "node_filename" };
+  if (name === "__get_import_meta_url") return { type: "node_import_meta_url" };
+
+  // Node builtin module functions — typed function imports (#1491)
+  // e.g. `__node_fs_readFileSync` → { moduleName: "fs", name: "readFileSync" }
+  if (name.startsWith("__node_fs_")) {
+    return { type: "node_builtin_fn", moduleName: "fs", name: name.slice("__node_fs_".length) };
+  }
+
+  // Node builtin modules (#1044) — module-shaped imports returning the whole module object
   if (name.startsWith("__node_")) return { type: "node_builtin", moduleName: name.slice(7) };
+
+  // #1501 — Timer host imports.
+  if (name === "__timer_set_timeout") return { type: "timer_set", mode: "timeout" };
+  if (name === "__timer_set_interval") return { type: "timer_set", mode: "interval" };
+  if (name === "__timer_clear_timeout") return { type: "timer_clear", mode: "timeout" };
+  if (name === "__timer_clear_interval") return { type: "timer_clear", mode: "interval" };
+
+  // #1492 — Node builtin function host imports (e.g. `crypto.randomUUID`).
+  // Format: `__nodefn__<module>__<fnName>`. Both module and fnName must be
+  // non-empty; we split on the first `__` boundary inside the payload.
+  if (name.startsWith("__nodefn__")) {
+    const payload = name.slice("__nodefn__".length);
+    const sepIdx = payload.indexOf("__");
+    if (sepIdx > 0) {
+      const moduleName = payload.slice(0, sepIdx);
+      const fnName = payload.slice(sepIdx + 2);
+      if (fnName.length > 0) {
+        return { type: "node_builtin_fn", moduleName, name: fnName };
+      }
+    }
+  }
+
+  // JSX runtime imports (#1540) — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV` after
+  // TypeScript desugars JSX with `jsx: react-jsx`. The host binding is
+  // either a user-supplied `deps.jsxRuntime` or a built-in React-shaped
+  // fallback. The `specifier` is recorded on the WasmModule by codegen
+  // (see `mod.jsxImportSource`); we default to `"react/jsx-runtime"`.
+  if (name.startsWith("__jsx_runtime_")) {
+    const method = name.slice("__jsx_runtime_".length);
+    const specifier = mod.jsxImportSource ?? "react/jsx-runtime";
+    if (method === "jsx" || method === "jsxs" || method === "Fragment" || method === "jsxDEV") {
+      return { type: "jsx_runtime", method, specifier };
+    }
+  }
 
   // Declared globals (like `declare const document: Document`)
   if (name.startsWith("global_")) return { type: "declared_global", name: name.slice(7) };
 
   // __new_plain_object is a builtin factory, not an extern class constructor
   if (name === "__new_plain_object") return { type: "builtin", name: "__new_plain_object" };
+
+  // (#1467) AggregateError needs spec-specific coercion (ToString on message,
+  // IterableToList on errors, CreateMethodProperty for non-enumerable own
+  // properties) that the generic `extern_class` path can't provide. Route
+  // through the dedicated builtin handler in the runtime.
+  if (name === "__new_AggregateError") return { type: "builtin", name };
+
+  // (#1339) SuppressedError likewise needs spec-specific construction
+  // (CreateNonEnumerableDataPropertyOrThrow for error/suppressed/message,
+  // InstallErrorCause via HasProperty for opaque WasmGC options struct).
+  // The generic `extern_class` path drops options entirely. Route through the
+  // dedicated runtime builtin like AggregateError.
+  if (name === "__new_SuppressedError") return { type: "builtin", name };
 
   // Unknown constructor imports (__new_ClassName)
   if (name.startsWith("__new_")) {

@@ -1,0 +1,61 @@
+name: native-messaging smoke (real wasmtime)
+
+# Real-wasmtime round-trip smoke test for the Native Messaging host example.
+#
+# The JS WASI polyfill zero-inits memory and masked an off-by-one in the
+# integer-print helper (#1618) — only real wasmtime, with reused bump memory,
+# exposed the stray trailing byte. This job runs the compiled example under an
+# actual wasmtime binary and asserts the stdout frame + clean stderr byte-for-
+# byte, so a codegen change that breaks the WASI stdout path can't slip through
+# the polyfill-based unit tests.
+#
+# Kept as a separate lightweight job (NOT a required check yet — it can be
+# promoted to required later). CI does not otherwise install wasmtime, so this
+# job installs a pinned release fresh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "examples/native-messaging/**"
+      - "src/codegen/**"
+      - ".github/workflows/native-messaging-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install wasmtime (pinned)
+        run: |
+          # Pin a current release for reproducibility. v44 is what the example
+          # was verified against; it supports the GC / function-references /
+          # tail-call / exceptions proposals the module uses via the explicit
+          # -W flags the smoke script enables. (Do NOT bump to all-proposals:
+          # wasmtime 44 rejects stack-switching, which all-proposals turns on.)
+          WASMTIME_VERSION=v44.0.0
+          curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" \
+            | tar xJ
+          echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
+
+      - name: Verify wasmtime is on PATH
+        run: wasmtime --version
+
+      - name: Native Messaging round-trip smoke test
+        run: ./examples/native-messaging/smoke-test.sh

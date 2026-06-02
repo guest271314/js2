@@ -30,7 +30,24 @@ export type ImportIntent =
   | { type: "same_value_zero" }
   | { type: "dynamic_import" }
   | { type: "proxy_create" }
-  | { type: "node_builtin"; moduleName: string };
+  | { type: "node_builtin"; moduleName: string }
+  | { type: "node_builtin_fn"; moduleName: string; name: string }
+  | { type: "web_storage"; which: "local" | "session" }
+  | { type: "timer_set"; mode: "timeout" | "interval" }
+  | { type: "timer_clear"; mode: "timeout" | "interval" }
+  | { type: "node_dirname" }
+  | { type: "node_filename" }
+  | { type: "node_import_meta_url" }
+  | {
+      // (#1540) JSX runtime binding — `_jsx`/`_jsxs`/`_Fragment`/`_jsxDEV`
+      // emitted by TypeScript when `jsx: react-jsx` is set. The host binding
+      // is either a user-supplied runtime (`deps.jsxRuntime`) or a built-in
+      // React-shaped fallback that constructs `{ $$typeof, type, props, key,
+      // ref }` objects suitable for `React.isValidElement` consumers.
+      type: "jsx_runtime";
+      method: "jsx" | "jsxs" | "Fragment" | "jsxDEV";
+      specifier: string;
+    };
 
 export interface ImportDescriptor {
   module: "env" | "wasm:js-string" | "string_constants";
@@ -38,6 +55,9 @@ export interface ImportDescriptor {
   kind: "func" | "global";
   intent: ImportIntent;
 }
+
+export type { ExportSignature, TypedArrayKind } from "./ir/types.js";
+import type { ExportSignature } from "./ir/types.js";
 
 export interface CompileResult {
   /** Wasm binary with GC proposal */
@@ -66,6 +86,39 @@ export interface CompileResult {
   hasMain: boolean;
   /** Whether the source has top-level executable statements (module init code) */
   hasTopLevelStatements: boolean;
+  /**
+   * Per-export TypedArray classifications (#1700). Surfaced so
+   * {@link wrapExports} can marshal `Uint8Array` (and other TypedArray)
+   * params/results across the JS↔Wasm boundary — the Wasm signature is
+   * ambiguous (`Uint8Array` and `number[]` share the same `(ref null $Vec[f64])`
+   * lowering), so we expose the TS-level distinction as metadata.
+   *
+   * Only present (and even then, possibly an empty object) when at least
+   * one exported function has a TypedArray param or return. Forward the
+   * value to `wrapExports(exports, { signatures: result.exportSignatures })`.
+   */
+  exportSignatures?: Record<string, ExportSignature>;
+  /**
+   * Ready-to-pass JS-host import object for default/JS-host mode (#1667).
+   *
+   * In default mode the compiled binary needs host imports (`env.*`,
+   * `wasm:js-string`, `string_constants`), so `WebAssembly.instantiate(binary,
+   * {})` throws. This getter wires the runtime helpers from {@link buildImports}
+   * into a single object the caller passes directly:
+   *
+   * ```js
+   * const r = await compile(src);
+   * const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
+   * ```
+   *
+   * Standalone / `wasi` mode is the zero-import portable default and needs no
+   * import object; for those targets this is an empty object. Computed lazily —
+   * accessing it builds the runtime once and caches the result.
+   *
+   * Always present on results from the public `compile*` entry points; the
+   * low-level `compile*Source` helpers in compiler.ts do not attach it.
+   */
+  readonly importObject?: WebAssembly.Imports;
 }
 
 export interface CompileError {
@@ -94,14 +147,23 @@ export interface CompileOptions {
   sourceMap?: boolean;
   /** Source map URL to embed in the wasm binary (default: "module.wasm.map") */
   sourceMapUrl?: string;
-  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory), or "wasi" (WASI-compatible GC) */
-  target?: "gc" | "linear" | "wasi";
+  /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory),
+   *  "wasi" (WASI-compatible GC), or "standalone" (pure WasmGC, no JS host
+   *  and no WASI runtime — #1470). `target: "standalone"` implies
+   *  `nativeStrings: true` and refuses to emit any `wasm:js-string` or
+   *  `env` JS-host string imports. */
+  target?: "gc" | "linear" | "wasi" | "standalone";
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
   /** Use WasmGC-native strings (array i16) instead of wasm:js-string imports.
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
+   *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
+   *  as i8-backed `Utf8String`; all others stay i16. Default false →
+   *  byte-identical output. Implies `nativeStrings` on the WasmGC backend. */
+  utf8Storage?: boolean;
   /** Test-only: emit `__test_str_from_externref` and `__test_str_to_externref`
    *  exports so test code can pass JS strings to/from native-string params (#1187).
    *  Has no effect unless `nativeStrings` is also true. Production builds should
@@ -156,19 +218,36 @@ export interface CompileOptions {
    *  Values must be valid JS expression literals (strings need inner quotes).
    *  Also supports shorthand: `"production"` mode sets process.env.NODE_ENV and typeof guards. */
   define?: Record<string, string>;
+  /** Allow synchronous file-system access via `node:fs` (`readFileSync`, `writeFileSync`)
+   *  as JS host imports in non-WASI targets (#1491). Gated behind an explicit flag
+   *  to prevent accidental capability leakage when compiling third-party code.
+   *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
+  allowFs?: boolean;
+  /**
+   * Enforce dual-mode discipline (#1524): when true, codegen rejects any
+   * JS-host `env` import that is not on
+   * `src/codegen/host-import-allowlist.ts`. Auto-enabled under
+   * `target: "wasi"` unless this option is explicitly set to `false`
+   * (the `--allow-host-imports` CLI escape hatch).
+   *
+   * Compile errors raised by the gate name the offending import and the
+   * tracking issue that owns its Wasm-native replacement.
+   */
+  strictNoHostImports?: boolean;
 }
 
 import * as path from "path";
 import { IncrementalLanguageService } from "./checker/index.js";
 import { compileFilesSource, compileMultiSource, compileSource, compileToObjectSource } from "./compiler.js";
 import { ModuleResolver, resolveAllImports } from "./resolve.js";
+import { buildImports as buildImportsRuntime } from "./runtime.js";
 
 /**
  * Compile TypeScript source to Wasm GC binary.
  *
  * @example
  * ```ts
- * const result = compile(`
+ * const result = await compile(`
  *   export function add(a: number, b: number): number {
  *     return a + b;
  *   }
@@ -179,20 +258,58 @@ import { ModuleResolver, resolveAllImports } from "./resolve.js";
  * }
  * ```
  */
-export function compile(source: string, options?: CompileOptions): CompileResult {
-  return compileSource(source, options);
+export async function compile(source: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileSource(source, options));
+}
+
+/**
+ * Attach a lazily-computed `importObject` getter (#1667) to a compile result.
+ *
+ * Building the host runtime via {@link buildImports} is deferred until the
+ * caller actually reads `result.importObject`, so standalone / `wasi` outputs
+ * (which need no host imports) pay nothing, and the result stays cheap to
+ * produce. The built object is cached on first access.
+ *
+ * The returned object is a valid `WebAssembly.Imports`: `{ env, "wasm:js-string",
+ * string_constants }`. It targets the polyfill instantiation path
+ * (`WebAssembly.instantiate(binary, importObject)` with no extra options),
+ * which is what the issue's example uses.
+ */
+function withImportObject(result: CompileResult): CompileResult {
+  let cached: WebAssembly.Imports | undefined;
+  Object.defineProperty(result, "importObject", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (cached) return cached;
+      // Failed compile or zero-import (standalone / wasi) output needs no host
+      // runtime — return an empty, harmless import object.
+      if (!result.success || result.imports.length === 0) {
+        cached = {};
+        return cached;
+      }
+      const built = buildImportsRuntime(result.imports, undefined, result.stringPool);
+      cached = {
+        env: built.env,
+        "wasm:js-string": built["wasm:js-string"],
+        string_constants: built.string_constants,
+      } as unknown as WebAssembly.Imports;
+      return cached;
+    },
+  });
+  return result;
 }
 
 /**
  * Compile multiple TypeScript source files into a single Wasm GC binary.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMulti(
+export async function compileMulti(
   files: Record<string, string>,
   entryFile: string,
   options?: CompileOptions,
-): CompileResult {
-  return compileMultiSource(files, entryFile, options);
+): Promise<CompileResult> {
+  return withImportObject(await compileMultiSource(files, entryFile, options));
 }
 
 /**
@@ -208,17 +325,17 @@ export function compileMulti(
  * @example
  * ```ts
  * // Given: src/main.ts imports from src/utils.ts
- * const result = compileFiles("src/main.ts");
+ * const result = await compileFiles("src/main.ts");
  * // TypeScript resolves src/utils.ts automatically
  * ```
  */
-export function compileFiles(entryPath: string, options?: CompileOptions): CompileResult {
-  return compileFilesSource(entryPath, options);
+export async function compileFiles(entryPath: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileFilesSource(entryPath, options));
 }
 
 /** Only WAT text (debug) */
-export function compileToWat(source: string): string {
-  const result = compileSource(source, { emitWat: true });
+export async function compileToWat(source: string): Promise<string> {
+  const result = await compileSource(source, { emitWat: true });
   return result.wat;
 }
 
@@ -239,7 +356,7 @@ export function compileToObject(source: string, options?: CompileOptions) {
  * @param entryFile - Absolute or relative path to the entry .ts file
  * @param options - Compile options including resolve and externals settings
  */
-export function compileProject(entryFile: string, options?: CompileOptions): CompileResult {
+export async function compileProject(entryFile: string, options?: CompileOptions): Promise<CompileResult> {
   const resolvedEntry = path.resolve(entryFile);
   const rootDir = path.dirname(resolvedEntry);
 
@@ -266,7 +383,7 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   // Entry file key
   const entryKey = `./${path.relative(rootDir, resolvedEntry)}`;
 
-  return compileMultiSource(files, entryKey, effectiveOptions);
+  return withImportObject(await compileMultiSource(files, entryKey, effectiveOptions));
 }
 
 /**
@@ -286,12 +403,12 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
  * ```
  */
 export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
-  compile: (source: string, options?: CompileOptions) => CompileResult;
+  compile: (source: string, options?: CompileOptions) => Promise<CompileResult>;
   dispose: () => void;
 } {
   const service = new IncrementalLanguageService();
   return {
-    compile(source: string, options?: CompileOptions): CompileResult {
+    compile(source: string, options?: CompileOptions): Promise<CompileResult> {
       return compileSource(source, { ...defaultOptions, ...options }, service);
     },
     dispose() {
@@ -301,6 +418,7 @@ export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
 }
 
 export { getBarePackageName, ModuleResolver, resolveAllImports } from "./resolve.js";
+export { preloadLibFiles } from "./checker/index.js";
 export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   zsh \
   man-db \
   unzip \
+  xz-utils \
   gnupg2 \
   gh \
   iptables \
@@ -23,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iproute2 \
   dnsutils \
   aggregate \
+  bubblewrap \
   jq \
   nano \
   vim \
@@ -66,6 +68,25 @@ RUN ARCH=$(dpkg --print-architecture) && \
   wget "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   sudo dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
   rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
+
+# wasmtime CLI — runs the warm-runtime perf benchmarks (#1580/#1746) that
+# refresh the committed landing-page benchmark JSON, and the native-messaging
+# smoke test. Pinned to v44 to match CI
+# (.github/workflows/native-messaging-smoke.yml); do NOT switch to
+# --all-proposals (v44 rejects stack-switching). Arch-aware: amd64->x86_64,
+# arm64->aarch64.
+ARG WASMTIME_VERSION=v44.0.0
+RUN ARCH=$(dpkg --print-architecture) && \
+  case "$ARCH" in \
+    amd64) WT_ARCH=x86_64 ;; \
+    arm64) WT_ARCH=aarch64 ;; \
+    *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+  esac && \
+  WT_DIR="wasmtime-${WASMTIME_VERSION}-${WT_ARCH}-linux" && \
+  wget -O- "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${WT_DIR}.tar.xz" | tar xJ && \
+  mv "${WT_DIR}/wasmtime" /usr/local/bin/wasmtime && \
+  rm -rf "${WT_DIR}" && \
+  /usr/local/bin/wasmtime --version
 
 COPY .tmux.conf /home/node/.tmux.conf
 RUN chown node:node /home/node/.tmux.conf

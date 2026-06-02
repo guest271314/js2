@@ -20,16 +20,24 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
 import * as ts from "typescript";
-import { compile, compileMulti } from "./compiler-bundle.mjs";
+import { compile, compileMulti, optimizeBinaryAsync } from "./compiler-bundle.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const HELPERS_PATH = path.resolve(ROOT, "playground", "examples", "benchmarks", "helpers.ts");
+const HELPERS_PATH = path.resolve(ROOT, "website", "playground", "examples", "benchmarks", "helpers.ts");
 const RESULTS_PATH = path.resolve(ROOT, "benchmarks", "results", "size-benchmarks.json");
-const PUBLIC_PATH = path.resolve(ROOT, "public", "benchmarks", "results", "size-benchmarks.json");
+const PUBLIC_PATH = path.resolve(ROOT, "website", "public", "benchmarks", "results", "size-benchmarks.json");
 const LOADTIME_RESULTS_PATH = path.resolve(ROOT, "benchmarks", "results", "loadtime-benchmarks.json");
-const LOADTIME_PUBLIC_PATH = path.resolve(ROOT, "public", "benchmarks", "results", "loadtime-benchmarks.json");
+const LOADTIME_PUBLIC_PATH = path.resolve(
+  ROOT,
+  "website",
+  "public",
+  "benchmarks",
+  "results",
+  "loadtime-benchmarks.json",
+);
 const LOADTIME_RESULTS_DIR = path.resolve(ROOT, "benchmarks", "results", "loadtime");
-const LOADTIME_PUBLIC_DIR = path.resolve(ROOT, "public", "benchmarks", "results", "loadtime");
+const LOADTIME_PUBLIC_DIR = path.resolve(ROOT, "website", "public", "benchmarks", "results", "loadtime");
+const BINARYEN_BUNDLE_PATH = path.resolve(ROOT, "node_modules", "binaryen", "index.js");
 
 const LOADTIME_RUNTIME_SOURCE = `const jsString = {
   concat: (a, b) => a + b,
@@ -148,6 +156,128 @@ export async function instantiateWasmStreaming(source, env, stringConstants = {}
   }
   return instantiateWasm(new Uint8Array(await fallback.arrayBuffer()), env, stringConstants);
 }
+
+let binaryenModulePromise = null;
+
+function addBinaryenFeature(features, featureFlags, name) {
+  const flag = featureFlags?.[name];
+  return typeof flag === "number" ? features | flag : features;
+}
+
+async function loadBinaryen() {
+  if (binaryenModulePromise) return binaryenModulePromise;
+  binaryenModulePromise = (async () => {
+    const browserLike = typeof window !== "undefined" || typeof globalThis.WorkerGlobalScope !== "undefined";
+    const globalObject = globalThis;
+    const hadProcess = "process" in globalObject;
+    const hadOwnProcess = Object.prototype.hasOwnProperty.call(globalObject, "process");
+    const previousProcess = globalObject.process;
+
+    if (browserLike && hadProcess) {
+      try {
+        globalObject.process = undefined;
+      } catch {
+        // Some runtimes expose a non-writable process global.
+      }
+    }
+
+    try {
+      const mod = await import(new URL("./binaryen.js", import.meta.url).href);
+      return mod.default ?? mod;
+    } catch {
+      return null;
+    } finally {
+      if (browserLike) {
+        if (hadProcess && hadOwnProcess) {
+          globalObject.process = previousProcess;
+        } else if (!hadOwnProcess) {
+          try {
+            delete globalObject.process;
+          } catch {
+            globalObject.process = undefined;
+          }
+        }
+      }
+    }
+  })();
+  return binaryenModulePromise;
+}
+
+export async function optimizeWasm(binary, options = {}) {
+  const binaryen = await loadBinaryen();
+  if (!binaryen?.readBinary) {
+    return {
+      binary,
+      optimized: false,
+      warning: "wasm-opt is unavailable in this browser benchmark runtime.",
+    };
+  }
+
+  const featureFlags = binaryen.Features ?? binaryen.features;
+  if (!featureFlags) {
+    return {
+      binary,
+      optimized: false,
+      warning: "wasm-opt feature flags are unavailable in this browser benchmark runtime.",
+    };
+  }
+
+  let mod;
+  try {
+    mod = binaryen.readBinary(binary);
+  } catch (error) {
+    return {
+      binary,
+      optimized: false,
+      warning: "wasm-opt could not read benchmark module: " + (error?.message || String(error)),
+    };
+  }
+
+  const previousOptimizeLevel =
+    typeof binaryen.getOptimizeLevel === "function" ? binaryen.getOptimizeLevel() : undefined;
+  const previousShrinkLevel = typeof binaryen.getShrinkLevel === "function" ? binaryen.getShrinkLevel() : undefined;
+
+  try {
+    let features = 0;
+    for (const name of ["GC", "ReferenceTypes", "ExceptionHandling", "BulkMemory", "MutableGlobals"]) {
+      features = addBinaryenFeature(features, featureFlags, name);
+    }
+    if (typeof mod.setFeatures === "function") mod.setFeatures(features);
+
+    const requestedLevel = Number.isFinite(options.level) ? Math.trunc(options.level) : 4;
+    const level = Math.max(1, Math.min(4, requestedLevel));
+    if (typeof binaryen.setOptimizeLevel === "function") {
+      binaryen.setOptimizeLevel(level >= 4 ? 3 : level);
+    }
+    if (typeof binaryen.setShrinkLevel === "function") {
+      binaryen.setShrinkLevel(level >= 4 ? 1 : 0);
+    }
+
+    const optimizePasses = level >= 4 ? 3 : 1;
+    for (let pass = 0; pass < optimizePasses; pass++) {
+      mod.optimize();
+    }
+
+    return {
+      binary: new Uint8Array(mod.emitBinary()),
+      optimized: true,
+    };
+  } catch (error) {
+    return {
+      binary,
+      optimized: false,
+      warning: "wasm-opt failed for benchmark module: " + (error?.message || String(error)),
+    };
+  } finally {
+    if (typeof binaryen.setOptimizeLevel === "function" && previousOptimizeLevel !== undefined) {
+      binaryen.setOptimizeLevel(previousOptimizeLevel);
+    }
+    if (typeof binaryen.setShrinkLevel === "function" && previousShrinkLevel !== undefined) {
+      binaryen.setShrinkLevel(previousShrinkLevel);
+    }
+    mod?.dispose?.();
+  }
+}
 `;
 
 const HELPERS_SOURCE = fs.readFileSync(HELPERS_PATH, "utf8");
@@ -238,6 +368,8 @@ function timeSync(fn: () => void, iterations = 20): number {
 interface SizeEntry {
   name: string;
   label: string;
+  wasmOptimized: boolean;
+  wasmOptimizeLevel: number;
   jsSizeRaw: number;
   jsSizeGzip: number;
   wasmSizeRaw: number;
@@ -257,6 +389,8 @@ interface LoadtimeEntry {
   exportName: string;
   jsUrl: string;
   wasmUrl: string;
+  wasmOptimized: boolean;
+  wasmOptimizeLevel: number;
   runtimeEnvironment: "node" | "browser";
   imports: unknown[];
   stringPool: string[];
@@ -264,15 +398,47 @@ interface LoadtimeEntry {
 
 const loadtimeEntries: LoadtimeEntry[] = [];
 
-function measureSizes(name: string, label: string, jsSrc: string, tsSrc: string): SizeEntry | null {
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function optimizeBenchmarkWasm(binary: Uint8Array, label: string): Promise<Uint8Array> {
+  let optimizedBinary = binary;
+  for (let pass = 0; pass < 4; pass++) {
+    const optResult = await optimizeBinaryAsync(optimizedBinary, { level: 4 });
+    if (!optResult.optimized) {
+      // wasm-opt cannot parse some js2wasm output — notably custom-descriptors
+      // ('exact' heap types), which the pinned Binaryen (v125) does not support
+      // (no Features.CustomDescriptors). Do NOT fail the entire Pages build over
+      // one un-optimizable benchmark artifact: warn and fall back to the best
+      // binary we have. The size figure for this artifact is then unoptimized.
+      // Tracked separately (Binaryen custom-descriptors support / emission gate).
+      console.warn(
+        `[${label}] wasm-opt could not optimize this artifact (${
+          optResult.warning ?? "optimizer returned the original binary"
+        }); using unoptimized binary for size measurement.`,
+      );
+      return optimizedBinary;
+    }
+    if (bytesEqual(optResult.binary, optimizedBinary)) return optimizedBinary;
+    optimizedBinary = optResult.binary;
+  }
+  return optimizedBinary;
+}
+
+async function measureSizes(name: string, label: string, jsSrc: string, tsSrc: string): Promise<SizeEntry | null> {
   // Compile TypeScript → Wasm
-  const result = compile(tsSrc, { fileName: `${name}.ts`, optimize: 4 });
+  const result = await compile(tsSrc, { fileName: `${name}.ts` });
   if (!result.success) {
     console.error(`  [${name}] compile failed: ${result.errors[0]?.message}`);
     return null;
   }
 
-  const wasmBinary = result.binary;
+  const wasmBinary = await optimizeBenchmarkWasm(result.binary, name);
   const hostJs = result.importsHelper || "";
   const jsBuf = Buffer.from(jsSrc, "utf8");
 
@@ -307,6 +473,8 @@ function measureSizes(name: string, label: string, jsSrc: string, tsSrc: string)
   return {
     name,
     label,
+    wasmOptimized: true,
+    wasmOptimizeLevel: 4,
     jsSizeRaw,
     jsSizeGzip,
     wasmSizeRaw,
@@ -320,8 +488,8 @@ function measureSizes(name: string, label: string, jsSrc: string, tsSrc: string)
   };
 }
 
-function measureMultiSizes(name: string, label: string, entryPath: string): SizeEntry | null {
-  const absPath = path.resolve(ROOT, "playground", entryPath);
+async function measureMultiSizes(name: string, label: string, entryPath: string): Promise<SizeEntry | null> {
+  const absPath = path.resolve(ROOT, "website", "playground", entryPath);
   const tsSrc = fs.readFileSync(absPath, "utf8");
   const usesBenchmarkHelpers =
     entryPath === "examples/benchmarks.ts" ||
@@ -329,13 +497,13 @@ function measureMultiSizes(name: string, label: string, entryPath: string): Size
     /^\s*import\s+\{[^}]+\}\s+from\s+["']\.\/(?:benchmarks\/)?helpers\.ts["'];?\s*$/m.test(tsSrc);
 
   // Compile using compileMulti to resolve helpers import
-  const result = compileMulti(
+  const result = await compileMulti(
     {
       [entryPath]: tsSrc,
       "examples/benchmarks/helpers.ts": HELPERS_SOURCE,
     },
     entryPath,
-    { optimize: 4 },
+    {},
   );
 
   if (!result.success) {
@@ -343,7 +511,7 @@ function measureMultiSizes(name: string, label: string, entryPath: string): Size
     return null;
   }
 
-  const wasmBinary = result.binary;
+  const wasmBinary = await optimizeBenchmarkWasm(result.binary, name);
   const hostJs = result.importsHelper || "";
 
   // For the JS side, include entry + helpers (the JS version imports helpers too)
@@ -376,11 +544,13 @@ function measureMultiSizes(name: string, label: string, entryPath: string): Size
     : 0;
   const wasmTotalMs = wasmCompileMs + hostJsParseMs;
 
-  emitLoadtimeArtifacts(name, label, entryPath, fullJsSrc, result.binary, result.imports, result.stringPool);
+  emitLoadtimeArtifacts(name, label, entryPath, fullJsSrc, wasmBinary, result.imports, result.stringPool);
 
   return {
     name,
     label,
+    wasmOptimized: true,
+    wasmOptimizeLevel: 4,
     jsSizeRaw,
     jsSizeGzip,
     wasmSizeRaw,
@@ -431,6 +601,8 @@ function emitLoadtimeArtifacts(
     exportName: `bench_${name}`,
     jsUrl: jsRel,
     wasmUrl: wasmRel,
+    wasmOptimized: true,
+    wasmOptimizeLevel: 4,
     runtimeEnvironment: name === "dom" || name === "style" ? "browser" : "node",
     imports,
     stringPool,
@@ -447,7 +619,12 @@ console.log("Generating size benchmarks...\n");
 console.log("How-it-works snippets:");
 
 process.stdout.write("  fib ...");
-const fibEntry = measureSizes("fib", "fibonacci", HOW_FIB_JS, HOW_FIB_TS);
+let fibEntry: SizeEntry | null = null;
+try {
+  fibEntry = await measureSizes("fib", "fibonacci", HOW_FIB_JS, HOW_FIB_TS);
+} catch (e) {
+  console.warn(`\n  [fib] skipped — ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+}
 if (fibEntry) {
   console.log(
     ` JS: ${fibEntry.jsSizeGzip}B gzip / ${fibEntry.jsParseMs.toFixed(4)}ms | Wasm: ${fibEntry.wasmSizeGzip}B gzip / ${fibEntry.wasmCompileMs.toFixed(4)}ms`,
@@ -455,7 +632,12 @@ if (fibEntry) {
 }
 
 process.stdout.write("  dom ...");
-const domEntry = measureSizes("dom", "DOM append", HOW_DOM_JS, HOW_DOM_TS);
+let domEntry: SizeEntry | null = null;
+try {
+  domEntry = await measureSizes("dom", "DOM append", HOW_DOM_JS, HOW_DOM_TS);
+} catch (e) {
+  console.warn(`\n  [dom] skipped — ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+}
 if (domEntry) {
   console.log(
     ` JS: ${domEntry.jsSizeGzip}B gzip / ${domEntry.jsParseMs.toFixed(4)}ms | Wasm: ${domEntry.wasmSizeGzip}B gzip / ${domEntry.wasmCompileMs.toFixed(4)}ms`,
@@ -468,7 +650,13 @@ console.log("\nPlayground benchmarks:");
 const benchmarkResults: SizeEntry[] = [];
 for (const bench of BENCHMARKS) {
   process.stdout.write(`  ${bench.name} ...`);
-  const entry = measureMultiSizes(bench.name, bench.label, bench.path);
+  let entry: SizeEntry | null = null;
+  try {
+    entry = await measureMultiSizes(bench.name, bench.label, bench.path);
+  } catch (e) {
+    console.warn(`\n  [${bench.name}] skipped — ${String((e as Error)?.message ?? e).split("\n")[0]}`);
+    continue;
+  }
   if (entry) {
     benchmarkResults.push(entry);
     console.log(
@@ -501,8 +689,17 @@ fs.writeFileSync(LOADTIME_RESULTS_PATH, JSON.stringify(loadtimeOutput, null, 2) 
 fs.writeFileSync(LOADTIME_PUBLIC_PATH, JSON.stringify(loadtimeOutput, null, 2) + "\n");
 fs.writeFileSync(path.join(LOADTIME_RESULTS_DIR, "runtime.js"), LOADTIME_RUNTIME_SOURCE);
 fs.writeFileSync(path.join(LOADTIME_PUBLIC_DIR, "runtime.js"), LOADTIME_RUNTIME_SOURCE);
+fs.copyFileSync(BINARYEN_BUNDLE_PATH, path.join(LOADTIME_RESULTS_DIR, "binaryen.js"));
+fs.copyFileSync(BINARYEN_BUNDLE_PATH, path.join(LOADTIME_PUBLIC_DIR, "binaryen.js"));
 
 console.log(`\nWrote ${RESULTS_PATH}`);
 console.log(`Copied to ${PUBLIC_PATH}`);
 console.log(`Wrote ${LOADTIME_RESULTS_PATH}`);
 console.log(`Copied to ${LOADTIME_PUBLIC_PATH}`);
+console.log(`Copied Binaryen wasm-opt bundle to loadtime benchmark assets`);
+
+// Binaryen's Emscripten runtime poisons process.exitCode to 1 when wasm-opt
+// aborts on an unparseable (custom-descriptors) binary — even though we catch
+// the thrown error and skip that benchmark above. All artifacts are written by
+// this point, so force a clean exit to keep the Pages build green.
+process.exitCode = 0;

@@ -36,12 +36,14 @@ import {
   type IrUnop,
   type IrValueId,
 } from "../nodes.js";
+import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { retireAllocsIn } from "./alloc-discipline.js";
 
 /**
  * Fold constant `prim`/`br_if` instructions. Returns the same reference
  * when no changes are made.
  */
-export function constantFold(fn: IrFunction): IrFunction {
+export function constantFold(fn: IrFunction, registry?: AllocSiteRegistry): IrFunction {
   // Seed the const-def map from every existing `const` instruction. The
   // seed is global across blocks — inter-block constant references are
   // valid in Phase 2+ IR, so folding needs to see them.
@@ -61,6 +63,14 @@ export function constantFold(fn: IrFunction): IrFunction {
       const rewritten = tryFoldInstr(instr, constDefs);
       if (rewritten !== instr) {
         changed = true;
+        // Rule 3 (retire): if the fold dropped an allocation the original
+        // carried (e.g. a folded-away string), the value no longer allocates —
+        // retire its id so the replacement `const` (which carries none) is
+        // consistent. Today CF only folds binary/unary (non-alloc), so this is
+        // a no-op guard that future alloc-folding rewrites inherit for free.
+        if (instr.alloc !== undefined && rewritten.alloc === undefined) {
+          retireAllocsIn(instr, registry);
+        }
         // A fold turned a binary/unary into a const — record the new def
         // so subsequent ops in the same or later blocks see it folded.
         if (rewritten.kind === "const" && rewritten.result !== null) {
@@ -100,6 +110,13 @@ export function constantFold(fn: IrFunction): IrFunction {
 function tryFoldInstr(instr: IrInstr, constDefs: ReadonlyMap<IrValueId, IrConst>): IrInstr {
   if (instr.kind === "binary") return tryFoldBinary(instr, constDefs);
   if (instr.kind === "unary") return tryFoldUnary(instr, constDefs);
+  // (#1392) `if` is value-producing but its arms are sequences of IR
+  // instrs, not constants. We DON'T fold the arms themselves here (the
+  // arm buffers hold their own instrs that constant-fold can be re-run
+  // on as a follow-up pass). However, when the cond is a known const,
+  // we COULD collapse to one branch — left as a future optimization.
+  // Leaving the if-instr unmodified preserves correctness; we miss the
+  // dead-arm DCE opportunity but the lowerer still emits valid Wasm.
   return instr;
 }
 
@@ -249,6 +266,12 @@ function foldUnary(op: IrUnop, rand: IrConst): IrConst | null {
       if (v <= -2147483648) return { kind: "i32", value: -2147483648 };
       return { kind: "i32", value: Math.trunc(v) };
     }
+    // (#1392) `ref.is_null` is non-foldable — we don't track ref-typed
+    // constants in the IrConst lattice, so we can't statically decide
+    // whether a Wasm reference is null at compile time. The runtime
+    // Wasm `ref.is_null` instruction handles this dynamically.
+    case "ref.is_null":
+      return null;
     default:
       return null;
   }

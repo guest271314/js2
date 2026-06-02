@@ -999,6 +999,8 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
         ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
         ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
         ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(-Infinity)]),
+        // §21.3.2.31: sinh(±0) = ±0 — return x to preserve sign of zero
+        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
         // (exp(x) - 1/exp(x)) / 2
         localGet(0),
         call(expIdx),
@@ -1049,6 +1051,8 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
         ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
         ...ifThenRet([localGet(0), f64c(20), fgt], [f64c(1)]),
         ...ifThenRet([localGet(0), f64c(-20), flt], [f64c(-1)]),
+        // §21.3.2.34: tanh(±0) = ±0 — return x to preserve sign of zero
+        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
         // (exp(2x) - 1) / (exp(2x) + 1)
         localGet(0),
         f64c(2),
@@ -1424,6 +1428,12 @@ function buildPowBody(expIdx: number, logIdx: number): Instr[] {
     // NaN checks (must come before base==1, per spec: pow(1, NaN) → NaN)
     ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
     ...ifThenRet([localGet(1), localGet(1), fne], [f64c(NaN)]),
+    // §21.3.2.26: if abs(base) == 1 and abs(exponent) == +Infinity → NaN
+    // (must come before base == 1 short-circuit; covers pow(±1, ±Infinity))
+    ...ifThenRet(
+      [localGet(0), fabs, f64c(1), feq, localGet(1), fabs, f64c(Infinity), feq, { op: "i32.and" } as Instr],
+      [f64c(NaN)],
+    ),
     // base == 1 → 1
     ...ifThenRet([localGet(0), f64c(1), feq], [f64c(1)]),
     // exp == 1 → base

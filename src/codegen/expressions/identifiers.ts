@@ -3,9 +3,16 @@
  * Identifier resolution, TDZ analysis, and instanceof handling.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isBooleanType, isHeterogeneousUnion, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import {
+  isBooleanType,
+  isHeterogeneousUnion,
+  isNullableNumberType,
+  isNumberType,
+  isStringType,
+} from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
-import { emitFuncRefAsClosure } from "../closures.js";
+import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
+import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
@@ -21,9 +28,72 @@ import { coerceType, compileExpression } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
-import { isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
+import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
+import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
+import { allocLocal } from "../context/locals.js";
+import { emitThrowReferenceError, noJsHost } from "./helpers.js";
+
+/**
+ * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
+ * `instanceof <ctorName>` test in no-JS-host mode. For `instanceof Error` this
+ * is every Error subtype tag; for `instanceof TypeError` it is TypeError's own
+ * tag plus any descendant (none today). Mirrors `isBuiltinSubtype` over the
+ * error portion of the BUILTIN_TYPE_TAGS registry.
+ */
+function collectErrorInstanceOfTags(ctorName: string): number[] {
+  const errorNames = [
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "URIError",
+    "EvalError",
+    "ReferenceError",
+    "AggregateError",
+  ] as const;
+  const tags: number[] = [];
+  for (const n of errorNames) {
+    if (isBuiltinSubtype(n, ctorName)) {
+      tags.push(BUILTIN_TYPE_TAGS[n]);
+    }
+  }
+  return tags;
+}
 
 export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, name: string, flagIdx: number): void {
+  const msg = `${name} is not defined`;
+  // #1473 — no JS host: build the TDZ flag check and emit a ReferenceError
+  // INSTANCE throw inside the `then` branch via the in-module constructor
+  // helper (no `__throw_reference_error` host import).
+  if (noJsHost(ctx)) {
+    const boxed = fctx.boxedTdzFlags?.get(name);
+    if (boxed) {
+      fctx.body.push({ op: "local.get", index: boxed.localIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+    } else {
+      fctx.body.push({ op: "local.get", index: flagIdx });
+    }
+    fctx.body.push({ op: "i32.eqz" });
+    // emitThrowReferenceError appends to fctx.body; capture into the `then`
+    // branch by swapping in a temporary body (tracked in savedBodies so any
+    // late-import index shift reaches it).
+    const savedBody = fctx.body;
+    fctx.savedBodies.push(savedBody);
+    fctx.body = [];
+    emitThrowReferenceError(ctx, fctx, msg);
+    fctx.body.push({ op: "unreachable" });
+    const then = fctx.body;
+    const si = fctx.savedBodies.lastIndexOf(savedBody);
+    if (si >= 0) fctx.savedBodies.splice(si, 1);
+    fctx.body = savedBody;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then,
+      else: [],
+    });
+    return;
+  }
   const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
   flushLateImportShifts(ctx, fctx);
   // If the flag has been boxed in an i32 ref cell (captured by a closure —
@@ -39,24 +109,23 @@ export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, na
   fctx.body.push({ op: "i32.eqz" });
   let then: Instr[];
   if (throwRefErrIdx !== undefined) {
-    const msg = `${name} is not defined`;
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
     then = [
       { op: "global.get", index: strIdx } as Instr,
       { op: "call", funcIdx: throwRefErrIdx } as Instr,
-      { op: "unreachable" } as unknown as Instr,
+      { op: "unreachable" },
     ];
   } else {
     const tagIdx = ensureExnTag(ctx);
-    then = [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as unknown as Instr];
+    then = [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx }];
   }
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then,
     else: [],
-  } as unknown as Instr);
+  });
 }
 
 /**
@@ -203,6 +272,16 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
+function isDeclaredNullableNumberIdentifier(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const symbol = ctx.checker.getSymbolAtLocation(id);
+  const decl = symbol?.valueDeclaration;
+  if (!decl) return false;
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
+    return isNullableNumberType(ctx.checker.getTypeAtLocation(decl));
+  }
+  return false;
+}
+
 /**
  * Compile-time TDZ elision for top-level let/const variables (#906).
  *
@@ -306,15 +385,21 @@ function analyzeTdzAccessByPos(ctx: CodegenContext, varName: string, callNode: t
 
 /** Emit a static TDZ throw (guaranteed violation — no flag check needed). */
 export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, name: string): void {
+  const msg = `${name} is not defined`;
+  // #1473 — no JS host: throw a ReferenceError INSTANCE built in-module.
+  if (noJsHost(ctx)) {
+    emitThrowReferenceError(ctx, fctx, msg);
+    fctx.body.push({ op: "unreachable" });
+    return;
+  }
   const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
   flushLateImportShifts(ctx, fctx);
   if (throwRefErrIdx !== undefined) {
-    const msg = `${name} is not defined`;
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
     fctx.body.push({ op: "global.get", index: strIdx } as Instr);
     fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return;
   }
   const tagIdx = ensureExnTag(ctx);
@@ -384,6 +469,14 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;
+      if (fctx.aliasedNullGuardNonNull?.has(name) && isDeclaredNullableNumberIdentifier(ctx, id)) {
+        addUnionImports(ctx);
+        const funcIdx = ctx.funcMap.get("__unbox_number");
+        if (funcIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx });
+          return { kind: "f64" };
+        }
+      }
     }
 
     // Null narrowing: if this variable is known non-null (e.g. inside `if (x !== null)`),
@@ -448,6 +541,78 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     return globalInfo.type;
   }
 
+  // (#1395) Class identifier as a value — emit lazy-initialized class-object
+  // singleton, registering static-method names with the runtime's
+  // `_staticMethodNames` allowlist so `Object.getOwnPropertyDescriptor(C, "m")`
+  // returns the spec-correct descriptor for static methods. Without this,
+  // bare `C` falls through to the `ref.null.extern` graceful-default below
+  // and `getOwnPropertyDescriptor(null, "m")` returns null, breaking
+  // verifyProperty-style static-method tests under
+  // `language/{statements,expressions}/class/elements/`.
+  //
+  // For class expressions (`var C = class { ... }`), `classExprNameMap` maps
+  // the user-visible name "C" to the synthetic internal name (e.g.
+  // `__anonClass_0`). All static-prop / static-method storage is keyed on the
+  // synthetic name, so `C.f` (via property-access) reads from
+  // `__static___anonClass_0_f`. Resolving the bare `C` identifier must go
+  // through the same alias so the LHS of `C.f() === C` and the RHS read the
+  // SAME `__class_<Name>` singleton; otherwise the comparison ends up with
+  // `__class___anonClass_0` on the LHS (returned by the arrow body via the
+  // synthetic-name `enclosingClassName`) and `__class_C` on the RHS, which
+  // are distinct singletons and break identity. (#1395 Phase 1 follow-up.)
+  //
+  // Order matters: this is AFTER `localMap`, `capturedGlobals`,
+  // `moduleGlobals`, and `declaredGlobals` so user shadowing
+  // (`var C = ...; class C {}` — though unusual) takes precedence.
+  // It is BEFORE the funcMap-funcref path so a class never gets re-wrapped
+  // as a closure, and BEFORE the `ref.null.extern` fallback so we beat the
+  // null result.
+  {
+    const resolvedClassName = ctx.classExprNameMap.get(name) ?? name;
+    if (ctx.classObjectGlobals?.has(resolvedClassName)) {
+      if (emitLazyClassObjectGet(ctx, fctx, resolvedClassName)) {
+        return { kind: "externref" };
+      }
+    }
+  }
+
+  // #1502 — Browser Storage globals (localStorage / sessionStorage). Emit
+  // a host import that resolves to the real browser Storage when running
+  // inside a browser / jsdom, and to an in-memory polyfill in standalone
+  // mode (Node / Bun / WASI). Recognised by name so callers don't need a
+  // `declare var` in source — lib.dom.d.ts already provides the type.
+  if (name === "localStorage" || name === "sessionStorage") {
+    const importName = name === "localStorage" ? "__get_localStorage" : "__get_sessionStorage";
+    let funcIdx = ctx.funcMap.get(importName);
+    if (funcIdx === undefined) {
+      const importsBefore = ctx.numImportFuncs;
+      const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+      addImport(ctx, "env", importName, { kind: "func", typeIdx });
+      shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+      funcIdx = ctx.funcMap.get(importName)!;
+    }
+    fctx.body.push({ op: "call", funcIdx });
+    return { kind: "externref" };
+  }
+
+  // #1494 — Node module-scope values: `__dirname` and `__filename`. Recognize
+  // them even when the source has no `@types/node` shim so plain `.ts` modules
+  // compile cleanly. The host import returns the loader-injected value
+  // (typed externref / string).
+  if (name === "__dirname" || name === "__filename") {
+    const importName = name === "__dirname" ? "__get_dirname" : "__get_filename";
+    let funcIdx = ctx.funcMap.get(importName);
+    if (funcIdx === undefined) {
+      const importsBefore = ctx.numImportFuncs;
+      const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+      addImport(ctx, "env", importName, { kind: "func", typeIdx });
+      shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+      funcIdx = ctx.funcMap.get(importName)!;
+    }
+    fctx.body.push({ op: "call", funcIdx });
+    return { kind: "externref" };
+  }
+
   // globalThis — return the JS global object via host import
   if (name === "globalThis") {
     let funcIdx = ctx.funcMap.get("__get_globalThis");
@@ -460,6 +625,44 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     }
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "externref" };
+  }
+
+  // (#820h) Explicit Resource Management constructors referenced as *values*
+  // (not in `new`/method position) — e.g. `DisposableStack.prototype`,
+  // `Reflect.construct(DisposableStack, …)`, `Object.getOwnPropertyDescriptor`.
+  // The extern-class machinery only models `new X()` / `x.method()`; a bare
+  // identifier falls through to the null-externref fallback below, so reflective
+  // test262 cases see `null` instead of the host constructor. Resolve them to
+  // the real host global via `__extern_get(__get_globalThis(), name)` so the
+  // native constructor object (with its prototype + accessor descriptors) is
+  // visible. Scope strictly to these host-delegated ERM globals and only when
+  // the name is not shadowed by a local/captured binding.
+  if (
+    (name === "DisposableStack" || name === "AsyncDisposableStack" || name === "SuppressedError") &&
+    !fctx.localMap.has(name) &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (gtFuncIdx !== undefined && getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+      addStringConstantGlobal(ctx, name);
+      const strGlobalIdx = ctx.stringGlobalMap.get(name);
+      if (strGlobalIdx !== undefined) {
+        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      return { kind: "externref" };
+    }
   }
 
   // Built-in numeric constants: NaN, Infinity
@@ -494,7 +697,22 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
         );
       }
     }
-    // Wrap the plain function in a closure struct
+    // (#1340) For captureless top-level function decls, emit a cached
+    // singleton closure so identity is preserved across textual occurrences.
+    // Without this, `foo === foo` is false and any sidecar write keyed by the
+    // per-site struct (e.g. `foo.prototype = X`) does not round-trip — which
+    // is what made the test262 Iterator.prototype.* shim show up as
+    // misclassified "wasm_compile" errors. Captures must be filled at the
+    // construction site (per-instance), so we only take the cached path when
+    // no captures are required.
+    const nestedCaptures = ctx.nestedFuncCaptures.get(name);
+    if (!nestedCaptures || nestedCaptures.length === 0) {
+      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx);
+      if (cachedRefType) {
+        return cachedRefType;
+      }
+    }
+    // Fallback: per-site closure struct (with captures, or if cache emit failed).
     const refType = emitFuncRefAsClosure(ctx, fctx, name, funcRefIdx);
     if (refType) return refType;
   }
@@ -506,25 +724,32 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // lib.d.ts and should use the fallback default instead.
   const sym = ctx.checker.getSymbolAtLocation(id);
   if (!sym) {
-    // Truly undeclared variable — throw a proper ReferenceError instance
-    // via the `__throw_reference_error` host import. The previous emission
-    // was a raw `throw ref.null.extern`, which surfaced to JS as `null` so
-    // `e instanceof ReferenceError` was false (#1380, S11.9.1_A2.1_T3).
+    // Truly undeclared variable — throw a proper ReferenceError instance.
+    // The previous emission was a raw `throw ref.null.extern`, which surfaced
+    // to JS as `null` so `e instanceof ReferenceError` was false (#1380,
+    // S11.9.1_A2.1_T3).
+    const msg = `${name} is not defined`;
+    // #1473 — no JS host: build the ReferenceError instance in-module so
+    // `e instanceof ReferenceError` works under wasmtime, with no
+    // `__throw_reference_error` host import.
+    if (noJsHost(ctx)) {
+      emitThrowReferenceError(ctx, fctx, msg);
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
+    }
     const throwRefErrIdx = ensureLateImport(ctx, "__throw_reference_error", [{ kind: "externref" }], []);
     flushLateImportShifts(ctx, fctx);
     if (throwRefErrIdx !== undefined) {
-      const msg = `${name} is not defined`;
       addStringConstantGlobal(ctx, msg);
       const strIdx = ctx.stringGlobalMap.get(msg)!;
       fctx.body.push({ op: "global.get", index: strIdx } as Instr);
       fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
-      fctx.body.push({ op: "unreachable" } as unknown as Instr);
+      fctx.body.push({ op: "unreachable" });
     } else {
-      // Standalone/WASI mode without `__throw_reference_error`: fall back to
-      // the raw exception-tag throw (no JS host to construct a ReferenceError).
+      // Fallback: raw exception-tag throw (no JS host to construct a ReferenceError).
       const tagIdx = ensureExnTag(ctx);
       fctx.body.push({ op: "ref.null.extern" } as Instr);
-      fctx.body.push({ op: "throw", tagIdx } as unknown as Instr);
+      fctx.body.push({ op: "throw", tagIdx });
     }
     return { kind: "externref" };
   }
@@ -636,7 +861,19 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
   // 1. LHS is a user class? A WasmGC user-class struct is never an instance of
   //    a JS built-in (Array / Error / Map / ...).
   const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
-  const lhsSymbolName = leftTsType.getSymbol()?.name;
+  let lhsSymbolName = leftTsType.getSymbol()?.name;
+  // (#1455) Resolve TypeScript's synthetic `__class` symbol name for
+  // anonymous class expressions (`const Sub = class extends Map {}`) via the
+  // type string + classExprNameMap so subclass-of-builtin reasoning works.
+  if (lhsSymbolName === "__class") {
+    const typeStr = ctx.checker.typeToString(leftTsType);
+    const mapped = ctx.classExprNameMap.get(typeStr);
+    if (mapped !== undefined) {
+      lhsSymbolName = mapped;
+    } else if (ctx.classTagMap.has(typeStr)) {
+      lhsSymbolName = typeStr;
+    }
+  }
   if (lhsSymbolName !== undefined) {
     if (ctx.classTagMap.has(lhsSymbolName)) {
       // (#1366a) Externref-backed subclass (e.g. `class MyError extends Error`)
@@ -647,11 +884,16 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
       if (builtinParent !== undefined) {
         return isBuiltinSubtype(builtinParent, ctorName);
       }
-      return false;
+      // (#1729) A user-class instance with no builtin parent is still an
+      // `instanceof Object` (its prototype chain ends at Object.prototype).
+      // Any other builtin RHS is false (a plain user struct isn't a Map/Array/…).
+      return ctorName === "Object";
     }
     // 2. LHS is itself a built-in (or matches the constructor's instance-type
-    //    name) — apply hierarchy reasoning.
+    //    name) — apply hierarchy reasoning. Every builtin instance is also an
+    //    `instanceof Object` (#1729), so Object is a universal yes here.
     if (isBuiltinTypeName(lhsSymbolName)) {
+      if (ctorName === "Object") return true;
       return isBuiltinSubtype(lhsSymbolName, ctorName);
     }
   }
@@ -661,6 +903,37 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
   //    TS type may be the wrapper, so we leave that to runtime.)
   if (isNumberType(leftTsType) || isBooleanType(leftTsType)) {
     return false;
+  }
+
+  // 4. (#1729) `<obj> instanceof Object` is true for every object value
+  //    (§7.3.20 OrdinaryHasInstance walks the prototype chain to
+  //    Object.prototype). WasmGC-struct-backed values — object literals,
+  //    arrays, tuples — are not real host objects, so the runtime
+  //    `__instanceof` falls through to a spurious `false`. Short-circuit to
+  //    `true` when the RHS is `Object` and the LHS is a provably non-primitive
+  //    object type. Guarded against primitives / null / undefined / any /
+  //    unknown so only definite objects qualify. (User-class instances are
+  //    handled by the `classTagMap` branch above, which returns before here.)
+  if (ctorName === "Object") {
+    const f = leftTsType.flags;
+    const isPrimitiveOrIndeterminate =
+      (f &
+        (ts.TypeFlags.Any |
+          ts.TypeFlags.Unknown |
+          ts.TypeFlags.NumberLike |
+          ts.TypeFlags.StringLike |
+          ts.TypeFlags.BooleanLike |
+          ts.TypeFlags.BigIntLike |
+          ts.TypeFlags.ESSymbolLike |
+          ts.TypeFlags.Null |
+          ts.TypeFlags.Undefined |
+          ts.TypeFlags.Void |
+          ts.TypeFlags.Never)) !==
+      0;
+    // Object literals, arrays, and tuples all carry the Object type flag.
+    if (!isPrimitiveOrIndeterminate && (f & ts.TypeFlags.Object) !== 0) {
+      return true;
+    }
   }
 
   return undefined;
@@ -699,6 +972,14 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   let ctorName: string | undefined;
   if (ts.isIdentifier(expr.right)) {
     ctorName = expr.right.text;
+    // (#1455) Resolve anonymous class-expression aliases. `const Sub = class extends Map {}`
+    // registers the class as a synthetic name like `__anonClass_N`; the
+    // constructor tags instances with that synthetic name, so the host check
+    // must compare against it (not the user-facing binding name).
+    const mapped = ctx.classExprNameMap.get(ctorName);
+    if (mapped !== undefined && ctx.classTagMap.has(mapped)) {
+      ctorName = mapped;
+    }
   }
 
   if (!ctorName) {
@@ -714,6 +995,62 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   const staticResult = tryStaticInstanceOf(ctx, expr, ctorName);
   if (staticResult !== undefined) {
     return emitConstantInstanceOf(ctx, fctx, expr, staticResult);
+  }
+
+  // #1473 — no JS host: `e instanceof TypeError` (and other Error subtypes)
+  // where the LHS is a dynamic value (any/externref). The caught value is the
+  // `$Error_struct` externref produced by emitWasiErrorConstructor; discriminate
+  // by reading its `$tag` field (fieldIdx 0) and comparing against the set of
+  // tags compatible with `ctorName`. No `__instanceof` host import.
+  if (noJsHost(ctx) && (ctorName === "Error" || isWasiErrorName(ctorName))) {
+    const compatTags = collectErrorInstanceOfTags(ctorName);
+    const structIdx = getOrRegisterErrorStructType(ctx);
+    const leftType = compileExpression(ctx, fctx, expr.left);
+    if (leftType && leftType.kind !== "externref") {
+      // Numeric / boolean primitives are never Error instances.
+      if (leftType.kind === "i32" || leftType.kind === "f64" || leftType.kind === "i64") {
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
+      }
+      coerceType(ctx, fctx, leftType, { kind: "externref" });
+    } else if (!leftType) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    // externref -> anyref, store in temp, ref.test $Error_struct, then read tag.
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    const anyLocalIdx = allocLocal(fctx, `__err_instanceof_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+    fctx.body.push({ op: "local.set", index: anyLocalIdx });
+    const elseBody: Instr[] = [
+      { op: "local.get", index: anyLocalIdx },
+      { op: "ref.cast", typeIdx: structIdx } as Instr,
+      { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+    ];
+    if (compatTags.length === 1) {
+      elseBody.push({ op: "i32.const", value: compatTags[0]! });
+      elseBody.push({ op: "i32.eq" });
+    } else {
+      const tagLocalIdx = allocLocal(fctx, `__err_tag_${fctx.locals.length}`, { kind: "i32" });
+      elseBody.push({ op: "local.set", index: tagLocalIdx });
+      elseBody.push({ op: "local.get", index: tagLocalIdx });
+      elseBody.push({ op: "i32.const", value: compatTags[0]! });
+      elseBody.push({ op: "i32.eq" });
+      for (let i = 1; i < compatTags.length; i++) {
+        elseBody.push({ op: "local.get", index: tagLocalIdx });
+        elseBody.push({ op: "i32.const", value: compatTags[i]! });
+        elseBody.push({ op: "i32.eq" });
+        elseBody.push({ op: "i32.or" });
+      }
+    }
+    fctx.body.push({ op: "local.get", index: anyLocalIdx });
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: elseBody,
+      else: [{ op: "i32.const", value: 0 }],
+    });
+    return { kind: "i32" };
   }
 
   // Ensure the __instanceof host import exists

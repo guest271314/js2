@@ -22,6 +22,13 @@ export interface WasmModule {
   externClasses: ExternClassMeta[];
   /** Node builtin module names detected from imports (#1044) */
   nodeBuiltinModules: Set<string>;
+  /**
+   * JSX runtime import specifier detected during import preprocessing (#1540).
+   * `"react/jsx-runtime"` by default; `preact/jsx-runtime`, etc. for other
+   * configured `jsxImportSource` values. Recorded so the import manifest
+   * classifier can attach it to `jsx_runtime` ImportIntent entries.
+   */
+  jsxImportSource?: string;
   /** Map from import func name → string literal value (e.g. "__str_0" → "Hello") */
   stringLiteralValues: Map<string, string>;
   /** Set of function names that are async (for .d.ts generation) */
@@ -36,6 +43,22 @@ export interface WasmModule {
   hasTopLevelStatements?: boolean;
   /** Wasm start function index — runs automatically on instantiation (#907) */
   startFuncIdx?: number;
+  /**
+   * Per-export TS-level type annotations (#1700). Surfaced so the JS-host
+   * `wrapExports` can faithfully marshal `Uint8Array` (and other TypedArray)
+   * params/results that share the same Wasm signature as `number[]`. Keyed
+   * by export name. Only populated for exports whose params/result reference
+   * TypedArray types.
+   */
+  exportSignatures?: Record<string, ExportSignature>;
+}
+
+/** TS-level kind hint for a single export parameter or result (#1700). */
+export type TypedArrayKind = "uint8array" | "typed-array" | "other";
+
+export interface ExportSignature {
+  params: TypedArrayKind[];
+  result: TypedArrayKind;
 }
 
 export type TypeDef = FuncTypeDef | StructTypeDef | ArrayTypeDef | RecGroupDef | SubTypeDef;
@@ -80,7 +103,7 @@ export interface FieldDef {
 
 export type ValType =
   | { kind: "i32" }
-  | { kind: "i64" }
+  | { kind: "i64"; bigint?: boolean }
   | { kind: "f32" }
   | { kind: "f64" }
   | { kind: "v128" }
@@ -144,6 +167,8 @@ type InstrBase =
   | { op: "i64.extend_i32_u" }
   | { op: "i64.trunc_f64_s" }
   | { op: "i64.reinterpret_f64" }
+  | { op: "i32.reinterpret_f32" }
+  | { op: "f32.reinterpret_i32" }
   | { op: "f64.convert_i64_s" }
   | { op: "f64.reinterpret_i64" }
   | { op: "f64.const"; value: number }

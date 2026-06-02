@@ -10,6 +10,8 @@ import {
   asBlockId,
   asValueId,
   irVal,
+  AllocKind,
+  AllocSiteId,
   IrBinop,
   IrBlock,
   IrBlockId,
@@ -22,6 +24,7 @@ import {
   IrInstr,
   IrObjectShape,
   IrParam,
+  IrSiteId,
   IrSlotDef,
   IrTerminator,
   IrType,
@@ -29,6 +32,7 @@ import {
   IrValueId,
   IrValueIdAllocator,
 } from "./nodes.js";
+import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { Instr, ValType } from "./types.js";
 
 interface OpenBlock {
@@ -69,7 +73,20 @@ export class IrFunctionBuilder {
     private readonly name: string,
     private readonly resultTypes: readonly IrType[],
     private readonly exported = false,
+    // #1586: module-global allocation-site registry. Optional so test builders
+    // and any non-module-driven construction work without one — emitters then
+    // simply leave `alloc` unset, which is inert at lowering.
+    private readonly allocRegistry?: AllocSiteRegistry,
   ) {}
+
+  /**
+   * #1586: mint a stable allocation-site id for a value-creating instr. Returns
+   * `undefined` when no registry is wired (test builders), in which case the
+   * instr's `alloc` field stays absent — lowering ignores it either way.
+   */
+  private allocId(kind: AllocKind, type: IrType, site?: IrSiteId): AllocSiteId | undefined {
+    return this.allocRegistry?.fresh(kind, type, site);
+  }
 
   // --- params -------------------------------------------------------------
 
@@ -164,7 +181,12 @@ export class IrFunctionBuilder {
       result = this.allocator.fresh();
       this.valueTypes.set(result, resultType);
     }
-    this.pushInstr({ kind: "call", target, args: [...args], result, resultType });
+    // #1588 Phase 2: a call that produces a string is a string allocation site.
+    // Minting the id is inert at lowering (the encoding analysis reads it; the
+    // emitted Wasm is unchanged), and gives the analysis an attachment point
+    // for call-result origin rules (JSON.parse, string methods, …).
+    const alloc = resultType?.kind === "string" ? this.allocId("string", resultType) : undefined;
+    this.pushInstr({ kind: "call", target, args: [...args], result, resultType, alloc });
     return result;
   }
 
@@ -200,13 +222,66 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * (#1392) Emit `unary("ref.is_null", val)` — tests a Wasm reference for
+   * null. Result is `i32` (1 if null, 0 otherwise). The architect-spec
+   * name `emitRefIsNull` mirrors the existing `emitUnary` /
+   * `emitBinary` / `emitSelect` family and surfaces the underlying op
+   * at the call site so #1375's optional-chain lowering reads naturally
+   * (`cx.builder.emitRefIsNull(recv)`).
+   *
+   * `val`'s IrType MUST be a `val`-kind wrapping a Wasm reference type
+   * (`ref` / `ref_null` / `externref` / `funcref`); the verifier and the
+   * Wasm validator together reject other operand shapes.
+   */
+  emitRefIsNull(val: IrValueId): IrValueId {
+    return this.emitUnary("ref.is_null", val, irVal({ kind: "i32" }));
+  }
+
+  /**
+   * (#1392) Emit a value-producing short-circuiting if/else. Both `then`
+   * and `else` are pre-collected instruction buffers (typically built
+   * via `collectBodyInstrs(...)`); the lowerer emits a Wasm
+   * `if (result T) ... else ... end` so only the matching branch
+   * executes.
+   *
+   * `thenValue` / `elseValue` are SSA value IDs DEFINED INSIDE the
+   * corresponding arm — the lowerer emits each arm's instruction tree
+   * and leaves the carrier value on the Wasm stack at end-of-arm; the
+   * post-block `local.set` binds the if-instr's result to whichever
+   * carrier ran.
+   */
+  emitIfElse(args: {
+    cond: IrValueId;
+    then: readonly IrInstr[];
+    thenValue: IrValueId;
+    else: readonly IrInstr[];
+    elseValue: IrValueId;
+    resultType: IrType;
+  }): IrValueId {
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, args.resultType);
+    this.pushInstr({
+      kind: "if",
+      cond: args.cond,
+      then: args.then,
+      thenValue: args.thenValue,
+      else: args.else,
+      elseValue: args.elseValue,
+      result,
+      resultType: args.resultType,
+    });
+    return result;
+  }
+
   // --- string ops (#1169a) ------------------------------------------------
 
   emitStringConst(value: string): IrValueId {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "string" };
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "string.const", value, result, resultType });
+    const alloc = this.allocId("string", resultType);
+    this.pushInstr({ kind: "string.const", value, result, resultType, alloc });
     return result;
   }
 
@@ -214,7 +289,8 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "string" };
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType });
+    const alloc = this.allocId("string", resultType);
+    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType, alloc });
     return result;
   }
 
@@ -252,12 +328,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "object", shape };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("object", resultType);
     this.pushInstr({
       kind: "object.new",
       shape,
       values: [...values],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -315,6 +393,7 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "closure", signature };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("closure", resultType);
     this.pushInstr({
       kind: "closure.new",
       liftedFunc,
@@ -323,6 +402,7 @@ export class IrFunctionBuilder {
       captures: [...captures],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -370,11 +450,13 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "boxed", inner };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("refcell", resultType);
     this.pushInstr({
       kind: "refcell.new",
       value,
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -435,12 +517,16 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "class", shape };
     this.valueTypes.set(result, resultType);
+    // The ctor body allocates internally (black-box per #1586 non-goals); the
+    // site is the constructing call, kind "object".
+    const alloc = this.allocId("object", resultType);
     this.pushInstr({
       kind: "class.new",
       shape,
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -518,12 +604,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "extern", className };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("extern", resultType);
     this.pushInstr({
       kind: "extern.new",
       className,
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -545,6 +633,9 @@ export class IrFunctionBuilder {
       result = this.allocator.fresh();
       this.valueTypes.set(result, resultType);
     }
+    // #1588 Phase 2: string-returning extern call (e.g. TextDecoder.decode) is
+    // a string allocation site — inert id for the encoding analysis.
+    const alloc = resultType?.kind === "string" ? this.allocId("string", resultType) : undefined;
     this.pushInstr({
       kind: "extern.call",
       className,
@@ -553,6 +644,7 @@ export class IrFunctionBuilder {
       args: [...args],
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -600,12 +692,14 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "extern", className: "RegExp" };
     this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("extern", resultType);
     this.pushInstr({
       kind: "extern.regex",
       pattern,
       flags,
       result,
       resultType,
+      alloc,
     });
     return result;
   }
@@ -704,7 +798,9 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = irVal({ kind: "externref" });
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "gen.epilogue", result, resultType });
+    // `__create_generator(buffer)` allocates the Generator object (black-box).
+    const alloc = this.allocId("generator", resultType);
+    this.pushInstr({ kind: "gen.epilogue", result, resultType, alloc });
     return result;
   }
 
@@ -837,15 +933,18 @@ export class IrFunctionBuilder {
    * Returns the captured body instrs.
    */
   collectBodyInstrs(emit: () => void): IrInstr[] {
-    if (this.bodyBuffer !== null) {
-      throw new Error(`IrFunctionBuilder: nested collectBodyInstrs not supported (func ${this.name})`);
-    }
+    // (#1392) Nesting support — required for nested optional chains
+    // (`a?.b?.c` lowers to nested `IrInstrIf`s, each with its own arm
+    // buffer). Save & restore the previous buffer so emissions inside
+    // the inner `emit()` route to its own buffer; instructions emitted
+    // AFTER the inner returns continue routing to the outer buffer.
+    const previous = this.bodyBuffer;
     const buffer: IrInstr[] = [];
     this.bodyBuffer = buffer;
     try {
       emit();
     } finally {
-      this.bodyBuffer = null;
+      this.bodyBuffer = previous;
     }
     return buffer;
   }
@@ -899,7 +998,8 @@ export class IrFunctionBuilder {
     const result = this.allocator.fresh();
     const resultType: IrType = irVal({ kind: "externref" });
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "iter.new", iterable, async, result, resultType });
+    const alloc = this.allocId("iterator", resultType);
+    this.pushInstr({ kind: "iter.new", iterable, async, result, resultType, alloc });
     return result;
   }
 

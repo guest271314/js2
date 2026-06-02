@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -18,9 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Skip explicit base-ancestry check (handled by simulated merge / queue)
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        run: |
+          # GitHub Actions checks out refs/pull/N/merge (a simulated merge of
+          # the PR's HEAD into the PR's BASE) for pull_request, and the queue
+          # ref for merge_group. Both inherently include the base in history.
+          # The previous explicit "git merge-base --is-ancestor origin/main HEAD"
+          # check had a TOCTOU race (false positives when main moved between
+          # checkout and the check), and using PR base.sha tripped over the
+          # shallow checkout's missing ancestry graph. Both contexts already
+          # guarantee base-ancestry by construction — no extra check needed.
+          echo "✓ ${{ github.event_name }} ref already includes base by construction"
+
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 25
 
       - name: Setup pnpm via Corepack
         run: |
@@ -40,6 +56,43 @@ jobs:
 
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
+
+      - name: Issue integrity + link gate (#1616)
+        # Fails on duplicate IDs, filename/frontmatter ID mismatch, dangling
+        # depends_on, or broken plan/issues/<id>-<slug>.md links in tracked *.md.
+        run: pnpm run check:issues
+
+      - name: Host-import allowlist + strict-mode gate (#1524)
+        env:
+          # PRs that intentionally grow the allowlist must include
+          # `[allowlist-grow]` in the PR description. We forward the flag to
+          # the budget test so the ratchet check accepts the growth.
+          ALLOWLIST_GROW: ${{ contains(github.event.pull_request.body, '[allowlist-grow]') && '1' || '' }}
+        run: |
+          # `pnpm test --` doesn't forward args correctly — pnpm consumes the
+          # trailing test filenames and vitest ends up running the entire suite
+          # (OOMs after ~9 min). Invoke vitest directly to scope it to the 2 gate
+          # files. See PR #432 investigation 2026-05-23.
+          pnpm exec vitest run tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
+
+      - name: IR alloc-provenance checker (#1586)
+        # Runs the AllocSiteRegistry + provenance tests with the debug-mode
+        # invariant checker enabled, so a pass that loses allocation-site
+        # provenance fails CI here.
+        run: pnpm run test:ir:alloc
+
+      - name: Benchmark staleness gate (#1580)
+        # Fails if the committed Wasmtime hot-runtime benchmark JSON regresses
+        # to Interpreter-class string-hash numbers — the silent-staleness mode
+        # that let the pre-#1580 63.7 ms warm value sit on the landing page for
+        # 9 days after the fix merged (no CI regenerates that JSON; it's a
+        # manual `pnpm run refresh:benchmarks:wasmtime`). Scoped to the one
+        # guard test so it stays cheap; the full assertions also run in the
+        # equivalence shards.
+        run: pnpm exec vitest run tests/issue-1580.test.ts
+
+      - name: Conformance numbers in sync (#1522)
+        run: pnpm run sync:conformance:check
 
       - name: Fetch runs/index.json from baselines repo
         if: github.event_name == 'push'
@@ -61,15 +114,81 @@ jobs:
             echo "No private planning artifacts in this checkout; skipping regeneration."
           fi
 
-      - name: Commit regenerated planning artifacts
-        if: github.event_name == 'push'
+      # DISABLED (post #491): The main branch ruleset enforces the merge
+      # queue, so direct `git push` from this workflow fails with
+      # `GH013: Changes must be made through the merge queue`. The whole
+      # auto-commit step is commented out; the typecheck/lint/format/IR
+      # gates above still RUN on every push and PR — only the
+      # auto-regeneration of planning artifacts back into main is disabled.
+      # Planning artifacts are regenerated locally by tech-lead-driven
+      # PRs (`pnpm run build:planning-artifacts`) instead.
+      # - name: Commit regenerated planning artifacts
+      #   if: github.event_name == 'push'
+      #   run: |
+      #     if [ -d plan ] || [ -d dashboard ]; then
+      #       if ! git diff --quiet -- plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json; then
+      #         git config user.name "github-actions[bot]"
+      #         git config user.email "github-actions[bot]@users.noreply.github.com"
+      #         git add -f plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json
+      #         git commit -m "chore(planning-artifacts): regen after merge [skip ci]"
+      #         git push
+      #       fi
+      #     fi
+
+  # #1659 — Run tests/equivalence/ in CI. Previously skipped because the full
+  # suite OOMed under file-parallelism. Each shard runs single-fork (peak
+  # ~1 GB RAM, ~1-2 min) and emits a partial failure list; the merge job
+  # combines partials and gates against scripts/equivalence-baseline.json —
+  # only NEW failures (not in the baseline) fail CI, so the existing failure
+  # backlog does not block every PR while still catching genuine regressions.
+  equivalence-shard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
         run: |
-          if [ -d plan ] || [ -d dashboard ]; then
-            if ! git diff --quiet -- plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add -f plan/goals plan/issues/sprints dashboard/data.js dashboard/data public/graph-data.json
-              git commit -m "chore(planning-artifacts): regen after merge [skip ci]"
-              git push
-            fi
-          fi
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Run equivalence shard ${{ matrix.shard }}/8
+        env:
+          SHARD: ${{ matrix.shard }}/8
+          PARTIAL_OUT: equiv-partial-${{ matrix.shard }}.json
+        run: node scripts/equivalence-gate.mjs
+      - name: Upload partial result
+        uses: actions/upload-artifact@v4
+        with:
+          name: equiv-partial-${{ matrix.shard }}
+          path: equiv-partial-${{ matrix.shard }}.json
+          retention-days: 3
+
+  equivalence-gate:
+    runs-on: ubuntu-latest
+    needs: equivalence-shard
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Download shard partials
+        uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-partial-*
+          path: equiv-partials
+          merge-multiple: true
+      - name: Gate against baseline
+        env:
+          MERGE_PARTIALS_DIR: equiv-partials
+        run: node scripts/equivalence-gate.mjs

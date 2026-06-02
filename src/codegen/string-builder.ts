@@ -504,6 +504,106 @@ export function compileStringBuilderAppend(
 }
 
 /**
+ * #1744 — single-code-unit append fast path.
+ *
+ * Appends ONE i16 code unit to the string-builder buffer without allocating
+ * an intermediate `$NativeString`. The caller has already pushed the code
+ * unit (an `i32` in 0..0xFFFF) onto the stack; this consumes it and emits:
+ *
+ *   1. cu = <stack top>                      ; stash the code unit
+ *   2. if (sb.len + 1 > sb.cap) grow buffer  ; same doubling policy as append
+ *   3. sb.buf[sb.len] = cu
+ *   4. sb.len = sb.len + 1
+ *   5. sb.mat = null                         ; invalidate the cache
+ *
+ * This is the hot path for `buf += X.charAt(i)` / `buf += "<1 char>"`: the
+ * generic `compileStringBuilderAppend` would otherwise materialise a 1-char
+ * `$NativeString` (`array.new_fixed` + `struct.new`) per iteration just to
+ * copy a single character out of it (~40k throwaway allocations on the
+ * string-hash benchmark). Reading the code unit directly and `array.set`ing
+ * it removes both the allocation and the per-iteration `__str_flatten` on the
+ * result.
+ *
+ * Correctness: this is a verbatim code-unit copy. `charAt` is itself
+ * code-unit-indexed (it returns the WTF-16 unit at the index, splitting
+ * surrogate pairs), so copying the raw unit into the i16 buffer is exactly
+ * what the string-roundtrip path does — no surrogate handling differs.
+ */
+export function emitStringBuilderAppendCodeUnit(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  sb: StringBuilderInfo,
+): void {
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const nextCapIdx = lookupModuleFuncByName(ctx, "__str_buf_next_cap");
+  if (nextCapIdx < 0) {
+    // Defensive: helper must exist (emitted by compileStringBuilderInit).
+    // Drop the code unit and bail so codegen continues; validation surfaces it.
+    fctx.body.push({ op: "drop" } as Instr);
+    return;
+  }
+
+  // Stack on entry: cu (i32 code unit). Stash it.
+  const cuLocal = allocLocal(fctx, `__sb_cu_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: cuLocal } as Instr);
+
+  // needed = sb.len + 1
+  const neededLocal = allocLocal(fctx, `__sb_needed1_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: neededLocal } as Instr);
+
+  // if (needed > sb.cap) grow — identical doubling policy to the bulk append.
+  const oldBufTmp = allocLocal(fctx, `__sb_oldBuf1_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: strDataTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.capLocalIdx } as Instr);
+  fctx.body.push({ op: "i32.gt_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: sb.capLocalIdx } as Instr,
+      { op: "local.get", index: neededLocal } as Instr,
+      { op: "call", funcIdx: nextCapIdx } as Instr,
+      { op: "local.set", index: sb.capLocalIdx } as Instr,
+      { op: "local.get", index: sb.bufLocalIdx } as Instr,
+      { op: "local.set", index: oldBufTmp } as Instr,
+      { op: "local.get", index: sb.capLocalIdx } as Instr,
+      { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+      { op: "local.set", index: sb.bufLocalIdx } as Instr,
+      { op: "local.get", index: sb.bufLocalIdx } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: oldBufTmp } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: sb.lenLocalIdx } as Instr,
+      { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx } as Instr,
+    ],
+  } as Instr);
+
+  // sb.buf[sb.len] = cu
+  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx } as Instr);
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: cuLocal } as Instr);
+  fctx.body.push({ op: "array.set", typeIdx: strDataTypeIdx } as Instr);
+
+  // sb.len = needed
+  fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: sb.lenLocalIdx } as Instr);
+
+  // sb.mat = null
+  fctx.body.push({ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: sb.materializedLocalIdx } as Instr);
+}
+
+/**
  * Materialize the current contents of a string builder into a `ref $NativeString`
  * (compatible with `ref $AnyString`). Pushes the materialized ref onto the
  * stack. Caches the result in `sb.mat` so repeated reads (e.g.
@@ -515,22 +615,55 @@ export function compileStringBuilderAppend(
  */
 export function emitStringBuilderRead(ctx: CodegenContext, fctx: FunctionContext, sb: StringBuilderInfo): ValType {
   const flatStrTypeIdx = ctx.nativeStrTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
 
-  // Materialize a fresh `$NativeString` view of the current builder state on
-  // every read. `$NativeString.len` is `mutable: false`, so we cannot patch a
-  // cached struct after a `+=` advances `sb.len`; an invalidate-on-append
-  // cache is possible but adds bookkeeping for negligible savings (the
-  // struct allocation is a 24-byte stack-like alloc and reads are usually
-  // followed immediately by `struct.get`/`charCodeAt`, which dominates).
-  // The dominant cost we optimize — the per-iteration `+=` — is unaffected.
-  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: flatStrTypeIdx } as Instr);
-  // `materializedLocalIdx` is reserved for a future invalidate-on-append
-  // cache; not used today.
-  void sb.materializedLocalIdx;
+  // #1580: cache a materialized `$NativeString` view in `sb.mat` and reuse
+  // it on subsequent reads until the next `+=` invalidates the cache (see
+  // `compileStringBuilderAppend` step 7, which sets `sb.mat = null`).
+  //
+  // Without caching, a hot loop like `for (let i=0;i<s.length;i++)
+  // hash = hash*31 + s.charCodeAt(i)` allocates two structs per iteration
+  // (one for `.length`, one for `.charCodeAt`). On a 20k-character builder
+  // that's 40,000 allocations — wasm-opt's SROA collapses them in `-O3`,
+  // but the unoptimized emitter pays the full cost (≈25ms on the
+  // string-hash benchmark vs. ≈20ms with caching, with V8 at ~1ms warm).
+  //
+  // Emit:
+  //   if (sb.mat == null) {
+  //     sb.mat = struct.new $NativeString(sb.len, 0, sb.buf)
+  //   }
+  //   <result> = sb.mat ref.as_non_null
+  //
+  // Note: `$NativeString.len` is non-mutable, so we cannot patch a cached
+  // struct in place after a `+=`. The append path invalidates the cache by
+  // writing null. The branch is monomorphic in steady-state — predictable
+  // for the engine, and `ref.as_non_null` is essentially free.
+  //
+  // The cache is typed as `ref null $AnyString` so we widen `$NativeString
+  // <: $AnyString` when caching, and narrow back on read.
+  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // sb.mat = struct.new $NativeString(sb.len, 0, sb.buf)
+      { op: "local.get", index: sb.lenLocalIdx } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: sb.bufLocalIdx } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.new", typeIdx: flatStrTypeIdx } as Instr,
+      { op: "local.set", index: sb.materializedLocalIdx } as Instr,
+    ],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx } as Instr);
+  // The cache slot is typed `ref null $AnyString`. Use `ref.cast` (non-null
+  // variant) to narrow to `ref $NativeString` so callers that expect
+  // `flatStringType(ctx)` (charCodeAt, charAt, ...) can do
+  // `struct.get $NativeString.<field>` directly. The `if` block above
+  // guarantees the slot is non-null on the fall-through path.
+  fctx.body.push({ op: "ref.cast", typeIdx: flatStrTypeIdx } as Instr);
+  void anyStrTypeIdx;
   return { kind: "ref", typeIdx: flatStrTypeIdx };
 }
 

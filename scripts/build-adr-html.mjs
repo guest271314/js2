@@ -41,7 +41,6 @@ function htmlShell({ title, body }) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script defer src="../../frame-nav-sync.js"></script>
   <title>${escapeHtml(title)} — js2wasm</title>
   <link rel="icon" href="../../js2logo.svg" type="image/svg+xml" />
   <style>
@@ -147,7 +146,7 @@ function htmlShell({ title, body }) {
     ${body}
   </main>
   <div class="footer">
-    Source: <a href="https://github.com/loopdive/js2wasm/tree/main/docs/adr">docs/adr/</a> on GitHub.
+    Source: <a href="https://github.com/loopdive/js2/tree/main/docs/adr">docs/adr/</a> on GitHub.
   </div>
   <script src="../../components/site-nav.js"></script>
 </body>

@@ -9,13 +9,32 @@
 import type { Instr } from "../ir/types.js";
 
 /**
- * Recursively walk all instructions in `instrs`, calling `visitor` on each one.
- * Automatically recurses into nested blocks: body, then, else, catches, catchAll.
+ * Walk all instructions in `instrs`, calling `visitor` on each one.
+ * Automatically descends into nested blocks: body, then, else, catches, catchAll.
+ *
+ * Implemented iteratively with an explicit frame stack so the JS call stack
+ * depth is O(1) regardless of Wasm block nesting. This matters because the
+ * walker runs synchronously inside already-deep codegen frames (via
+ * flushLateImportShifts → shiftLateImportIndices), and recursive composition
+ * with the compile stack tripped V8 stack limits under tight CI cgroup
+ * budgets. Pre-order semantics preserved: visit(instr) fires before recursion
+ * into its children, and siblings are visited in source order.
  */
 export function walkInstructions(instrs: Instr[], visitor: (instr: Instr) => void): void {
-  for (const instr of instrs) {
+  const stack: { arr: Instr[]; i: number }[] = [{ arr: instrs, i: 0 }];
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    if (top.i >= top.arr.length) {
+      stack.pop();
+      continue;
+    }
+    const instr = top.arr[top.i++]!;
     visitor(instr);
-    walkChildren(instr, (child) => walkInstructions(child, visitor));
+    const children: Instr[][] = [];
+    walkChildren(instr, (c) => children.push(c));
+    for (let j = children.length - 1; j >= 0; j--) {
+      stack.push({ arr: children[j]!, i: 0 });
+    }
   }
 }
 

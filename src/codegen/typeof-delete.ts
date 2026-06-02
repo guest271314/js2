@@ -88,6 +88,27 @@ export function compileDeleteExpression(
     return { kind: "i32" };
   }
 
+  // (#1511) `delete arguments[i]` on a mapped index severs the param↔arguments
+  // mapping for that slot (ECMA-262 §10.4.4.5 step 5.b): after a successful
+  // delete the property no longer mirrors the named parameter. Record the
+  // statically-resolvable case (literal index on the `arguments` identifier in
+  // a mapped-args function) so the mapped-sync emitters skip it from here on.
+  // This only updates compile-time bookkeeping; the actual element delete is
+  // emitted by the element-access paths below.
+  if (
+    fctx.mappedArgsInfo &&
+    ts.isElementAccessExpression(inner) &&
+    ts.isIdentifier(inner.expression) &&
+    inner.expression.text === "arguments"
+  ) {
+    const idxArg = inner.argumentExpression;
+    const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
+    const argIndex = idxText !== undefined ? Number(idxText) : NaN;
+    if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+    }
+  }
+
   // Try to resolve struct type and field for property access: delete obj.prop
   if (ts.isPropertyAccessExpression(inner)) {
     const objType = ctx.checker.getTypeAtLocation(inner.expression);
@@ -285,6 +306,18 @@ export function compileDeleteExpression(
  * The pattern and flags strings are loaded from the string pool, then RegExp_new is called.
  */
 export function compileRegExpLiteral(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): ValType | null {
+  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
+  // regex engine yet. Refuse in --target standalone (Phase 1: refuse-and-document).
+  if (ctx.standalone) {
+    reportError(
+      ctx,
+      expr,
+      "Codegen error: RegExp literals are not supported in --target standalone (#1474). " +
+        "Recompile without --target standalone, or replace the regex with " +
+        "String.prototype.{indexOf, startsWith, slice}.",
+    );
+    return null;
+  }
   const { pattern, flags } = parseRegExpLiteral(expr.getText());
 
   // Load pattern string

@@ -7,6 +7,7 @@
 import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
+import { isStrictFunction } from "../helpers/is-strict-function.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import {
   collectFunctionOwnLocals,
@@ -18,7 +19,7 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
-import { emitThrowString } from "../expressions/helpers.js";
+import { emitThrowReferenceError, emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
   compileClassBodies,
@@ -43,6 +44,34 @@ import {
   registerHoistFunctionDeclarations,
 } from "../shared.js";
 
+/**
+ * §15.7.1 ClassDefinitionEvaluation: the class name binding is added to the
+ * class's inner scope AFTER the `extends` clause is evaluated. Referencing the
+ * class name inside its own `extends` expression therefore hits the TDZ and
+ * must throw ReferenceError (e.g. `class x extends x {}`). Returns true if the
+ * extends heritage clause contains an identifier equal to the class name.
+ */
+function extendsReferencesClassName(decl: ts.ClassDeclaration, className: string): boolean {
+  if (!decl.heritageClauses) return false;
+  for (const clause of decl.heritageClauses) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    for (const typeNode of clause.types) {
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (found) return;
+        if (ts.isIdentifier(node) && node.text === className) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeNode.expression);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
 export function compileNestedClassDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -51,12 +80,19 @@ export function compileNestedClassDeclaration(
   if (!decl.name) return;
   const className = decl.name.text;
 
+  // §15.7.1: the class name is in TDZ while its own `extends` clause is
+  // evaluated. `class x extends x {}` must throw ReferenceError (#1594B).
+  if (extendsReferencesClassName(decl, className)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${className}' before initialization`);
+    return;
+  }
+
   const isDeferred = ctx.deferredClassBodies.has(className);
   // Skip if already collected AND not deferred (already fully compiled)
   if (ctx.structMap.has(className) && !isDeferred) {
     // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
     if (ctx.classThrowsOnEval.has(className)) {
-      emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+      emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
       return;
     }
     return;
@@ -71,7 +107,7 @@ export function compileNestedClassDeclaration(
     // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
     // Check after collection since collectClassDeclaration sets the flag.
     if (ctx.classThrowsOnEval.has(className)) {
-      emitThrowString(ctx, fctx, "TypeError: Classes may not have a static property named 'prototype'");
+      emitThrowTypeError(ctx, fctx, "Classes may not have a static property named 'prototype'");
       return;
     }
 
@@ -213,6 +249,21 @@ export function compileNestedFunctionDeclaration(
   }[] = [];
   for (const name of referencedNames) {
     if (ownLocals.has(name)) continue;
+    // (#1702) A nested `FunctionDeclaration` establishes its OWN `this`
+    // binding per ECMA-262 §10.2.1.1 (OrdinaryCallBindThis) — `this` is
+    // never lexically captured the way an arrow function inherits it. When
+    // such a function is invoked without a receiver (e.g. a plain `inner()`
+    // call inside a class method body or another function), its `this` is
+    // `undefined` in strict code, NOT the enclosing method's receiver.
+    // Capturing the outer `this` here threaded the method's instance into
+    // the lifted body as param 0, so `inner()` saw the instance instead of
+    // `undefined` — the class-method half of the #873/#895 strict-`this`
+    // residual. Skipping `this`/`super` lets `ThisKeyword` fall through to
+    // the `undefined` / `__current_this` resolution path, which is correct
+    // for a free function. (Arrow functions are compiled via closures.ts,
+    // which keeps lexical `this` capture — this branch only handles
+    // `FunctionDeclaration`s.)
+    if (name === "this" || name === "super") continue;
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
     if (ctx.funcMap.has(name)) continue;
@@ -352,7 +403,7 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt));
     }
 
     if (isGenerator) {
@@ -366,7 +417,7 @@ export function compileNestedFunctionDeclaration(
       const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
       liftedFctx.body.push({ op: "call", funcIdx: createBufIdx });
       liftedFctx.body.push({ op: "local.set", index: bufferLocal });
-      liftedFctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+      liftedFctx.body.push({ op: "ref.null.extern" });
       liftedFctx.body.push({ op: "local.set", index: pendingThrowLocal });
 
       const bodyInstrs: Instr[] = [];
@@ -392,13 +443,10 @@ export function compileNestedFunctionDeclaration(
       // Wrap generator body block in try/catch to capture exceptions as pending throw
       const tagIdx = ensureExnTag(ctx);
       const getCaughtIdx = ctx.funcMap.get("__get_caught_exception");
-      const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal } as unknown as Instr];
+      const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
       const catchAllBody: Instr[] =
         getCaughtIdx !== undefined
-          ? [
-              { op: "call", funcIdx: getCaughtIdx } as Instr,
-              { op: "local.set", index: pendingThrowLocal } as unknown as Instr,
-            ]
+          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
           : [];
       liftedFctx.body.push({
         op: "try",
@@ -406,7 +454,7 @@ export function compileNestedFunctionDeclaration(
         body: [{ op: "block", blockType: { kind: "empty" }, body: bodyInstrs }],
         catches: [{ tagIdx, body: catchBody }],
         catchAll: catchAllBody.length > 0 ? catchAllBody : undefined,
-      } as unknown as Instr);
+      });
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
@@ -593,7 +641,7 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length);
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, isStrictFunction(stmt));
     }
 
     if (isGenerator) {
@@ -607,7 +655,7 @@ export function compileNestedFunctionDeclaration(
       const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
       liftedFctx.body.push({ op: "call", funcIdx: createBufIdx });
       liftedFctx.body.push({ op: "local.set", index: bufferLocal });
-      liftedFctx.body.push({ op: "ref.null.extern" } as unknown as Instr);
+      liftedFctx.body.push({ op: "ref.null.extern" });
       liftedFctx.body.push({ op: "local.set", index: pendingThrowLocal });
 
       const bodyInstrs: Instr[] = [];
@@ -633,13 +681,10 @@ export function compileNestedFunctionDeclaration(
       // Wrap generator body block in try/catch to capture exceptions as pending throw
       const tagIdx = ensureExnTag(ctx);
       const getCaughtIdx = ctx.funcMap.get("__get_caught_exception");
-      const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal } as unknown as Instr];
+      const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
       const catchAllBody: Instr[] =
         getCaughtIdx !== undefined
-          ? [
-              { op: "call", funcIdx: getCaughtIdx } as Instr,
-              { op: "local.set", index: pendingThrowLocal } as unknown as Instr,
-            ]
+          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
           : [];
       liftedFctx.body.push({
         op: "try",
@@ -647,7 +692,7 @@ export function compileNestedFunctionDeclaration(
         body: [{ op: "block", blockType: { kind: "empty" }, body: bodyInstrs }],
         catches: [{ tagIdx, body: catchBody }],
         catchAll: catchAllBody.length > 0 ? catchAllBody : undefined,
-      } as unknown as Instr);
+      });
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
@@ -854,8 +899,8 @@ function emitDefaultParamInit(
       // This distinguishes missing args from explicit NaN/0/any other value.
       // Sentinel: 0x7FF00000DEADC0DE (emitted by pushDefaultValue).
       liftedFctx.body.push({ op: "local.get", index: paramIdx });
-      liftedFctx.body.push({ op: "i64.reinterpret_f64" } as unknown as Instr);
-      liftedFctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den } as unknown as Instr);
+      liftedFctx.body.push({ op: "i64.reinterpret_f64" });
+      liftedFctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
       liftedFctx.body.push({ op: "i64.eq" });
       liftedFctx.body.push({
         op: "if",
@@ -940,6 +985,29 @@ export function ensureArgcGlobal(ctx: CodegenContext): number {
     init: [{ op: "i32.const", value: -1 }],
   });
   ctx.argcGlobalIdx = globalIdx;
+  return globalIdx;
+}
+
+/**
+ * (#1636-S1) Lazily register a `(mut externref)` module global
+ * `__current_this` used by `__call_fn_method_N` to thread a host-supplied
+ * `this`-value into a Wasm closure body. The dispatcher save+restores the
+ * previous value across the inner `call_ref`, and `ThisKeyword` resolution
+ * reads this global when no local `this` binding is in scope (free-closure
+ * fallback). Default value is `ref.null.extern` (= JS `null`), which is
+ * compatible with the prior "undefined fallback" behaviour for the vast
+ * majority of references that compare strictly against null/undefined.
+ */
+export function ensureCurrentThisGlobal(ctx: CodegenContext): number {
+  if (ctx.currentThisGlobalIdx >= 0) return ctx.currentThisGlobalIdx;
+  const globalIdx = nextModuleGlobalIdx(ctx);
+  ctx.mod.globals.push({
+    name: "__current_this",
+    type: { kind: "externref" },
+    mutable: true,
+    init: [{ op: "ref.null.extern" } as Instr],
+  });
+  ctx.currentThisGlobalIdx = globalIdx;
   return globalIdx;
 }
 
@@ -1159,6 +1227,7 @@ export function emitArgumentsObject(
   fctx: FunctionContext,
   paramTypes: ValType[],
   paramOffset: number,
+  unmapped = false,
 ): void {
   const numArgs = paramTypes.length;
   const elemType: ValType = { kind: "externref" };
@@ -1176,15 +1245,19 @@ export function emitArgumentsObject(
     flushLateImportShifts(ctx, fctx);
   }
 
-  // Set up mapped arguments info for param ↔ arguments bidirectional sync (#849)
-  fctx.mappedArgsInfo = {
-    argsLocalIdx: argsLocal,
-    arrTypeIdx: ati,
-    vecTypeIdx: vti,
-    paramCount: numArgs,
-    paramOffset,
-    paramTypes: paramTypes.slice(),
-  };
+  // Set up mapped arguments info for param ↔ arguments bidirectional sync (#849).
+  // Strict-mode functions get an *unmapped* arguments object (§10.4.4): skip the
+  // sync so writes to `arguments[i]` don't reflect into the named param (#779e).
+  if (!unmapped) {
+    fctx.mappedArgsInfo = {
+      argsLocalIdx: argsLocal,
+      arrTypeIdx: ati,
+      vecTypeIdx: vti,
+      paramCount: numArgs,
+      paramOffset,
+      paramTypes: paramTypes.slice(),
+    };
+  }
 
   // Build the arguments vec by concatenating formal params with
   // extras delivered via the __extras_argv global (#1053).

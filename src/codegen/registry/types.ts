@@ -237,4 +237,33 @@ export function registerNativeStringTypes(ctx: CodegenContext): void {
     ],
     superTypeIdx: ctx.anyStrTypeIdx,
   });
+
+  // #1588 PR-B: dual i8/i16 storage. Only register the UTF-8 backing array +
+  // `Utf8String` subtype when `--utf8-storage` is on. When off, the type table
+  // is unchanged so emitted Wasm is byte-identical to today.
+  if (ctx.utf8Storage) {
+    ctx.utf8StrDataTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({
+      kind: "array",
+      name: "__str_data_u8",
+      element: { kind: "i8" },
+      mutable: true,
+    });
+
+    ctx.utf8StrTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({
+      kind: "struct",
+      name: "Utf8String",
+      fields: [
+        // JS-visible code-unit (UTF-16) length — preserves observable
+        // `.length` / indexing / comparison semantics (issue Non-goals).
+        { name: "len", type: { kind: "i32" }, mutable: false },
+        // Canonical-ABI byte length (>= len for multi-byte scalars; == len for ascii).
+        { name: "byteLen", type: { kind: "i32" }, mutable: false },
+        { name: "off", type: { kind: "i32" }, mutable: false },
+        { name: "data", type: { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx }, mutable: false },
+      ],
+      superTypeIdx: ctx.anyStrTypeIdx,
+    });
+  }
 }

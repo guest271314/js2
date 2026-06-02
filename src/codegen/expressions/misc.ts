@@ -262,7 +262,16 @@ function compileYieldExpression(ctx: CodegenContext, fctx: FunctionContext, expr
  * Handles: numeric literals, NaN, Infinity, -Infinity, object-with-valueOf, {}.
  * Returns undefined if the value cannot be determined at compile time.
  */
-export function tryStaticToNumber(ctx: CodegenContext, expr: ts.Expression): number | undefined {
+export function tryStaticToNumber(
+  ctx: CodegenContext,
+  expr: ts.Expression,
+  // #1607: guard against self-referential lexical initializers (TDZ), e.g.
+  // `const x = x;` or `await using x = x + 1;`. Tracing an identifier back to
+  // its own declaration initializer would otherwise recurse forever and blow
+  // the JS call stack during codegen. We record each variable-declaration node
+  // we trace through and refuse to re-enter one already on the current path.
+  visitedDecls?: Set<ts.Node>,
+): number | undefined {
   // Numeric literal
   if (ts.isNumericLiteral(expr)) return Number(expr.text);
   // String literal → ToNumber: "" → 0, "123" → 123, "abc" → NaN
@@ -280,7 +289,7 @@ export function tryStaticToNumber(ctx: CodegenContext, expr: ts.Expression): num
   if (ts.isIdentifier(expr) && expr.text === "Infinity") return Infinity;
   // -Infinity: prefix minus on Infinity
   if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.MinusToken) {
-    const inner = tryStaticToNumber(ctx, expr.operand);
+    const inner = tryStaticToNumber(ctx, expr.operand, visitedDecls);
     if (inner !== undefined) return -inner;
   }
   // Binary expressions: fold constant operands at compile time
@@ -295,8 +304,8 @@ export function tryStaticToNumber(ctx: CodegenContext, expr: ts.Expression): num
     ) {
       return undefined;
     }
-    const left = tryStaticToNumber(ctx, expr.left);
-    const right = tryStaticToNumber(ctx, expr.right);
+    const left = tryStaticToNumber(ctx, expr.left, visitedDecls);
+    const right = tryStaticToNumber(ctx, expr.right, visitedDecls);
     if (left !== undefined && right !== undefined) {
       switch (expr.operatorToken.kind) {
         case ts.SyntaxKind.PlusToken: {
@@ -423,11 +432,11 @@ export function tryStaticToNumber(ctx: CodegenContext, expr: ts.Expression): num
   }
   // Parenthesized expression: unwrap parentheses
   if (ts.isParenthesizedExpression(expr)) {
-    return tryStaticToNumber(ctx, expr.expression);
+    return tryStaticToNumber(ctx, expr.expression, visitedDecls);
   }
   // Unary + (ToNumber coercion): +expr
   if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.PlusToken) {
-    return tryStaticToNumber(ctx, expr.operand);
+    return tryStaticToNumber(ctx, expr.operand, visitedDecls);
   }
   // Variable: trace to initializer (only for const declarations to avoid
   // incorrectly folding mutable variables like `let heapSize = 0`).
@@ -443,11 +452,19 @@ export function tryStaticToNumber(ctx: CodegenContext, expr: ts.Expression): num
     if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
       const declList = decl.parent;
       if (ts.isVariableDeclarationList(declList) && (declList.flags & ts.NodeFlags.Const) !== 0) {
+        // #1607: self-referential lexical initializer (TDZ). If we are already
+        // tracing through this exact declaration, the initializer names the
+        // very binding it declares (`const x = x;`, `await using x = x + 1;`).
+        // Resolving it statically would recurse forever — bail to runtime,
+        // which emits the spec-required TDZ ReferenceError.
+        const seen = visitedDecls ?? new Set<ts.Node>();
+        if (seen.has(decl)) return undefined;
+        seen.add(decl);
         const init = decl.initializer;
         if (ts.isObjectLiteralExpression(init) || ts.isArrayLiteralExpression(init)) {
           return undefined;
         }
-        return tryStaticToNumber(ctx, init);
+        return tryStaticToNumber(ctx, init, seen);
       }
     }
   }

@@ -14,7 +14,10 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ### Conformance
 
-- **17,252 / 48,088** test262 tests passing (**35.9%** of the full ECMAScript conformance suite)
+<!-- AUTO:conformance-start -->
+**test262 conformance**: 30,214 / 43,135 (70.0 %) — baseline 9ee8e921, 2026-05-29T00:58:42Z
+<!-- AUTO:conformance-end -->
+
 - Automated conformance tracking with historical trend data and a public [conformance report](https://loopdive.github.io/js2wasm/benchmarks/report.html)
 - 195 project-level equivalence tests validating JS↔Wasm output parity
 
@@ -80,9 +83,9 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 
 ## Why This Matters for Digital Sovereignty
 
-### Independence from Proprietary JS Engines
+### Independence from Heavyweight JS Engines
 
-Today, running JavaScript on the server or at the edge requires one of three proprietary engines: Google's V8, Apple's JavaScriptCore, or Mozilla's SpiderMonkey. js2wasm eliminates this dependency entirely — compiled Wasm modules run on **any** standards-compliant WebAssembly runtime, including fully open-source options like Wasmtime and wazero.
+Today, running JavaScript on the server or at the edge in practice means embedding one of three large, vendor-led engines: Google's V8, Apple's JavaScriptCore, or Mozilla's SpiderMonkey. All three are open source (V8 and JavaScriptCore under BSD-style licenses, SpiderMonkey under the MPL), but each is a megabyte-scale engine governed by a single major vendor, and embedding one means shipping and initializing that whole engine. js2wasm removes that dependency: compiled Wasm modules run on **any** standards-compliant WebAssembly runtime, including lightweight, independently governed options like Wasmtime and wazero — no bundled engine required.
 
 ### Open Standards, No Vendor Lock-In
 
@@ -124,7 +127,7 @@ Compute-intensive workloads (fibonacci, loops, array operations) already match o
 
 ## Get Involved
 
-- **Repository**: [github.com/loopdive/js2wasm](https://github.com/loopdive/js2wasm)
+- **Repository**: [github.com/loopdive/js2](https://github.com/loopdive/js2)
 - **Playground**: [Live demo](https://loopdive.github.io/js2wasm/playground/)
 - **Conformance report**: [Historical compatibility tracking](https://loopdive.github.io/js2wasm/benchmarks/report.html)
 - **License**: Apache 2.0 with LLVM Exceptions

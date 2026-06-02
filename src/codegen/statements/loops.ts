@@ -1,14 +1,16 @@
+import { isStringType } from "../../checker/type-mapper.js";
+import type { Instr, ValType } from "../../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Loop statement lowering: while, for, do-while, for-of, for-in.
  */
-import { ts, forEachChild } from "../../ts-api.js";
-import { isStringType } from "../../checker/type-mapper.js";
-import type { Instr, ValType } from "../../ir/types.js";
+import { forEachChild, ts } from "../../ts-api.js";
+import { collectReferencedIdentifiers } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError, reportErrorNoNode } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { emitExternrefDestructureGuard } from "../destructuring-params.js";
 import {
   findUnresolvableInArrayPattern,
   findUnresolvableInObjectPattern,
@@ -16,7 +18,6 @@ import {
 } from "../expressions/assignment.js";
 import { emitCoercedLocalSet } from "../expressions/helpers.js";
 import { shiftLateImportIndices } from "../expressions/late-imports.js";
-import { emitExternrefDestructureGuard } from "../destructuring-params.js";
 import {
   addIteratorImports,
   ensureI32Condition,
@@ -26,7 +27,7 @@ import {
 } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec } from "../registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -36,15 +37,20 @@ import {
 } from "../shared.js";
 import {
   compileArrayDestructuring,
+  arrayDstrNeedsIdentity,
   compileExternrefArrayDestructuringDecl,
   compileExternrefObjectDestructuringDecl,
   compileObjectDestructuring,
   emitDefaultValueCheck,
   emitNullGuard,
   ensureAsyncIterator,
+  ensureExternIsUndefined,
   syncDestructuredLocalsToGlobals,
+  tryEmitArrayProtoIteratorReadDrive,
 } from "./destructuring.js";
+import { arrayIteratorOverrideGlobalIdx } from "../expressions/proto-override.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
+import { collectPatternBindingNames } from "./tdz.js";
 
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
@@ -292,36 +298,175 @@ function loopBodyMutatesIndexOrArray(body: ts.Statement, indexName: string, arra
   return mutates;
 }
 
+/**
+ * #1453: Per-iteration fresh binding detection for `for (let X = …; …; …)`.
+ *
+ * Per ECMA-262 §14.7.4.4 (CreatePerIterationEnvironment), each iteration of
+ * a `for` with let/const head bindings runs against a freshly-allocated
+ * binding initialised from the previous iteration's value. Closures captured
+ * inside the body therefore see distinct bindings.
+ *
+ * Detect which head-binding names are referenced from a nested closure (arrow,
+ * function expression/declaration, method, class) anywhere in the loop's
+ * condition, incrementor, or body. Names with no closure capture keep the
+ * single-local fast path; captured names get boxed as ref-cells and the
+ * codegen allocates a fresh cell at the iteration boundary.
+ *
+ * `collectReferencedIdentifiers` is scope-aware (tracks shadowing across
+ * nested function boundaries), so a reference to `i` inside a nested
+ * function that re-binds `i` is correctly ignored.
+ */
+function findHeadBindingsCapturedByClosures(stmt: ts.ForStatement, headNames: ReadonlySet<string>): Set<string> {
+  const captured = new Set<string>();
+  if (headNames.size === 0) return captured;
+  function visit(node: ts.Node | undefined): void {
+    if (!node) return;
+    if (
+      ts.isArrowFunction(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      // Scope-aware reference collection over the entire nested subtree.
+      const refs = new Set<string>();
+      collectReferencedIdentifiers(node, refs);
+      for (const n of headNames) {
+        if (refs.has(n)) captured.add(n);
+      }
+      return; // collectReferencedIdentifiers already walked deeper closures.
+    }
+    forEachChild(node, visit);
+  }
+  // Walk condition + incrementor + body. Closures may appear in any of them
+  // (e.g. `for (let i=0; (f = () => i, true); i++) {}`).
+  visit(stmt.condition);
+  visit(stmt.incrementor);
+  visit(stmt.statement);
+  return captured;
+}
+
+/**
+ * #1589: Find every identifier name that appears inside a nested closure
+ * anywhere in the for-loop's condition/incrementor/body. Used to pre-emptively
+ * box outer-scope (`var`-declared or enclosing-function) variables before
+ * compiling the loop condition.
+ *
+ * Without this pre-pass, the closure-construction codegen promotes the
+ * variable to a ref-cell mid-loop. The loop condition (compiled first) reads
+ * the original unboxed slot, while the incrementor (compiled after the body)
+ * writes through the ref cell — so the condition's view never updates and the
+ * loop spins forever.
+ */
+function findAllNamesCapturedByClosuresInForLoop(stmt: ts.ForStatement): Set<string> {
+  const captured = new Set<string>();
+  function visit(node: ts.Node | undefined): void {
+    if (!node) return;
+    if (
+      ts.isArrowFunction(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      const refs = new Set<string>();
+      collectReferencedIdentifiers(node, refs);
+      for (const n of refs) captured.add(n);
+      return;
+    }
+    forEachChild(node, visit);
+  }
+  visit(stmt.condition);
+  visit(stmt.incrementor);
+  visit(stmt.statement);
+  return captured;
+}
+
+/**
+ * Collect names that are lexically declared (`let`/`const`/`using`, class,
+ * or function) at the top level of the loop body — i.e. block-scoped bindings
+ * that belong to each iteration's environment rather than to an outer scope.
+ *
+ * The #1589 pre-box pass is only meant for `var`-declared or enclosing-function
+ * variables. A body-local `let`/`const` captured by a closure already gets a
+ * fresh per-iteration cell via the body declaration + closure-construction
+ * path; pre-boxing it at the loop head is semantically wrong (the binding does
+ * not exist yet) and conflates the hoisted value slot with the ref cell,
+ * emitting `ref.is_null` over an f64 local (invalid wasm). We exclude these.
+ *
+ * We do NOT descend into nested closures or nested blocks/loops: only bindings
+ * whose scope is the loop body's own lexical environment matter here.
+ */
+function findBodyLocalLexicalNames(stmt: ts.ForStatement): Set<string> {
+  const names = new Set<string>();
+  const body = stmt.statement;
+  const statements = ts.isBlock(body) ? body.statements : [body];
+  for (const s of statements) {
+    if (ts.isVariableStatement(s)) {
+      const isLexical =
+        (s.declarationList.flags &
+          (ts.NodeFlags.Let | ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)) !==
+        0;
+      if (!isLexical) continue;
+      for (const decl of s.declarationList.declarations) {
+        for (const n of collectPatternBindingNames(decl.name)) names.add(n);
+      }
+    } else if (ts.isFunctionDeclaration(s) && s.name) {
+      names.add(s.name.text);
+    } else if (ts.isClassDeclaration(s) && s.name) {
+      names.add(s.name.text);
+    }
+  }
+  return names;
+}
+
 export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForStatement): void {
   // Save localMap entries for let/const initializers that shadow outer variables.
   // `for (let x = ...; ...)` creates a block scope that ends after the loop.
   let savedForScope: Map<string, number> | null = null;
   let savedForTdz: Map<string, number> | null = null;
   let savedForConstBindings: Map<string, boolean> | null = null;
+  // #1453: Save existing boxedCaptures entries that we will overwrite when
+  // boxing per-iteration cells. `undefined` means the name had no prior entry.
+  let savedForBoxedCaptures: Map<string, { refCellTypeIdx: number; valType: ValType } | undefined> | null = null;
   if (
     stmt.initializer &&
     ts.isVariableDeclarationList(stmt.initializer) &&
     stmt.initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)
   ) {
+    // #1452 — walk every name introduced by the declaration. The legacy
+    // path only covered `ts.isIdentifier(decl.name)`, leaving array /
+    // object / nested / rest binding-pattern bindings out of the
+    // shadow-tracking. The result was that `for (let [x] = [...]) ...`
+    // leaked `x` into the outer scope after the loop terminated.
+    const introducedNames: string[] = [];
     for (const decl of stmt.initializer.declarations) {
-      if (ts.isIdentifier(decl.name)) {
-        const name = decl.name.text;
-        if (!savedForConstBindings) savedForConstBindings = new Map();
-        savedForConstBindings.set(name, fctx.constBindings?.has(name) ?? false);
-        fctx.constBindings?.delete(name);
+      for (const n of collectPatternBindingNames(decl.name)) {
+        introducedNames.push(n);
+      }
+    }
+    for (const name of introducedNames) {
+      if (!savedForConstBindings) savedForConstBindings = new Map();
+      savedForConstBindings.set(name, fctx.constBindings?.has(name) ?? false);
+      fctx.constBindings?.delete(name);
 
-        const existing = fctx.localMap.get(name);
-        if (existing !== undefined) {
-          if (!savedForScope) savedForScope = new Map();
-          savedForScope.set(name, existing);
-          fctx.localMap.delete(name);
-        }
-        const existingTdz = fctx.tdzFlagLocals?.get(name);
-        if (existingTdz !== undefined) {
-          if (!savedForTdz) savedForTdz = new Map();
-          savedForTdz.set(name, existingTdz);
-          fctx.tdzFlagLocals?.delete(name);
-        }
+      const existing = fctx.localMap.get(name);
+      if (existing !== undefined) {
+        if (!savedForScope) savedForScope = new Map();
+        savedForScope.set(name, existing);
+        fctx.localMap.delete(name);
+      }
+      const existingTdz = fctx.tdzFlagLocals?.get(name);
+      if (existingTdz !== undefined) {
+        if (!savedForTdz) savedForTdz = new Map();
+        savedForTdz.set(name, existingTdz);
+        fctx.tdzFlagLocals?.delete(name);
       }
     }
   }
@@ -344,7 +489,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
         // Check if this variable is a module-level global (e.g., for(var i...)
         // at the top level). If so, use global.set instead of local.set.
-        const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+        // #1745: a function-local of the same name (hoisted by
+        // hoistVarDeclarations for a `var` inside a function/closure body)
+        // SHADOWS the module global per ECMA-262 §10.2.10 — bind to the local
+        // and fall through. Otherwise a `for (var i = <arrayExpr>; ...)` inside
+        // a closure whose `i` collides with a differently-typed top-level
+        // module global `i` would `global.set` an incompatible value type into
+        // the global → invalid Wasm.
+        const hasLocalShadow = fctx.localMap.has(name);
+        const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
         if (moduleGlobalIdx !== undefined) {
           if (decl.initializer) {
             const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleGlobalIdx)];
@@ -431,6 +584,161 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
     }
   }
 
+  // #1453: Per-iteration fresh binding for `for (let/const X = ...)`.
+  //
+  // ECMA-262 §14.7.4.4 (CreatePerIterationEnvironment) requires that each
+  // iteration of a let/const for-loop runs with a fresh binding initialised
+  // to the previous iteration's value, so closures captured inside the body
+  // observe distinct bindings (not the final post-loop value).
+  //
+  // Strategy: for every head identifier name captured by a nested closure
+  // anywhere in the loop's condition/incrementor/body, box the binding into
+  // a ref-cell (struct { value: T }) sourced by an outer "boxed local". The
+  // initial value is wrapped at loop entry. At the iteration boundary
+  // (between body and incrementor), we struct.new a fresh cell with the
+  // current value and re-aim the boxed local to it — closures captured in
+  // earlier iterations keep their original cell. This implements the spec
+  // semantics while letting non-capturing loops keep the fast single-local
+  // path unchanged.
+  const perIterCells: {
+    name: string;
+    refCellTypeIdx: number;
+    boxedLocal: number;
+  }[] = [];
+  if (
+    stmt.initializer &&
+    ts.isVariableDeclarationList(stmt.initializer) &&
+    stmt.initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)
+  ) {
+    const headNames = new Set<string>();
+    for (const decl of stmt.initializer.declarations) {
+      // Only identifier bindings — destructuring patterns are out of scope
+      // for this pass (the existing initializer code emits their bindings
+      // directly into locals, and per-iteration freshness for destructured
+      // names is rare enough to defer).
+      if (ts.isIdentifier(decl.name)) headNames.add(decl.name.text);
+    }
+    const perIterationNames = findHeadBindingsCapturedByClosures(stmt, headNames);
+    for (const name of perIterationNames) {
+      const oldLocalIdx = fctx.localMap.get(name);
+      if (oldLocalIdx === undefined) continue;
+      const oldType =
+        oldLocalIdx < fctx.params.length
+          ? fctx.params[oldLocalIdx]!.type
+          : (fctx.locals[oldLocalIdx - fctx.params.length]?.type ?? {
+              kind: "f64",
+            });
+      const refCellTypeIdx = getOrRegisterRefCellType(ctx, oldType);
+      const boxedLocal = allocLocal(fctx, `__pi_box_${name}`, {
+        kind: "ref_null",
+        typeIdx: refCellTypeIdx,
+      });
+      // Box the initial value into the first ref cell.
+      fctx.body.push({ op: "local.get", index: oldLocalIdx });
+      fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+      fctx.body.push({ op: "local.set", index: boxedLocal });
+
+      // Save the previous boxedCaptures entry (if any) so we can restore on
+      // loop exit — nested for-loops with the same name would otherwise
+      // permanently overwrite the outer binding.
+      if (!savedForBoxedCaptures) savedForBoxedCaptures = new Map();
+      savedForBoxedCaptures.set(name, fctx.boxedCaptures?.get(name));
+
+      // Re-aim localMap to the boxed local and register the boxed-capture
+      // metadata so subsequent identifier reads/writes (condition body,
+      // incrementor) route through the ref cell automatically.
+      fctx.localMap.set(name, boxedLocal);
+      if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+      fctx.boxedCaptures.set(name, { refCellTypeIdx, valType: oldType });
+
+      perIterCells.push({ name, refCellTypeIdx, boxedLocal });
+    }
+  }
+
+  // #1589: Pre-emptive boxing for non-let/const names captured by closures.
+  //
+  // The closure-construction codegen promotes a captured variable to a ref
+  // cell at the point the closure literal is compiled. For `var`-declared or
+  // enclosing-function variables referenced from a closure INSIDE a for-loop,
+  // that promotion happens AFTER the loop condition was already compiled —
+  // the condition reads the original unboxed slot, while the body's
+  // incrementor writes through the ref cell. Result: condition's view never
+  // updates and the loop spins forever.
+  //
+  // Fix: before compiling the condition, find every name captured by any
+  // closure in the loop and, if it currently lives in a plain local that is
+  // NOT yet boxed, promote it to a ref cell now. Subsequent identifier reads
+  // (condition, body, incrementor) all route through the same ref cell.
+  //
+  // We deliberately skip names already covered by the let/const per-iteration
+  // pass above (those are in `boxedCaptures` now). Names not in `localMap`
+  // (e.g. globals, module imports) are left alone — the closure-construction
+  // path handles them by reading the underlying global.
+  const preBoxedNames: {
+    name: string;
+    refCellTypeIdx: number;
+    boxedLocal: number;
+    valType: ValType;
+    originalLocalIdx: number;
+  }[] = [];
+  {
+    const capturedNames = findAllNamesCapturedByClosuresInForLoop(stmt);
+    // Body-local `let`/`const`/class/function bindings are block-scoped to each
+    // iteration and handled by the body declaration + closure-construction path.
+    // Pre-boxing them at the loop head conflates the hoisted value slot with the
+    // ref cell (→ `ref.is_null` over an f64 local). Exclude them.
+    const bodyLocalLexical = findBodyLocalLexicalNames(stmt);
+    for (const name of capturedNames) {
+      if (bodyLocalLexical.has(name)) continue;
+      if (fctx.boxedCaptures?.has(name)) continue; // already boxed (let/const per-iter)
+      const oldLocalIdx = fctx.localMap.get(name);
+      if (oldLocalIdx === undefined) continue; // not a local — globals/imports
+      if (oldLocalIdx < fctx.params.length) continue; // params get boxed by closure construction itself
+      const oldType = fctx.locals[oldLocalIdx - fctx.params.length]?.type ?? {
+        kind: "f64" as const,
+      };
+      // Only box value-typed locals (i32, f64, externref, ref_null) — ref-cell
+      // boxing of arbitrary struct/array refs is handled by the closure-side
+      // path which knows the underlying type.
+      if (
+        oldType.kind !== "i32" &&
+        oldType.kind !== "f64" &&
+        oldType.kind !== "i64" &&
+        oldType.kind !== "f32" &&
+        oldType.kind !== "externref" &&
+        oldType.kind !== "ref_null"
+      ) {
+        continue;
+      }
+      const refCellTypeIdx = getOrRegisterRefCellType(ctx, oldType);
+      const boxedLocal = allocLocal(fctx, `__pre_box_${name}`, {
+        kind: "ref_null",
+        typeIdx: refCellTypeIdx,
+      });
+      // Box the current value into a fresh ref cell.
+      fctx.body.push({ op: "local.get", index: oldLocalIdx });
+      fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
+      fctx.body.push({ op: "local.set", index: boxedLocal });
+
+      // Save prior boxedCaptures entry so we can restore it on loop exit.
+      if (!savedForBoxedCaptures) savedForBoxedCaptures = new Map();
+      if (!savedForBoxedCaptures.has(name)) {
+        savedForBoxedCaptures.set(name, fctx.boxedCaptures?.get(name));
+      }
+
+      fctx.localMap.set(name, boxedLocal);
+      if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+      fctx.boxedCaptures.set(name, { refCellTypeIdx, valType: oldType });
+      preBoxedNames.push({
+        name,
+        refCellTypeIdx,
+        boxedLocal,
+        valType: oldType,
+        originalLocalIdx: oldLocalIdx,
+      });
+    }
+  }
+
   // Loop structure:
   // block $break {                    ; break target (depth 2 from body)
   //   loop $loop {                    ; loop restart (continue outer target)
@@ -457,15 +765,21 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.continueStack.push(0);
 
   // Condition (inside $loop, before $continue block)
+  // (#1690) Register condInstrs in liveBodies before any nested compilation
+  // can fire an `addStringConstantGlobal` whose fixup walker would otherwise
+  // miss this detached buffer. The cond instrs live outside `fctx.body`
+  // (which is the loop body buffer registered via savedBodies) for the entire
+  // window from cond compilation through body+incrementor compilation until
+  // the assembled loop is pushed back into fctx.body below.
   const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
   if (stmt.condition) {
     const condBody = fctx.body;
-    fctx.body = [];
+    fctx.body = condInstrs;
     const condType = compileExpression(ctx, fctx, stmt.condition);
     ensureI32Condition(fctx, condType, ctx);
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({ op: "br_if", depth: 1 }); // break: exits $break (depth 1 from $loop body)
-    condInstrs.push(...fctx.body);
     fctx.body = condBody;
   }
 
@@ -537,12 +851,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.safeIndexedArrays = savedSafeIndexed;
 
   // Incrementor (inside $loop, after $continue block)
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as condInstrs above: the incrementor
+  // buffer is detached until the assembled loop is pushed below.
+  const incrInstrs: Instr[] = [];
+  ctx.liveBodies.add(incrInstrs);
+  fctx.body = incrInstrs;
   if (stmt.incrementor) {
     const resultType = compileExpression(ctx, fctx, stmt.incrementor);
     if (resultType !== null) fctx.body.push({ op: "drop" });
   }
-  const incrInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -555,7 +872,29 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
   popBody(fctx, savedBody);
 
-  // Build the loop body: condition + block $continue { body } + incrementor + br $loop
+  // #1453: Per-iteration fresh binding (CreatePerIterationEnvironment).
+  // For each head-binding that's captured by a nested closure, allocate a
+  // fresh ref cell whose value copies the current cell's, then re-aim the
+  // boxed local. Closures captured in earlier iterations retain their
+  // original cell, observing the spec-mandated distinct binding per
+  // iteration. These instructions sit between the body block and the
+  // incrementor — `continue` (br 0) exits the inner $continue block and
+  // falls through here, so per-iteration freshness applies on every
+  // continuation path. `break`/`return`/`throw` skip these instructions,
+  // which matches the spec (no new env when leaving the loop).
+  const freshCellInstrs: Instr[] = [];
+  for (const cell of perIterCells) {
+    freshCellInstrs.push({ op: "local.get", index: cell.boxedLocal });
+    freshCellInstrs.push({
+      op: "struct.get",
+      typeIdx: cell.refCellTypeIdx,
+      fieldIdx: 0,
+    });
+    freshCellInstrs.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx });
+    freshCellInstrs.push({ op: "local.set", index: cell.boxedLocal });
+  }
+
+  // Build the loop body: condition + block $continue { body } + fresh-cells + incrementor + br $loop
   const loopBody: Instr[] = [
     ...condInstrs,
     {
@@ -563,6 +902,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       blockType: { kind: "empty" },
       body: bodyInstrs,
     },
+    ...freshCellInstrs,
     ...incrInstrs,
     { op: "br", depth: 0 }, // restart $loop
   ];
@@ -578,6 +918,41 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       },
     ],
   });
+
+  // (#1690) The cond/incr Instr objects are now reachable via fctx.body →
+  // assembled loop. The condInstrs/incrInstrs arrays themselves are no longer
+  // needed by the walker (their contents were spread into `loopBody`).
+  ctx.liveBodies.delete(condInstrs);
+  ctx.liveBodies.delete(incrInstrs);
+
+  // #1589: For pre-emptively boxed `var`/outer-scope names, write the final
+  // ref-cell value back to the original unboxed local so post-loop reads of
+  // the variable observe the loop's final state, then restore localMap.
+  if (preBoxedNames.length > 0) {
+    for (const pb of preBoxedNames) {
+      fctx.body.push({ op: "local.get", index: pb.boxedLocal });
+      // Null guard: if the ref cell somehow ended up null (shouldn't happen
+      // since we struct.new'd it at loop entry), skip the writeback rather
+      // than trapping.
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [],
+        else: [
+          { op: "local.get", index: pb.boxedLocal } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          {
+            op: "struct.get",
+            typeIdx: pb.refCellTypeIdx,
+            fieldIdx: 0,
+          } as Instr,
+          { op: "local.set", index: pb.originalLocalIdx } as Instr,
+        ],
+      } as Instr);
+      fctx.localMap.set(pb.name, pb.originalLocalIdx);
+    }
+  }
 
   // Restore localMap entries for for-loop let/const initializers
   if (savedForScope) {
@@ -596,6 +971,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
     for (const [name, hadConstBinding] of savedForConstBindings) {
       if (hadConstBinding) fctx.constBindings.add(name);
       else fctx.constBindings.delete(name);
+    }
+  }
+  // #1453: restore previous boxedCaptures entries so the per-iteration boxing
+  // is scoped to this loop (relevant for nested loops with same-named bindings).
+  if (savedForBoxedCaptures) {
+    if (!fctx.boxedCaptures) fctx.boxedCaptures = new Map();
+    for (const [name, prev] of savedForBoxedCaptures) {
+      if (prev) fctx.boxedCaptures.set(name, prev);
+      else fctx.boxedCaptures.delete(name);
     }
   }
 }
@@ -638,11 +1022,14 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   const bodyInstrs = fctx.body;
 
   // Compile condition — true means continue looping
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as compileForStatement: the cond
+  // buffer is detached from fctx.body until the assembled loop is pushed.
+  const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
+  fctx.body = condInstrs;
   const condType = compileExpression(ctx, fctx, stmt.expression);
   ensureI32Condition(fctx, condType, ctx);
   fctx.body.push({ op: "br_if", depth: 0 }); // restart $loop if true
-  const condInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -676,6 +1063,9 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
       },
     ],
   });
+
+  // (#1690) The cond Instr objects are now reachable via fctx.body → loop.
+  ctx.liveBodies.delete(condInstrs);
 }
 
 function compileForOfDestructuring(
@@ -776,7 +1166,10 @@ function compileForOfDestructuring(
                 [{ kind: "externref" }, { kind: "externref" }],
                 [{ kind: "externref" }],
               );
-              addImport(ctx, "env", "__extern_rest_object", { kind: "func", typeIdx: restObjType });
+              addImport(ctx, "env", "__extern_rest_object", {
+                kind: "func",
+                typeIdx: restObjType,
+              });
               shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
               restObjIdx = ctx.funcMap.get("__extern_rest_object");
             }
@@ -861,6 +1254,19 @@ function compileForOfDestructuring(
     }); // end null guard for for-of object destructuring
   } else if (ts.isArrayBindingPattern(pattern)) {
     // Array destructuring in for-of: for (var [a, b] of arr)
+    // (#1719 CPR-2) When the program overrode Array.prototype's @@iterator and
+    // the per-element array is destructured, drive the override instead of the
+    // backing store (§8.5.2). Strictly gated behind the brand + a captured
+    // override; both clear in the common case ⇒ byte-identical. The element
+    // value lives in `elemLocal`, so feed the shared decl read-drive that local.
+    if (
+      arrayDstrNeedsIdentity(ctx, false) &&
+      arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+      tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, elemType, elemLocal)
+    ) {
+      syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+      return;
+    }
     // Element may be a vec struct (array wrapper) OR a tuple struct.
     // Handle externref elements: use __extern_get to extract indexed properties
     if (elemType.kind !== "ref" && elemType.kind !== "ref_null") {
@@ -937,7 +1343,10 @@ function compileForOfDestructuring(
             if (sliceIdx === undefined) {
               const importsBefore = ctx.numImportFuncs;
               const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-              addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
+              addImport(ctx, "env", "__extern_slice", {
+                kind: "func",
+                typeIdx: sliceType,
+              });
               shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
               sliceIdx = ctx.funcMap.get("__extern_slice");
             }
@@ -958,7 +1367,11 @@ function compileForOfDestructuring(
           ) {
             const nestedLocal = allocLocal(fctx, `__forof_nested_${fctx.locals.length}`, fieldType);
             fctx.body.push({ op: "local.get", index: elemLocal });
-            fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i });
+            fctx.body.push({
+              op: "struct.get",
+              typeIdx: structTypeIdx,
+              fieldIdx: i,
+            });
             fctx.body.push({ op: "local.set", index: nestedLocal });
             compileForOfDestructuring(ctx, fctx, element.name, nestedLocal, fieldType, stmt);
             continue;
@@ -971,7 +1384,11 @@ function compileForOfDestructuring(
           const localIdx = allocLocal(fctx, localName, bindingWasmType);
 
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: structTypeIdx,
+            fieldIdx: i,
+          });
 
           if (!valTypesMatch(fieldType, bindingWasmType)) {
             coerceType(ctx, fctx, fieldType, bindingWasmType);
@@ -1012,7 +1429,11 @@ function compileForOfDestructuring(
         ) {
           const nestedLocal = allocLocal(fctx, `__forof_nested_${fctx.locals.length}`, innerElemType);
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 1 });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: structTypeIdx,
+            fieldIdx: 1,
+          });
           fctx.body.push({ op: "i32.const", value: i });
           emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
           fctx.body.push({ op: "local.set", index: nestedLocal });
@@ -1027,7 +1448,11 @@ function compileForOfDestructuring(
           // Compute rest length: max(0, original.length - i)
           const restLenLocal = allocLocal(fctx, `__rest_len_${fctx.locals.length}`, { kind: "i32" });
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 0 }); // length
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: structTypeIdx,
+            fieldIdx: 0,
+          }); // length
           fctx.body.push({ op: "i32.const", value: i });
           fctx.body.push({ op: "i32.sub" } as Instr);
           fctx.body.push({ op: "local.set", index: restLenLocal });
@@ -1046,17 +1471,28 @@ function compileForOfDestructuring(
             typeIdx: innerArrTypeIdx,
           });
           fctx.body.push({ op: "local.get", index: restLenLocal });
-          fctx.body.push({ op: "array.new_default", typeIdx: innerArrTypeIdx } as Instr);
+          fctx.body.push({
+            op: "array.new_default",
+            typeIdx: innerArrTypeIdx,
+          } as Instr);
           fctx.body.push({ op: "local.set", index: restArrLocal });
 
           // array.copy(restArr, 0, srcData, i, restLen)
           fctx.body.push({ op: "local.get", index: restArrLocal });
           fctx.body.push({ op: "i32.const", value: 0 });
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 1 }); // src data
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: structTypeIdx,
+            fieldIdx: 1,
+          }); // src data
           fctx.body.push({ op: "i32.const", value: i });
           fctx.body.push({ op: "local.get", index: restLenLocal });
-          fctx.body.push({ op: "array.copy", dstTypeIdx: innerArrTypeIdx, srcTypeIdx: innerArrTypeIdx } as Instr);
+          fctx.body.push({
+            op: "array.copy",
+            dstTypeIdx: innerArrTypeIdx,
+            srcTypeIdx: innerArrTypeIdx,
+          } as Instr);
 
           // Create new vec struct: struct.new(restLen, restArr)
           const restVecType: ValType = { kind: "ref", typeIdx: structTypeIdx };
@@ -1085,9 +1521,21 @@ function compileForOfDestructuring(
         const localIdx = allocLocal(fctx, localName, bindingWasmType);
 
         fctx.body.push({ op: "local.get", index: elemLocal });
-        fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 1 });
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: structTypeIdx,
+          fieldIdx: 1,
+        });
         fctx.body.push({ op: "i32.const", value: i });
-        emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
+        // (#1396) Pass `useUndefinedSentinel: true` when this element has a
+        // default initializer AND the source-array element type is externref.
+        // The OOB else-branch must produce JS `undefined` (not `null`) so
+        // `emitDefaultValueCheck` → `__extern_is_undefined` returns 1 and
+        // the initializer fires for empty/short arrays.
+        const wantUndefinedSentinel =
+          element.initializer !== undefined &&
+          (innerElemType.kind === "externref" || innerElemType.kind === "ref_extern");
+        emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType, ctx, wantUndefinedSentinel);
 
         if (!valTypesMatch(innerElemType, bindingWasmType)) {
           coerceType(ctx, fctx, innerElemType, bindingWasmType);
@@ -1127,7 +1575,7 @@ function compileForOfAssignDestructuring(
   if (hasUnresolvable && isStrictContext(stmt)) {
     const tagIdx = ensureExnTag(ctx);
     fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "throw", tagIdx } as unknown as Instr);
+    fctx.body.push({ op: "throw", tagIdx });
     return;
   }
   if (ts.isObjectLiteralExpression(expr)) {
@@ -1272,7 +1720,9 @@ function compileForOfAssignDestructuring(
             const globalIdx = ctx.moduleGlobals.get(oobTarget.text);
             if (globalIdx !== undefined) {
               const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
-              const globalType = globalDef?.type ?? { kind: "externref" as const };
+              const globalType = globalDef?.type ?? {
+                kind: "externref" as const,
+              };
               oobLocal = allocLocal(fctx, oobTarget.text, globalType);
               oobSyncGlobalIdx = globalIdx;
             }
@@ -1317,7 +1767,9 @@ function compileForOfAssignDestructuring(
               const globalIdx = ctx.moduleGlobals.get(oobTarget.text);
               if (globalIdx !== undefined) {
                 const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
-                const globalType = globalDef?.type ?? { kind: "externref" as const };
+                const globalType = globalDef?.type ?? {
+                  kind: "externref" as const,
+                };
                 oobLocal = allocLocal(fctx, oobTarget.text, globalType);
                 oobSyncGlobalIdx = globalIdx;
               }
@@ -1344,7 +1796,11 @@ function compileForOfAssignDestructuring(
         if (ts.isObjectLiteralExpression(el) || ts.isArrayLiteralExpression(el)) {
           const nestedLocal = allocLocal(fctx, `__forof_nested_${fctx.locals.length}`, fieldType);
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: i });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: innerVecTypeIdx,
+            fieldIdx: i,
+          });
           fctx.body.push({ op: "local.set", index: nestedLocal });
           compileForOfAssignDestructuring(ctx, fctx, el, nestedLocal, fieldType, vecTypeIdx, arrTypeIdx, stmt);
           continue;
@@ -1373,7 +1829,11 @@ function compileForOfAssignDestructuring(
 
         const targetType = getLocalType(fctx, targetLocal);
         fctx.body.push({ op: "local.get", index: elemLocal });
-        fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: i });
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: innerVecTypeIdx,
+          fieldIdx: i,
+        });
 
         if (defaultInit) {
           // Check for undefined and apply default — BEFORE type coercion
@@ -1405,7 +1865,11 @@ function compileForOfAssignDestructuring(
         if (ts.isObjectLiteralExpression(el) || ts.isArrayLiteralExpression(el)) {
           const nestedLocal = allocLocal(fctx, `__forof_nested_${fctx.locals.length}`, innerElemType);
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: 1 });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: innerVecTypeIdx,
+            fieldIdx: 1,
+          });
           fctx.body.push({ op: "i32.const", value: i });
           emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
           fctx.body.push({ op: "local.set", index: nestedLocal });
@@ -1436,6 +1900,82 @@ function compileForOfAssignDestructuring(
 
         const targetType = getLocalType(fctx, targetLocal);
 
+        // #1510 — boxed-capture target with default initializer (vec path).
+        // Mirror of the externref-path fix in compileForOfAssignDestructuringExternref.
+        // Without this, `emitDefaultValueCheck` does `local.set` on the captured
+        // param, overwriting the box-ref. The pre-fix symptom is
+        // "dereferencing a null pointer" (when valType is a ref) or silently
+        // lost writes (when valType is f64 → coerce mismatch + drop).
+        const boxedCapVec = fctx.boxedCaptures?.get(targetEl.text);
+        if (boxedCapVec && defaultInit) {
+          const valType = boxedCapVec.valType;
+          // Read elem.data[i] safely (bounds-checked → produces innerElemType or
+          // the type's "undefined" sentinel for OOB). For f64 element types this
+          // returns NaN sentinel; for ref/externref it returns null.
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({ op: "local.get", index: elemLocal });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: innerVecTypeIdx,
+            fieldIdx: 1,
+          });
+          fctx.body.push({ op: "i32.const", value: i });
+          emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
+          // Now stack: [box-ref, value:innerElemType]. Apply default-on-undefined
+          // and coerce to valType before struct.set.
+          // For f64: check sNaN sentinel; for ref/null: check ref.is_null;
+          // for externref: __extern_is_undefined.
+          const tmpVal = allocLocal(fctx, `__forof_dflt_v_${fctx.locals.length}`, innerElemType);
+          fctx.body.push({ op: "local.tee", index: tmpVal });
+          if (innerElemType.kind === "f64") {
+            fctx.body.push({ op: "i64.reinterpret_f64" });
+            fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
+            fctx.body.push({ op: "i64.eq" });
+          } else if (innerElemType.kind === "externref") {
+            const undefIdx = ensureExternIsUndefined(ctx, fctx);
+            if (undefIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: undefIdx });
+            } else {
+              fctx.body.push({ op: "ref.is_null" } as Instr);
+            }
+          } else if (innerElemType.kind === "ref" || innerElemType.kind === "ref_null") {
+            fctx.body.push({ op: "ref.is_null" } as Instr);
+          } else {
+            // i32 or other — no reliable undefined sentinel; treat as not-undefined.
+            fctx.body.push({ op: "i32.const", value: 0 });
+          }
+          const thenInstrs = collectInstrs(fctx, () => {
+            compileExpression(ctx, fctx, defaultInit!, valType);
+          });
+          const elseInstrs = collectInstrs(fctx, () => {
+            fctx.body.push({ op: "local.get", index: tmpVal } as Instr);
+            if (!valTypesMatch(innerElemType, valType)) {
+              coerceType(ctx, fctx, innerElemType, valType);
+            }
+          });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: valType },
+            then: thenInstrs,
+            else: elseInstrs,
+          });
+          fctx.body.push({
+            op: "struct.set",
+            typeIdx: boxedCapVec.refCellTypeIdx,
+            fieldIdx: 0,
+          });
+          if (vecSyncGlobalIdx !== undefined) {
+            fctx.body.push({ op: "local.get", index: targetLocal });
+            fctx.body.push({
+              op: "struct.get",
+              typeIdx: boxedCapVec.refCellTypeIdx,
+              fieldIdx: 0,
+            });
+            fctx.body.push({ op: "global.set", index: vecSyncGlobalIdx });
+          }
+          continue;
+        }
+
         if (defaultInit && innerElemType.kind === "externref") {
           // For externref elements with defaults, do explicit bounds check.
           // OOB produces ref.null.extern (Wasm null) which is indistinguishable from JS null.
@@ -1445,7 +1985,11 @@ function compileForOfAssignDestructuring(
             typeIdx: innerArrTypeIdx,
           });
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: 1 });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: innerVecTypeIdx,
+            fieldIdx: 1,
+          });
           fctx.body.push({ op: "local.tee", index: arrDataLocal });
           fctx.body.push({ op: "array.len" });
           fctx.body.push({ op: "i32.const", value: i });
@@ -1456,7 +2000,10 @@ function compileForOfAssignDestructuring(
           const thenInstrs = collectInstrs(fctx, () => {
             fctx.body.push({ op: "local.get", index: arrDataLocal } as Instr);
             fctx.body.push({ op: "i32.const", value: i } as Instr);
-            fctx.body.push({ op: "array.get", typeIdx: innerArrTypeIdx } as Instr);
+            fctx.body.push({
+              op: "array.get",
+              typeIdx: innerArrTypeIdx,
+            } as Instr);
             emitDefaultValueCheck(ctx, fctx, innerElemType, targetLocal!, defaultInit!, targetType ?? undefined);
           });
           // Else branch: OOB — apply default directly
@@ -1472,7 +2019,11 @@ function compileForOfAssignDestructuring(
           } as Instr);
         } else {
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "struct.get", typeIdx: innerVecTypeIdx, fieldIdx: 1 });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: innerVecTypeIdx,
+            fieldIdx: 1,
+          });
           fctx.body.push({ op: "i32.const", value: i });
           emitBoundsCheckedArrayGet(fctx, innerArrTypeIdx, innerElemType);
 
@@ -1569,7 +2120,9 @@ function compileForOfAssignDestructuringExternref(
       const setFnIdx = ensureExternSet();
       if (setFnIdx === undefined) continue;
       // Push receiver (already-existing variable, evaluated each iteration)
-      const recvType = compileExpression(ctx, fctx, targetEl.expression, { kind: "externref" });
+      const recvType = compileExpression(ctx, fctx, targetEl.expression, {
+        kind: "externref",
+      });
       if (recvType && recvType.kind !== "externref") {
         coerceType(ctx, fctx, recvType, { kind: "externref" });
       }
@@ -1657,7 +2210,7 @@ function compileForOfAssignDestructuringExternref(
         op: "struct.set",
         typeIdx: boxedCap.refCellTypeIdx,
         fieldIdx: 0,
-      } as unknown as Instr);
+      });
       if (extSyncGlobalIdx !== undefined) {
         // Re-load through the cell for global sync
         fctx.body.push({ op: "local.get", index: targetLocal });
@@ -1665,7 +2218,77 @@ function compileForOfAssignDestructuringExternref(
           op: "struct.get",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
+        fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
+      }
+      continue;
+    }
+
+    // #1510 — boxed-capture target WITH default initializer.
+    // The pre-#1510 code fell through to `emitDefaultValueCheck` which
+    // emitted `local.set` directly on the captured param — overwriting
+    // the box-ref instead of writing through the cell. The mutation was
+    // invisible to the outer scope's box, which silently kept the old
+    // value (e.g. -1 from a `let v = -1` decl). Test262 cases:
+    //   - language/statements/for-await-of/async-{gen,func}-decl-dstr-
+    //     array-elem-init-assignment.js — `[v = expr] of …` where `v` is
+    //     a `let`-bound outer variable captured by the async function.
+    // Spec §13.15.5.5 ArrayAssignmentPattern requires PutValue on the
+    // LHS; for a boxed-capture variable that means `struct.set` on
+    // field 0 of the cell.
+    if (boxedCap && defaultInit) {
+      const valType = boxedCap.valType;
+      const undefIdx = ensureExternIsUndefined(ctx, fctx);
+      // Push the box-ref for the eventual struct.set.
+      fctx.body.push({ op: "local.get", index: targetLocal });
+      // Get the extracted value: __extern_get(elem, box(i)) -> externref
+      fctx.body.push({ op: "local.get", index: elemLocal });
+      fctx.body.push({ op: "f64.const", value: i });
+      fctx.body.push({ op: "call", funcIdx: boxIdx! });
+      fctx.body.push({ op: "call", funcIdx: getIdx! });
+      // Tee into a temp so we can both test-undefined and reuse on else.
+      const tmpExt = allocLocal(fctx, `__forof_dflt_ext_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpExt });
+      // Test undefined-ness (using __extern_is_undefined; JS spec applies
+      // defaults only on `undefined`, NOT on `null`).
+      if (undefIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: undefIdx });
+      } else {
+        // Fallback: ref.is_null treats null AS undefined — imprecise but safer
+        // than crashing. The runtime always exposes __extern_is_undefined.
+        fctx.body.push({ op: "ref.is_null" } as Instr);
+      }
+      // Build then-branch (default fires): compile default to valType.
+      const thenInstrs = collectInstrs(fctx, () => {
+        compileExpression(ctx, fctx, defaultInit, valType);
+      });
+      // Build else-branch (value used as-is): coerce externref -> valType.
+      const elseInstrs = collectInstrs(fctx, () => {
+        fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+        if (valType.kind !== "externref") {
+          coerceType(ctx, fctx, { kind: "externref" }, valType);
+        }
+      });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: valType },
+        then: thenInstrs,
+        else: elseInstrs,
+      });
+      // Now stack: [box-ref, value:valType]
+      fctx.body.push({
+        op: "struct.set",
+        typeIdx: boxedCap.refCellTypeIdx,
+        fieldIdx: 0,
+      });
+      if (extSyncGlobalIdx !== undefined) {
+        // Re-load through the cell for global sync
+        fctx.body.push({ op: "local.get", index: targetLocal });
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: boxedCap.refCellTypeIdx,
+          fieldIdx: 0,
+        });
         fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
       }
       continue;
@@ -1719,18 +2342,15 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
-  const sym = (exprTsType as ts.TypeReference).symbol ?? (exprTsType as ts.Type).symbol;
-  const isArray = sym?.name === "Array";
-
-  if (isArray) {
-    compileForOfArray(ctx, fctx, stmt);
-  } else {
-    // Type checker didn't resolve as Array — tentatively compile the expression
-    // to check if it produces a vec struct (e.g. tuple types, union types, etc.).
-    // If so, use the efficient array path; otherwise fall back to host iterator.
-    if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
-      compileForOfIterator(ctx, fctx, stmt);
-    }
+  // The TS type resolving to `Array` is necessary but NOT sufficient to use the
+  // fast vec-struct array path: an Array-typed iterable can still lower to a
+  // non-vec value (a Symbol.iterator whose declared return widens to Array, an
+  // array-subclass instance, a union). Tentatively compile the expression and
+  // only take the array path when it genuinely produces a vec struct; otherwise
+  // fall back to the iterator protocol instead of hard-erroring with
+  // "for-of requires an array expression" (#1610).
+  if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
+    compileForOfIterator(ctx, fctx, stmt);
   }
 }
 
@@ -1786,13 +2406,17 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   const strNullGuardStart = fctx.body.length;
 
   // Extract length from string (field 0 of AnyString struct)
-  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: strLocal });
   fctx.body.push({ op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   // Allocate counter local (i32)
-  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, { kind: "i32" });
+  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iLocal });
 
@@ -2256,7 +2880,10 @@ function compileForOfIteratorAssignDestructuring(
       if (setIdxIter === undefined) {
         const importsBefore = ctx.numImportFuncs;
         const setType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], []);
-        addImport(ctx, "env", "__extern_set", { kind: "func", typeIdx: setType });
+        addImport(ctx, "env", "__extern_set", {
+          kind: "func",
+          typeIdx: setType,
+        });
         shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
         setIdxIter = ctx.funcMap.get("__extern_set");
         // Refresh boxIdx/getIdx since they may have shifted.
@@ -2283,7 +2910,9 @@ function compileForOfIteratorAssignDestructuring(
       if (ts.isPropertyAccessExpression(targetElIter) || ts.isElementAccessExpression(targetElIter)) {
         const setFnIdx = ensureExternSetIter();
         if (setFnIdx === undefined || boxIdx === undefined || getIdx === undefined) continue;
-        const recvType = compileExpression(ctx, fctx, targetElIter.expression, { kind: "externref" });
+        const recvType = compileExpression(ctx, fctx, targetElIter.expression, {
+          kind: "externref",
+        });
         if (recvType && recvType.kind !== "externref") {
           coerceType(ctx, fctx, recvType, { kind: "externref" });
         }
@@ -2349,14 +2978,67 @@ function compileForOfIteratorAssignDestructuring(
           op: "struct.set",
           typeIdx: boxedCap.refCellTypeIdx,
           fieldIdx: 0,
-        } as unknown as Instr);
+        });
         if (iterArrSyncGlobalIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: targetLocal });
           fctx.body.push({
             op: "struct.get",
             typeIdx: boxedCap.refCellTypeIdx,
             fieldIdx: 0,
-          } as unknown as Instr);
+          });
+          fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
+        }
+        continue;
+      }
+
+      // #1510 — boxed-capture target WITH default initializer (iterator path).
+      // Mirror of the array-path fix in compileForOfAssignDestructuringExternref.
+      // Without this, defaults on captured `let`-bound targets in for-await-of
+      // (over an arbitrary iterable) silently lose the write (overwrites the
+      // box-ref) or trap dereferencing a null pointer when coerceType emits
+      // ref.as_non_null on a null cell.
+      if (boxedCap && defaultInitIter) {
+        const valType = boxedCap.valType;
+        const undefIdx = ensureExternIsUndefined(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: targetLocal });
+        fctx.body.push({ op: "local.get", index: elemLocal });
+        fctx.body.push({ op: "f64.const", value: i });
+        fctx.body.push({ op: "call", funcIdx: boxIdx! });
+        fctx.body.push({ op: "call", funcIdx: getIdx! });
+        const tmpExt = allocLocal(fctx, `__forit_dflt_ext_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.tee", index: tmpExt });
+        if (undefIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: undefIdx });
+        } else {
+          fctx.body.push({ op: "ref.is_null" } as Instr);
+        }
+        const thenInstrs = collectInstrs(fctx, () => {
+          compileExpression(ctx, fctx, defaultInitIter!, valType);
+        });
+        const elseInstrs = collectInstrs(fctx, () => {
+          fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+          if (valType.kind !== "externref") {
+            coerceType(ctx, fctx, { kind: "externref" }, valType);
+          }
+        });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: valType },
+          then: thenInstrs,
+          else: elseInstrs,
+        });
+        fctx.body.push({
+          op: "struct.set",
+          typeIdx: boxedCap.refCellTypeIdx,
+          fieldIdx: 0,
+        });
+        if (iterArrSyncGlobalIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({
+            op: "struct.get",
+            typeIdx: boxedCap.refCellTypeIdx,
+            fieldIdx: 0,
+          });
           fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
         }
         continue;
@@ -2567,7 +3249,11 @@ function compileForOfDirectIterator(
   if (nextResultType.kind === "ref_null") {
     fctx.body.push({ op: "ref.as_non_null" } as Instr);
   }
-  fctx.body.push({ op: "struct.get", typeIdx: resultStructTypeIdx, fieldIdx: doneFieldIdx });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: resultStructTypeIdx,
+    fieldIdx: doneFieldIdx,
+  });
   // done field might be i32 (boolean) or f64; convert to i32 for br_if
   if (doneFieldType.kind === "f64") {
     fctx.body.push({ op: "i32.trunc_f64_s" } as Instr);
@@ -2582,14 +3268,18 @@ function compileForOfDirectIterator(
       { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
     ],
     else: [],
-  } as unknown as Instr);
+  });
 
   // Get value: elem = result.value
   fctx.body.push({ op: "local.get", index: resultLocal });
   if (nextResultType.kind === "ref_null") {
     fctx.body.push({ op: "ref.as_non_null" } as Instr);
   }
-  fctx.body.push({ op: "struct.get", typeIdx: resultStructTypeIdx, fieldIdx: valueFieldIdx });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: resultStructTypeIdx,
+    fieldIdx: valueFieldIdx,
+  });
 
   // Coerce value to element type if needed
   const targetElemType = getLocalType(fctx, elemLocal) ?? elemType;
@@ -2658,7 +3348,7 @@ function compileForOfDirectIterator(
         { op: "drop" } as Instr,
       ],
       else: [],
-    } as unknown as Instr);
+    });
   }
 
   return true;
@@ -2692,9 +3382,9 @@ function findStructFieldsByTypeIdx(
  * Generated Wasm pseudo-code:
  *   iter = __iterator(obj)
  *   loop:
- *     result = __iterator_next(iter)
- *     if __iterator_done(result) → break
- *     elem = __iterator_value(result)
+ *     (done, value) = __iterator_next(iter)   // multi-value result
+ *     if done → break
+ *     elem = value
  *     <body>
  *     br loop
  */
@@ -2742,7 +3432,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   {
     const backupLocal: number | undefined = (fctx as any).__lastGuardedCastBackup;
     const tagIdx = ensureExnTag(ctx);
-    const iterTmp = allocLocal(fctx, `__forit_null_${fctx.locals.length}`, { kind: "externref" });
+    const iterTmp = allocLocal(fctx, `__forit_null_${fctx.locals.length}`, {
+      kind: "externref",
+    });
     fctx.body.push({ op: "local.tee", index: iterTmp });
     fctx.body.push({ op: "ref.is_null" });
     if (backupLocal !== undefined) {
@@ -2789,18 +3481,21 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.body.push({ op: "call", funcIdx: iteratorIdx });
 
   const nextIdx = ctx.funcMap.get("__iterator_next");
-  const doneIdx = ctx.funcMap.get("__iterator_done");
-  const valueIdx = ctx.funcMap.get("__iterator_value");
   const returnIdx = ctx.funcMap.get("__iterator_return");
-  if (nextIdx === undefined || doneIdx === undefined || valueIdx === undefined) {
+  if (nextIdx === undefined) {
     reportError(ctx, stmt, "for-of on non-array type requires iterator imports");
     return;
   }
-  const iterLocal = allocLocal(fctx, `__forof_iter_${fctx.locals.length}`, { kind: "externref" });
+  const iterLocal = allocLocal(fctx, `__forof_iter_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   fctx.body.push({ op: "local.set", index: iterLocal });
 
-  // Allocate locals for iterator result and loop element
+  // Allocate locals for the iterator-step result. __iterator_next now returns a
+  // multi-value (i32 done, externref value); resultLocal holds the value, and
+  // nextDoneLocal the done flag (#1620 v2 — no $IteratorResult struct).
   const resultLocal = allocLocal(fctx, `__forof_result_${fctx.locals.length}`, { kind: "externref" });
+  const nextDoneLocal = allocLocal(fctx, `__forof_done_raw_${fctx.locals.length}`, { kind: "i32" });
 
   // Declare the loop variable (element type is externref for iterator protocol)
   const elemType: ValType = { kind: "externref" };
@@ -2851,7 +3546,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // Done flag: tracks whether iterator completed normally (done=true).
   // Used after the loop to decide whether to call iterator.return() (#851).
-  const doneFlag = allocLocal(fctx, `__forof_done_${fctx.locals.length}`, { kind: "i32" });
+  const doneFlag = allocLocal(fctx, `__forof_done_${fctx.locals.length}`, {
+    kind: "i32",
+  });
 
   // Iterator close finallyStack entry (#851): inline before return/outer-break/outer-continue.
   // Push BEFORE the for-of break/continue entries so that:
@@ -2880,7 +3577,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
               { op: "call", funcIdx: capturedReturnIdx } as Instr,
             ],
             else: [],
-          } as unknown as Instr,
+          },
         ]),
       breakStackLen: iterCloseBreakStackLen,
       continueStackLen: iterCloseContinueStackLen,
@@ -2900,14 +3597,16 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.body.push({ op: "i32.gt_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break if >1M iterations
 
-  // Call __iterator_next(iter) → result
+  // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
+  // Results are pushed left-to-right, so value (externref) is on top of the
+  // stack and done (i32) below it: pop value first, then done.
   fctx.body.push({ op: "local.get", index: iterLocal });
   fctx.body.push({ op: "call", funcIdx: nextIdx });
-  fctx.body.push({ op: "local.set", index: resultLocal });
+  fctx.body.push({ op: "local.set", index: resultLocal }); // externref value (top)
+  fctx.body.push({ op: "local.set", index: nextDoneLocal }); // i32 done (below)
 
-  // Check done: __iterator_done(result) → i32, break if truthy
-  fctx.body.push({ op: "local.get", index: resultLocal });
-  fctx.body.push({ op: "call", funcIdx: doneIdx });
+  // Check done: read the i32 directly, break if truthy
+  fctx.body.push({ op: "local.get", index: nextDoneLocal });
   // If done, set the done flag to 1 before breaking
   fctx.body.push({
     op: "if",
@@ -2918,11 +3617,10 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
     ],
     else: [],
-  } as unknown as Instr);
+  });
 
-  // Get value: elem = __iterator_value(result)
+  // Get value: elem = value (already in resultLocal)
   fctx.body.push({ op: "local.get", index: resultLocal });
-  fctx.body.push({ op: "call", funcIdx: valueIdx });
   fctx.body.push({ op: "local.set", index: elemLocal });
 
   // If destructuring pattern, destructure from the element
@@ -2967,7 +3665,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // The block/loop body; wrapped in try/catch_all when __iterator_return is available
   // to call iterator.return() on throw (#851 via-throw).
-  const blockLoop = {
+  const blockLoop: Instr = {
     op: "block",
     blockType: { kind: "empty" },
     body: [
@@ -2994,7 +3692,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       body: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
       catches: [],
       catchAll: [], // suppress any error from GetMethod / return() per spec step 6
-    } as unknown as Instr;
+    };
     const catchAllBody: Instr[] = [
       { op: "local.get", index: doneFlag } as Instr,
       { op: "i32.eqz" } as Instr,
@@ -3003,8 +3701,8 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
         blockType: { kind: "empty" },
         then: [innerCloseTry],
         else: [],
-      } as unknown as Instr,
-      { op: "rethrow", depth: 0 } as unknown as Instr,
+      },
+      { op: "rethrow", depth: 0 },
     ];
     fctx.body.push({
       op: "try",
@@ -3012,9 +3710,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       body: [blockLoop],
       catches: [],
       catchAll: catchAllBody,
-    } as unknown as Instr);
+    });
   } else {
-    fctx.body.push(blockLoop as unknown as Instr);
+    fctx.body.push(blockLoop);
   }
 
   // Iterator close protocol (#851): call iterator.return() on break (post-loop check).
@@ -3027,8 +3725,63 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       blockType: { kind: "empty" },
       then: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
       else: [],
-    } as unknown as Instr);
+    });
   }
+}
+
+/**
+ * Write the current for-in key (held in `keyLocal` as an externref) to a
+ * member-expression target (`for (x.y in obj)` / `for (x[k] in obj)`), per
+ * ECMA-262 §14.7.5.6 ForIn/OfBodyEvaluation (lhsKind = assignment). Emits
+ * `__extern_set(receiver, key, value)` (#1613).
+ */
+function emitForInMemberTargetWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  keyLocal: number,
+): void {
+  let setIdx = ctx.funcMap.get("__extern_set");
+  if (setIdx === undefined) {
+    const importsBefore = ctx.numImportFuncs;
+    const setType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], []);
+    addImport(ctx, "env", "__extern_set", { kind: "func", typeIdx: setType });
+    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+    setIdx = ctx.funcMap.get("__extern_set");
+  }
+  if (setIdx === undefined) return;
+
+  // Receiver
+  const recvType = compileExpression(ctx, fctx, target.expression, {
+    kind: "externref",
+  });
+  if (recvType && recvType.kind !== "externref") {
+    coerceType(ctx, fctx, recvType, { kind: "externref" });
+  } else if (recvType === null) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+
+  // Key
+  if (ts.isPropertyAccessExpression(target)) {
+    const propName = target.name.text;
+    addStringConstantGlobal(ctx, propName);
+    const keyGlobalIdx = ctx.stringGlobalMap.get(propName);
+    if (keyGlobalIdx === undefined) return;
+    fctx.body.push({ op: "global.get", index: keyGlobalIdx } as Instr);
+  } else {
+    const keyType = compileExpression(ctx, fctx, target.argumentExpression, {
+      kind: "externref",
+    });
+    if (keyType && keyType.kind !== "externref") {
+      coerceType(ctx, fctx, keyType, { kind: "externref" });
+    } else if (keyType === null) {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+  }
+
+  // Value = the enumerated key string
+  fctx.body.push({ op: "local.get", index: keyLocal });
+  fctx.body.push({ op: "call", funcIdx: setIdx });
 }
 
 export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForInStatement): void {
@@ -3036,17 +3789,29 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const init = stmt.initializer;
   let varName: string;
   let keyLocal: number;
+  // For non-identifier heads (binding pattern / member-expression target) the
+  // enumerated key is materialised in a temp externref local, then written to
+  // the real target each iteration (#1613). These describe that write.
+  let bindingPattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern | null = null;
+  let memberTarget: ts.PropertyAccessExpression | ts.ElementAccessExpression | null = null;
   if (ts.isVariableDeclarationList(init)) {
     const decl = init.declarations[0]!;
     if (!ts.isIdentifier(decl.name)) {
-      // Destructuring patterns in for-in (e.g. `for (var [a] in obj)`)
-      // are exotic — the key is a string, destructuring it gives characters.
-      // For now, skip gracefully rather than crash.
-      reportError(ctx, decl, "for-in variable must be an identifier");
-      return;
+      // Destructuring binding head: `for (var/let [a] in obj)`. The key is a
+      // string; per spec the binding pattern destructures that string value.
+      bindingPattern = decl.name;
+      varName = `__forin_key_${fctx.locals.length}`;
+      keyLocal = allocLocal(fctx, varName, { kind: "externref" });
+    } else {
+      varName = decl.name.text;
+      // Allocate a local for the loop variable (string / externref)
+      keyLocal = allocLocal(fctx, varName, { kind: "externref" });
     }
-    varName = decl.name.text;
-    // Allocate a local for the loop variable (string / externref)
+  } else if (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init)) {
+    // Member-expression target: `for (x.y in obj)` / `for (x[k] in obj)`.
+    // Per spec the enumerated key is assigned to the reference each iteration.
+    memberTarget = init;
+    varName = `__forin_key_${fctx.locals.length}`;
     keyLocal = allocLocal(fctx, varName, { kind: "externref" });
   } else if (ts.isIdentifier(init)) {
     // Bare identifier: `for (x in obj)` — look up existing local
@@ -3107,17 +3872,23 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   fctx.body.push({ op: "call", funcIdx: keysIdx }); // __for_in_keys(obj) -> keys array
 
   // Store keys array in a local
-  const keysLocal = allocLocal(fctx, `__forin_keys_${fctx.locals.length}`, { kind: "externref" });
+  const keysLocal = allocLocal(fctx, `__forin_keys_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   fctx.body.push({ op: "local.set", index: keysLocal });
 
   // Get length
-  const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: keysLocal });
   fctx.body.push({ op: "call", funcIdx: lenIdx }); // __for_in_len(keys) -> i32
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   // Counter
-  const iLocal = allocLocal(fctx, `__forin_i_${fctx.locals.length}`, { kind: "i32" });
+  const iLocal = allocLocal(fctx, `__forin_i_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iLocal });
 
@@ -3135,6 +3906,27 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
 
   fctx.breakStack.push(2); // break = depth 2 (exit $break block)
   fctx.continueStack.push(0); // continue = depth 0 (exit $continue block -> falls to incr)
+
+  // Non-identifier head (#1613): write the per-iteration key into its real
+  // target before the user body runs. keyLocal holds keys[i] at this point.
+  if (memberTarget) {
+    emitForInMemberTargetWrite(ctx, fctx, memberTarget, keyLocal);
+  } else if (bindingPattern) {
+    // Spec: the binding pattern destructures the (string) key value. Reuse the
+    // externref destructuring helpers — array patterns iterate the string's
+    // code units, object patterns read named properties.
+    if (ts.isArrayBindingPattern(bindingPattern)) {
+      fctx.body.push({ op: "local.get", index: keyLocal });
+      compileExternrefArrayDestructuringDecl(ctx, fctx, bindingPattern, {
+        kind: "externref",
+      });
+    } else {
+      fctx.body.push({ op: "local.get", index: keyLocal });
+      compileExternrefObjectDestructuringDecl(ctx, fctx, bindingPattern, {
+        kind: "externref",
+      });
+    }
+  }
 
   // Compile the user's loop body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {

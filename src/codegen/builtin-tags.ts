@@ -44,6 +44,11 @@ export const BUILTIN_TYPE_TAGS = {
   // Indexed collections
   Array: -3,
 
+  // Wrapper types (#1455)
+  Boolean: -4,
+  Number: -5,
+  String: -6,
+
   // Errors (Error is the parent of all *Error subclasses)
   Error: -10,
   TypeError: -11,
@@ -59,6 +64,7 @@ export const BUILTIN_TYPE_TAGS = {
   Set: -21,
   WeakMap: -22,
   WeakSet: -23,
+  WeakRef: -24,
 
   // Built-in objects
   Date: -30,
@@ -69,6 +75,21 @@ export const BUILTIN_TYPE_TAGS = {
   ArrayBuffer: -50,
   SharedArrayBuffer: -51,
   DataView: -52,
+
+  // Typed arrays (#1455). %TypedArray% intrinsic is not in this registry —
+  // tests rarely use `arr instanceof %TypedArray%`; concrete typed arrays
+  // are sufficient for the spec-completeness gap addressed by #1455.
+  Int8Array: -70,
+  Uint8Array: -71,
+  Uint8ClampedArray: -72,
+  Int16Array: -73,
+  Uint16Array: -74,
+  Int32Array: -75,
+  Uint32Array: -76,
+  Float32Array: -77,
+  Float64Array: -78,
+  BigInt64Array: -79,
+  BigUint64Array: -80,
 } as const;
 
 export type BuiltinTypeName = keyof typeof BUILTIN_TYPE_TAGS;
@@ -84,6 +105,12 @@ export type BuiltinTypeName = keyof typeof BUILTIN_TYPE_TAGS;
  * incomplete chain data).
  */
 const BUILTIN_PARENT: Partial<Record<BuiltinTypeName, BuiltinTypeName>> = {
+  // #1721 — `Function` descends from `Object`, so a subclass of Function is
+  // statically an instance of Object too (every function IS an object). This
+  // is the one chain edge that produces a provably-true (never false-negative)
+  // `instanceof Object` result, so it is safe to record here even though the
+  // module deliberately leaves the other builtins' Object edges to runtime.
+  Function: "Object",
   TypeError: "Error",
   RangeError: "Error",
   SyntaxError: "Error",
@@ -134,10 +161,34 @@ export function getBuiltinParent(name: string): BuiltinTypeName | undefined {
  * is represented as externref (NOT a WasmGC struct), and the host returns a
  * real JS object with the right internal slots.
  *
- * Scope for #1366a. Array/Map/Set/Promise will follow in #1366b via a
- * generic `__construct_subclass` host import.
+ * Scope:
+ *   - #1366a: Error family (Error, TypeError, RangeError, …).
+ *   - #1366b: container builtins (Array, Map, Set, WeakMap, WeakSet, Promise,
+ *     RegExp, ArrayBuffer). These all route through the same single-arg
+ *     `__new_<Name>(arg) -> externref` host import; the runtime's
+ *     `extern_class new` resolver (`runtime.ts:1604`) constructs the real
+ *     built-in via `new globalThis[Name](...)` after stripping trailing nulls.
+ *
+ * Limitations (deferred to #1366c/d):
+ *   - `instanceof Sub` for non-Error subclasses: the host instance's
+ *     `[[Prototype]]` is the parent's, not Sub's, so `subInst instanceof Sub`
+ *     resolves via the static reasoning path (`expressions.ts:714`) rather
+ *     than runtime prototype-chain walking.
+ *   - `Symbol.species` is honoured by the host's spec-conforming method
+ *     impls automatically (since the instance IS a real Array/Map/etc.), but
+ *     methods that return "a new instance of the same kind" return the
+ *     parent type, not Sub.
+ *   - Default constructor `class Sub extends Array {}` does not forward
+ *     `new Sub(5)`'s `5` argument to `super(5)` (Sub has 0 declared params,
+ *     so callers truncate args to match). Explicit `constructor(x){super(x)}`
+ *     is the supported pattern.
+ *   - Multi-arg `super(a, b)` only passes the first arg today (the existing
+ *     #1366a `compileSuperCall` builtin branch is single-arg). DataView's
+ *     3-arg and RegExp's 2-arg forms thus don't fully work; deferred to a
+ *     follow-up that pre-scans super arities.
  */
 export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = new Set<BuiltinTypeName>([
+  // #1366a — Error family
   "Error",
   "TypeError",
   "RangeError",
@@ -146,12 +197,49 @@ export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = 
   "EvalError",
   "ReferenceError",
   "AggregateError",
+  // #1366b — container / wrapper builtins
+  "Array",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "Promise",
+  "RegExp",
+  "ArrayBuffer",
+  // #1455 — additional host-constructible builtins for subclass-builtins
+  "DataView",
+  "WeakRef",
+  "SharedArrayBuffer",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  // #1455 — wrapper types + Date. `new Sub()` lowers to `new Wrapper()` /
+  // `new Date()` and the instance's [[Prototype]] is set to `Sub.prototype`.
+  "Boolean",
+  "Number",
+  "String",
+  "Date",
+  // #1721 — root constructors. `class Sub extends Object {}` / `extends
+  // Function {}` lower to `new Object()` / `new Function()` so the instance is
+  // a real host object/function whose [[Prototype]] is then set to
+  // `Sub.prototype`. Missed by #1455 (which registered Map/TypedArray/etc. but
+  // not the two roots), so `new Sub() instanceof Sub` returned false for both.
+  "Object",
+  "Function",
 ]);
 
 /**
  * Returns true if `name` is a built-in JS constructor that can act as a
- * parent for a host-constructible subclass (#1366a). The subclass instance
- * is externref-backed and `super(...)` lowers to `__new_<Name>(...)`.
+ * parent for a host-constructible subclass (#1366a/#1366b). The subclass
+ * instance is externref-backed and `super(...)` lowers to `__new_<Name>(...)`.
  */
 export function isHostConstructibleBuiltin(name: string): boolean {
   return isBuiltinTypeName(name) && BUILTIN_PARENTS_HOST_CONSTRUCTIBLE.has(name as BuiltinTypeName);

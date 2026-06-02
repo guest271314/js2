@@ -46,9 +46,9 @@ Sprint 50 planning, approved by tech lead 2026-05-07 14:32 UTC.
   (validation pass, decisions, routing rationale, open questions).
 - `plan/issues/sprints/49/sprint.md` — added closure note, set status
   to `closing`, listed the 8 closed issues + carry-overs.
-- `plan/issues/sprints/49/1301-closure-env-f64-anyref-mismatch.md` —
+- `plan/issues/1301-closure-env-f64-anyref-mismatch.md` —
   status `in-progress` → `done`, completed 2026-05-04 (PR #216).
-- `plan/issues/sprints/49/1304-typeof-externref-function-classification.md` —
+- `plan/issues/1304-typeof-externref-function-classification.md` —
   status `in-progress` → `done`, completed 2026-05-04 (PR #219).
 
 ## Outstanding wrap-up actions (tech-lead-owned)

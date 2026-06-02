@@ -7,6 +7,7 @@ import {
   IncrementalLanguageService,
   type TypedAST,
 } from "./checker/index.js";
+import { isNullableNumberType } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
@@ -32,7 +33,7 @@ import { applyDefineSubstitutions } from "./compiler/define-substitution.js";
 import { rewriteCjsRequire } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
-import { optimizeBinary } from "./optimize.js";
+import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
@@ -40,6 +41,18 @@ export type { ObjectCompileResult } from "./compiler/output.js";
 const HARD_TS_DIAG_CODES = new Set([
   2322, // "Type 'X' is not assignable to type 'Y'"
   2345, // "Argument of type 'X' is not assignable to parameter of type 'Y'"
+  // ── ECMA-262 §12.6.1 Early Errors: reserved word in auto-strict context ──
+  // TS1213/1214 fire when a strict-mode-reserved word (let/static/yield/…)
+  // is used as a class name or as a module-level binding. Per spec these
+  // are always parse-time SyntaxErrors regardless of an explicit `"use strict"`
+  // directive, because ClassDefinition/ModuleBody are strict mode code
+  // (ES2024 §10.2.1). TypeScript classifies these as semantic diagnostics,
+  // not syntactic, so they previously slipped past the syntactic-only gate
+  // and let `class let {}` / module-level `let` compile and instantiate.
+  // Treating them as hard errors aligns with test262 `negative.phase: parse`
+  // (#1435).
+  1213, // "Identifier expected. 'X' is a reserved word in strict mode. Class definitions are automatically in strict mode."
+  1214, // "Identifier expected. 'X' is a reserved word in strict mode. Modules are automatically in strict mode."
 ]);
 
 /**
@@ -88,9 +101,134 @@ function isBindingPatternFalsePositive(diag: ts.Diagnostic, checker: ts.TypeChec
   return ts.isArrayBindingPattern(paramDecl.name) || ts.isObjectBindingPattern(paramDecl.name);
 }
 
+function findSmallestNodeAtPosition(file: ts.SourceFile, pos: number): ts.Node | undefined {
+  function visit(node: ts.Node): ts.Node | undefined {
+    if (pos < node.getStart(file) || pos >= node.getEnd()) return undefined;
+    let found: ts.Node = node;
+    node.forEachChild((child) => {
+      const inner = visit(child);
+      if (inner) found = inner;
+    });
+    return found;
+  }
+  return visit(file);
+}
+
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  while (current) {
+    if (current === ancestor) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function detectNullGuardForVar(
+  expr: ts.Expression,
+  varName: string,
+): { varName: string; narrowedBranch: "then" | "else" } | null {
+  if (!ts.isBinaryExpression(expr)) return null;
+  const op = expr.operatorToken.kind;
+  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  if (!isNeq && !isEq) return null;
+
+  const rightIsNull = expr.right.kind === ts.SyntaxKind.NullKeyword;
+  const leftIsNull = expr.left.kind === ts.SyntaxKind.NullKeyword;
+  if (!rightIsNull && !leftIsNull) return null;
+
+  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  if (!ts.isIdentifier(nonNullSide) || nonNullSide.text !== varName) return null;
+  return { varName, narrowedBranch: isNeq ? "then" : "else" };
+}
+
+function detectConditionNullGuard(
+  checker: ts.TypeChecker,
+  condition: ts.Expression,
+  varName: string,
+): { varName: string; narrowedBranch: "then" | "else" } | null {
+  const direct = detectNullGuardForVar(condition, varName);
+  if (direct) return direct;
+  if (ts.isIdentifier(condition)) {
+    const symbol = checker.getSymbolAtLocation(condition);
+    const decl = symbol?.valueDeclaration;
+    if (
+      decl &&
+      ts.isVariableDeclaration(decl) &&
+      decl.initializer &&
+      ts.isVariableDeclarationList(decl.parent) &&
+      (decl.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      return detectNullGuardForVar(decl.initializer, varName);
+    }
+  }
+  if (
+    ts.isPrefixUnaryExpression(condition) &&
+    condition.operator === ts.SyntaxKind.ExclamationToken &&
+    ts.isIdentifier(condition.operand)
+  ) {
+    const alias = detectConditionNullGuard(checker, condition.operand, varName);
+    if (!alias) return null;
+    return { varName, narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then" };
+  }
+  return null;
+}
+
+function isUint8ArrayType(checker: ts.TypeChecker, expr: ts.Expression): boolean {
+  const type = checker.getTypeAtLocation(expr);
+  const sym = (type as ts.TypeReference).symbol ?? type.symbol;
+  return sym?.name === "Uint8Array";
+}
+
+function isGuardedNullableNumberByteAssignmentDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
+  if (diag.code !== 2322) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  let node = findSmallestNodeAtPosition(file, diag.start);
+  if (!node) return false;
+  while (node && !ts.isBinaryExpression(node)) node = node.parent;
+  if (!node || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+  if (!ts.isElementAccessExpression(node.left)) return false;
+
+  let rhs = node.right;
+  while (
+    ts.isParenthesizedExpression(rhs) ||
+    ts.isAsExpression(rhs) ||
+    ts.isTypeAssertionExpression(rhs) ||
+    ts.isNonNullExpression(rhs)
+  ) {
+    rhs = ts.isParenthesizedExpression(rhs)
+      ? rhs.expression
+      : ts.isAsExpression(rhs)
+        ? rhs.expression
+        : ts.isNonNullExpression(rhs)
+          ? rhs.expression
+          : (rhs as ts.TypeAssertion).expression;
+  }
+  if (!ts.isIdentifier(rhs)) return false;
+  if (!isNullableNumberType(checker.getTypeAtLocation(rhs))) return false;
+  if (!isUint8ArrayType(checker, node.left.expression)) return false;
+
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isIfStatement(current)) {
+      const guard = detectConditionNullGuard(checker, current.expression, rhs.text);
+      if (guard) {
+        if (guard.narrowedBranch === "then" && isDescendantOf(node, current.thenStatement)) return true;
+        if (guard.narrowedBranch === "else" && current.elseStatement && isDescendantOf(node, current.elseStatement)) {
+          return true;
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
+  if (checker && isGuardedNullableNumberByteAssignmentDiagnostic(diag, checker)) return false;
   return true;
 }
 
@@ -120,8 +258,48 @@ function detectNodeFsImports(source: string): Set<string> {
 /**
  * Orchestrates the full compilation pipeline:
  * TS Source → tsc Parser+Checker → Codegen → Binary + WAT
+ *
+ * Async because the optional Binaryen optimizer is lazy-loaded only when
+ * wasm-opt is requested (#1757 / GH #986), so normal compilation and
+ * standalone bundles do not need to embed Binaryen.
  */
-export function compileSource(
+export async function compileSource(
+  source: string,
+  options: CompileOptions = {},
+  /** Optional persistent language service for incremental compilation */
+  languageService?: IncrementalLanguageService,
+): Promise<CompileResult> {
+  // The whole codegen pipeline is synchronous; the ONLY async step is the
+  // optional Binaryen wasm-opt pass. Run the synchronous core, then apply
+  // optimization (when requested) over the produced binary. A synchronous
+  // entry point (compileSourceSync) is preserved for callers that cannot be
+  // async — notably the JS `eval` host shim in runtime-eval.ts, which never
+  // optimizes.
+  const result = compileSourceSync(source, options, languageService);
+
+  if (options.optimize && result.success) {
+    const level = typeof options.optimize === "number" ? options.optimize : 3;
+    const optResult = await optimizeBinaryAsync(result.binary, { level });
+    if (optResult.optimized) {
+      result.binary = optResult.binary;
+    }
+    if (optResult.warning) {
+      result.errors.push({ message: optResult.warning, line: 0, column: 0, severity: "warning" });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Synchronous compilation core (no Binaryen optimization).
+ *
+ * Identical to {@link compileSource} but never runs the async wasm-opt pass —
+ * the `optimize` option is ignored here. Use this only from synchronous
+ * contexts that cannot await (the `eval` host shim). All other callers should
+ * use the async {@link compileSource}.
+ */
+export function compileSourceSync(
   source: string,
   options: CompileOptions = {},
   /** Optional persistent language service for incremental compilation */
@@ -151,7 +329,10 @@ export function compileSource(
   //
   // Before preprocessing strips import declarations, detect node:fs imports
   // for WASI mode (preprocessing replaces them with declare stubs).
-  const wasiNodeFsFuncs = options.target === "wasi" ? detectNodeFsImports(cjsRewritten) : undefined;
+  // #1491 — detect named fs imports for both WASI (#1035 syscall path) and the
+  // new JS-host imports (non-WASI). Detection is identical; the codegen branch
+  // is selected based on `ctx.wasi` + `ctx.allowFs`.
+  const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
   const preprocessed = preprocessImports(rewriteEvalSuperCall(cjsRewritten));
   const processedSource = preprocessed.source;
 
@@ -206,7 +387,10 @@ export function compileSource(
     if (diag.category === 1) {
       // Error
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
-      const severity = DOWNGRADE_DIAG_CODES.has(diag.code) ? "warning" : "error";
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, ast.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
@@ -337,8 +521,10 @@ export function compileSource(
         sourceMap: emitSourceMap,
         fast: options.fast,
         nativeStrings: options.nativeStrings,
+        utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        standalone: options.target === "standalone",
         // Phase 2 (#1131): default experimentalIR to on so recursive
         // numeric kernels (fib, factorial, etc.) compile without the
         // boxing roundtrip the legacy path emits for untyped JS
@@ -347,6 +533,9 @@ export function compileSource(
         experimentalIR: options.experimentalIR !== false,
         nodeBuiltins: preprocessed.nodeBuiltins,
         wasiNodeFsFuncs,
+        allowFs: options.allowFs ?? false,
+        strictNoHostImports: options.strictNoHostImports,
+        jsxRuntime: preprocessed.jsxRuntime,
       });
       mod = result.module;
       // Propagate codegen errors with source locations
@@ -465,17 +654,10 @@ export function compileSource(
     };
   }
 
-  // Step 3b: Optimize binary with Binaryen (optional)
-  if (options.optimize) {
-    const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
-    if (optResult.optimized) {
-      binary = optResult.binary;
-    }
-    if (optResult.warning) {
-      pushSourceAnchoredDiagnostic(errors, ast.sourceFile, optResult.warning, "warning");
-    }
-  }
+  // Step 3b: Optimize binary with Binaryen (optional) — applied by the async
+  // compileSource wrapper, not here (the optimizer is lazy-loaded only when
+  // wasm-opt is requested, #1757). This synchronous core ignores
+  // options.optimize.
 
   // Step 4: Emit WAT (optional)
   let wat = "";
@@ -520,6 +702,7 @@ export function compileSource(
     wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }
 
@@ -527,11 +710,11 @@ export function compileSource(
  * Compile multiple TypeScript source files into a single Wasm module.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMultiSource(
+export async function compileMultiSource(
   files: Record<string, string>,
   entryFile: string,
   options: CompileOptions = {},
-): CompileResult {
+): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -559,11 +742,15 @@ export function compileMultiSource(
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1 && isEntryDiag(diag)) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
@@ -630,8 +817,11 @@ export function compileMultiSource(
         sourceMap: emitSourceMap,
         fast: options.fast,
         nativeStrings: options.nativeStrings,
+        utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        strictNoHostImports: options.strictNoHostImports,
+        standalone: options.target === "standalone",
       });
       mod = result.module;
       // Propagate codegen errors with source locations
@@ -745,7 +935,7 @@ export function compileMultiSource(
   // Optimize binary with Binaryen (optional)
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }
@@ -790,6 +980,7 @@ export function compileMultiSource(
     imports: buildImportManifest(mod),
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }
 
@@ -798,7 +989,7 @@ export function compileMultiSource(
  * Uses ts.createProgram with real filesystem access -- TypeScript resolves
  * all imports automatically via standard module resolution.
  */
-export function compileFilesSource(entryPath: string, options: CompileOptions = {}): CompileResult {
+export async function compileFilesSource(entryPath: string, options: CompileOptions = {}): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -810,11 +1001,15 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
@@ -874,8 +1069,11 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
         sourceMap: emitSourceMap,
         fast: options.fast,
         nativeStrings: options.nativeStrings,
+        utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        strictNoHostImports: options.strictNoHostImports,
+        standalone: options.target === "standalone",
       });
       mod = result.module;
       for (const err of result.errors) {
@@ -981,7 +1179,7 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
 
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }
@@ -1026,5 +1224,6 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
     imports: buildImportManifest(mod),
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }

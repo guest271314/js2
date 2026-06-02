@@ -3,7 +3,7 @@
  * Post-processing pass using Binaryen's wasm-opt optimizer.
  *
  * Tries two strategies in order:
- * 1. The `binaryen` npm package (if installed as an optional dependency)
+ * 1. The `binaryen` npm package (if installed as an optional peer dependency)
  * 2. A system `wasm-opt` binary on PATH
  *
  * If neither is available, returns the original binary unchanged and emits a warning.
@@ -16,6 +16,7 @@ let _nodeImports: {
   writeFileSync: typeof import("node:fs").writeFileSync;
   readFileSync: typeof import("node:fs").readFileSync;
   unlinkSync: typeof import("node:fs").unlinkSync;
+  rmdirSync: typeof import("node:fs").rmdirSync;
   mkdtempSync: typeof import("node:fs").mkdtempSync;
   join: typeof import("node:path").join;
   tmpdir: typeof import("node:os").tmpdir;
@@ -34,6 +35,7 @@ async function getNodeImports() {
     writeFileSync: fs.writeFileSync,
     readFileSync: fs.readFileSync,
     unlinkSync: fs.unlinkSync,
+    rmdirSync: fs.rmdirSync,
     mkdtempSync: fs.mkdtempSync,
     join: path.join,
     tmpdir: os.tmpdir,
@@ -41,20 +43,61 @@ async function getNodeImports() {
   return _nodeImports;
 }
 
-// Sync fallback for Node.js environments (avoids changing the public API)
+// Sync fallback for Node.js environments (avoids changing the public API).
+// `require` is undefined inside ESM modules, and Vite/Rollup will refuse to
+// resolve bare `require("node:child_process")` in browser bundles. Detect a
+// Node-like runtime and use `createRequire` to materialize a CJS `require`
+// for the four built-in modules we need. #1580: the previous body silently
+// returned null in ESM contexts, which made `optimize: true` fall through to
+// the "wasm-opt not available" warning even when the binary was on PATH.
 function getNodeImportsSync() {
   if (_nodeImports) return _nodeImports;
+  // Bail in browser-like contexts. `optimizeBinary` should only be invoked
+  // from Node code paths; the async variant handles browser playgrounds.
+  if (typeof process === "undefined" || !process.versions || !process.versions.node) {
+    return null;
+  }
   try {
-    /* eslint-disable @typescript-eslint/no-require-imports */
-    const cp = require("node:child_process");
-    const fs = require("node:fs");
-    const path = require("node:path");
-    const os = require("node:os");
+    // #1580: the previous body used `require("node:child_process")` directly,
+    // which is a ReferenceError in ESM. That made `optimize: true` always
+    // fall through to the "wasm-opt not available" warning when called from
+    // any ESM caller (including `tsx` runs and the scripts/ benchmark
+    // generators) even when wasm-opt was on PATH. Use `node:module`'s
+    // synchronous `createRequire` via `process.getBuiltinModule` (Node ≥ 22)
+    // so the same code path works in CJS hosts, ESM hosts, and esbuild
+    // bundles. Vite/Rollup won't statically follow the dynamic getter, so
+    // browser bundles still tree-shake this whole function away (it's
+    // gated on `process.versions.node` above).
+    // Build a synchronous `require` via Node's built-in
+    // `node:module#createRequire`. We must reach `node:module` without using
+    // `require()` itself (it's a ReferenceError in ESM). Node ≥ 22 exposes
+    // `process.getBuiltinModule` for synchronous access to a built-in
+    // module — that's the only primitive that works in both CJS and ESM
+    // hosts without falling back to `eval`, and it's available in every
+    // Node version this project supports.
+    let req: NodeRequire | undefined;
+    const getBuiltin = (process as unknown as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule;
+    if (typeof getBuiltin === "function") {
+      const moduleNs = getBuiltin("node:module") as typeof import("node:module") | undefined;
+      if (moduleNs && typeof moduleNs.createRequire === "function") {
+        // Anchor the require resolver at the project root (process.cwd).
+        // We don't depend on `import.meta.url` here — synchronous code can
+        // run in either CJS or ESM, and the resolver only needs a starting
+        // directory to walk node_modules from.
+        req = moduleNs.createRequire(`file://${process.cwd()}/`);
+      }
+    }
+    if (!req || typeof req !== "function") return null;
+    const cp = req("node:child_process") as typeof import("node:child_process");
+    const fs = req("node:fs") as typeof import("node:fs");
+    const path = req("node:path") as typeof import("node:path");
+    const os = req("node:os") as typeof import("node:os");
     _nodeImports = {
       execFileSync: cp.execFileSync,
       writeFileSync: fs.writeFileSync,
       readFileSync: fs.readFileSync,
       unlinkSync: fs.unlinkSync,
+      rmdirSync: fs.rmdirSync,
       mkdtempSync: fs.mkdtempSync,
       join: path.join,
       tmpdir: os.tmpdir,
@@ -92,41 +135,16 @@ function isBrowserLikeRuntime(): boolean {
 
 /**
  * Optimize a Wasm binary using Binaryen.
- * Returns the optimized binary, or the original if optimization is unavailable.
- */
-export function optimizeBinary(binary: Uint8Array, options: OptimizeOptions = {}): OptimizeResult {
-  const level = options.level ?? 3;
-  const gc = options.gc !== false;
-  const referenceTypes = options.referenceTypes !== false;
-  const exceptionHandling = options.exceptionHandling !== false;
-
-  // Strategy 1: Try the binaryen npm package
-  try {
-    const result = optimizeWithBinaryenPackage(binary, level, gc, referenceTypes, exceptionHandling);
-    if (result) return result;
-  } catch {
-    // Fall through to system binary
-  }
-
-  // Strategy 2: Try system wasm-opt binary
-  try {
-    const result = optimizeWithSystemBinary(binary, level, gc, referenceTypes, exceptionHandling);
-    if (result) return result;
-  } catch {
-    // Fall through to warning
-  }
-
-  return {
-    binary,
-    optimized: false,
-    warning:
-      "wasm-opt not available: install the 'binaryen' npm package or add wasm-opt to PATH. Skipping optimization.",
-  };
-}
-
-/**
- * Async optimizer variant for environments that can lazy-load the ESM
- * `binaryen` package (for example the browser playground via Vite).
+ *
+ * This is the only public optimizer entry point (#1763). The previous
+ * synchronous `optimizeBinary` was removed: after the #1757 async-compile
+ * migration every live caller goes through this async path, and the sync
+ * variant only kept alive a dead `createRequire("binaryen")` branch — the
+ * exact bundler hazard #986/#1756 set out to remove. The `binaryen` package
+ * is loaded lazily at runtime (see `getBinaryenModule`) without making
+ * bundlers embed it in standalone artifacts; the system `wasm-opt` CLI
+ * fallback still uses the dynamic node-builtin shim that bundlers
+ * intentionally cannot statically resolve.
  */
 export async function optimizeBinaryAsync(binary: Uint8Array, options: OptimizeOptions = {}): Promise<OptimizeResult> {
   const level = options.level ?? 3;
@@ -180,7 +198,11 @@ async function getBinaryenModule(): Promise<any | null> {
     }
 
     try {
-      const mod = await import("binaryen");
+      // Keep Binaryen optional. A string-literal dynamic import makes esbuild,
+      // Bun, and Deno treat the package as a bundle input, adding ~13.5 MB to
+      // standalone artifacts even though wasm-opt is only a post-compile pass.
+      const specifier = (globalObject.__js2wasmBinaryenModuleSpecifier as string | undefined) ?? "binaryen";
+      const mod = await import(/* @vite-ignore */ specifier);
       return mod.default ?? mod;
     } catch {
       return null;
@@ -195,24 +217,6 @@ async function getBinaryenModule(): Promise<any | null> {
     }
   })();
   return _binaryenModulePromise;
-}
-
-function optimizeWithBinaryenPackage(
-  binary: Uint8Array,
-  level: number,
-  gc: boolean,
-  referenceTypes: boolean,
-  exceptionHandling: boolean,
-): OptimizeResult | null {
-  // Dynamic import to avoid hard dependency
-  let binaryen: any;
-  try {
-    binaryen = require("binaryen");
-  } catch {
-    return null;
-  }
-
-  return optimizeWithBinaryenModule(binaryen, binary, level, gc, referenceTypes, exceptionHandling);
 }
 
 function optimizeWithBinaryenModule(
@@ -239,13 +243,36 @@ function optimizeWithBinaryenModule(
       typeof binaryen.getOptimizeLevel === "function" ? binaryen.getOptimizeLevel() : undefined;
     const previousShrinkLevel = typeof binaryen.getShrinkLevel === "function" ? binaryen.getShrinkLevel() : undefined;
 
-    // Set features on the module
+    // Set features on the module. #1580: enable the full superset js2wasm
+    // can emit so wasm-opt doesn't bail on saturating-float-to-int,
+    // tail-call, multivalue, typed-function-references, or strings. The
+    // binaryen Features bitset accepts ORs; unknown flags on older binaryen
+    // simply read as 0 and are no-ops. The "All" feature mask covers
+    // everything binaryen knows about — equivalent to the CLI
+    // `--all-features`.
     let features = 0;
-    if (gc) features |= featureFlags.GC | featureFlags.ReferenceTypes;
-    if (referenceTypes) features |= featureFlags.ReferenceTypes;
-    if (exceptionHandling) features |= featureFlags.ExceptionHandling;
-    features |= featureFlags.BulkMemory;
-    features |= featureFlags.MutableGlobals;
+    if (featureFlags.All !== undefined) {
+      features = featureFlags.All;
+    } else {
+      if (gc) features |= featureFlags.GC | featureFlags.ReferenceTypes;
+      if (referenceTypes) features |= featureFlags.ReferenceTypes;
+      if (exceptionHandling) features |= featureFlags.ExceptionHandling;
+      features |= featureFlags.BulkMemory ?? 0;
+      features |= featureFlags.MutableGlobals ?? 0;
+      features |= featureFlags.SignExt ?? 0;
+      features |= featureFlags.TruncSat ?? 0;
+      features |= featureFlags.TailCall ?? 0;
+      features |= featureFlags.Multivalue ?? 0;
+      features |= featureFlags.TypedFunctionReferences ?? 0;
+      features |= featureFlags.Strings ?? 0;
+    }
+    // Mirror the CLI's `--disable-custom-descriptors`: clear the
+    // CustomDescriptors bit if `All` set it, so wasm-opt's GC passes don't
+    // introduce `(ref (exact $T))` types that wasmtime ≤ 44 can't parse.
+    // See the matching comment in `optimizeWithSystemBinary`.
+    if (featureFlags.CustomDescriptors !== undefined) {
+      features &= ~featureFlags.CustomDescriptors;
+    }
     mod.setFeatures(features);
 
     // Match the requested optimization level more closely than a bare optimize() call.
@@ -287,14 +314,56 @@ function optimizeWithSystemBinary(
   const n = getNodeImportsSync();
   if (!n) return null; // Not in Node.js environment (browser)
 
-  // Check if wasm-opt is on PATH
-  let wasmOptPath: string;
+  // Resolve a wasm-opt binary. Try in priority order:
+  //   1. PATH lookup via `which` (covers system installs and npx-launched
+  //      processes where node_modules/.bin is already on PATH).
+  //   2. The `binaryen` npm package's bundled `bin/wasm-opt`. This is the
+  //      common case for any project that lists `binaryen` as a (optional)
+  //      dependency — it always ships a platform-appropriate binary. #1580:
+  //      without this fallback `node script.mjs` (no npx) reaches optimize
+  //      but `which` returns "not found", and we silently skip optimization.
+  let wasmOptPath: string | undefined;
   try {
-    wasmOptPath = n.execFileSync("which", ["wasm-opt"], { encoding: "utf-8" }).trim();
+    const p = n.execFileSync("which", ["wasm-opt"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (p) wasmOptPath = p;
   } catch {
-    return null;
+    // not on PATH — try the binaryen package below
   }
-
+  if (!wasmOptPath) {
+    // Resolve binaryen's bin/wasm-opt via Node's module resolver so this
+    // works regardless of the caller's cwd.
+    try {
+      // Get a sync require we can use to resolve packages — same
+      // `process.getBuiltinModule` path as `getNodeImportsSync`. Works in
+      // both CJS and ESM hosts without relying on `eval` or a lexical
+      // `require` binding.
+      let req: NodeRequire | undefined;
+      const getBuiltin = (process as unknown as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule;
+      if (typeof getBuiltin === "function") {
+        const moduleNs = getBuiltin("node:module") as typeof import("node:module") | undefined;
+        if (moduleNs && typeof moduleNs.createRequire === "function") {
+          req = moduleNs.createRequire(`file://${process.cwd()}/`);
+        }
+      }
+      if (req && typeof req.resolve === "function") {
+        // `binaryen/package.json` resolves cleanly even when binaryen is a
+        // peer/optional dep with an ESM-only main entry. From there derive
+        // the bin path.
+        const pkgJsonPath = req.resolve("binaryen/package.json");
+        const wasmOptCandidate = n.join(pkgJsonPath, "..", "bin", "wasm-opt");
+        // Probe by spawning --version (don't fs.access; that's an extra
+        // sync system call and execFileSync below will surface a clear
+        // error if the file is missing).
+        n.execFileSync(wasmOptCandidate, ["--version"], {
+          stdio: ["ignore", "ignore", "ignore"],
+          timeout: 5_000,
+        });
+        wasmOptPath = wasmOptCandidate;
+      }
+    } catch {
+      // resolution or probe failed — fall through to "not available"
+    }
+  }
   if (!wasmOptPath) return null;
 
   // Write to temp file, run wasm-opt, read result
@@ -305,22 +374,54 @@ function optimizeWithSystemBinary(
   try {
     n.writeFileSync(inputPath, binary);
 
-    const args: string[] = [inputPath, `-O${level}`, "-o", outputPath];
+    // #1580: js2wasm emits constructs from a broad set of post-MVP proposals:
+    // saturating float-to-int (nontrapping-float-to-int), array.copy / array.fill
+    // (bulk-memory), tail calls in return position, multivalue blocks, and the
+    // string proposal when targeting JS hosts. Enable everything wasm-opt
+    // understands; the cost of an unused-feature flag is zero, the cost of a
+    // missing one is a fatal validator error inside wasm-opt (which previously
+    // surfaced as the misleading "wasm-opt not available" warning at the
+    // outer try/catch). Use `--all-features` rather than enumerating; it's
+    // the same set wasm-opt uses for `wasm-opt --all-features`.
+    // `--disable-custom-descriptors` excludes the unfinished
+    // custom-descriptors / exact-ref proposal from `--all-features`.
+    // Without this, wasm-opt's GC optimization passes will introduce
+    // `(ref (exact $T))` types that wasmtime ≤ 44 (and most other engines)
+    // refuse to parse. The cost of the disable is zero — js2wasm doesn't
+    // emit exact refs itself, so the only effect is preventing wasm-opt
+    // from inserting them as a width refinement.
+    const args: string[] = [
+      inputPath,
+      `-O${level}`,
+      "-o",
+      outputPath,
+      "--all-features",
+      "--disable-custom-descriptors",
+    ];
+    void gc;
+    void referenceTypes;
+    void exceptionHandling;
 
-    if (gc) {
-      args.push("--enable-gc");
+    let stderr: Buffer | string = "";
+    try {
+      n.execFileSync(wasmOptPath, args, {
+        timeout: 60_000, // 60 second timeout
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // Surface wasm-opt's actual error message instead of falling through to
+      // the misleading "not available" warning. A validator error here means
+      // we emitted something wasm-opt rejected — that's a compiler bug worth
+      // seeing, not a missing-binary problem.
+      const e = err as { stderr?: Buffer | string; message?: string };
+      stderr = e.stderr ?? e.message ?? "unknown error";
+      const text = Buffer.isBuffer(stderr) ? stderr.toString("utf-8") : String(stderr);
+      return {
+        binary,
+        optimized: false,
+        warning: `wasm-opt -O${level} failed: ${text.slice(0, 800).trim()}`,
+      };
     }
-    if (referenceTypes) {
-      args.push("--enable-reference-types");
-    }
-    if (exceptionHandling) {
-      args.push("--enable-exception-handling");
-    }
-
-    n.execFileSync(wasmOptPath, args, {
-      timeout: 60_000, // 60 second timeout
-      stdio: "pipe",
-    });
 
     const optimizedBinary = n.readFileSync(outputPath);
     return { binary: new Uint8Array(optimizedBinary), optimized: true };
@@ -337,14 +438,14 @@ function optimizeWithSystemBinary(
       /* ignore */
     }
     try {
-      n.unlinkSync(tmpDir);
+      // The temp dir is a directory, so `unlinkSync` is expected to fail;
+      // remove it with `rmdirSync`. #1763: route this through the same
+      // dynamic node-builtin bundle (`n` = getNodeImportsSync()) the rest of
+      // this function uses, rather than a bare `require("node:fs")` that a
+      // bundler can't bind in ESM (GH #986).
+      n.rmdirSync(tmpDir);
     } catch {
-      try {
-        const fs = require("node:fs");
-        fs.rmdirSync(tmpDir);
-      } catch {
-        /* ignore */
-      }
+      /* ignore */
     }
   }
 }

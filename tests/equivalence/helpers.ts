@@ -63,6 +63,28 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
     __unbox_boolean: (v: unknown) => (v ? 1 : 0),
     __box_number: (v: number) => v,
     __box_boolean: (v: number) => Boolean(v),
+    // (#1644) bigint boxing: JS-BigInt-integration delivers the i64 as a JS
+    // bigint already, so box is identity; __to_bigint is §7.1.13 ToBigInt.
+    __box_bigint: (v: bigint) => v,
+    __to_bigint: (v: any): bigint => {
+      if (typeof v === "bigint") return v;
+      if (typeof v === "number") throw new TypeError("Cannot convert a Number to a BigInt");
+      if (typeof v === "symbol") throw new TypeError("Cannot convert a Symbol value to a BigInt");
+      return BigInt(v);
+    },
+    // (#1644 Slice B) __bigint_ctor: §21.2.1.1 BigInt(value). Number →
+    // NumberToBigInt (RangeError unless safe integer); string → StringToBigInt
+    // (SyntaxError on malformed); Symbol → TypeError; bigint/boolean identity.
+    __bigint_ctor: (v: any): bigint => {
+      if (typeof v === "number") {
+        if (!Number.isInteger(v)) {
+          throw new RangeError(`The number ${v} cannot be converted to a BigInt because it is not an integer`);
+        }
+        return BigInt(v);
+      }
+      if (typeof v === "symbol") throw new TypeError("Cannot convert a Symbol value to a BigInt");
+      return BigInt(v);
+    },
     __make_callback: () => null,
     __extern_get: (obj: any, key: any) => (obj == null ? undefined : obj[key]),
     __extern_set: (obj: any, key: any, val: any) => {
@@ -70,6 +92,9 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
     },
     __extern_length: (obj: any) => (obj == null ? 0 : obj.length),
     __extern_is_undefined: (v: any) => (v === undefined ? 1 : 0),
+    __throw_type_error: (msg: any) => {
+      throw new TypeError(String(msg ?? ""));
+    },
     __extern_slice: (arr: any, start: number) => (Array.isArray(arr) ? arr.slice(start) : []),
     JSON_stringify: (v: any) => JSON.stringify(v),
     JSON_parse: (s: any) => JSON.parse(s),
@@ -115,9 +140,12 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
       if (asyncIter) return asyncIter.call(obj);
       return obj[Symbol.iterator]();
     },
-    __iterator_next: (iter: any) => iter.next(),
-    __iterator_done: (result: any) => (result.done ? 1 : 0),
-    __iterator_value: (result: any) => result.value,
+    // #1620 v2: multi-value result [i32 done, externref value]; __iterator_done
+    // and __iterator_value imports are eliminated.
+    __iterator_next: (iter: any): [number, any] => {
+      const r = iter.next();
+      return [r.done ? 1 : 0, r.value];
+    },
     __iterator_return: (iter: any) => {
       if (iter && typeof iter.return === "function") iter.return();
     },
@@ -174,10 +202,35 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
 }
 
 /**
+ * Instantiate a compiled result with full host-import fidelity (#1659).
+ *
+ * Unlike calling `buildImports` + `WebAssembly.instantiate` directly, this
+ * overlays the runtime's faithful host imports (struct sidecar reads,
+ * iterator protocol) AND registers the wasm exports via `setExports` so
+ * runtime callbacks like `__extern_get`'s `__sget_<field>` struct-getter
+ * fallback work. Direct `buildImports` callers that skip `setExports` see
+ * `undefined` for opaque WasmGC struct fields, which makes destructuring
+ * defaults wrongly fire in the harness even when the real runtime is correct.
+ */
+export async function instantiateWithRuntime(result: CompileResult) {
+  const imports = buildImports(result);
+  let setExportsFn: ((exports: Record<string, Function>) => void) | undefined;
+  if (result.imports && result.imports.length > 0) {
+    const runtimeResult = buildRuntimeImports(result.imports, undefined, result.stringPool);
+    setExportsFn = runtimeResult.setExports;
+    imports.env = { ...(imports.env as Record<string, Function>), ...runtimeResult.env };
+    if (runtimeResult.string_constants) imports.string_constants = runtimeResult.string_constants;
+  }
+  const { instance } = await WebAssembly.instantiate(result.binary, imports);
+  if (setExportsFn) setExportsFn(instance.exports as Record<string, Function>);
+  return instance;
+}
+
+/**
  * Compile TS source to Wasm, instantiate it, and return exports.
  */
 export async function compileToWasm(source: string) {
-  const result = compile(source);
+  const result = await compile(source);
   if (!result.success) {
     throw new Error(
       `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,

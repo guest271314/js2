@@ -12,14 +12,244 @@ import { collectReferencedIdentifiers, collectWrittenIdentifiers, compileArrowAs
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitThrowString } from "./expressions/helpers.js";
+import { emitThrowString, emitThrowTypeError } from "./expressions/helpers.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
-import { compileNativeStringLiteral } from "./string-ops.js";
+import { compileNativeStringLiteral, compileStringLiteral } from "./string-ops.js";
+import { getVecInfo } from "./type-coercion.js";
+
+// ── Compile-time ToBoolean coercion of descriptor flag initializers ──
+/**
+ * Try to constant-fold `ToBoolean(<expr>)` at compile time. Returns:
+ *   - `true`/`false` if the expression has a statically-known truthiness
+ *   - `undefined` if the value cannot be determined at compile time (caller
+ *     must evaluate at runtime or fall back to the dynamic path).
+ *
+ * Per ES spec §6.2.5.6 step 5.b, every descriptor attribute (writable,
+ * enumerable, configurable) is run through `ToBoolean` before being stored.
+ * Previously the codegen only accepted the `true`/`false` keyword literals
+ * and silently dropped the entire attribute when any other expression
+ * appeared (so `{ configurable: -12345 }` resulted in `configurable: false`
+ * — a silent spec violation triggering 1,000+ test262 failures).
+ */
+export function tryConstantFoldToBoolean(init: ts.Expression): boolean | undefined {
+  // Strip parentheses
+  while (ts.isParenthesizedExpression(init)) init = init.expression;
+  // Strip non-null/as assertions (TS-only no-ops)
+  while (ts.isNonNullExpression(init) || ts.isAsExpression(init) || ts.isTypeAssertionExpression(init)) {
+    init = init.expression;
+  }
+
+  if (init.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (init.kind === ts.SyntaxKind.FalseKeyword) return false;
+  if (init.kind === ts.SyntaxKind.NullKeyword) return false;
+  if (ts.isIdentifier(init) && init.text === "undefined") return false;
+  if (ts.isIdentifier(init) && init.text === "NaN") return false;
+  if (ts.isIdentifier(init) && init.text === "Infinity") return true;
+  if (ts.isNumericLiteral(init)) {
+    const n = Number(init.text);
+    return !!n && !Number.isNaN(n);
+  }
+  if (ts.isBigIntLiteral(init)) {
+    // Strip trailing "n"
+    const txt = init.text.replace(/n$/, "");
+    return BigInt(txt) !== 0n;
+  }
+  if (ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init)) {
+    return init.text.length > 0;
+  }
+  if (ts.isTemplateExpression(init)) {
+    // Non-empty template (has head text or spans) is always truthy as a string
+    return init.head.text.length > 0 || init.templateSpans.length > 0;
+  }
+  // Object/array literals → truthy
+  if (ts.isObjectLiteralExpression(init) || ts.isArrayLiteralExpression(init)) return true;
+  // Function/arrow → truthy
+  if (ts.isFunctionExpression(init) || ts.isArrowFunction(init) || ts.isClassExpression(init)) return true;
+  // Unary minus / plus on numeric literal: !!(-12345) = true; !!(+0) = false
+  if (ts.isPrefixUnaryExpression(init)) {
+    const inner = tryConstantFoldToBoolean(init.operand);
+    if (init.operator === ts.SyntaxKind.MinusToken || init.operator === ts.SyntaxKind.PlusToken) {
+      // -N, +N preserve truthiness for numeric literal operands
+      if (ts.isNumericLiteral(init.operand)) {
+        const n = Number(init.operand.text);
+        return !!n && !Number.isNaN(n);
+      }
+    }
+    if (init.operator === ts.SyntaxKind.ExclamationToken) {
+      return inner !== undefined ? !inner : undefined;
+    }
+    if (init.operator === ts.SyntaxKind.TildeToken && ts.isNumericLiteral(init.operand)) {
+      const n = Number(init.operand.text);
+      const v = ~(n | 0);
+      return v !== 0;
+    }
+  }
+  // `void <expr>` always yields undefined
+  if (ts.isVoidExpression(init)) return false;
+  // Cannot determine statically — caller must handle the dynamic case
+  return undefined;
+}
+
+/**
+ * Check whether a descriptor argument is statically a non-object primitive
+ * value (number/string/boolean/null/undefined). When true, ES §6.2.5.5 step 1
+ * requires the runtime to throw a TypeError "Property description must be an
+ * object". We detect this at compile time and emit the throw directly.
+ */
+function isStaticallyNonObjectDescArg(descArg: ts.Expression): boolean {
+  while (ts.isParenthesizedExpression(descArg)) descArg = descArg.expression;
+  if (
+    ts.isNumericLiteral(descArg) ||
+    ts.isStringLiteral(descArg) ||
+    ts.isNoSubstitutionTemplateLiteral(descArg) ||
+    descArg.kind === ts.SyntaxKind.TrueKeyword ||
+    descArg.kind === ts.SyntaxKind.FalseKeyword ||
+    descArg.kind === ts.SyntaxKind.NullKeyword
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(descArg) && descArg.text === "undefined") return true;
+  if (ts.isPrefixUnaryExpression(descArg) && ts.isNumericLiteral(descArg.operand)) return true;
+  return false;
+}
+
+// ── #1130 PR-0: array-index-exotic length growth on defineProperty ───
+
+/**
+ * Parse a property key string as a canonical array index per the array
+ * exotic-object rules (ES §10.4.2.1 / `CanonicalNumericIndexString` plus
+ * `ToString(ToUint32(n)) === key`). Returns the index when the key is a
+ * canonical array index in `[0, 2^32-2]`, else undefined. "length", "01",
+ * "-1", "1.5", "4294967295" are NOT canonical array indices.
+ */
+function parseCanonicalArrayIndex(key: string): number | undefined {
+  if (!/^(0|[1-9][0-9]*)$/.test(key)) return undefined;
+  const n = Number(key);
+  // Array indices are < 2^32 - 1 (4294967295 is the max length, not an index).
+  if (!Number.isInteger(n) || n < 0 || n >= 0xffffffff) return undefined;
+  return n;
+}
+
+/**
+ * A receiver expression is safe to re-compile for the length-growth side
+ * effect only when evaluating it has no observable side effects. Identifiers
+ * and `this` qualify; calls, indexing, and arbitrary member chains do not.
+ */
+function isSideEffectFreeReceiver(objArg: ts.Expression): boolean {
+  return ts.isIdentifier(objArg) || objArg.kind === ts.SyntaxKind.ThisKeyword;
+}
+
+/**
+ * #1130 PR-0: emit array-index-exotic `length` growth.
+ *
+ * `Object.defineProperty(arr, "n", desc)` on an array exotic object with
+ * `n >= arr.length` sets `arr.length = n + 1` (ES §10.4.2.1 ArraySetLength
+ * via `[[DefineOwnProperty]]`). Our WasmGC vec stores the logical length in
+ * struct field 0; this emits a guarded bump on a freshly-compiled vec ref.
+ *
+ * Emits nothing (and returns) when `objArg` is not a side-effect-free vec
+ * receiver or `propArg` is not a canonical array index. Leaves the operand
+ * stack unchanged.
+ */
+function maybeEmitVecLengthGrowth(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  objArg: ts.Expression,
+  propArg: ts.Expression,
+): void {
+  if (!ts.isStringLiteral(propArg)) return;
+  const idx = parseCanonicalArrayIndex(propArg.text);
+  if (idx === undefined) return;
+  if (!isSideEffectFreeReceiver(objArg)) return;
+
+  const objTsType = ctx.checker.getTypeAtLocation(objArg);
+  const wasmType = resolveWasmType(ctx, objTsType);
+  if (wasmType.kind !== "ref" && wasmType.kind !== "ref_null") return;
+  const vecTypeIdx = (wasmType as { typeIdx?: number }).typeIdx;
+  if (vecTypeIdx === undefined) return;
+  const vecInfo = getVecInfo(ctx, vecTypeIdx);
+  if (vecInfo === null) return;
+  const arrTypeIdx = vecInfo.arrTypeIdx;
+
+  // Re-compile the receiver to a raw vec ref (safe: side-effect-free).
+  const recvType = compileExpression(ctx, fctx, objArg);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    // Unexpected: discard whatever landed on the stack to stay balanced.
+    if (recvType) fctx.body.push({ op: "drop" });
+    return;
+  }
+  const vecLocal = allocLocal(fctx, `__defprop_grow_${fctx.locals.length}`, recvType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+
+  // Only grow when idx >= vec.length. Inside the guard, grow the backing
+  // `$data` array if its capacity is too small (so iteration/index reads
+  // don't trap), then set vec.length = idx + 1. This mirrors the indexed
+  // assignment grow path in expressions/assignment.ts so the vec stays
+  // internally consistent (logical length never exceeds backing capacity).
+  const dataLocal = allocLocal(fctx, `__defprop_grow_data_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+  const oldCapLocal = allocLocal(fctx, `__defprop_grow_ocap_${fctx.locals.length}`, { kind: "i32" });
+  const newDataLocal = allocLocal(fctx, `__defprop_grow_ndata_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+
+  fctx.body.push({ op: "i32.const", value: idx });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "i32.ge_s" }); // idx >= vec.length?
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // data = vec.data
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "local.set", index: dataLocal } as Instr,
+
+      // if (idx >= array.len(data)) grow backing array to idx + 1
+      { op: "local.get", index: dataLocal } as Instr,
+      { op: "array.len" } as Instr,
+      { op: "local.tee", index: oldCapLocal } as Instr,
+      { op: "i32.const", value: idx } as Instr,
+      { op: "i32.le_s" } as Instr, // oldCap <= idx?
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // newData = array.new_default(idx + 1)
+          { op: "i32.const", value: idx + 1 } as Instr,
+          { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+          { op: "local.set", index: newDataLocal } as Instr,
+          // array.copy newData[0..oldCap] = data[0..oldCap]
+          { op: "local.get", index: newDataLocal } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "local.get", index: oldCapLocal } as Instr,
+          { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+          // vec.data = newData
+          { op: "local.get", index: vecLocal } as Instr,
+          { op: "local.get", index: newDataLocal } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        ],
+      } as Instr,
+
+      // vec.length = idx + 1
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "i32.const", value: idx + 1 } as Instr,
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+    ],
+  });
+}
 
 // ── Compile-time primitive type check for Object methods ─────────────
 
@@ -204,7 +434,7 @@ export function emitDefinePropertyFlagCheck(
 
   // Convert existing flags to i32 (NaN -> 0 via i32.trunc_sat_f64_s)
   fctx.body.push({ op: "local.get", index: existingFlagsLocal });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as unknown as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: existingI32Local });
 
   // Build non-configurable violation checks (only emitted when property is defined AND non-configurable)
@@ -224,7 +454,7 @@ export function emitDefinePropertyFlagCheck(
     { op: "i32.and" } as Instr,
     { op: "i32.const", value: newEnumerable } as Instr,
     { op: "i32.ne" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] } as unknown as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
   );
 
   // Check for data property restrictions
@@ -242,14 +472,14 @@ export function emitDefinePropertyFlagCheck(
         { op: "i32.const", value: PROP_FLAG_WRITABLE } as Instr,
         { op: "i32.and" } as Instr,
         { op: "i32.eqz" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: nonWritableChecks } as unknown as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: nonWritableChecks },
       ];
       nonConfigChecks.push(
         { op: "local.get", index: existingI32Local } as Instr,
         { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
         { op: "i32.and" } as Instr,
         { op: "i32.eqz" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: isDataAndNonWritable } as unknown as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: isDataAndNonWritable },
       );
     }
   }
@@ -261,14 +491,14 @@ export function emitDefinePropertyFlagCheck(
       { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
       { op: "i32.and" } as Instr,
       { op: "i32.eqz" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] } as unknown as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
     );
   } else if (hasValue || newFlags & PROP_FLAG_WRITABLE) {
     nonConfigChecks.push(
       { op: "local.get", index: existingI32Local } as Instr,
       { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
       { op: "i32.and" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] } as unknown as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
     );
   }
 
@@ -298,7 +528,7 @@ export function emitDefinePropertyFlagCheck(
     op: "block",
     blockType: { kind: "empty" },
     body: blockBody,
-  } as unknown as Instr);
+  });
 
   // Check: If property was NOT defined yet, check non-extensibility
   const neCheckBody: Instr[] = [
@@ -306,8 +536,8 @@ export function emitDefinePropertyFlagCheck(
     { op: "global.get", index: neKeyGlobal } as Instr,
     { op: "call", funcIdx: getIdx } as Instr,
     { op: "call", funcIdx: unboxIdx } as Instr,
-    { op: "i32.trunc_sat_f64_s" } as unknown as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...neThrowInstrs] } as unknown as Instr,
+    { op: "i32.trunc_sat_f64_s" },
+    { op: "if", blockType: { kind: "empty" }, then: [...neThrowInstrs] },
   ];
 
   fctx.body.push(
@@ -320,7 +550,7 @@ export function emitDefinePropertyFlagCheck(
     op: "if",
     blockType: { kind: "empty" },
     then: neCheckBody,
-  } as unknown as Instr);
+  });
 
   // Store the new flags: __extern_set(obj, "__pf_<propName>", box(newFlags))
   fctx.body.push({ op: "local.get", index: objLocal });
@@ -350,14 +580,44 @@ export function compileObjectDefineProperty(
 ): ValType | null {
   const objArg = expr.arguments[0]!;
   const propArg = expr.arguments[1]!;
-  const descArg = expr.arguments[2]!;
+  // Strip TS-only `as`/`!`/type-assertion wrappers so descriptor shape inspection
+  // (object-literal detection, primitive-literal R5 check, etc.) sees the real node.
+  let descArg = expr.arguments[2]!;
+  while (
+    ts.isAsExpression(descArg) ||
+    ts.isNonNullExpression(descArg) ||
+    ts.isTypeAssertionExpression(descArg) ||
+    ts.isParenthesizedExpression(descArg)
+  ) {
+    descArg = (descArg as ts.AsExpression).expression;
+  }
 
   // ES spec 19.1.2.4 step 1: throw TypeError if first arg is not an object
   if (emitNonObjectArgGuard(ctx, fctx, objArg, "Object.defineProperty")) {
     // After the throw, emit unreachable and return externref to satisfy callers
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }
+
+  // (#1460 R5) ES spec §6.2.5.5 step 1: throw TypeError if descriptor is not an object.
+  // Static check: numeric/string/boolean/null/undefined literal descriptors are spec
+  // violations. The runtime helpers already check this for opaque cases, but the
+  // compiler-time check produces a clean throw that the test262 suite expects.
+  if (isStaticallyNonObjectDescArg(descArg)) {
+    // Compile obj/prop for side effects then throw.
+    const t1 = compileExpression(ctx, fctx, objArg);
+    if (t1) fctx.body.push({ op: "drop" });
+    const t2 = compileExpression(ctx, fctx, propArg);
+    if (t2) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, "TypeError: Property description must be an object");
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
+
+  // (#1130 PR-0) Array exotic objects grow `length` when a numeric-index
+  // property at or beyond the current length is defined. Emit the guarded
+  // bump before the descriptor is applied; no-op for non-array receivers.
+  maybeEmitVecLengthGrowth(ctx, fctx, objArg, propArg);
 
   // Check if descriptor is an object literal with a `value`, `get`, or `set` property
   let valueExpr: ts.Expression | undefined;
@@ -434,24 +694,62 @@ export function compileObjectDefineProperty(
   }
 
   // ── Parse descriptor flags (configurable, writable, enumerable) ──────
-  // Defaults per spec: all false when using Object.defineProperty
+  // Defaults per spec: all false when using Object.defineProperty.
+  // (#1460 R1) Apply ToBoolean per ES §6.2.5.6 step 5.b — `tryConstantFoldToBoolean`
+  // handles all statically-known shapes (`0`, `-12345`, `null`, `"foo"`, `{}`, etc.).
+  // Track whether the property key was present in the descriptor (`*Specified`)
+  // separately from its boolean value — an unspecified attribute is functionally
+  // identical to `false` for `Object.defineProperty` per ES §6.2.5.6 step 7, but
+  // we must NOT downgrade an attribute that was supplied dynamically to "absent".
   let descWritable: boolean | undefined;
   let descEnumerable: boolean | undefined;
   let descConfigurable: boolean | undefined;
+  let writableDynamic = false;
+  let enumerableDynamic = false;
+  let configurableDynamic = false;
   if (ts.isObjectLiteralExpression(descArg)) {
     for (const prop of descArg.properties) {
       if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
         const name = prop.name.text;
         if (name === "writable" || name === "enumerable" || name === "configurable") {
-          // Resolve boolean literal value
-          let boolVal: boolean | undefined;
-          if (prop.initializer.kind === ts.SyntaxKind.TrueKeyword) boolVal = true;
-          else if (prop.initializer.kind === ts.SyntaxKind.FalseKeyword) boolVal = false;
-          if (name === "writable") descWritable = boolVal;
-          else if (name === "enumerable") descEnumerable = boolVal;
-          else if (name === "configurable") descConfigurable = boolVal;
+          const folded = tryConstantFoldToBoolean(prop.initializer);
+          if (name === "writable") {
+            descWritable = folded;
+            if (folded === undefined) writableDynamic = true;
+          } else if (name === "enumerable") {
+            descEnumerable = folded;
+            if (folded === undefined) enumerableDynamic = true;
+          } else if (name === "configurable") {
+            descConfigurable = folded;
+            if (folded === undefined) configurableDynamic = true;
+          }
         }
       }
+    }
+  }
+  const _anyFlagDynamic = writableDynamic || enumerableDynamic || configurableDynamic;
+
+  // (#1460 R4) ES spec §6.2.5.6 step 4 — if the descriptor mixes data attributes
+  // (value / writable) with accessor attributes (get / set), throw TypeError.
+  // Detect statically so the diagnostic doesn't depend on runtime descriptor
+  // shape resolution.
+  {
+    const hasData = valueExpr !== undefined || descWritable !== undefined || writableDynamic;
+    const hasAccessor =
+      getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
+    if (hasData && hasAccessor) {
+      // Compile obj/prop for side effects then throw.
+      const t1 = compileExpression(ctx, fctx, objArg);
+      if (t1) fctx.body.push({ op: "drop" });
+      const t2 = compileExpression(ctx, fctx, propArg);
+      if (t2) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(
+        ctx,
+        fctx,
+        "TypeError: Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
+      );
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
     }
   }
 
@@ -461,11 +759,110 @@ export function compileObjectDefineProperty(
     propName = propArg.text;
   }
 
+  // (#1511) Mapped-arguments link-break. Per ECMA-262 §10.4.4.2
+  // (ArgumentsExoticObject.[[DefineOwnProperty]]), defining a mapped index
+  // with an accessor descriptor, or a data descriptor whose `writable` is
+  // explicitly false, removes the param↔arguments mapping for that index:
+  // subsequent parameter writes must stop reflecting into `arguments[i]` and
+  // vice-versa. Setting only `configurable:false` (or `enumerable`) leaves the
+  // map intact. We detect the statically-resolvable shape — `arguments` as the
+  // receiver identifier (in a mapped-args function) with a literal index — and
+  // sever the link in `mappedArgsInfo.unmappedIndices`; the mapped-sync
+  // emitters read this set live, so codegen order makes the break apply only
+  // to syncs emitted after this defineProperty call.
+  if (
+    fctx.mappedArgsInfo &&
+    ts.isIdentifier(objArg) &&
+    objArg.text === "arguments" &&
+    ts.isObjectLiteralExpression(descArg)
+  ) {
+    const idxKey = propName ?? (ts.isNumericLiteral(propArg) ? propArg.text : undefined);
+    const argIndex = idxKey !== undefined ? Number(idxKey) : NaN;
+    if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      const isAccessor =
+        getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
+      const breaksLink = isAccessor || descWritable === false;
+      if (breaksLink) {
+        (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+      }
+    }
+  }
+
+  // (#1629a) Dynamic-descriptor path: when the descriptor argument is not an
+  // ObjectLiteralExpression (e.g. `var d = {value: 1}; defineProperty(o, k, d)`),
+  // the inline-literal code below has nothing to extract — valueExpr / getNode /
+  // descWritable are all undefined. The legacy fall-through to
+  // emitExternDefinePropertyNoValue silently emits empty flags AND for typed
+  // struct receivers skips the runtime call entirely, so the descriptor's
+  // value / accessor / flag bits are dropped on the floor.
+  //
+  // Route to the runtime's __defineProperty_desc helper, which materializes
+  // the descriptor via struct-aware getField (sidecar + __sget_<f> exports)
+  // and applies it via native Object.defineProperty. The obj is coerced to
+  // externref so the runtime sees a uniform entry point — this matches the
+  // sibling Object.create path at calls.ts:3996+ (#1631).
+  if (!ts.isObjectLiteralExpression(descArg)) {
+    // Compile obj → externref
+    const objType = compileExpression(ctx, fctx, objArg);
+    if (!objType) return null;
+    if (objType.kind === "ref" || objType.kind === "ref_null") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    } else if (objType.kind !== "externref") {
+      coerceType(ctx, fctx, objType, { kind: "externref" });
+    }
+    // Compile prop → externref
+    const propType = compileExpression(ctx, fctx, propArg, { kind: "externref" });
+    if (propType && propType.kind !== "externref") {
+      coerceType(ctx, fctx, propType, { kind: "externref" });
+    } else if (!propType) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    // Compile descArg → externref (WasmGC struct or plain object both work;
+    // runtime helper handles both via struct-aware getField).
+    const descType = compileExpression(ctx, fctx, descArg);
+    if (descType) {
+      if (descType.kind === "ref" || descType.kind === "ref_null") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      } else if (descType.kind !== "externref") {
+        coerceType(ctx, fctx, descType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const dpDescIdx = ensureLateImport(
+      ctx,
+      "__defineProperty_desc",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (dpDescIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: dpDescIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return { kind: "externref" };
+  }
+
   // Check if obj is a struct type with the given field
   const objTsType = ctx.checker.getTypeAtLocation(objArg);
   let structName =
     resolveStructName(ctx, objTsType) ||
     (ts.isIdentifier(objArg) ? ctx.widenedVarStructMap.get(objArg.text) : undefined);
+
+  // (#1629 S3) Whether the receiver is *statically* struct-typed — i.e. resolved
+  // WITHOUT the `any`/externref rescue fallbacks 1-3 below. This is the same
+  // strength of resolution the *read* site (`resolveStructNameForExpr` in
+  // property-access.ts) has, so when it is set the compiled accessor fast path
+  // (`${structName}_get_<prop>` + `classAccessorSet`) is reachable from reads and
+  // must be kept. When it is unset (the `const o:any = {...}` case, resolved only
+  // via the define-site-only fallbacks), reads route through `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — those must
+  // instead mirror the accessor into the runtime sidecar (the working
+  // `emitExternDefinePropertyNoValue` → `__defineProperty_accessor` path). Splitting
+  // on this bit fixes the `const o:any` accessor-get bug without regressing the
+  // statically struct-typed (class-instance) accessor path.
+  const receiverIsStaticStruct = structName !== undefined;
 
   // Fallback 1: resolve struct name from the local variable's Wasm type.
   // This handles cases where the TS type is `any` but the local holds a struct ref.
@@ -512,15 +909,48 @@ export function compileObjectDefineProperty(
   const structTypeIdx = structName ? ctx.structMap.get(structName) : undefined;
   const fields = structName ? ctx.structFields.get(structName) : undefined;
   const fieldIdx = fields && propName ? fields.findIndex((f) => f.name === propName) : -1;
-  const useStruct = structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
+  // (#1460 R1) When any flag has a *dynamic* (non-foldable) initializer, the
+  // struct fast path can't encode it — fall back to externref. For statically-
+  // folded flags we keep struct.set (preserves the value-storage side-effect)
+  // and emit an additional side-effect `__defineProperty_value` call further
+  // below so attribute flags are propagated to the runtime sidecar
+  // (`_wasmPropDescs`) for later `Object.getOwnPropertyDescriptor` reads.
+  const useStruct = !_anyFlagDynamic && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
+  const anyFlagSpecified =
+    _anyFlagDynamic || descWritable !== undefined || descEnumerable !== undefined || descConfigurable !== undefined;
 
   // ── Getter/setter path ──────────────────────────────────────────────
   // Object.defineProperty(obj, "prop", { get() {...}, set(v) {...} })
-  // Compile as struct accessor methods, analogous to object literal getters/setters.
-  // Take the struct path whenever a struct is known — accessor properties don't need fieldIdx >= 0
-  // because they compile as Wasm functions (not struct fields). Property assignment uses the
-  // classAccessorSet to route o.foo = v to the compiled setter Wasm function.
-  if ((getNode || setNode) && !valueExpr && structName && structTypeIdx !== undefined && propName) {
+  //
+  // (#1629 S3) For a *statically struct-typed* receiver (a class instance / typed
+  // object — `receiverIsStaticStruct`) this branch compiles the getter/setter into
+  // a `${structName}_get_<prop>` Wasm function + `classAccessorSet` registration,
+  // which the read site dispatches via `compilePropertyAccess`'s class-accessor
+  // path. That read site resolves the same `structName`, so the compiled fast
+  // path is reachable and stays — removing it regresses the #459 accessor suite.
+  //
+  // For a `const o:any = {...}` receiver, by contrast, `structName` was resolved
+  // ONLY via the define-site rescue fallbacks 1-3 below, which the *read* site
+  // (`resolveStructNameForExpr`) lacks. Such reads lower to `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — so the old
+  // unconditional early-return left the getter in neither
+  // `_wasmStructProps[obj]["__get_<prop>"]` nor `_wasmStructAccessors`, and
+  // `o.p` / `o["p"]` / `o[k]` / host reads returned `undefined`. We now fall
+  // those through (below) to `emitExternDefinePropertyNoValue`, which mirrors
+  // get/set into the runtime `__defineProperty_accessor` import (closure-wrapped
+  // via `_maybeWrapCallable` / the unconditional `__call_fn_<n>` bridge, validated
+  // by `_validatePropertyDescriptor`, written to the canonical sidecar slot
+  // `_safeGet` / S1 `_readOwnDescriptor` / GOPD all consult). One write reconciles
+  // every reader — the symmetric mirror the data-value path already emits via
+  // `__defineProperty_value`.
+  if (
+    receiverIsStaticStruct &&
+    (getNode || setNode) &&
+    !valueExpr &&
+    structName &&
+    structTypeIdx !== undefined &&
+    propName
+  ) {
     // Compile obj and save to local
     const objType = compileExpression(ctx, fctx, objArg);
     if (!objType) return null;
@@ -906,10 +1336,10 @@ export function compileObjectDefineProperty(
         fctx.body.push({ op: "f64.eq" });
         fctx.body.push({ op: "f64.const", value: 1.0 });
         fctx.body.push({ op: "local.get", index: oldValLocal });
-        fctx.body.push({ op: "f64.copysign" } as unknown as Instr);
+        fctx.body.push({ op: "f64.copysign" });
         fctx.body.push({ op: "f64.const", value: 1.0 });
         fctx.body.push({ op: "local.get", index: newValLocal });
-        fctx.body.push({ op: "f64.copysign" } as unknown as Instr);
+        fctx.body.push({ op: "f64.copysign" });
         fctx.body.push({ op: "f64.eq" });
         fctx.body.push({ op: "i32.and" });
         // Part 2: (old != old) && (new != new)  — both NaN
@@ -928,7 +1358,7 @@ export function compileObjectDefineProperty(
           op: "if",
           blockType: { kind: "empty" },
           then: compareBody,
-        } as unknown as Instr);
+        });
       } else if (fieldType.kind === "i32") {
         const compareBody: Instr[] = [
           { op: "global.get", index: errMsgGlobal } as Instr,
@@ -941,7 +1371,7 @@ export function compileObjectDefineProperty(
           op: "if",
           blockType: { kind: "empty" },
           then: compareBody,
-        } as unknown as Instr);
+        });
       }
       // For externref/ref types, skip value comparison (would need reference equality)
 
@@ -962,6 +1392,51 @@ export function compileObjectDefineProperty(
         coerceType(ctx, fctx, valType, fieldType);
       }
       fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx!, fieldIdx });
+    }
+
+    // (#1460 R1) Register attribute flags in the runtime sidecar
+    // (`_wasmPropDescs`) when any of writable/enumerable/configurable is
+    // specified. We pass the raw struct obj through `extern.convert_any` so the
+    // host import sees the same externref identity used by every other sidecar
+    // lookup. Value bit (1<<7) is left unset so the host doesn't overwrite the
+    // value we just struct.set above.
+    if (anyFlagSpecified) {
+      fctx.body.push({ op: "local.get", index: objLocal });
+      if (objType.kind === "ref" || objType.kind === "ref_null") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      } else if (objType.kind !== "externref") {
+        coerceType(ctx, fctx, objType, { kind: "externref" });
+      }
+      // prop key
+      const sePropType = compileExpression(ctx, fctx, propArg, { kind: "externref" });
+      if (sePropType && sePropType.kind !== "externref") {
+        coerceType(ctx, fctx, sePropType, { kind: "externref" });
+      }
+      // null value (hasValue=false ensures runtime won't overwrite struct.set)
+      fctx.body.push({ op: "ref.null.extern" });
+      const dynForStruct = extractDynamicFlagExprs(descArg);
+      emitRuntimeFlagsF64(
+        ctx,
+        fctx,
+        descWritable,
+        descEnumerable,
+        descConfigurable,
+        false,
+        dynForStruct.writableDyn,
+        dynForStruct.enumerableDyn,
+        dynForStruct.configurableDyn,
+      );
+      const sideFuncIdx = ensureLateImport(
+        ctx,
+        "__defineProperty_value",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (sideFuncIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: sideFuncIdx });
+        fctx.body.push({ op: "drop" }); // discard returned obj
+      }
     }
 
     // Return obj
@@ -1027,6 +1502,118 @@ function computeRuntimeFlags(
   }
   if (hasValue) flags |= 1 << 7;
   return flags;
+}
+
+/**
+ * Extract any dynamic-flag expressions (non-constant-foldable) from a descriptor
+ * object literal. The compiler converts each to runtime `__to_boolean` calls so
+ * that `Object.defineProperty(obj, k, { configurable: -12345 })` ToBoolean-coerces
+ * per ES §6.2.5.6 step 5.b (#1460 R1).
+ */
+function extractDynamicFlagExprs(descArg: ts.Expression): {
+  writableDyn?: ts.Expression;
+  enumerableDyn?: ts.Expression;
+  configurableDyn?: ts.Expression;
+} {
+  const out: {
+    writableDyn?: ts.Expression;
+    enumerableDyn?: ts.Expression;
+    configurableDyn?: ts.Expression;
+  } = {};
+  if (!ts.isObjectLiteralExpression(descArg)) return out;
+  for (const prop of descArg.properties) {
+    if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) continue;
+    const folded = tryConstantFoldToBoolean(prop.initializer);
+    if (folded !== undefined) continue;
+    if (prop.name.text === "writable") out.writableDyn = prop.initializer;
+    else if (prop.name.text === "enumerable") out.enumerableDyn = prop.initializer;
+    else if (prop.name.text === "configurable") out.configurableDyn = prop.initializer;
+  }
+  return out;
+}
+
+/**
+ * Emit code that pushes the runtime flag bitword as an f64 onto the stack.
+ *
+ * Static base: encode constant-foldable flags via `computeRuntimeFlags`.
+ * Dynamic adds: for each non-constant-foldable flag, compile the expression as
+ * externref, call `__to_boolean` (i32), shift to the value bit position, and
+ * OR with the running accumulator. The "specified" bit for each dynamic flag
+ * is included in the static base (the attribute IS supplied; only the bool
+ * value is computed at runtime).
+ *
+ * Stack effect: pushes 1 value (f64).
+ */
+function emitRuntimeFlagsF64(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  descWritable: boolean | undefined,
+  descEnumerable: boolean | undefined,
+  descConfigurable: boolean | undefined,
+  hasValue: boolean,
+  writableDyn: ts.Expression | undefined,
+  enumerableDyn: ts.Expression | undefined,
+  configurableDyn: ts.Expression | undefined,
+): void {
+  const hasDynamic = writableDyn !== undefined || enumerableDyn !== undefined || configurableDyn !== undefined;
+  if (!hasDynamic) {
+    const flags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, hasValue);
+    fctx.body.push({ op: "f64.const", value: flags });
+    return;
+  }
+  // Static base includes:
+  //   - bit 7 (hasValue)
+  //   - bit 3/4/5 (specified) for all dynamic flags
+  //   - bit 3/4/5 (specified) + value bit for any statically-folded flags
+  let staticBase = 0;
+  if (hasValue) staticBase |= 1 << 7;
+  if (descWritable !== undefined) {
+    staticBase |= 1 << 3;
+    if (descWritable) staticBase |= 1;
+  } else if (writableDyn !== undefined) {
+    staticBase |= 1 << 3;
+  }
+  if (descEnumerable !== undefined) {
+    staticBase |= 1 << 4;
+    if (descEnumerable) staticBase |= 1 << 1;
+  } else if (enumerableDyn !== undefined) {
+    staticBase |= 1 << 4;
+  }
+  if (descConfigurable !== undefined) {
+    staticBase |= 1 << 5;
+    if (descConfigurable) staticBase |= 1 << 2;
+  } else if (configurableDyn !== undefined) {
+    staticBase |= 1 << 5;
+  }
+  // Push static base as i32
+  fctx.body.push({ op: "i32.const", value: staticBase });
+
+  const toBoolIdx = ensureLateImport(ctx, "__to_boolean", [{ kind: "externref" }], [{ kind: "i32" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  const emitDyn = (expr: ts.Expression, valueBitShift: number): void => {
+    // Compile expr → externref
+    const t = compileExpression(ctx, fctx, expr, { kind: "externref" });
+    if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+    if (toBoolIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toBoolIdx });
+    } else {
+      // Defensive: __to_boolean import is built-in to the runtime, this should not happen.
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "i32.const", value: 0 });
+    }
+    if (valueBitShift > 0) {
+      fctx.body.push({ op: "i32.const", value: valueBitShift });
+      fctx.body.push({ op: "i32.shl" });
+    }
+    fctx.body.push({ op: "i32.or" });
+  };
+  if (writableDyn !== undefined) emitDyn(writableDyn, 0); // bit 0
+  if (enumerableDyn !== undefined) emitDyn(enumerableDyn, 1); // bit 1
+  if (configurableDyn !== undefined) emitDyn(configurableDyn, 2); // bit 2
+
+  // Convert i32 → f64 for the f64-typed flags parameter
+  fctx.body.push({ op: "f64.convert_i32_s" });
 }
 
 /**
@@ -1103,14 +1690,24 @@ function emitExternDefinePropertyValue(
     }
   }
 
-  // Compute runtime flags
-  const runtimeFlags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, true);
+  // Compute runtime flags (#1460 R1: ToBoolean coercion on dynamic flag exprs)
+  const { writableDyn, enumerableDyn, configurableDyn } = extractDynamicFlagExprs(descArg);
 
   // Push args: obj, key, val, flags and call __defineProperty_value
   fctx.body.push({ op: "local.get", index: objLocal });
   fctx.body.push({ op: "local.get", index: propLocal });
   fctx.body.push({ op: "local.get", index: valLocal });
-  fctx.body.push({ op: "f64.const", value: runtimeFlags });
+  emitRuntimeFlagsF64(
+    ctx,
+    fctx,
+    descWritable,
+    descEnumerable,
+    descConfigurable,
+    true,
+    writableDyn,
+    enumerableDyn,
+    configurableDyn,
+  );
 
   const funcIdx = ensureLateImport(
     ctx,
@@ -1280,8 +1877,9 @@ function emitExternDefinePropertyNoValue(
         }
       }
 
-      // Accessor path: compile getter/setter as JS-callable callbacks
-      const runtimeFlags = computeRuntimeFlags(undefined, descEnumerable, descConfigurable, false);
+      // Accessor path: compile getter/setter as JS-callable callbacks.
+      // (#1460 R1) Resolve dynamic enumerable/configurable expressions for ToBoolean.
+      const accDyn = extractDynamicFlagExprs(descArg);
 
       fctx.body.push({ op: "local.get", index: objLocal });
       if (objType.kind === "ref" || objType.kind === "ref_null") {
@@ -1338,7 +1936,17 @@ function emitExternDefinePropertyNoValue(
         fctx.body.push({ op: "ref.null.extern" });
       }
 
-      fctx.body.push({ op: "f64.const", value: runtimeFlags });
+      emitRuntimeFlagsF64(
+        ctx,
+        fctx,
+        undefined,
+        descEnumerable,
+        descConfigurable,
+        false,
+        undefined,
+        accDyn.enumerableDyn,
+        accDyn.configurableDyn,
+      );
 
       const accFuncIdx = ensureLateImport(
         ctx,
@@ -1354,7 +1962,8 @@ function emitExternDefinePropertyNoValue(
     }
 
     // Non-accessor path: flag-only descriptor
-    const runtimeFlags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, false);
+    // (#1460 R1) Resolve dynamic flag exprs for runtime ToBoolean coercion.
+    const flagOnlyDyn = extractDynamicFlagExprs(descArg);
 
     fctx.body.push({ op: "local.get", index: objLocal });
     // Use extern.convert_any directly (not coerceType) to avoid __make_iterable
@@ -1366,7 +1975,17 @@ function emitExternDefinePropertyNoValue(
     }
     fctx.body.push({ op: "local.get", index: propLocal });
     fctx.body.push({ op: "ref.null.extern" }); // null value
-    fctx.body.push({ op: "f64.const", value: runtimeFlags });
+    emitRuntimeFlagsF64(
+      ctx,
+      fctx,
+      descWritable,
+      descEnumerable,
+      descConfigurable,
+      false,
+      flagOnlyDyn.writableDyn,
+      flagOnlyDyn.enumerableDyn,
+      flagOnlyDyn.configurableDyn,
+    );
 
     const funcIdx = ensureLateImport(
       ctx,
@@ -1449,7 +2068,7 @@ export function compileObjectDefineProperties(
 
   // ES spec 19.1.2.3 step 1: throw TypeError if first arg is not an object
   if (emitNonObjectArgGuard(ctx, fctx, objArg, "Object.defineProperties")) {
-    fctx.body.push({ op: "unreachable" } as unknown as Instr);
+    fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
   }
 
@@ -1569,16 +2188,16 @@ export function compileObjectDefineProperties(
             if (ts.isPropertyAssignment(dp) && ts.isIdentifier(dp.name)) {
               if (dp.name.text === "value") valueExpr = dp.initializer;
               if (dp.name.text === "writable") {
-                if (dp.initializer.kind === ts.SyntaxKind.TrueKeyword) descWritable = true;
-                else if (dp.initializer.kind === ts.SyntaxKind.FalseKeyword) descWritable = false;
+                // (#1460 R1) Apply ToBoolean via compile-time fold; dynamic values
+                // remain undefined here and are resolved at runtime in the externref
+                // fallback below via emitRuntimeFlagsF64 + extractDynamicFlagExprs.
+                descWritable = tryConstantFoldToBoolean(dp.initializer);
               }
               if (dp.name.text === "enumerable") {
-                if (dp.initializer.kind === ts.SyntaxKind.TrueKeyword) descEnumerable = true;
-                else if (dp.initializer.kind === ts.SyntaxKind.FalseKeyword) descEnumerable = false;
+                descEnumerable = tryConstantFoldToBoolean(dp.initializer);
               }
               if (dp.name.text === "configurable") {
-                if (dp.initializer.kind === ts.SyntaxKind.TrueKeyword) descConfigurable = true;
-                else if (dp.initializer.kind === ts.SyntaxKind.FalseKeyword) descConfigurable = false;
+                descConfigurable = tryConstantFoldToBoolean(dp.initializer);
               }
               // Accessor: get/set with inline function
               if (dp.name.text === "get") {
@@ -1748,7 +2367,7 @@ export function compileObjectDefineProperties(
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [{ op: "global.get", index: errMsgGlobal } as Instr, { op: "throw", tagIdx } as Instr],
-                  } as unknown as Instr);
+                  });
                 } else if (fieldType.kind === "i32") {
                   fctx.body.push({ op: "local.get", index: oldValLocal });
                   fctx.body.push({ op: "local.get", index: newValLocal });
@@ -1757,7 +2376,7 @@ export function compileObjectDefineProperties(
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [{ op: "global.get", index: errMsgGlobal } as Instr, { op: "throw", tagIdx } as Instr],
-                  } as unknown as Instr);
+                  });
                 }
 
                 // Do the struct.set if values match
@@ -1801,7 +2420,7 @@ export function compileObjectDefineProperties(
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [{ op: "global.get", index: errMsgGlobal } as Instr, { op: "throw", tagIdx } as Instr],
-                  } as unknown as Instr);
+                  });
                 } else if (fieldType.kind === "i32") {
                   fctx.body.push({ op: "local.get", index: oldValLocal });
                   fctx.body.push({ op: "local.get", index: newValLocal });
@@ -1810,7 +2429,7 @@ export function compileObjectDefineProperties(
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [{ op: "global.get", index: errMsgGlobal } as Instr, { op: "throw", tagIdx } as Instr],
-                  } as unknown as Instr);
+                  });
                 }
 
                 // Do the struct.set
@@ -1903,7 +2522,10 @@ export function compileObjectDefineProperties(
 
         if (dpIsAccessor) {
           // Accessor descriptor: emit __defineProperty_accessor
-          const dpRuntimeFlags = computeRuntimeFlags(undefined, descEnumerable, descConfigurable, false);
+          // (#1460 R1) Extract dynamic flag exprs for runtime ToBoolean.
+          const dpAccDyn = ts.isObjectLiteralExpression(descExpr)
+            ? extractDynamicFlagExprs(descExpr)
+            : ({} as ReturnType<typeof extractDynamicFlagExprs>);
           fctx.body.push({ op: "local.get", index: objExtLocal });
           compileExpression(ctx, fctx, ts.factory.createStringLiteral(propName), { kind: "externref" });
 
@@ -1943,7 +2565,17 @@ export function compileObjectDefineProperties(
             fctx.body.push({ op: "ref.null.extern" });
           }
 
-          fctx.body.push({ op: "f64.const", value: dpRuntimeFlags });
+          emitRuntimeFlagsF64(
+            ctx,
+            fctx,
+            undefined,
+            descEnumerable,
+            descConfigurable,
+            false,
+            undefined,
+            dpAccDyn.enumerableDyn,
+            dpAccDyn.configurableDyn,
+          );
           const accIdx = ensureLateImport(
             ctx,
             "__defineProperty_accessor",
@@ -1986,9 +2618,21 @@ export function compileObjectDefineProperties(
             fctx.body.push({ op: "ref.null.extern" });
           }
 
-          // Runtime flags
-          const runtimeFlags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, !!valueExpr);
-          fctx.body.push({ op: "f64.const", value: runtimeFlags });
+          // Runtime flags (#1460 R1: ToBoolean coercion on dynamic flag exprs)
+          const dpValDyn = ts.isObjectLiteralExpression(descExpr)
+            ? extractDynamicFlagExprs(descExpr)
+            : ({} as ReturnType<typeof extractDynamicFlagExprs>);
+          emitRuntimeFlagsF64(
+            ctx,
+            fctx,
+            descWritable,
+            descEnumerable,
+            descConfigurable,
+            !!valueExpr,
+            dpValDyn.writableDyn,
+            dpValDyn.enumerableDyn,
+            dpValDyn.configurableDyn,
+          );
 
           const funcIdx = ensureLateImport(
             ctx,
@@ -2163,18 +2807,11 @@ export function compileObjectKeysOrValues(
         // Object.keys returns externref strings, convert from native
         fctx.body.push({ op: "extern.convert_any" });
       } else {
-        const globalIdx = ctx.stringGlobalMap.get(entry.field.name);
-        if (globalIdx !== undefined) {
-          fctx.body.push({ op: "global.get", index: globalIdx });
-        } else {
-          const importName = ctx.stringLiteralMap.get(entry.field.name);
-          if (importName) {
-            const funcIdx = ctx.funcMap.get(importName);
-            if (funcIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx });
-            }
-          }
-        }
+        // compileStringLiteral handles late registration when the field name
+        // was not collected in the first pass (e.g. dynamically-added own
+        // properties). Without it, an unregistered name pushed nothing and
+        // array.new_fixed below underflowed the stack (#786).
+        compileStringLiteral(ctx, fctx, entry.field.name, expr);
       }
     }
 
@@ -2261,18 +2898,9 @@ export function compileObjectKeysOrValues(
           fctx.body.push({ op: "extern.convert_any" });
         }
       } else {
-        const globalIdx = ctx.stringGlobalMap.get(entry.field.name);
-        if (globalIdx !== undefined) {
-          fctx.body.push({ op: "global.get", index: globalIdx });
-        } else {
-          const importName = ctx.stringLiteralMap.get(entry.field.name);
-          if (importName) {
-            const funcIdx = ctx.funcMap.get(importName);
-            if (funcIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx });
-            }
-          }
-        }
+        // Late-register unregistered field names so nothing underflows the
+        // tuple/array construction below (#786).
+        compileStringLiteral(ctx, fctx, entry.field.name, expr);
       }
 
       // Push value (field 1 of tuple)

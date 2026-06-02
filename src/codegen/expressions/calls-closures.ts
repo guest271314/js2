@@ -20,6 +20,7 @@ import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
 import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
+import { emitClosureCallArgcExtras, emitResetArgcExtras } from "./calls.js";
 
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
@@ -88,7 +89,23 @@ export function compileClosureCall(
     if (effectiveLocalIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: effectiveLocalIdx });
     } else {
-      fctx.body.push({ op: "global.get", index: moduleIdx! });
+      // (#1730) Re-resolve the module-global index from `ctx.moduleGlobals` on
+      // every push instead of reusing the `const moduleIdx` captured at entry.
+      // A late string-constant import added while compiling the call arguments
+      // (between the receiver push at the top and this funcref-re-resolution
+      // push) shifts every module-global index by +1 and rewrites the
+      // ALREADY-EMITTED `global.get` in `fctx.body` via `fixupModuleGlobalIndices`
+      // (which also updates the `ctx.moduleGlobals` map). The stale captured
+      // `moduleIdx` would emit a NEW `global.get` with the pre-shift index
+      // AFTER the shift already ran, so the shifter never visits it — the
+      // index then points at the late-added string-constant import global and
+      // `ref.cast` of that externref to the closure struct traps "illegal cast"
+      // (a module-level `const`-bound arrow called internally, #1730). Reading
+      // the live map mirrors why `g = f; g(21)` works: the intermediate-local
+      // path resolves through a local whose load lands in the outer body the
+      // shifter does visit.
+      const liveModuleIdx = ctx.moduleGlobals.get(varName) ?? moduleIdx!;
+      fctx.body.push({ op: "global.get", index: liveModuleIdx });
     }
     // Null-check → TypeError instead of trap on struct.get (#728, #441)
     emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: info.structTypeIdx });
@@ -106,18 +123,17 @@ export function compileClosureCall(
     compileExpression(ctx, fctx, expr.arguments[i]!, info.paramTypes[i]);
   }
 
-  // Drop excess arguments beyond the closure's parameter count (evaluate for side effects)
-  for (let i = paramCount; i < expr.arguments.length; i++) {
-    const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-    if (extraType !== null) {
-      fctx.body.push({ op: "drop" });
-    }
-  }
-
   // Pad missing arguments with defaults (arity mismatch)
   for (let i = expr.arguments.length; i < info.paramTypes.length; i++) {
     pushDefaultValue(fctx, info.paramTypes[i]!, ctx);
   }
+
+  // (#779e/#1511) Overflow args beyond the closure's declared arity are NOT
+  // pushed to the wasm stack — instead pack them into `__extras_argv` and set
+  // `__argc` so a callee that reads `arguments` sees the true call-site length.
+  // emitClosureCallArgcExtras evaluates the overflow args itself (into the
+  // global), so we must NOT also evaluate them above. Cleanup after call_ref.
+  emitClosureCallArgcExtras(ctx, fctx, expr.arguments, paramCount);
 
   // Push the funcref from the closure struct (field 0) and cast to typed ref
   pushClosureRef();
@@ -132,6 +148,18 @@ export function compileClosureCall(
 
   // call_ref with the lifted function's type index
   fctx.body.push({ op: "call_ref", typeIdx: info.funcTypeIdx });
+
+  // (#779e/#1511) Reset __argc / __extras_argv. A callee that doesn't read
+  // `arguments` never consumed them and would otherwise leak stale values
+  // into the next call that does. Preserve the return value across the reset.
+  if (info.returnType === null || info.returnType === undefined) {
+    emitResetArgcExtras(ctx, fctx);
+  } else {
+    const retLocal = allocLocal(fctx, `__cc_ret_${fctx.locals.length}`, info.returnType);
+    fctx.body.push({ op: "local.set", index: retLocal });
+    emitResetArgcExtras(ctx, fctx);
+    fctx.body.push({ op: "local.get", index: retLocal });
+  }
 
   // Return VOID_RESULT for void closures so compileExpression doesn't treat
   // the null return as a compilation failure and roll back the emitted instructions
@@ -247,12 +275,6 @@ export function compileGetterCallable(
     for (let i = 0; i < Math.min(expr.arguments.length, methodParamCount); i++) {
       compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + selfOffset]);
     }
-    for (let i = methodParamCount; i < expr.arguments.length; i++) {
-      const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-      if (extraType !== null) {
-        fctx.body.push({ op: "drop" });
-      }
-    }
     // Pad missing arguments
     if (paramTypes) {
       for (let i = Math.min(expr.arguments.length, methodParamCount) + selfOffset; i < paramTypes.length; i++) {
@@ -260,10 +282,29 @@ export function compileGetterCallable(
       }
     }
 
+    // (#779e/#1511) Overflow args beyond the method's declared arity go into
+    // `__extras_argv` (with `__argc`) so a callee reading `arguments` sees the
+    // true call-site length. emitClosureCallArgcExtras evaluates the overflow
+    // args itself, so we must NOT also drop-evaluate them above.
+    emitClosureCallArgcExtras(ctx, fctx, expr.arguments, methodParamCount);
+
     // Re-lookup: receiver/arg compilation may have triggered late imports
     // (e.g. emitUndefined for missing tuple elements) that shift function indices.
     const finalCandidateIdx = ctx.funcMap.get(candidateName) ?? candidateIdx;
     fctx.body.push({ op: "call", funcIdx: finalCandidateIdx });
+    // Reset globals so a callee that doesn't read `arguments` can't leak stale
+    // extras into the next call. Preserve the return value across the reset.
+    {
+      const retWasm = getWasmFuncReturnType(ctx, finalCandidateIdx);
+      if (retWasm && !wasmFuncReturnsVoid(ctx, finalCandidateIdx)) {
+        const retLocal = allocLocal(fctx, `__gc_ret_${fctx.locals.length}`, retWasm);
+        fctx.body.push({ op: "local.set", index: retLocal });
+        emitResetArgcExtras(ctx, fctx);
+        fctx.body.push({ op: "local.get", index: retLocal });
+      } else {
+        emitResetArgcExtras(ctx, fctx);
+      }
+    }
 
     // Determine return type
     const sig = ctx.checker.getResolvedSignature(expr);
@@ -300,7 +341,7 @@ export function compileObjectPrototypeFallback(
     flushLateImportShifts(ctx, fctx);
     if (toStrIdx !== undefined) {
       compileExpression(ctx, fctx, propAccess.expression);
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
       return { kind: "externref" };
     }
@@ -313,7 +354,7 @@ export function compileObjectPrototypeFallback(
     flushLateImportShifts(ctx, fctx);
     if (toStrIdx !== undefined) {
       compileExpression(ctx, fctx, propAccess.expression);
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
       return { kind: "externref" };
     }
@@ -323,7 +364,7 @@ export function compileObjectPrototypeFallback(
   // valueOf: return the receiver itself (Object.prototype.valueOf returns this)
   if (methodName === "valueOf") {
     compileExpression(ctx, fctx, propAccess.expression);
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
     return { kind: "externref" };
   }
 
@@ -338,7 +379,7 @@ export function compileObjectPrototypeFallback(
     flushLateImportShifts(ctx, fctx);
     if (hopIdx !== undefined) {
       compileExpression(ctx, fctx, propAccess.expression);
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       if (expr.arguments.length > 0) {
         compileExpression(ctx, fctx, expr.arguments[0]!);
       } else {
@@ -361,7 +402,7 @@ export function compileObjectPrototypeFallback(
     flushLateImportShifts(ctx, fctx);
     if (pieIdx !== undefined) {
       compileExpression(ctx, fctx, propAccess.expression);
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       if (expr.arguments.length > 0) {
         compileExpression(ctx, fctx, expr.arguments[0]!);
       } else {
@@ -384,7 +425,7 @@ export function compileObjectPrototypeFallback(
     flushLateImportShifts(ctx, fctx);
     if (ipIdx !== undefined) {
       compileExpression(ctx, fctx, propAccess.expression);
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       if (expr.arguments.length > 0) {
         compileExpression(ctx, fctx, expr.arguments[0]!);
       } else {
@@ -426,6 +467,47 @@ export function compileCallablePropertyCall(
 
   const fieldType = fields[fieldIdx]!.type;
 
+  // (#1734) Compile the receiver and normalize it to `(ref null structTypeIdx)`
+  // before the bare `struct.get` that extracts the method-closure field.
+  //
+  // The receiver expression's compiled wasm type can disagree with the resolved
+  // struct type `structTypeIdx`: a receiver that is itself a call (e.g. a lifted
+  // closure / static factory whose declared return is `externref` but whose body
+  // returns a wider struct, or simply a method returning the object as externref)
+  // leaves an `externref` (or a different struct ref) on the stack. Emitting
+  // `struct.get structTypeIdx` directly on that value is ill-typed and fails Wasm
+  // validation (`struct.get expected (ref null N), found … M`). Route the value
+  // through `any.convert_extern` (when externref) + a `ref.test`-guarded cast to
+  // `structTypeIdx`, mirroring the guarded cast already used for the closure
+  // field itself below, so the `struct.get` operand is always the right struct.
+  const compileGuardedReceiver = (): void => {
+    const recvResult = compileExpression(ctx, fctx, propAccess.expression);
+    // Already exactly the target struct type (or its nullable form) — the bare
+    // struct.get is well-typed; no bridge needed.
+    if (
+      recvResult &&
+      (recvResult.kind === "ref" || recvResult.kind === "ref_null") &&
+      (recvResult as { typeIdx: number }).typeIdx === structTypeIdx
+    ) {
+      return;
+    }
+    // externref must round-trip through anyref before ref.test/ref.cast.
+    if (recvResult && recvResult.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      emitGuardedRefCast(fctx, structTypeIdx);
+      return;
+    }
+    // A different struct ref is already an anyref subtype — guard-cast directly.
+    if (recvResult && (recvResult.kind === "ref" || recvResult.kind === "ref_null")) {
+      emitGuardedRefCast(fctx, structTypeIdx);
+      return;
+    }
+    // Anything else (primitive / void) — leave the stack as the legacy bare
+    // `struct.get` path expected; guarding a non-reference operand would itself
+    // be ill-typed. This preserves prior behavior for shapes that never reach
+    // the #1734 mismatch.
+  };
+
   // The field must be a callable type — check via TS type checker
   const propTsType = ctx.checker.getTypeAtLocation(propAccess);
   let callSigs = propTsType.getCallSignatures?.();
@@ -451,8 +533,8 @@ export function compileCallablePropertyCall(
   if (fieldType.kind === "ref" || fieldType.kind === "ref_null") {
     const closureInfo = ctx.closureInfoByTypeIdx.get((fieldType as { typeIdx: number }).typeIdx);
     if (closureInfo) {
-      // Compile receiver, get field value (closure struct ref)
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       const closureLocal = allocLocal(fctx, `__cprop_${fctx.locals.length}`, fieldType);
@@ -510,8 +592,8 @@ export function compileCallablePropertyCall(
     if (wrapperTypes) {
       const { structTypeIdx: wrapperStructIdx, closureInfo: matchedClosureInfo } = wrapperTypes;
 
-      // Compile receiver, get field value (externref)
-      compileExpression(ctx, fctx, propAccess.expression);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       // Convert externref -> closure struct ref (guarded to avoid illegal cast)

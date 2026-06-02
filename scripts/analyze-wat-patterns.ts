@@ -387,7 +387,7 @@ function analyzeWat(wat: string, counts: PatternCounts, moduleHasPattern: { [K i
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
   process.stderr.write("Reading test files...\n");
 
   const testFiles = readdirSync(TESTS_DIR)
@@ -430,7 +430,7 @@ function main() {
 
     let result;
     try {
-      result = compile(source);
+      result = await compile(source);
     } catch {
       compiledFail++;
       continue;
@@ -541,4 +541,4 @@ function main() {
   }
 }
 
-main();
+await main();

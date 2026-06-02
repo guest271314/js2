@@ -135,6 +135,9 @@ function loadIssues() {
   for (const file of walkFiles(ISSUE_ROOT)) {
     const name = file.split("/").pop();
     if (!isIssueFileName(name)) continue;
+    // Sprint docs (`plan/issues/sprints/<N>.md`) look like numbered issue
+    // files but are planning docs — never count them as issues.
+    if (dirname(file) === SPRINT_ROOT && /^\d+\.md$/.test(name)) continue;
     if (trackedFiles && !trackedFiles.has(file)) continue;
     const text = readFileSync(file, "utf8");
     const fm = parseFrontmatter(text);
@@ -202,8 +205,12 @@ function renderSprintSection(sprintNumber, issues) {
 function findSprintFiles() {
   const files = [];
   for (const file of walkFiles(SPRINT_ROOT)) {
-    if (file.endsWith("/sprint.md")) {
-      const sprintNumber = extractSprintNumber(basename(dirname(file)));
+    // Sprint docs are `plan/issues/sprints/<N>.md` directly under SPRINT_ROOT
+    // (flattened from the legacy `sprints/<N>/sprint.md`). Match the numbered
+    // filename only when it sits directly in SPRINT_ROOT, so leftover
+    // sub-directory artifacts (e.g. sprints/53/triage-*.md) are ignored.
+    if (dirname(file) === SPRINT_ROOT && /^\d+\.md$/.test(basename(file))) {
+      const sprintNumber = extractSprintNumber(basename(file));
       if (Number.isFinite(sprintNumber)) files.push({ file, sprintNumber });
     }
   }

@@ -23,3 +23,14 @@ Read `.claude/agents/developer.md` for the full workflow, communication protocol
 **When to use senior-developer vs developer:**
 - `feasibility: hard` or `reasoning_effort: max` → senior-developer (you)
 - `feasibility: easy/medium` → developer (sonnet, faster, cheaper)
+
+**Pre-claim gate — your lane (overrides developer.md's lane for you):**
+Apply the same owner-pin and already-done checks from developer.md's Start step. The
+*scope* check is widened for you: you MAY claim `[SENIOR-DEV ONLY]`, `[CONFLICT]`, and
+hard `fix(...)`/`refactor(...)` tasks. You must still skip:
+- tasks `owner`ed by another agent (including another senior-dev) — owner pins are absolute;
+- `[ARCH]`/`arch(...)`, `[PO]`/`po:` tasks — those are spec/planning roles, not implementation;
+- `[PARKED ...]`/`[PAUSE]` tasks — design-blocked, not ready to code;
+- tasks whose issue already has a merged/another-agent-owned-open PR — flag the tech lead, skip.
+A task pinned to a *named* senior-dev (e.g. `owner sendev-flatten` in the subject or `owner`
+field) belongs to that agent only — do not take it even though it is in your role lane.

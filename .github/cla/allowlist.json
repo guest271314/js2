@@ -1,0 +1,5 @@
+{
+  "comment": "Explicit CLA exemption allowlist — a deterministic fallback so internal/automation committers never get blocked even if the live org-membership API call fails (rate limit, token scope, outage). The workflow ALSO checks live org membership via the GitHub API; this file is the belt-and-suspenders fallback. Bots ('*[bot]') are exempt unconditionally in code and need not be listed. Keep maintainers + known internal contributors here.",
+  "exempt_logins": ["ttraenkler", "github-actions[bot]", "dependabot[bot]"],
+  "exempt_orgs": ["loopdive"]
+}

@@ -162,12 +162,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
       const idx = (curr as { index: number }).index;
       const localType = localTypes[idx];
       if (localType && localType.kind === "externref") {
-        body.splice(
-          i + 1,
-          0,
-          { op: "any.convert_extern" } as unknown as Instr,
-          { op: "ref.cast_null", typeIdx: structTypeIdx } as unknown as Instr,
-        );
+        body.splice(i + 1, 0, { op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: structTypeIdx });
         fixed++;
         i += 4; // skip past local.get + any.convert_extern + ref.cast_null + struct.get
         continue;
@@ -179,12 +174,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
       const idx = (curr as { index: number }).index;
       const localType = localTypes[idx];
       if (localType && localType.kind === "externref") {
-        body.splice(
-          i + 1,
-          0,
-          { op: "any.convert_extern" } as unknown as Instr,
-          { op: "ref.cast_null", typeIdx: structTypeIdx } as unknown as Instr,
-        );
+        body.splice(i + 1, 0, { op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: structTypeIdx });
         fixed++;
         i += 4;
         continue;
@@ -208,12 +198,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
         if (ft?.kind === "func" && ft.results.length > 0) retType = ft.results[0];
       }
       if (retType && retType.kind === "externref") {
-        body.splice(
-          i + 1,
-          0,
-          { op: "any.convert_extern" } as unknown as Instr,
-          { op: "ref.cast_null", typeIdx: structTypeIdx } as unknown as Instr,
-        );
+        body.splice(i + 1, 0, { op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: structTypeIdx });
         fixed++;
         i += 4;
         continue;
@@ -239,9 +224,31 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
     // struct.set consumes 2 values: the struct ref (deeper) and the field value (top).
     // Track net stack contribution going backwards: when cumulative reaches +2,
     // that instruction produced the struct ref.
+    //
+    // (#1725) `instrStackDelta` treats `if`/`block`/`loop`/`try` as opaque
+    // (delta 0), but a structured block that yields a value (e.g. `if (result T)`)
+    // nets +1 and one with diverging arms can net otherwise. When the field-VALUE
+    // sub-expression contains such control flow — as it does for
+    // `this.X = f(arr[cond ? a : b])` in a function-constructor body — the
+    // backward depth accounting under-counts, so the walk overshoots the real
+    // receiver (`local.get $__self`) and lands on an externref local DEEP inside
+    // the value sub-expression (e.g. the `options` param feeding an inline
+    // `options.ecmaVersion` read). Splicing `any.convert_extern + ref.cast_null`
+    // there produces an invalid `ref.cast_null … ; any.convert_extern` adjacency
+    // (the receiver of the inline read becomes a struct ref where the read's own
+    // `any.convert_extern` expects externref) → the binary fails validation
+    // (acorn `__fnctor_Parser_new`). Guard: if the span we walked back over
+    // contains any opaque control-flow instruction, the located producer is not
+    // a trustworthy struct-ref receiver — skip the splice and leave codegen's
+    // own (correct) receiver lowering intact.
     let depth = 0;
     let refIdx = -1;
+    let crossedControlFlow = false;
     for (let j = i - 1; j >= 0; j--) {
+      const op = body[j]!.op;
+      if (op === "if" || op === "block" || op === "loop" || op === "try") {
+        crossedControlFlow = true;
+      }
       depth += instrStackDelta(body[j]!, mod);
       if (depth >= 2) {
         refIdx = j;
@@ -249,7 +256,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
       }
     }
 
-    if (refIdx >= 0) {
+    if (refIdx >= 0 && !crossedControlFlow) {
       const refProducer = body[refIdx]!;
 
       // Pattern: ref.null.extern → ref.null $typeIdx
@@ -265,12 +272,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
         const idx = (refProducer as { index: number }).index;
         const localType = localTypes[idx];
         if (localType && localType.kind === "externref") {
-          body.splice(
-            refIdx + 1,
-            0,
-            { op: "any.convert_extern" } as unknown as Instr,
-            { op: "ref.cast_null", typeIdx: structTypeIdx } as unknown as Instr,
-          );
+          body.splice(refIdx + 1, 0, { op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: structTypeIdx });
           fixed++;
           i += 3; // shifted by 2 insertions + advance past struct.set
           continue;
@@ -642,6 +644,23 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
     return null;
   }
 
+  // See fixupExternConvertAny for the rationale — imported globals occupy the
+  // lower part of the combined index space and aren't present in mod.globals.
+  const numImportedGlobals = ctx.mod.imports.filter((imp: any) => imp.desc?.kind === "global").length;
+  function getGlobalType(gIdx: number): ValType | null {
+    if (gIdx < numImportedGlobals) {
+      let seen = 0;
+      for (const imp of ctx.mod.imports) {
+        if ((imp as any).desc?.kind !== "global") continue;
+        if (seen === gIdx) return (imp as any).desc.type as ValType;
+        seen++;
+      }
+      return null;
+    }
+    const def = ctx.mod.globals[gIdx - numImportedGlobals];
+    return def ? def.type : null;
+  }
+
   function fixupInstrs(func: WasmFunction, instrs: Instr[]): void {
     for (let i = 0; i < instrs.length; i++) {
       const instr = instrs[i]!;
@@ -676,9 +695,8 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
             const lt = getLocalType(func, (prev as { index: number }).index);
             if (lt && lt.kind === "externref") isExternref = true;
           } else if (prev.op === "global.get") {
-            const gIdx = (prev as { index: number }).index;
-            const gDef = ctx.mod.globals[gIdx];
-            if (gDef && gDef.type.kind === "externref") isExternref = true;
+            const gType = getGlobalType((prev as { index: number }).index);
+            if (gType && gType.kind === "externref") isExternref = true;
           }
           if (isExternref) {
             const unboxIdx = ctx.funcMap.get("__unbox_number");
@@ -714,10 +732,8 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
           i++; // skip the inserted instruction
         }
       } else if (next.op === "global.set") {
-        // Check global type
-        const globalIdx = (next as { index: number }).index;
-        const globalDef = ctx.mod.globals[globalIdx];
-        if (globalDef && globalDef.type.kind === "externref") {
+        const gType = getGlobalType((next as { index: number }).index);
+        if (gType && gType.kind === "externref") {
           instrs.splice(i + 1, 0, { op: "extern.convert_any" } as Instr);
           i++;
         }
@@ -743,10 +759,9 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
           if (lt && lt.kind === "externref") isAlreadyExternref = true;
           if (lt && lt.kind === "funcref") isFuncref = true;
         } else if (prev.op === "global.get") {
-          const gIdx = (prev as { index: number }).index;
-          const gDef = ctx.mod.globals[gIdx];
-          if (gDef && gDef.type.kind === "externref") isAlreadyExternref = true;
-          if (gDef && gDef.type.kind === "funcref") isFuncref = true;
+          const gType = getGlobalType((prev as { index: number }).index);
+          if (gType && (gType.kind === "externref" || gType.kind === "ref_extern")) isAlreadyExternref = true;
+          if (gType && gType.kind === "funcref") isFuncref = true;
         } else if (prev.op === "struct.get") {
           // struct.get can produce funcref fields — check the struct type
           const sTypeIdx = (prev as any).typeIdx;
@@ -797,6 +812,28 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
     return null;
   }
 
+  // Resolve a Wasm `global.get` operand to its ValType. The combined index
+  // space starts with imported globals (in import-section order), followed by
+  // module-defined globals (`ctx.mod.globals`). Looking up `mod.globals[gIdx]`
+  // directly is wrong for any module that imports globals, since the module
+  // globals array only stores the definition side — for the `static [computed]`
+  // class-field path this caused the fixup to miss redundant
+  // `extern.convert_any` ops over externref globals (#1623).
+  const numImportedGlobals = ctx.mod.imports.filter((imp: any) => imp.desc?.kind === "global").length;
+  function getGlobalType(gIdx: number): ValType | null {
+    if (gIdx < numImportedGlobals) {
+      let seen = 0;
+      for (const imp of ctx.mod.imports) {
+        if ((imp as any).desc?.kind !== "global") continue;
+        if (seen === gIdx) return (imp as any).desc.type as ValType;
+        seen++;
+      }
+      return null;
+    }
+    const def = ctx.mod.globals[gIdx - numImportedGlobals];
+    return def ? def.type : null;
+  }
+
   function fixupInstrs(func: WasmFunction, instrs: Instr[]): void {
     // Recurse into nested blocks first
     for (const instr of instrs) {
@@ -842,12 +879,9 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
           if (refDef && refDef.kind === "func") isFuncref = true;
         }
       } else if (prev.op === "global.get") {
-        const gIdx = (prev as { index: number }).index;
-        const gDef = ctx.mod.globals[gIdx];
-        if (gDef && gDef.type.kind === "externref") isAlreadyExternref = true;
-        if (gDef && gDef.type.kind === "funcref") isFuncref = true;
-        // Also check globals with externref type
-        if (gDef && (gDef.type.kind === "externref" || gDef.type.kind === "ref_extern")) isAlreadyExternref = true;
+        const gType = getGlobalType((prev as { index: number }).index);
+        if (gType && (gType.kind === "externref" || gType.kind === "ref_extern")) isAlreadyExternref = true;
+        if (gType && gType.kind === "funcref") isFuncref = true;
       } else if (prev.op === "struct.get") {
         const sTypeIdx = (prev as any).typeIdx;
         const sFieldIdx = (prev as any).fieldIdx;
@@ -936,6 +970,17 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
         if (pos < 0) break;
         const argInstr = instrs[pos]!;
 
+        // local.tee is stack-neutral (pops 1, pushes 1) — it is NOT an arg
+        // producer, it sits between the real value producer and the consumer.
+        // Skip it WITHOUT advancing the param index so the producer beneath it
+        // maps to the current param. (Without this, a `ref.null.extern` value
+        // tee'd into a temp gets mis-assigned to the wrong param and rewritten
+        // to a struct null — #1605-cpn.)
+        if (argInstr.op === "local.tee") {
+          pi++; // counteract the loop's pi-- so this param is retried
+          continue;
+        }
+
         // struct.new consumes N fields and produces 1 value.
         // The current pos IS a call arg (the struct.new result), but the N
         // instructions before it are struct field args, NOT call args.
@@ -989,7 +1034,7 @@ export function fixupExternConvertAny(ctx: CodegenContext): void {
         const paramType = params[pi]!;
         if (argInstr.op === "ref.null.extern" && (paramType.kind === "ref" || paramType.kind === "ref_null")) {
           // Replace ref.null extern with ref.null of the correct type
-          instrs[pos] = { op: "ref.null", typeIdx: (paramType as any).typeIdx } as unknown as Instr;
+          instrs[pos] = { op: "ref.null", typeIdx: (paramType as any).typeIdx };
         }
       }
     }

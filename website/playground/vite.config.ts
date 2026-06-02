@@ -1,0 +1,87 @@
+import { defineConfig } from "vite";
+import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { test262Plugin } from "./vite-plugin-test262.js";
+import { compilerBundlePlugin } from "./vite-plugin-compiler-bundle.js";
+import { adrPlugin } from "./vite-plugin-adr.js";
+import { dashboardPlugin } from "./vite-plugin-dashboard.js";
+
+const projectRoot = resolve(import.meta.dirname, "../..");
+const websiteRoot = resolve(import.meta.dirname, "..");
+const dashboardPluginPath = resolve(import.meta.dirname, "vite-plugin-dashboard.ts");
+const hasDashboardData =
+  existsSync(resolve(websiteRoot, "dashboard", "index.html")) && existsSync(resolve(projectRoot, "plan", "issues"));
+
+export default defineConfig(async () => {
+  const plugins = [compilerBundlePlugin(), test262Plugin(), adrPlugin()];
+  if (hasDashboardData && existsSync(dashboardPluginPath)) {
+    plugins.push(dashboardPlugin());
+  }
+
+  return {
+    root: websiteRoot,
+    appType: "mpa",
+    base: "./",
+    publicDir: resolve(websiteRoot, "public"),
+    plugins,
+    optimizeDeps: {
+      // Pre-bundle heavy deps so Vite doesn't transform them on each page load.
+      // compiler-bundle.mjs (3.2MB) and runtime-bundle.mjs (3.2MB) cause OOM without this.
+      include: ["typescript", "monaco-editor/esm/vs/editor/editor.api"],
+      esbuildOptions: {
+        target: "esnext",
+      },
+    },
+    resolve: {
+      alias: {
+        path: resolve(import.meta.dirname, "stubs/path-shim.js"),
+        "node:path": resolve(import.meta.dirname, "stubs/path-shim.js"),
+        "node:fs": resolve(import.meta.dirname, "stubs/node-fs-stub.js"),
+        "node:child_process": resolve(import.meta.dirname, "stubs/node-stub.js"),
+        "node:os": resolve(import.meta.dirname, "stubs/node-stub.js"),
+        "node:module": resolve(import.meta.dirname, "stubs/node-module-stub.js"),
+      },
+    },
+    server: {
+      fs: {
+        // root is website/; allow serving repo-root dirs (src/, tests/,
+        // test262/, benchmarks/, node_modules/) that live one level up.
+        allow: [".."],
+      },
+      watch: {
+        // Exclude agent worktrees, test262, node_modules, and build artifacts.
+        // Without this, Vite watches the entire project root including full repo
+        // copies in .claude/worktrees/ — each file change triggers transforms
+        // that accumulate and OOM after ~4 minutes.
+        ignored: [
+          "**/.claude/worktrees/**",
+          "**/test262/**",
+          "**/node_modules/**",
+          "**/.test262-cache/**",
+          "**/dist/pages/**",
+          "**/dist/playground/**",
+          "**/benchmarks/results/test262-results-*.jsonl",
+        ],
+      },
+    },
+    build: {
+      // Absolute so the artifact lands at <repo-root>/dist/playground even
+      // though `root` is website/ (dist/ stays at the repo root).
+      outDir: resolve(projectRoot, "dist/playground"),
+      emptyOutDir: true,
+      target: "esnext",
+      rollupOptions: {
+        input: {
+          index: resolve(import.meta.dirname, "../index.html"),
+          playground: resolve(import.meta.dirname, "index.html"),
+        },
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules/monaco-editor")) return "monaco";
+            if (id.includes("node_modules/typescript")) return "typescript";
+          },
+        },
+      },
+    },
+  };
+});
