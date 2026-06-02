@@ -436,6 +436,50 @@ Scoped validation in this follow-up:
 Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. No blockers were found in this follow-up.
 
+### Codex attempt 24 verification — 2026-06-02
+
+Re-checked the `symphony/682` worktree against the assigned #682 scope. The
+current branch remains focused on the reduced `native-literal-substring`
+standalone backend: static plain patterns with no flags lower to native string
+`indexOf` for `.test()`, while unsupported syntax, direct symbol protocol calls,
+opaque RegExp receivers, and RegExp-consuming string methods still refuse
+explicitly without registering JS-host RegExp/string imports.
+
+No additional implementation gap was found in this pass.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in attempt 24.
+
+### Codex current verification — 2026-06-02
+
+Re-validated the assigned `symphony/682` branch after reviewing the reduced
+standalone RegExp backend and focused #682 tests. No further implementation
+gap was found in this pass: the branch still supports only static plain
+patterns with no flags for `RegExp.prototype.test`, and unsupported syntax,
+symbol protocol calls, opaque RegExp receivers, and RegExp-consuming string
+methods continue to refuse explicitly without JS-host RegExp/string imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this verification pass.
+
 ### Phase 0 — Decision and ABI
 
 Pick QuickJS libregexp. Rationale:
