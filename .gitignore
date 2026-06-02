@@ -35,6 +35,13 @@ benchmarks/results/test262-results.jsonl
 .claude/settings.local.json
 .claude/worktrees/
 .claude/agents/
+.codex/worktrees/
+.codex/agent-status/
+.codex/agent-context/
+.codex/nonces/
+.codex/ci-status/
+.codex/symphony/
+.codex/dispatch/
 .test262-cache/
 output/
 examples/native-messaging/out/
