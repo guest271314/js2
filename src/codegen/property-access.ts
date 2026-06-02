@@ -44,6 +44,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
+import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
 const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   iterator: 1,
@@ -975,6 +976,9 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  const jsonParsePropertyType = tryEmitJsonParsePropertyAccess(ctx, fctx, expr);
+  if (jsonParsePropertyType !== undefined) return jsonParsePropertyType;
 
   // TextEncoder/TextDecoder read-only Web API properties under no-host
   // targets. These instances are stateless placeholders; preserve receiver
@@ -3212,6 +3216,9 @@ export function compileElementAccess(
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null {
+  const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
+  if (jsonParseElementType !== undefined) return jsonParseElementType;
+
   // Handle super[expr] — access parent class property via computed key on `this`
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
     return compileSuperElementAccess(ctx, fctx, expr);

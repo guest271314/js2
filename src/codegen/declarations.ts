@@ -572,7 +572,16 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     node.expression.expression.text === "JSON"
   ) {
     const method = node.expression.name.text;
-    if (method === "stringify") state.jsonNeedStringify = true;
+    if (method === "stringify") {
+      state.jsonNeedStringify = true;
+      const arg = node.arguments[0];
+      if (arg) {
+        const argType = ctx.checker.getTypeAtLocation(arg);
+        if (isNumberType(argType)) {
+          state.primitiveNeeded.add("number_toString");
+        }
+      }
+    }
     if (method === "parse") state.jsonNeedParse = true;
   }
 

@@ -1,9 +1,10 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: in-progress
+status: in-review
+pr: 1048
 created: 2026-05-24
-updated: 2026-06-02
+updated: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -251,3 +252,58 @@ Phase 2: ~350 LOC (serialiser + parser helper emitters), hard. No external toolc
 - `pnpm exec vitest run tests/issue-1599-json-standalone-refuse.test.ts` —
   12 tests passed after adding the standalone `JSON.stringify(number)` refusal
   regression case.
+
+## Status — Phase 2A literal standalone slice implemented
+
+This branch implements the first runtime-host-independent JSON slice for
+standalone/WASI while keeping unsupported dynamic JSON on the existing clear
+`#1599` compile-error path.
+
+### What changed
+
+- `src/codegen/json-standalone.ts` adds a bounded static JSON evaluator:
+  - `JSON.stringify(<static JSON-compatible literal graph>)` is folded at
+    compile time and emitted as a native string, with runtime output fully
+    standalone.
+  - `JSON.parse(<static string literal>).prop` and `[index]` are parsed by the
+    compiler and lowered to Wasm constants/native strings.
+  - static JSON primitive parses (`"x"`, `42`, `true`, `null`) lower without
+    `env::JSON_parse`.
+- `src/codegen/declarations.ts` now registers `number_toString` for
+  `JSON.stringify(number)` so standalone/WASI use the existing pure-Wasm native
+  number formatter instead of refusing or importing `env::number_toString`.
+- `src/codegen/expressions/calls.ts` now returns the concrete emitted string
+  type for primitive/static JSON stringify. This also fixes the native-string
+  standalone path that previously could materialize string constants through
+  the `stringGlobalMap` sentinel as `global.get -1`.
+- `src/codegen/property-access.ts` bypasses the generic `__extern_get` path for
+  static `JSON.parse(...).prop` / `[index]` reads, so these forms do not pull in
+  JS-host property imports.
+- `tests/issue-1599.test.ts` covers the concrete standalone runtime examples:
+  `JSON.stringify({a:1,b:[2,3]})`, `JSON.parse('{"x":42}').x`, static array
+  parse indexing, string escaping, dynamic number stringify, and dynamic parse
+  refusal.
+- `tests/issue-1599-json-standalone-refuse.test.ts` was updated so dynamic
+  object/array/string stringify and dynamic parse still refuse, while the new
+  static/number slices compile without JSON host imports.
+
+### Current support boundary
+
+- Supported now: static JSON-compatible object/array/string/number/boolean/null
+  literal graphs for stringify; static JSON text property/index reads for parse;
+  dynamic number stringify.
+- Still refused: dynamic JSON text parsing and dynamic object/array/string value
+  walking. These still need the full WasmGC JSON value graph/parser/stringifier
+  described above before the full `test/built-ins/JSON/*` standalone subset can
+  be claimed.
+
+### Spec anchors
+
+- ECMA-262 §25.5.2 `JSON.parse` / `ParseJSON`.
+- ECMA-262 §25.5.4 `JSON.stringify`, especially §25.5.4.2
+  `SerializeJSONProperty` and §25.5.4.3 `QuoteJSONString`.
+
+### Validation — 2026-06-03
+
+- `pnpm exec vitest run tests/issue-1599.test.ts tests/issue-1599-json-standalone-refuse.test.ts`
+  — 20 tests passed.

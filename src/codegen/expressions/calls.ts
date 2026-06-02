@@ -51,6 +51,7 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
+import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -325,16 +326,20 @@ function resolveClosureInfoFromLocal(
  *   - `bigint`  — needs runtime check + TypeError throw
  *   - object / array — needs WasmGC shape walking
  *
- * Returns `true` and pushes an externref onto the wasm stack when
- * emission succeeded; returns `false` (no stack effect) otherwise so
+ * Returns the emitted type and pushes a string/undefined value onto the wasm
+ * stack when emission succeeded; returns `undefined` (no stack effect) otherwise so
  * the caller can fall through to the `JSON_stringify` host import.
  */
-function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): boolean {
+function tryEmitJsonStringifyPrimitive(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg: ts.Expression,
+): ValType | null | undefined {
   let argType: ts.Type;
   try {
     argType = ctx.checker.getTypeAtLocation(arg);
   } catch {
-    return false;
+    return undefined;
   }
   const flags = argType.flags;
 
@@ -348,14 +353,13 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
     ts.TypeFlags.Object |
     ts.TypeFlags.NonPrimitive |
     ts.TypeFlags.TypeParameter;
-  if (flags & ambiguousMask) return false;
+  if (flags & ambiguousMask) return undefined;
 
   // null literal
   if (flags & ts.TypeFlags.Null) {
     const t = compileExpression(ctx, fctx, arg);
     if (t) fctx.body.push({ op: "drop" } as Instr);
-    compileStringLiteral(ctx, fctx, "null", arg);
-    return true;
+    return compileStringLiteral(ctx, fctx, "null", arg);
   }
 
   // undefined / void — `JSON.stringify(undefined)` returns the JS
@@ -368,7 +372,7 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
     const t = compileExpression(ctx, fctx, arg);
     if (t) fctx.body.push({ op: "drop" } as Instr);
     emitUndefined(ctx, fctx);
-    return true;
+    return { kind: "externref" };
   }
 
   // boolean / true / false
@@ -376,32 +380,41 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
     const argResult = compileExpression(ctx, fctx, arg, { kind: "i32" });
     if (argResult === null) {
       // Failed to compile the arg as i32 — abandon (no stack effect from this fn).
-      return false;
+      return undefined;
     }
-    addStringConstantGlobal(ctx, "true");
-    addStringConstantGlobal(ctx, "false");
-    const trueIdx = ctx.stringGlobalMap.get("true");
-    const falseIdx = ctx.stringGlobalMap.get("false");
-    if (trueIdx === undefined || falseIdx === undefined) return false;
+    const savedBody = fctx.body;
+    fctx.body = [];
+    const trueType = compileStringLiteral(ctx, fctx, "true", arg);
+    const trueBody = fctx.body;
+    fctx.body = [];
+    const falseType = compileStringLiteral(ctx, fctx, "false", arg);
+    const falseBody = fctx.body;
+    fctx.body = savedBody;
+    const resultType = trueType ?? falseType ?? ({ kind: "externref" } as ValType);
     fctx.body.push({
       op: "if",
-      blockType: { kind: "val", type: { kind: "externref" } },
-      then: [{ op: "global.get", index: trueIdx } as Instr],
-      else: [{ op: "global.get", index: falseIdx } as Instr],
+      blockType: { kind: "val", type: resultType },
+      then: trueBody,
+      else: falseBody,
     } as Instr);
-    return true;
+    return resultType;
   }
 
   // number / numeric literal
   if (flags & ts.TypeFlags.NumberLike) {
     const numToStrIdx = ctx.funcMap.get("number_toString");
-    if (numToStrIdx === undefined) return false;
-    addStringConstantGlobal(ctx, "null");
-    const nullStrIdx = ctx.stringGlobalMap.get("null");
-    if (nullStrIdx === undefined) return false;
+    if (numToStrIdx === undefined) return undefined;
+    const savedBody = fctx.body;
+    fctx.body = [];
+    const nullType = compileStringLiteral(ctx, fctx, "null", arg);
+    const nullBody = fctx.body;
+    fctx.body = savedBody;
+    const resultType = (ctx.standalone || ctx.wasi ? nullType : ({ kind: "externref" } as ValType)) ?? {
+      kind: "externref",
+    };
 
     const argResult = compileExpression(ctx, fctx, arg, { kind: "f64" });
-    if (argResult === null) return false;
+    if (argResult === null) return undefined;
 
     // Stack: [f64 value]. Save to a local so we can both test for
     // finiteness AND pass to number_toString in the finite branch.
@@ -418,17 +431,26 @@ function tryEmitJsonStringifyPrimitive(ctx: CodegenContext, fctx: FunctionContex
 
     fctx.body.push({
       op: "if",
-      blockType: { kind: "val", type: { kind: "externref" } },
-      then: [{ op: "local.get", index: valLocal } as Instr, { op: "call", funcIdx: numToStrIdx } as Instr],
-      else: [{ op: "global.get", index: nullStrIdx } as Instr],
+      blockType: { kind: "val", type: resultType },
+      then: [
+        { op: "local.get", index: valLocal } as Instr,
+        { op: "call", funcIdx: numToStrIdx } as Instr,
+        ...(ctx.standalone || ctx.wasi
+          ? ([
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+            ] as Instr[])
+          : []),
+      ],
+      else: nullBody,
     } as Instr);
     releaseTempLocal(fctx, valLocal);
-    return true;
+    return resultType;
   }
 
   // string / bigint / unhandled — fall through to the host import. Full
   // pure-Wasm support tracked under #1353.
-  return false;
+  return undefined;
 }
 
 /**
@@ -5003,7 +5025,8 @@ function compileCallExpression(
         // JSON_stringify host import — full pure-Wasm shape walking is
         // tracked under #1353 (architect-spec follow-up).
         if (method === "stringify") {
-          if (tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!)) {
+          const primitiveStringType = tryEmitJsonStringifyPrimitive(ctx, fctx, expr.arguments[0]!);
+          if (primitiveStringType !== undefined) {
             // Compile remaining args (replacer, space) for their side
             // effects only — primitive stringify ignores them per spec
             // §25.5.4 (replacer doesn't observe primitives, space only
@@ -5012,7 +5035,19 @@ function compileCallExpression(
               const t = compileExpression(ctx, fctx, expr.arguments[i]!);
               if (t) fctx.body.push({ op: "drop" } as Instr);
             }
-            return { kind: "externref" };
+            return primitiveStringType;
+          }
+          if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 1) {
+            const staticStringType = tryEmitJsonStringifyStatic(ctx, fctx, expr.arguments[0]!);
+            if (staticStringType !== undefined) {
+              return staticStringType;
+            }
+          }
+        }
+        if (method === "parse" && (ctx.standalone || ctx.wasi)) {
+          const parsedType = tryEmitJsonParseLiteral(ctx, fctx, expr);
+          if (parsedType !== undefined) {
+            return parsedType;
           }
         }
         // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
