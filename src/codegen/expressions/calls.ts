@@ -90,6 +90,11 @@ import { compileOptionalCallExpression } from "./calls-optional.js";
 import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
+  compileStandaloneRegExpConstructor,
+  isGlobalRegExpIdentifier,
+  tryCompileStandaloneRegExpTest,
+} from "../regexp-standalone.js";
+import {
   emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
@@ -1722,30 +1727,22 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
   // RegExp(pattern, flags) called without `new` — per spec, equivalent to
   // `new RegExp(pattern, flags)` (unless pattern is already a RegExp with
-  // flags undefined, an edge case we accept). Emit the RegExp_new host call
-  // directly so the host constructor runs and validates modifier syntax,
-  // throwing SyntaxError on invalid patterns. (#1055)
-  // #1474 — RegExp delegates to the JS host engine; refuse `RegExp(...)`
-  // (no `new`) in --target standalone (Phase 1: refuse-and-document).
+  // flags undefined, an edge case we accept). Host mode emits RegExp_new
+  // directly; standalone mode routes static literal patterns to #682's native
+  // subset and keeps unsupported forms on the explicit refusal path.
   if (
     ctx.standalone &&
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "RegExp"
+    isGlobalRegExpIdentifier(ctx, expr.expression)
   ) {
-    reportError(
-      ctx,
-      expr,
-      "Codegen error: RegExp(...) is not supported in --target standalone (#1474). " +
-        "Recompile without --target standalone.",
-    );
-    return null;
+    return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
   }
 
   if (
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "RegExp" &&
+    isGlobalRegExpIdentifier(ctx, expr.expression) &&
     ctx.externClasses.has("RegExp")
   ) {
     const externInfo = ctx.externClasses.get("RegExp")!;
@@ -2193,6 +2190,9 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
   // Handle property access calls: console.log, Math.xxx, extern methods
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
+
+    const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, expr, propAccess);
+    if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
 
     // Handle Array.prototype.METHOD.call(obj, ...args) — inline as array method on shape-inferred obj
     {
@@ -8825,6 +8825,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           const recvIsUserClass = !!resolvedClassName && ctx.classSet.has(resolvedClassName);
           const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
           if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
+            if (ctx.standalone) {
+              reportError(
+                ctx,
+                expr,
+                `Codegen error: standalone RegExp literal-substring backend does not support ` +
+                  `${methodName} symbol protocol calls (#682/#1474). Use RegExp.prototype.test ` +
+                  `with a plain static pattern and no flags, or recompile without --target standalone.`,
+              );
+              return null;
+            }
+
             // Push receiver as externref (already a RegExp host object)
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {

@@ -1,7 +1,7 @@
 ---
 id: 682
 title: "RegExp standalone mode: native engine or embedded library for non-JS targets"
-status: ready
+status: in-review
 owner: Raman
 created: 2026-03-20
 updated: 2026-06-02
@@ -11,25 +11,52 @@ reasoning_effort: max
 goal: standalone-mode
 sprint: 58
 files:
-  src/codegen/expressions.ts:
-    new:
-      - "standalone-mode RegExp lowering to a native engine or embedded regexp backend"
   src/codegen/regexp-standalone.ts:
     new:
       - "typed native standalone RegExp ABI scaffold and engine availability hook"
+      - "reduced native literal-substring backend for static standalone RegExp.test"
+      - "global RegExp identifier guard so local shadows are not lowered as builtins"
   src/codegen/context/types.ts:
-    new:
-      - "nullable CodegenContext.standaloneRegExpEngine hook"
+    changed:
+      - "CodegenContext.standaloneRegExpEngine documents the enabled reduced backend and refusal fallback"
   src/codegen/context/create-context.ts:
     new:
-      - "initialize standaloneRegExpEngine to null while #1474 gate remains closed"
+      - "enable reduced standalone literal-substring RegExp engine for --target standalone"
+  src/codegen/declarations.ts:
+    changed:
+      - "avoid pre-registering JS-host string method imports for standalone RegExp refusal paths"
+  src/codegen/string-ops.ts:
+    changed:
+      - "explicitly refuse standalone string method RegExp/symbol-protocol search values before host fallback"
+  src/codegen/typeof-delete.ts:
+    changed:
+      - "route standalone RegExp literals through the reduced native backend"
+  src/codegen/expressions/calls.ts:
+    changed:
+      - "route standalone RegExp(...) and RegExp.prototype.test through the reduced native backend"
+      - "refuse direct standalone RegExp symbol protocol calls before JS-host helper lowering"
+      - "preserve user-defined RegExp(...) calls by checking the resolved global declaration"
+  src/codegen/expressions/new-super.ts:
+    changed:
+      - "route standalone new RegExp(...) through the reduced native backend"
+      - "avoid treating user-defined RegExp classes as the standalone builtin"
+  tests/issue-682.test.ts:
+    new:
+      - "standalone RegExp literal/new/call .test execution and unsupported-syntax refusals"
+      - "standalone RegExp call shadowing regression"
+      - "standalone refusal for direct RegExp symbol protocol calls without host imports"
+      - "standalone RegExp-consuming string method refusals emit no JS-host string imports"
   tests/issue-682-regexp-standalone-abi.test.ts:
     new:
-      - "pins closed gate and non-JS-host ABI shape"
+      - "pins default null hook and non-JS-host ABI shape"
+  tests/issue-1474-standalone-regex-refuse.test.ts:
+    changed:
+      - "document that #1474 now covers forms outside #682's reduced native subset"
 ---
+
 # #682 — RegExp standalone mode: native engine or embedded library for non-JS targets
 
-## Status: open
+## Status: in review
 
 #676 proposed host imports for RegExp. That path is now partially implemented and
 was pushed forward further by [#763](../done/763.md), which completed major
@@ -140,7 +167,6 @@ long-term dependency than PCRE2 or a maintained Rust option.
 - [§22.2.2 The RegExp Constructor](https://tc39.es/ecma262/#sec-regexp-constructor) — pattern compilation semantics
 - [§22.2.7.1 RegExpExec](https://tc39.es/ecma262/#sec-regexpexec) — abstract operation for executing a regexp
 
-
 ## Acceptance criteria
 
 - standalone targets can execute basic `RegExp` operations without JS host imports
@@ -190,15 +216,203 @@ Validation for this slice:
 
 Full test262 was not run; this was intentionally limited to scoped checks.
 
+### Implementation note — 2026-06-02 reduced standalone `.test` slice
+
+Added a deliberately reduced native standalone backend named
+`native-literal-substring`. This opens the #1474 refusal gate only for static
+plain literal patterns with no flags and only for `RegExp.prototype.test`.
+Supported construction forms:
+
+- `/plain/.test("...")`
+- `new RegExp("plain").test("...")`
+- `RegExp("plain").test("...")`
+- escaped literal metacharacters such as `/a\.b/`
+
+The backend represents RegExp values as an in-module `$__StandaloneRegExp`
+struct carrying the native string pattern and lowers `.test` to
+`__str_indexOf(input, pattern, 0) >= 0`. It emits no `RegExp_*`,
+`__regex_symbol_call`, `wasm:js-string`, or `string_constants` imports.
+
+Unsupported forms still fail explicitly with `#682/#1474` diagnostics instead
+of silently diverging from JS semantics. Current refusals include dynamic
+constructor patterns/flags, all flags (`g`/`y` lastIndex state included),
+metacharacters, classes, quantifiers, captures, backreferences, lookaround,
+argument coercion, and RegExp-consuming `String.prototype.*` methods.
+
+QuickJS `libregexp` remains the documented future ABI target for near-JS
+parity; this slice is a compiler-native bridge for basic standalone execution.
+
+Validation for this slice:
+
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/context/types.ts src/codegen/context/create-context.ts src/codegen/typeof-delete.ts src/codegen/expressions/new-super.ts src/codegen/expressions/calls.ts tests/issue-682.test.ts tests/issue-1474-standalone-regex-refuse.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 25 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Full local test262 was not run per scoped-validation rule.
+
+### Codex verification note — 2026-06-02
+
+Re-reviewed the reduced `native-literal-substring` backend in the assigned
+`symphony/682` worktree. The implementation remains intentionally scoped to
+plain static patterns with no flags and `.test()` lowering through native string
+`indexOf`; unsupported syntax and RegExp-consuming string methods continue to
+fail explicitly with `#682/#1474` diagnostics.
+
+Scoped validation rerun in this attempt:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 25 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this Codex verification pass.
+
+### Codex final implementation note — 2026-06-02
+
+Found and fixed one remaining standalone escape path in the direct
+`RegExp.prototype[@@match/@@replace/@@search/@@split/@@matchAll]` lowering.
+That path is correct for JS-host mode, but in standalone mode it could compile a
+direct symbol protocol call such as `re[Symbol.search](s)` instead of refusing
+the unsupported operation. `src/codegen/expressions/calls.ts` now reports an
+explicit `#682/#1474` compile error before it can lower to the JS-host
+`__regex_symbol_call` helper.
+
+Added a focused regression in `tests/issue-682.test.ts` proving the unsupported
+symbol protocol form fails explicitly and emits no `RegExp_*`,
+`__regex_symbol_call`, `wasm:js-string`, or `string_constants` imports. The
+accepted reduced subset remains unchanged: static plain patterns with no flags
+and `.test()` only.
+
+Scoped validation in this final pass:
+
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/context/types.ts src/codegen/context/create-context.ts src/codegen/typeof-delete.ts src/codegen/expressions/new-super.ts src/codegen/expressions/calls.ts tests/issue-682.test.ts tests/issue-1474-standalone-regex-refuse.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts tests/issue-1330.test.ts`
+  - result: passed, 4 files / 32 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found.
+
+### Codex import-collector follow-up — 2026-06-02
+
+Found and fixed a remaining standalone import pre-scan leak for
+RegExp-consuming `String.prototype` methods. The lowering already refuses these
+forms under `--target standalone`, but the unified import collector could
+pre-register JS-host `env::string_*` imports first. `src/codegen/declarations.ts`
+now skips those imports for standalone `match`/`matchAll`/`search` and for
+standalone `replace`/`replaceAll`/`split` calls whose first argument requires
+RegExp protocol semantics.
+
+Aligned `src/codegen/string-ops.ts` with that collector gate so standalone
+`replace`/`replaceAll`/`split` calls with non-string search values now report an
+explicit `#1474` RegExp/symbol-protocol refusal before the host fallback path.
+
+Extended `tests/issue-682.test.ts` to prove both refusal shapes emit no
+RegExp or JS-host string imports:
+
+- `s.replace(/a/g, "b")`
+- `s.search("a")`
+
+Scoped validation in this follow-up:
+
+- `pnpm exec prettier --write src/codegen/declarations.ts src/codegen/string-ops.ts tests/issue-682.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 28 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this follow-up.
+
+### Codex shadowing guard and final validation — 2026-06-02
+
+Found and fixed one remaining semantic risk in the reduced standalone lowering:
+the direct `RegExp(...)` standalone branch matched only the identifier text, so a
+user-defined local function named `RegExp` could be intercepted as the builtin.
+`src/codegen/regexp-standalone.ts` now exposes a declaration-based global
+`RegExp` guard, and both call/new-expression lowering use it before selecting
+the native literal-substring backend. Explicit `undefined` constructor handling
+also now checks the resolved type instead of only the identifier text.
+
+Added a focused regression in `tests/issue-682.test.ts` proving a local
+`function RegExp(...)` still runs as user code under `--target standalone`.
+
+Scoped validation in this final pass:
+
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/expressions/calls.ts src/codegen/expressions/new-super.ts tests/issue-682.test.ts`
+  - result: passed
+- `pnpm exec prettier --write plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 29 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found.
+
+### Codex `.test()` receiver shadowing follow-up — 2026-06-02
+
+Found and fixed a narrower shadowing path in the standalone
+`RegExp.prototype.test` reduction. The `.test()` fast path previously accepted
+any receiver whose TypeScript type symbol was named `RegExp`, which could
+intercept a user-defined local `class RegExp { test(...) { ... } }` before the
+normal class method lowering ran.
+
+`src/codegen/regexp-standalone.ts` now checks that RegExp receiver types resolve
+only to declaration-file symbols before selecting the native literal-substring
+backend. `src/codegen/expressions/new-super.ts` uses the same declaration-file
+type guard for non-identifier constructor forms, preserving global RegExp
+support while avoiding source-defined shadows.
+
+Added a focused regression in `tests/issue-682.test.ts` proving a local
+`RegExp` class with its own `.test()` method still runs as user code under
+`--target standalone`.
+
+Scoped validation in this follow-up:
+
+- `pnpm exec vitest run tests/issue-682.test.ts --reporter verbose`
+  - result: passed, 1 file / 12 tests
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/expressions/new-super.ts tests/issue-682.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 30 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this follow-up.
+
 ### Phase 0 — Decision and ABI
 
 Pick QuickJS libregexp. Rationale:
+
 - explicit ECMAScript ES2023 semantics
 - ~3000 LOC, manageable extract surface
 - no backtracking blowup for non-fancy patterns (NFA-based)
 - already licensed compatibly (MIT)
 
 Define ABI in `src/codegen/builtins/regexp-standalone.ts`:
+
 ```ts
 // Wasm functions exported by the embedded engine:
 //   __re_compile(pattern_ptr, pattern_len, flags) -> handle (i32)
@@ -224,6 +438,7 @@ Define ABI in `src/codegen/builtins/regexp-standalone.ts`:
 ### Phase 2 — Codegen lowering
 
 In `src/codegen/builtins/regexp-standalone.ts`:
+
 1. `new RegExp(pattern, flags)`:
    - Allocate `$RegExp_struct` (existing).
    - Call `__re_compile`, store the handle in `$compiled` field.

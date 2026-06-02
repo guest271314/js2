@@ -20,6 +20,11 @@ import {
 } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
+import {
+  compileStandaloneRegExpConstructor,
+  isGlobalRegExpIdentifier,
+  isGlobalRegExpType,
+} from "../regexp-standalone.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
 import {
@@ -2419,21 +2424,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
-  // regex engine yet. Refuse `new RegExp(...)` in --target standalone
-  // (Phase 1: refuse-and-document). Match either the resolved builtin name
-  // or the literal identifier (which is how `new RegExp(...)` appears).
+  // #682 — standalone mode supports a reduced native RegExp subset for static
+  // literal patterns. Unsupported constructor forms still produce explicit
+  // #1474-compatible compile errors instead of JS-host imports.
   if (
     ctx.standalone &&
-    (className === "RegExp" || (ts.isIdentifier(expr.expression) && expr.expression.text === "RegExp"))
+    (isGlobalRegExpType(type) || (ts.isIdentifier(expr.expression) && isGlobalRegExpIdentifier(ctx, expr.expression)))
   ) {
-    reportError(
-      ctx,
-      expr,
-      "Codegen error: new RegExp(...) is not supported in --target standalone (#1474). " +
-        "Recompile without --target standalone.",
-    );
-    return null;
+    return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
   }
 
   // #1679 — `new this(...)` inside a static method: the callee is `this`, which
