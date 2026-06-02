@@ -1,9 +1,10 @@
 ---
 id: 1767
 title: "native-messaging 64 MiB run grows wasmtime memory toward OOM"
-status: in-progress
+status: done
 created: 2026-06-01
 updated: 2026-06-02
+completed: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -172,7 +173,8 @@ node examples/native-messaging/stress-memory.mjs --reported-64mib
 
 ## Final implementation and measurement — 2026-06-02
 
-Status: implementation validated on `symphony/1767`; PR publish pending.
+Status: done on `symphony/1767`; ready PR opened as
+<https://github.com/loopdive/js2/pull/1039>.
 
 Root cause:
 
