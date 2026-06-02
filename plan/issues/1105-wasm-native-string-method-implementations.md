@@ -1,7 +1,7 @@
 ---
 id: 1105
 title: "Wasm-native String method implementations for standalone mode"
-status: in-progress
+status: in-review
 created: 2026-04-12
 updated: 2026-06-02
 priority: high
@@ -14,6 +14,7 @@ sprint: 58
 es_edition: multi
 claimed_by: codex-developer
 claimed_at: 2026-06-02T20:52:56.870Z
+pr: 1046
 ---
 
 # #1105 — Wasm-native String method implementations for standalone mode
