@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #207: Class statement/expression runtime failures
 
-## Status: review
-
+## Status: in-review
 ## Problem
 Class expression and declaration edge cases fail in test262.
 `typeof A === "function"` where A is a class returns false instead of true.

@@ -2,9 +2,9 @@
 id: 1339
 title: "spec gap: AggregateError + SuppressedError errors-iterable + cause coercion (37 test262 fails)"
 status: done
-completed: 2026-05-28
 created: 2026-05-08
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium

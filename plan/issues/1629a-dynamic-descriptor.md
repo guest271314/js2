@@ -2,9 +2,9 @@
 id: 1629a
 title: "Object.defineProperty dynamic (non-literal) descriptor materialization"
 status: done
-completed: 2026-05-28
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -13,8 +13,8 @@ area: codegen, runtime
 language_feature: object
 goal: spec-completeness
 sprint: Backlog
-owner: senior-developer
 parent: 1629
+owner: senior-developer
 related: [1629, 1630, 1631, 1335]
 ---
 # #1629a — Object.defineProperty dynamic descriptor materialization

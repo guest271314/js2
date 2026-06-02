@@ -14,7 +14,6 @@ language_feature: classes/super
 sprint: 55
 related: [1594, 1551]
 ---
-
 ## Problem
 
 Found by **dev-1607** during a language/class investigation (task #108 probe).

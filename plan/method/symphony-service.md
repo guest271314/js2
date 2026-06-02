@@ -24,7 +24,7 @@ added later without changing the orchestrator or runner contracts.
 
 - `ready`: claimable by Symphony.
 - `in-progress`: claimed, running, or resumable by an existing retry.
-- `review`: worker published a PR or handed off for lead review.
+- `in-review`: worker published a PR or handed off for lead review.
 - `done` / `wont-fix`: terminal.
 
 On dispatch, Symphony immediately flips the issue frontmatter from `ready` to

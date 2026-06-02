@@ -29,8 +29,7 @@ test262_refs:
 ---
 # #204 — Array literal compile errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 15 test262 compile errors in `language/expressions/array`. While 6 pass, the remaining errors involve array patterns the compiler can't handle.
 

@@ -1,7 +1,7 @@
 ---
 id: 1484
 title: "wasi: provide standalone setTimeout/setInterval via poll_oneoff (or fail loud)"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

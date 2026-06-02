@@ -10,7 +10,7 @@ sprint: 2
 ---
 # Issue #216: Modulus with special IEEE 754 values
 
-**Status:** review
+**Status:** in-review
 **Type:** bug
 **Failures:** 5
 

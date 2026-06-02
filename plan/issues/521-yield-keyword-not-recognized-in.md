@@ -19,8 +19,7 @@ files:
 ---
 # #521 — Yield keyword not recognized in nested contexts (53 CE)
 
-## Status: review
-
+## Status: in-review
 53 tests fail with "Unknown keyword or identifier. Did you mean 'yield'?" — the compiler doesn't recognize `yield` inside certain generator body contexts (nested functions, try/catch, computed properties inside generators).
 
 ## Complexity: S

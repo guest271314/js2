@@ -11,11 +11,9 @@ reasoning_effort: high
 task_type: refactor
 area: compiler-api
 goal: platform
-related: [1756, 986]
-depends_on: []
 sprint: Backlog
+related: [1756, 986]
 ---
-
 # #1757 — Migrate the public `compile()` API to async
 
 ## Why

@@ -17,7 +17,6 @@ test262_fail: 111
 test262_category: built-ins/Object, built-ins/String, built-ins/RegExp, built-ins/JSON, built-ins/Date, built-ins/DataView
 related: [1090, 1319, 1525, 1442]
 ---
-
 # #1716 — ToPrimitive residual: 'Cannot convert object to primitive value' (111 fails)
 
 ## Problem (RESIDUAL / possible regression)

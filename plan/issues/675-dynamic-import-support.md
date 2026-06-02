@@ -17,8 +17,7 @@ files:
 ---
 # #675 — Dynamic import() support
 
-## Status: review
-
+## Status: in-review
 ~471 tests use `import()`.
 
 ### Approach

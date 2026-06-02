@@ -18,8 +18,7 @@ files:
 ---
 # #658 — local.set type mismatch residual (659 CE)
 
-## Status: review
-
+## Status: in-review
 659 tests fail with local.set type mismatches. #625 fixed the simple cases but 659 remain — deeper coercion gaps between ref types, especially in generator/async contexts.
 
 ## Complexity: M

@@ -8,17 +8,15 @@ completed: 2026-06-01
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-es_edition: n/a
-language_feature: type-narrowing
-task_type: bug
+task_type: bugfix
 area: type-system
+language_feature: type-narrowing
 goal: platform
-related: [389, 1753, 1755]
-depends_on: []
 sprint: 58
+es_edition: n/a
+related: [389, 1753, 1755]
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 ---
-
 # #1765 — nullable number alias guard not narrowed for byte assignment
 
 ## Problem

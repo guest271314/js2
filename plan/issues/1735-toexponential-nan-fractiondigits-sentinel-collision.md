@@ -3,6 +3,7 @@ id: 1735
 title: "Number.prototype.toExponential(NaN) collides with no-arg sentinel — returns variable digits instead of ToInteger(NaN)=0"
 status: done
 created: 2026-05-29
+updated: 2026-05-29
 completed: 2026-05-29
 priority: medium
 feasibility: easy
@@ -15,7 +16,6 @@ test262_fail: 1
 test262_category: built-ins/Number/prototype/toExponential
 related: [49, 1321, 1731]
 ---
-
 # #1735 — toExponential(NaN) wrongly treated as no-arg (sentinel collision)
 
 ## Problem

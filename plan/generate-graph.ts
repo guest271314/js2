@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 type RawIssueStatus =
   | "ready"
   | "in-progress"
-  | "review"
+  | "in-review"
   | "blocked"
   | "backlog"
   | "done"
@@ -68,7 +68,7 @@ const STATUS_PRIORITY: Record<string, number> = {
   done: 0,
   "wont-fix": 1,
   blocked: 2,
-  review: 3,
+  "in-review": 3,
   "in-progress": 4,
   ready: 5,
   deferred: 6,
@@ -204,11 +204,11 @@ function normalizePriority(value: unknown): IssueNode["priority"] {
 function normalizeRawStatus(value: unknown): RawIssueStatus {
   const v = String(value || "").toLowerCase();
   if (v === "in_progress") return "in-progress";
-  if (v === "in-review" || v === "in_review") return "review";
+  if (v === "review" || v === "in-review" || v === "in_review") return "in-review";
   if (
     v === "ready" ||
     v === "in-progress" ||
-    v === "review" ||
+    v === "in-review" ||
     v === "blocked" ||
     v === "backlog" ||
     v === "done" ||

@@ -24,8 +24,7 @@ files:
 ---
 # #526 — RuntimeError: dereferencing a null pointer (129 FAIL)
 
-## Status: review
-
+## Status: in-review
 129 tests fail with null pointer dereference — `struct.get` or `struct.set` on a null reference. Need null guards before struct access in codegen.
 
 ## Complexity: M

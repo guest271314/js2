@@ -4,17 +4,16 @@ title: "Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming"
 status: done
 created: 2026-05-30
 updated: 2026-06-02
+completed: 2026-06-02
 priority: medium
 feasibility: medium
 task_type: feature
 area: examples
 goal: platform
-related: [389, 1655, 1700, 1752]
-depends_on: []
 sprint: 58
-completed: 2026-06-02
+required_by: [1767]
+related: [389, 1655, 1700, 1752]
 ---
-
 # #1753 — Native-messaging host: 64 MiB chunked streaming
 
 ## Context

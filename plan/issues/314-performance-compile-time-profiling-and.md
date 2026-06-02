@@ -16,8 +16,7 @@ files:
 ---
 # Issue #314: Performance -- compile time profiling and optimization
 
-## Status: review
-
+## Status: in-review
 ## Summary
 As the compiler handles more test262 tests, compile time becomes important. Profile the compilation pipeline to identify bottlenecks and optimize the slowest phases (type checking, scope analysis, codegen, Wasm validation).
 

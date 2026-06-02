@@ -18,8 +18,7 @@ files:
 ---
 # #608 — TypedArray support (108 tests)
 
-## Status: review
-
+## Status: in-review
 54 tests skip for "unsupported feature: TypedArray" and 54 for "resizableArrayBufferUtils.js". TypedArrays (Uint8Array, Int32Array, Float64Array, etc.) are essential for npm compatibility — used in crypto, binary protocols, Buffer, streams.
 
 ## Approach

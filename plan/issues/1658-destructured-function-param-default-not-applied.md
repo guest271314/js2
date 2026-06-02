@@ -2,7 +2,6 @@
 id: 1658
 title: "Destructured/scalar function-parameter default not applied (returns wrong value)"
 status: done
-sprint: Backlog
 created: 2026-05-24
 updated: 2026-05-27
 completed: 2026-05-27
@@ -13,8 +12,9 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: spec-completeness
-related: [1553b, 1553d]
+sprint: Backlog
 depends_on: [1659]
+related: [1553b, 1553d]
 ---
 # #1658 — Destructured/scalar function-parameter default not applied (returns wrong value)
 

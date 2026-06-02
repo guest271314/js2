@@ -2,7 +2,6 @@
 id: 1660
 title: "Replace placeholder cla-check with a real CLA signature/approval gate"
 status: done
-sprint: Backlog
 created: 2026-05-24
 updated: 2026-05-24
 completed: 2026-05-24
@@ -10,9 +9,9 @@ priority: high
 feasibility: medium
 task_type: infrastructure
 area: ci/legal/governance
+sprint: Backlog
 related: [1530]
 ---
-
 # Replace placeholder cla-check with a real CLA signature/approval gate
 
 ## Problem

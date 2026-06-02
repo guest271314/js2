@@ -31,7 +31,7 @@ test262_refs:
 ---
 # #179 — Generator functions: yield in module mode errors
 
-## Status: review
+## Status: in-review
 completed: 2026-03-13
 
 ## Summary

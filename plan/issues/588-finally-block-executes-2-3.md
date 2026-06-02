@@ -17,8 +17,7 @@ files:
 ---
 # #588 — Finally block executes 2-3 times instead of once
 
-## Status: review
-
+## Status: in-review
 When both `catch` and `finally` exist, the finally block instructions are inlined at:
 1. End of try body (statements.ts:3629)
 2. Inside inner try's catch_all (3699-3700)

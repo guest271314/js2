@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #186 — `typeof null` returns wrong value
 
-## Status: review
-
+## Status: in-review
 ## Summary
 `typeof null` should return `"object"` per the JavaScript specification, but the compiler likely returns `"null"` or another value.
 

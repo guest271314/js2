@@ -3,6 +3,7 @@ id: 1741
 title: "TS type-checker CEs on test262 intentionally-wrong-typed builtin method args"
 status: backlog
 created: 2026-05-29
+updated: 2026-05-29
 priority: medium
 feasibility: hard
 task_type: bugfix

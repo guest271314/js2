@@ -1,7 +1,7 @@
 ---
 id: 1512
 title: "spec gap: dynamic import — early SyntaxErrors for nested syntactic contexts"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

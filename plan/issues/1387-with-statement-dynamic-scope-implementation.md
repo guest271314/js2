@@ -2,7 +2,6 @@
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
 status: in-progress
-owner: Hooke
 created: 2026-05-08
 updated: 2026-06-02
 priority: high
@@ -13,6 +12,7 @@ area: codegen, ir
 language_feature: with
 goal: spec-completeness
 sprint: 58
+owner: Hooke
 claimed_by: codex-developer
 claimed_at: 2026-06-02T11:02:41.007Z
 ---

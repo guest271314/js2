@@ -30,8 +30,7 @@ files:
 ---
 # #326 -- Array element access out of bounds
 
-## Status: review
-
+## Status: in-review
 17 test262 tests fail with "array element access out of bounds" at runtime. The compiled Wasm accesses an array index beyond its length.
 
 ## Error pattern

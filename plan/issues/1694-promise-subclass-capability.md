@@ -3,6 +3,7 @@ id: 1694
 title: "Promise.any/all/allSettled/race: non-Promise capability `this` + extends-Promise codegen (~50 fails)"
 status: backlog
 created: 2026-05-28
+updated: 2026-05-28
 priority: medium
 feasibility: hard
 reasoning_effort: high

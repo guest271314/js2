@@ -3,6 +3,7 @@ id: 1666
 title: "bug: --target wasi emits INVALID wasm for class/closure/callback/number→string/regex/generator/typed-array (native helper type mismatch + unbound late global)"
 status: done
 created: 2026-05-25
+updated: 2026-05-27
 completed: 2026-05-27
 priority: high
 feasibility: hard

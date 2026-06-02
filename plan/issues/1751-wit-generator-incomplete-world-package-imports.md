@@ -10,11 +10,9 @@ feasibility: medium
 task_type: feature
 area: wit-generator
 goal: platform
-related: [600, 639, 389]
-depends_on: []
 sprint: 58
+related: [600, 639, 389]
 ---
-
 # #1751 — WIT generator emits an incomplete world
 
 ## Context

@@ -2,7 +2,6 @@
 id: 1659
 title: "CI does not run tests/equivalence/ (OOM) — genuine equivalence regressions land silently"
 status: done
-sprint: Backlog
 created: 2026-05-24
 updated: 2026-05-27
 completed: 2026-05-27
@@ -13,6 +12,8 @@ task_type: infrastructure
 area: testing
 language_feature: n/a
 goal: spec-completeness
+sprint: Backlog
+required_by: [1658]
 related: [1658]
 ---
 # #1659 — CI does not run tests/equivalence/ (OOM); equivalence regressions land silently

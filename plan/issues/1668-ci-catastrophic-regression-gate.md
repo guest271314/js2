@@ -1,12 +1,13 @@
 ---
 id: 1668
-title: CI catastrophic-regression guard — block merge-queue on large test262 pass drops
-sprint: 55
+title: "CI catastrophic-regression guard — block merge-queue on large test262 pass drops"
 status: in-review
+created: 2026-05-25
+updated: 2026-05-25
 feasibility: easy
+sprint: 55
 owner: tech-lead
 ---
-
 ## Problem
 
 PR #608 (#1666) merged a codegen change that corrupted the test262 harness

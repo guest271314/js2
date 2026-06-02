@@ -4,6 +4,7 @@ title: "WasmGC objects leak to JS host as opaque values (re-baselined: 0 literal
 status: done
 created: 2026-04-06
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: hard
 reasoning_effort: high

@@ -16,7 +16,6 @@ test262_fail: 101
 test262_category: built-ins/Iterator
 related: [1340, 1320]
 ---
-
 # #1718 — Iterator sequencing helpers + Iterator.prototype.flatMap (101 fails)
 
 ## Problem

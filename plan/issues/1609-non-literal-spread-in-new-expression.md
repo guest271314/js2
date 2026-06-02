@@ -4,7 +4,6 @@ title: "codegen: non-literal spread argument in new-expression not supported"
 status: blocked
 created: 2026-05-24
 updated: 2026-05-27
-blocked_on: [1620, 1633]
 priority: medium
 feasibility: medium
 task_type: feature
@@ -12,6 +11,7 @@ area: codegen
 language_feature: spread, new-expression
 goal: compiler-correctness
 sprint: Backlog
+blocked_on: [1620, 1633]
 es_edition: es2015
 test262_count: 18
 ---

@@ -2,9 +2,9 @@
 id: 1679
 title: "Stress test: compile acorn.js — `new this(...)` dynamic constructor unsupported"
 status: done
-completed: 2026-05-27
 created: 2026-05-27
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium

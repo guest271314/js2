@@ -3,6 +3,7 @@ id: 1663
 title: "host-indep: pure-Wasm parseInt / parseFloat / Number(string) in standalone mode"
 status: done
 created: 2026-05-25
+updated: 2026-05-25
 completed: 2026-05-25
 priority: medium
 feasibility: medium

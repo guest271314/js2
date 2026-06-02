@@ -2,9 +2,9 @@
 id: 1312
 title: "Async recursive function (next() compose pattern) — Unhandled rejection"
 status: done
-completed: 2026-05-27
 created: 2026-05-07
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: hard
 reasoning_effort: max
