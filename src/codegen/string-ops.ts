@@ -36,6 +36,11 @@ function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): voi
   } as Instr);
 }
 
+function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionContext): void {
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+}
+
 // ── String operations ─────────────────────────────────────────────────
 
 export function compileStringLiteral(
@@ -184,19 +189,21 @@ export function compileNativeTemplateExpression(
 
   const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
-  // #1618: the extern bridge (__str_to_extern/__str_from_extern) is JS-host-only
-  // — it marshals via __str_to_mem/__str_from_mem host imports that don't exist
-  // under --target wasi/standalone, where they collapse to bogus indices and
-  // produce an invalid module. Only emit it when the template actually needs
-  // externref marshaling, i.e. it has a NON-string substitution (number/bigint/
-  // object → number_toString returns externref → __str_from_extern). A template
-  // whose spans are all strings concatenates natively with zero host calls.
+  const standaloneNativeStrings = noJsHost(ctx);
+  // #1618/#1759: the extern bridge (__str_to_extern/__str_from_extern) is
+  // JS-host-only — it marshals via __str_to_mem/__str_from_mem host imports
+  // that don't exist under --target wasi/standalone, where they collapse to
+  // bogus indices and produce an invalid module. Only emit it when the template
+  // actually needs externref marshaling AND a JS host is available. In
+  // WASI/standalone, numeric substitutions use the native number_toString
+  // helper and convert its internally-created externref back to ref $AnyString
+  // with Wasm reference conversions, not host imports.
   const hasNonStringSpan = expr.templateSpans.some((s) => !isStringType(ctx.checker.getTypeAtLocation(s.expression)));
-  if (hasNonStringSpan) {
+  if (hasNonStringSpan && !standaloneNativeStrings) {
     ensureNativeStringExternBridge(ctx);
     flushLateImportShifts(ctx, fctx);
   }
-  const fromExternIdx = ctx.nativeStrHelpers.get("__str_from_extern");
+  const fromExternIdx = standaloneNativeStrings ? undefined : ctx.nativeStrHelpers.get("__str_from_extern");
   if (concatIdx === undefined) return null;
 
   if (expr.head.text) {
@@ -222,26 +229,45 @@ export function compileNativeTemplateExpression(
       // (No marshaling instructions emitted — value stays on the stack.)
     } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
-      // number_toString returns externref, marshal to native string
-      if (fromExternIdx !== undefined) {
+      if (standaloneNativeStrings) {
+        emitNativeStringRefFromExternref(ctx, fctx);
+      } else if (fromExternIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: fromExternIdx });
       }
     } else if (spanType && spanType.kind === "i32" && toStrIdx !== undefined) {
       fctx.body.push({ op: "f64.convert_i32_s" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
-      if (fromExternIdx !== undefined) {
+      if (standaloneNativeStrings) {
+        emitNativeStringRefFromExternref(ctx, fctx);
+      } else if (fromExternIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: fromExternIdx });
       }
     } else if (spanType && spanType.kind === "i64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "f64.convert_i64_s" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
-      if (fromExternIdx !== undefined) {
+      if (standaloneNativeStrings) {
+        emitNativeStringRefFromExternref(ctx, fctx);
+      } else if (fromExternIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: fromExternIdx });
       }
-    } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null") && toStrIdx !== undefined) {
-      // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
-      coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
-      if (fromExternIdx !== undefined) {
+    } else if (spanType && (spanType.kind === "f64" || spanType.kind === "i32" || spanType.kind === "i64")) {
+      reportError(ctx, span.expression, "Template literal numeric substitution requires number_toString");
+      fctx.body.push({ op: "drop" } as Instr);
+      compileStringLiteral(ctx, fctx, "", span.expression);
+    } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null")) {
+      if (standaloneNativeStrings) {
+        reportError(
+          ctx,
+          span.expression,
+          "Template literal object substitution in WASI/standalone requires JS-host string coercion; only string and numeric substitutions are supported",
+        );
+        fctx.body.push({ op: "drop" } as Instr);
+        compileStringLiteral(ctx, fctx, "", span.expression);
+      } else {
+        // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
+        coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
+      }
+      if (!standaloneNativeStrings && fromExternIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: fromExternIdx });
       }
     }

@@ -893,7 +893,11 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectPrimitiveMethodImports finalize ──
-  if (state.primitiveNeeded.has("number_toString")) {
+  // #1759: under WASI/standalone, template interpolation and String(number)
+  // need a pure-Wasm default Number::toString helper. Do not emit the JS-host
+  // env.number_toString import there; emit the native helper below instead.
+  const needsNativeNumberToString = state.primitiveNeeded.has("number_toString") && (ctx.wasi || ctx.standalone);
+  if (state.primitiveNeeded.has("number_toString") && !needsNativeNumberToString) {
     const t = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString", { kind: "func", typeIdx: t });
   }
@@ -926,7 +930,13 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // like emitNativeParseNumber's.
   if (ctx.wasi || ctx.standalone) {
     const fmtNative = new Set<string>();
-    for (const n of ["number_toString_radix", "number_toFixed", "number_toExponential", "number_toPrecision"]) {
+    for (const n of [
+      "number_toString",
+      "number_toString_radix",
+      "number_toFixed",
+      "number_toExponential",
+      "number_toPrecision",
+    ]) {
       if (state.primitiveNeeded.has(n) && !ctx.funcMap.has(n)) fmtNative.add(n);
     }
     if (fmtNative.size > 0) {

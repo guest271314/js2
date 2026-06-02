@@ -1,9 +1,9 @@
 ---
 id: 1759
 title: "native number→string missing on the WASI/standalone string-concat path (process.stderr/stdout.write of numeric template emits invalid module)"
-status: ready
+status: done
 created: 2026-05-31
-updated: 2026-05-31
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 task_type: bug
@@ -118,10 +118,34 @@ silent-invalid-module failure mode regardless.
 
 ## Acceptance criteria
 
-- [ ] `process.stdout.write(\`n=${n}\n\`)` compiles AND produces a valid module
+- [x] `process.stdout.write(\`n=${n}\n\`)` compiles AND produces a valid module
       under `--target wasi` (instantiates under wasmtime, prints `n=7`).
-- [ ] `process.stderr.write` of a numeric template works equivalently on fd=2.
-- [ ] The native-messaging example debug line can switch back from
+- [x] `process.stderr.write` of a numeric template works equivalently on fd=2.
+- [x] The native-messaging example debug line can switch back from
       `console.error` to `process.stderr.write` and `examples/native-messaging/smoke-test.sh` still passes.
-- [ ] No invalid `call undefined` / unsatisfiable host imports emitted in any
+- [x] No invalid `call undefined` / unsatisfiable host imports emitted in any
       standalone/WASI build.
+
+## Final findings — 2026-06-02
+
+Implemented on branch `symphony/1759`.
+
+- Added a pure-Wasm `number_toString(value: f64) -> externref` helper for
+  WASI/standalone, emitted from the existing native number-format module. It
+  keeps the host-compatible function name/signature but no longer imports
+  `env.number_toString` in no-JS-host targets.
+- Updated native template interpolation so numeric spans in WASI/standalone use
+  the native formatter and convert its internally-created externref back to
+  `ref $AnyString` with Wasm reference conversions. The JS-host
+  `__str_to_extern` / `__str_from_extern` bridge is no longer emitted for this
+  path.
+- Unsupported object substitutions in WASI/standalone native templates now
+  report a compile error instead of risking an invalid bridge-dependent module.
+- Switched `examples/native-messaging/nm_js2wasm.ts` debug telemetry back to
+  `process.stderr.write(...)` with an explicit newline.
+
+Validation:
+
+- `pnpm exec vitest run tests/issue-1759.test.ts`
+- `pnpm exec vitest run tests/issue-1759.test.ts tests/issue-1321-standalone.test.ts tests/issue-1335-standalone.test.ts tests/issue-1723.test.ts`
+- `bash examples/native-messaging/smoke-test.sh` with wasmtime 44.0.0
