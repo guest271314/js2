@@ -292,11 +292,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
     }
     if (isNumberType(receiverType) && methodName === "toString") {
-      state.primitiveNeeded.add("number_toString");
       // #1321: toString(radix) needs a 2-arg host import so the radix is
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+      } else {
+        state.primitiveNeeded.add("number_toString");
       }
     }
     // (#1644 Slice D) BigInt.prototype.toString — bigint-typed receiver routes
@@ -898,7 +899,11 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // #1321: 2-arg `number_toString_radix(value, radix)` for `toString(radix)` calls.
   // Without this, the codegen validates the radix range but then calls 1-arg
   // `number_toString(value)`, silently producing decimal output for any radix.
-  if (state.primitiveNeeded.has("number_toString_radix")) {
+  // #1335 Phase 1: standalone/WASI emits the safe-integer radix formatter in
+  // pure Wasm instead of requesting the JS host import.
+  const needsNativeNumberToStringRadix =
+    state.primitiveNeeded.has("number_toString_radix") && (ctx.wasi || ctx.standalone);
+  if (state.primitiveNeeded.has("number_toString_radix") && !needsNativeNumberToStringRadix) {
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
   }
@@ -920,7 +925,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // like emitNativeParseNumber's.
   if (ctx.wasi || ctx.standalone) {
     const fmtNative = new Set<string>();
-    for (const n of ["number_toFixed", "number_toExponential", "number_toPrecision"]) {
+    for (const n of ["number_toString_radix", "number_toFixed", "number_toExponential", "number_toPrecision"]) {
       if (state.primitiveNeeded.has(n) && !ctx.funcMap.has(n)) fmtNative.add(n);
     }
     if (fmtNative.size > 0) {
