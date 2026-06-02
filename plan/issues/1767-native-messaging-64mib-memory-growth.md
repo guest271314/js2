@@ -1,7 +1,7 @@
 ---
 id: 1767
 title: "native-messaging 64 MiB run grows wasmtime memory toward OOM"
-status: ready
+status: in-progress
 created: 2026-06-01
 updated: 2026-06-02
 priority: high
@@ -17,6 +17,8 @@ related: [389, 1655, 1723, 1724, 1753]
 depends_on: [1753]
 sprint: 58
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:04:55.165Z
 ---
 
 # #1767 — native-messaging 64 MiB run grows wasmtime memory toward OOM
@@ -63,12 +65,12 @@ Expected result:
 He also reported a rough end-to-end runtime of `1:53` for the 64 MiB case and
 called out that the memory behavior undermines performance comparisons.
 
-## Blocking context
+## Historical blocking context
 
-#1753's full 64 MiB read/write story is still open, but the #1767 branch is
-actively taking the needed write-side slice: the native-messaging example now
-emits large responses as <=1 MiB frames through a reusable chunk buffer instead
-of one oversized stdout write.
+When this issue was opened, #1753's full 64 MiB read/write story was still
+open. The #1767 branch first took the needed write-side slice: the
+native-messaging example emitted large responses as <=1 MiB frames through a
+reusable chunk buffer instead of one oversized stdout write.
 
 ## Blocked findings — 2026-06-01
 
@@ -168,9 +170,94 @@ Manual full run, not for normal CI:
 node examples/native-messaging/stress-memory.mjs --reported-64mib
 ```
 
-Remaining #1767 work after this slice: run and record a real guarded 64x
-wasmtime measurement with baseline/peak RSS on a suitable machine. #1753 also
-still owns the broader read-side multi-frame aggregation story.
+## Final implementation and measurement — 2026-06-02
+
+Status: implementation validated on `symphony/1767`; PR publish pending.
+
+Root cause:
+
+- The first guarded 64x wasmtime run on this branch reproduced the unsafe memory
+  shape even after response chunking. With `wasmtime 45.0.0`, RSS reached
+  `299.2 MiB` after 19 request frames (`+295.6 MiB` over the first sample), so
+  the stress harness killed the child before any response frames were emitted.
+- The cause was request-side continuation aggregation. The host copied each
+  <=1 MiB request frame into a growing `ArrayBuffer` logical-message store
+  before writing the response. Under wasmtime/WasmGC, that storage grows RSS
+  aggressively and defeats the bounded response writer.
+
+What changed:
+
+- `sendMessageWithContinuations()` no longer builds a full 64 MiB request
+  buffer. It streams continuations under the existing 64 MiB ceiling.
+- Raw byte continuations are echoed one <=1 MiB response frame at a time as they
+  are read.
+- The reported Chrome `Array(209715 * 64)` shape is parsed with a streaming
+  null-array scanner that carries state across request frames, counts elements,
+  and then emits valid <=1 MiB JSON array response chunks. This preserves
+  `port.onMessage` delivery and lets the extension sum `message.length`.
+- The stress harness now listens for child stdin `error` events, so guard kills
+  or early child exits report `EPIPE` in the structured result instead of
+  crashing Node before the RSS/protocol summary is printed.
+
+Guarded reported-workload measurement:
+
+```text
+command=node examples/native-messaging/stress-memory.mjs --reported-64mib
+node_version=v25.8.2
+wasmtime_version="wasmtime 45.0.0 (377cd917a 2026-05-21)"
+mode=chrome-array
+array_elements=13421760
+request_body_bytes=67108801
+request_frame_budget_bytes=1048576
+response_frames=64
+response_body_bytes=67108864
+response_array_elements=13421760
+max_response_frame_body_bytes=1048576
+chunk_budget_bytes=1048576
+rss_source=procfs
+rss_first_mb=3.3
+rss_peak_sampled_mb=36.1
+rss_peak_hwm_mb=36.1
+rss_peak_delta_sampled_mb=32.8
+rss_limit_delta_mb=256
+rss_samples=8
+elapsed_ms=1800
+```
+
+Additional raw-byte sanity measurement:
+
+```text
+command=node examples/native-messaging/stress-memory.mjs --bytes 67108864 --max-rss-delta-mb 256
+wasmtime_version="wasmtime 45.0.0 (377cd917a 2026-05-21)"
+mode=raw-bytes
+request_body_bytes=67108864
+response_frames=64
+response_body_bytes=67108864
+max_response_frame_body_bytes=1048576
+rss_first_mb=3.3
+rss_peak_sampled_mb=36.1
+rss_peak_hwm_mb=36.1
+rss_peak_delta_sampled_mb=32.8
+rss_limit_delta_mb=256
+rss_samples=3
+elapsed_ms=1377
+```
+
+Files changed:
+
+- `examples/native-messaging/nm_js2wasm.ts`
+- `examples/native-messaging/stress-memory.mjs`
+- `examples/native-messaging/README.md`
+- `tests/issue-1767.test.ts`
+- `plan/issues/1767-native-messaging-64mib-memory-growth.md`
+
+Validation:
+
+- `node_modules/.bin/vitest run tests/issue-1767.test.ts`
+- `node_modules/.bin/vitest run tests/issue-1753.test.ts`
+- `node_modules/.bin/vitest run tests/issue-1530.test.ts`
+- `node examples/native-messaging/stress-memory.mjs --reported-64mib`
+- `node examples/native-messaging/stress-memory.mjs --bytes 67108864 --max-rss-delta-mb 256`
 
 ## Scope
 
