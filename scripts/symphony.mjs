@@ -674,6 +674,17 @@ function renderTemplate(template, context) {
   });
 }
 
+function issueForWorkspacePrompt(issue, workspace) {
+  const renderedIssue = { ...issue };
+  if (issue.file) {
+    const rel = path.relative(ROOT, issue.file);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      renderedIssue.file = path.join(workspace.path, rel);
+    }
+  }
+  return renderedIssue;
+}
+
 class AgentRunner {
   constructor(config, logger) {
     this.config = config;
@@ -1003,8 +1014,9 @@ class Orchestrator {
     }
     const workspace = this.workspaceManager.ensure(issue);
     this.workspaceManager.runHook("before_run", workspace.path, issue);
+    const promptIssue = issueForWorkspacePrompt(issue, workspace);
     const prompt = renderTemplate(this.workflow.promptTemplate, {
-      issue,
+      issue: promptIssue,
       workspace,
       agent: lane,
       attempt: attempt ?? "",
