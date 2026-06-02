@@ -519,3 +519,4 @@ sprint: 0
 | 1769 | 2026-06-02 | Nullable primitive unions now preserve nullish sentinels in externref storage and unbox through reusable non-null proofs across writes, arithmetic, calls, and returns | Sprint-58 |
 | 1755 | 2026-06-02 | Generic typed-array annotations such as Uint8Array<ArrayBuffer> now erase to the bare typed-array lowering across IR, export metadata, and the existing linear Uint8Array collection tagging paths | Sprint-58 |
 | 682 | 2026-06-02 | Reduced standalone RegExp backend supports static plain `.test` forms without JS-host imports; PR #1038 merged via the merge queue | Sprint-58 |
+| 1668 | 2026-05-25 | Catastrophic test262 regression guard landed in the required merge-report job via PR #619 | Sprint-55 |

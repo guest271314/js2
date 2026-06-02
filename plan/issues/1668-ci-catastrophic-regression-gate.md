@@ -1,9 +1,11 @@
 ---
 id: 1668
 title: "CI catastrophic-regression guard — block merge-queue on large test262 pass drops"
-status: in-review
+status: done
 created: 2026-05-25
-updated: 2026-05-25
+updated: 2026-06-02
+completed: 2026-05-25
+pr: 619
 feasibility: easy
 sprint: 55
 owner: tech-lead
