@@ -1,7 +1,7 @@
 ---
 id: 1751
 title: "WIT generator emits an incomplete world: hardcoded package name + no WASI imports"
-status: done
+status: in-review
 created: 2026-05-30
 updated: 2026-06-02
 completed: 2026-06-02

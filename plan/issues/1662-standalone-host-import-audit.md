@@ -3,7 +3,7 @@ id: 1662
 title: "audit: standalone (--target wasi) host-import leaks per construct + remaining-gap map"
 status: done
 created: 2026-05-25
-updated: 2026-06-02
+updated: 2026-05-25
 completed: 2026-05-25
 priority: high
 feasibility: easy

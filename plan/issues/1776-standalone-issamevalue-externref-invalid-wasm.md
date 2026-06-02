@@ -1,7 +1,7 @@
 ---
 id: 1776
 title: "standalone test262 isSameValue emits invalid Wasm for externref operands"
-status: ready
+status: done
 created: 2026-06-01
 updated: 2026-06-02
 priority: high
@@ -13,7 +13,7 @@ language_feature: equality
 goal: standalone-mode
 sprint: 58
 owner: Tesla
-related: [1228, 1472, 1781, 1623]
+related: [1228, 1472]
 ---
 # #1776 - standalone test262 isSameValue emits invalid Wasm for externref operands
 

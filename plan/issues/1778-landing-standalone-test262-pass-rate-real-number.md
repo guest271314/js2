@@ -14,10 +14,9 @@ language_feature: n/a
 goal: developer-experience
 sprint: 58
 es_edition: n/a
-related: [925, 959, 1201, 1583, 1662, 1777, 1781]
+related: [925, 959, 1201, 1583, 1662, 1777]
 origin: "Project lead report on 2026-06-02: when the JS host checkbox is unchecked on the landing page, the pass-rate stat should show the real standalone-mode test262 number instead of an estimate."
 ---
-
 # #1778 - landing page JS-host toggle should show real standalone test262 pass rate
 
 ## Problem
