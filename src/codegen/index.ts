@@ -9368,6 +9368,9 @@ function registerExternClassImports(ctx: CodegenContext, info: ExternClassInfo):
 /** Scan user code and register only the extern class imports actually used */
 function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
   const registered = new Set<string>();
+  const useNativeEncodingApi = ctx.wasi || ctx.standalone || ctx.strictNoHostImports;
+  const isNativeEncodingClass = (className: string | undefined): boolean =>
+    useNativeEncodingApi && (className === "TextEncoder" || className === "TextDecoder");
 
   // Pre-scan source for user-defined class names. A user-defined class shadows
   // any extern class with the same name (e.g. user `class Node` shadows DOM
@@ -9415,7 +9418,7 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
     if (ts.isNewExpression(node)) {
       const type = ctx.checker.getTypeAtLocation(node);
       const className = type.getSymbol()?.name;
-      if (className && !userClassNames.has(className)) {
+      if (className && !userClassNames.has(className) && !isNativeEncodingClass(className)) {
         const info = ctx.externClasses.get(className);
         if (info) register(`${info.importPrefix}_new`, info.constructorParams, [{ kind: "externref" }]);
       }
@@ -9452,7 +9455,7 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
         const objType = ctx.checker.getTypeAtLocation(node.expression);
         const className = objType.getSymbol()?.name;
         const memberName = node.name.text;
-        if (className) {
+        if (className && !isNativeEncodingClass(className)) {
           const isCall = node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node;
           if (isCall) {
             const info = resolveExtern(className, memberName, "method");
@@ -9480,7 +9483,7 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       const objType = ctx.checker.getTypeAtLocation(node.left.expression);
       const className = objType.getSymbol()?.name;
       const propName = node.left.name.text;
-      if (className) {
+      if (className && !isNativeEncodingClass(className)) {
         const info = resolveExtern(className, propName, "property");
         if (info) {
           const propInfo = info.properties.get(propName)!;

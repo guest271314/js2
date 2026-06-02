@@ -101,7 +101,11 @@ import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
-import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "../native-strings.js";
+import {
+  ensureNativeStringExternBridge,
+  ensureTextEncodingHelpers,
+  stringConstantExternrefInstrs,
+} from "../native-strings.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 
 /**
@@ -5245,6 +5249,55 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Check if receiver is an externref object
     const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+
+    // TextEncoder/TextDecoder under no-JS-host targets. These are standard
+    // Web/Node APIs, but WASI/standalone cannot rely on env.TextEncoder_* host
+    // imports. Lower the narrow UTF-8 surface natively.
+    if ((noJsHost(ctx) || ctx.strictNoHostImports) && ctx.nativeStrings) {
+      const recvSym =
+        receiverType.getSymbol()?.name ??
+        (ts.isNewExpression(propAccess.expression) && ts.isIdentifier(propAccess.expression.expression)
+          ? propAccess.expression.expression.text
+          : undefined);
+      const method = propAccess.name.text;
+      if (recvSym === "TextEncoder" && method === "encode") {
+        const { encodeIdx, vecTypeIdx } = ensureTextEncodingHelpers(ctx);
+        const recvResult = compileExpression(ctx, fctx, propAccess.expression);
+        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
+        if (expr.arguments.length > 0) {
+          compileExpression(ctx, fctx, expr.arguments[0]!, nativeStringType(ctx));
+        } else {
+          compileStringLiteral(ctx, fctx, "");
+        }
+        for (let i = 1; i < expr.arguments.length; i++) {
+          const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
+          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
+        }
+        fctx.body.push({ op: "call", funcIdx: encodeIdx } as Instr);
+        return { kind: "ref_null", typeIdx: vecTypeIdx };
+      }
+
+      if (recvSym === "TextDecoder" && method === "decode") {
+        const { decodeU8Idx, vecTypeIdx } = ensureTextEncodingHelpers(ctx);
+        const recvResult = compileExpression(ctx, fctx, propAccess.expression);
+        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
+        if (expr.arguments.length === 0) {
+          compileStringLiteral(ctx, fctx, "");
+          return nativeStringType(ctx);
+        }
+        const expected: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, expected);
+        if (argType && !valTypesMatch(argType, expected)) {
+          coerceType(ctx, fctx, argType, expected);
+        }
+        for (let i = 1; i < expr.arguments.length; i++) {
+          const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
+          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
+        }
+        fctx.body.push({ op: "call", funcIdx: decodeU8Idx } as Instr);
+        return nativeStringType(ctx);
+      }
+    }
 
     // Handle Date instance method calls BEFORE extern class dispatch,
     // because Date is declared in lib.d.ts (so isExternalDeclaredClass returns true)

@@ -976,6 +976,33 @@ export function compilePropertyAccess(
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
 
+  // TextEncoder/TextDecoder read-only Web API properties under no-host
+  // targets. These instances are stateless placeholders; preserve receiver
+  // evaluation, then return the standard UTF-8/default option values.
+  {
+    const objSym =
+      objType.getSymbol()?.name ??
+      (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
+        ? expr.expression.expression.text
+        : undefined);
+    if (
+      (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+      (objSym === "TextEncoder" || objSym === "TextDecoder")
+    ) {
+      if (propName === "encoding") {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+        return compileStringLiteral(ctx, fctx, "utf-8");
+      }
+      if (objSym === "TextDecoder" && (propName === "fatal" || propName === "ignoreBOM")) {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        return { kind: "i32" };
+      }
+    }
+  }
+
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
   // generic `__extern_get` host-import path: the standalone WASI module has
   // no `process` global, and even with a JS polyfill the generic extern lookup

@@ -1518,6 +1518,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return cur;
   };
 
+  // TextEncoder/TextDecoder are standard Web/Node classes, but standalone and
+  // WASI builds cannot depend on host `env.TextEncoder_*` imports. The instance
+  // carries no state for the UTF-8-only surface implemented here, so the native
+  // method fast paths use this evaluated placeholder receiver.
+  if ((noJsHost(ctx) || ctx.strictNoHostImports) && ctx.nativeStrings && ts.isIdentifier(expr.expression)) {
+    const ctorName = expr.expression.text;
+    if (ctorName === "TextEncoder" || ctorName === "TextDecoder") {
+      const args = expr.arguments ?? [];
+      for (const arg of args) {
+        const argType = compileExpression(ctx, fctx, arg);
+        if (argType !== null) fctx.body.push({ op: "drop" } as Instr);
+      }
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+  }
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
     const unwrappedNew = unwrapNewTarget(expr.expression);

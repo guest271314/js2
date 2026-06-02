@@ -1,9 +1,9 @@
 ---
 id: 1752
 title: "TextEncoder / TextDecoder runtime API (standalone + WASI)"
-status: ready
+status: in-review
 created: 2026-05-30
-updated: 2026-05-31
+updated: 2026-06-02
 priority: medium
 feasibility: medium
 task_type: feature
@@ -57,3 +57,19 @@ is its inverse. Pairs with #1655 (WASI `process.stdout.write(Uint8Array|ArrayBuf
   "mimic standard APIs" rule.
 - Regression test covering ASCII, multi-byte (é, 你, 😀), and round-trip;
   ideally compiles the #389 `encodeMessage` shape.
+
+## Implementation Notes
+
+- Added WasmGC-native UTF-8 helpers for the standard `TextEncoder.encode` and
+  `TextDecoder.decode` APIs under standalone/WASI no-host targets.
+- Suppressed `TextEncoder`/`TextDecoder` extern host import registration for
+  the native no-host path, and added default read-only properties:
+  `encoding === "utf-8"`, `fatal === false`, `ignoreBOM === false`.
+- Added `tests/issue-1752.test.ts` covering WASI byte encoding, standalone
+  encode/decode round-trip, direct UTF-8 decode, default properties, and the
+  stored-encoder `encodeMessage` shape writing to WASI stdout.
+- Scoped validation passes:
+  - `npm test -- tests/issue-1752.test.ts`
+  - `npm test -- tests/issue-1588-str-to-utf8.test.ts tests/issue-1655-wasi-arraybuffer-write.test.ts tests/issue-1664.test.ts tests/issue-1530.test.ts`
+  - `npm run typecheck -- --pretty false`
+- Stretch item not implemented: `TextEncoder.encodeInto`.
