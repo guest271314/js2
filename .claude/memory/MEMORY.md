@@ -95,6 +95,8 @@
 - [feedback_compile_away.md](feedback_compile_away.md) — Compile away, don't emulate — resolve JS semantics statically, zero runtime overhead
 - [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md) — No bespoke builtins (readStdin/writeStdout); expose standard Node.js (process.stdin/stdout) / Web Worker (postMessage) APIs and compile them to WASI
 - [feedback_external_comments_first_person.md](feedback_external_comments_first_person.md) — GitHub/external comments in first-person singular ("I"), never "we"
+- [feedback_pr_title_coauthor_conventions.md](feedback_pr_title_coauthor_conventions.md) — Follow project PR title conventions and add Codex co-author trailer for Codex-authored commits/PRs
+- [feedback_native_multi_agent_worktrees.md](feedback_native_multi_agent_worktrees.md) — Prefer native Codex multi-agents over tmux harnesses; isolate writing agents in explicit git worktrees
 - [feedback_no_nuclear_option.md](feedback_no_nuclear_option.md) — Never take destructive shortcuts without consent
 - [feedback_wait_for_answer.md](feedback_wait_for_answer.md) — Ask then STOP — never act on assumed "yes" in the same message
 - [feedback_check_before_cleanup.md](feedback_check_before_cleanup.md) — Check worktree diffs before removing

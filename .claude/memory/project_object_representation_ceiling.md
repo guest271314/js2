@@ -1,0 +1,20 @@
+---
+name: project_object_representation_ceiling
+description: "The convergent test262 ceiling — compiled WasmGC values aren't host JS objects with prototype identity"
+metadata:
+  node_type: memory
+  type: project
+  originSessionId: 8d9a5e7c-ee71-42b6-8e54-753ae07c8f9f
+---
+
+As of 2026-05-29 (sprint 57), the localized/one-PR test262 conformance fixes are largely **exhausted**. dev-a's triage rounds repeatedly bottomed out in ONE foundational gap, empirically proven during #1719:
+
+**Compiled WasmGC values are not host JS objects and are not on the host prototype chain.** A compiled array is a WasmGC vec/struct, not a host `Array`, so it cannot observe a monkeypatched `Array.prototype[Symbol.iterator]` (proven via `[...arr]` spread + `for-of` both ignoring the override / throwing). The same gap blocks function-object semantics: `var f = String.prototype.indexOf; new f` can't throw (no runtime `[[Construct]]`-absent brand), and `.length`/`.name` own-descriptors aren't materialized.
+
+**Convergent cluster** (all the same root cause): #1719 (array-dstr ignores @@iterator override), #1130 / #1320 (array methods don't observe accessor getters / host-prototype), #1732 (function-object values: not-a-constructor + length DontEnum across ~20 String methods), and related #1632 (bind) / #1665 ($Iterator). A codegen gate (like #1719's intactness-gate spec) CANNOT fix these — the runtime value has no host-object identity to route to.
+
+**Why it's a strategic decision, not a re-spec:** the **dual-mode** constraint (standalone = pure Wasm, no JS host — see [[CLAUDE.md architecture]]) means "make compiled values real host JS objects" can't be the universal answer. The real design question is how to give compiled values JS-observable object identity (prototype chains, brands, own-property descriptors) *within* the WasmGC model. That's a foundational representation effort spanning many issues, architect+senior-dev led — not dev-volume work.
+
+**How to apply:** when test262 triage surfaces a fail that depends on compiled-value↔host-object identity (prototype overrides, accessor observation on builtins, function-object brands/descriptors), do NOT route it as a localized dev fix or a codegen-gate spec — it belongs to this representation track. Throughput on the remaining conformance gains is gated on a deliberate object-representation architecture decision, not on more dev agents. The acorn/IR track (#1713/#1714/#1715) remains independent dev-able work.
+
+**RESOLUTION (2026-05-30, sprint 57):** the architecture decision was made — build-now approved. Root cause pinpointed (sdev-arrayobj, 4 probes): **`X.prototype[k]=v` is silently DROPPED at compile time for ALL prototypes** (Array/Object/String/Number/user-class) — no module-init, no `__extern_set`, and the RHS is even DCE'd. The compiler has no writable-prototype model, so prior "route the read to observe the override" attempts (dev-a, dev-b reflect-vec S2) were doomed — you can't read a write that never happened. The architect spec's "override lives on host Array.prototype" premise was also false. The fix is the **Compiled-Prototype-Record (CPR)**: a `ctx.protoOverrides` table (staticProps-shaped, keyed proto-owner-identity→key→funcref) populated by a write-arm in `compileElementAssignment` (assignment.ts ~2388, before the classSet gates) that force-emits + roots the RHS closure; read-consults at the S1 brand-gated sites (array-dstr destructuring.ts:892, for-of loops.ts:1060, spread) call the stored funcref in-Wasm (no host import → standalone-clean). It's a contained SUBSET of the spec's S4, sits on the already-landed #942 S1 brand machinery, byte-identical when the brand is clear, closes #1719's 71 standalone, and is the **keystone** — the same table extends (add rows) to #1130 accessor-observation, #1320 Array.from bridge, and String/Number/user-class prototype patches. CPR is distinct in scope from #1629's instance-level defineProperty accessor STORE (`_wasmStructAccessors`) — prototype-override vs own-descriptor; they coexist. Implementation in flight as #1719 CPR-1+CPR-2 (task #266).
