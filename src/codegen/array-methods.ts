@@ -3046,6 +3046,17 @@ function compileArrayIteratorMethod(
   propAccess: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   methodName: string,
 ): ValType | null {
+  if (ctx.standalone || ctx.wasi) {
+    reportError(
+      ctx,
+      propAccess,
+      `Codegen error: #681 standalone/WASI Array.prototype.${methodName}() still requires JS-host iterator helpers; ` +
+        "use direct array for-of/destructuring for the current pure-Wasm slice " +
+        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose).",
+    );
+    return null;
+  }
+
   addArrayIteratorImports(ctx);
   const importName = `__array_${methodName}`;
   const funcIdx = ctx.funcMap.get(importName);
