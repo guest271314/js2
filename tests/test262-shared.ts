@@ -243,6 +243,72 @@ class ConformanceError extends Error {
   }
 }
 
+type RecordMetadata = {
+  imports?: string[];
+  hostImportLeakClass?: string;
+  reachedTest?: boolean;
+};
+
+function normalizeErrorSignature(status: string, errorCategory: string | undefined, error: string | undefined) {
+  if (!error) return undefined;
+  const normalized = error
+    .replace(/\bL\d+:\d+/g, "L#:##")
+    .replace(/\bL\d+\b/g, "L#")
+    .replace(/@\+\d+/g, "@+#")
+    .replace(/0x[0-9a-f]+/gi, "0x#")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  return `${errorCategory ?? status}:${normalized}`;
+}
+
+function summarizeImportName(desc: any): string | undefined {
+  if (!desc || typeof desc !== "object") return undefined;
+  const moduleName = desc.module ?? desc.moduleName ?? desc.module_name ?? "env";
+  const name = desc.name ?? desc.field ?? desc.fieldName ?? desc.importName;
+  return name ? `${moduleName}::${name}` : undefined;
+}
+
+function summarizeImports(imports: any[] | undefined): string[] {
+  if (!Array.isArray(imports)) return [];
+  return [...new Set(imports.map(summarizeImportName).filter((name): name is string => Boolean(name)))].sort();
+}
+
+function classifyHostImportLeak(imports: string[] | undefined): string | undefined {
+  if (!imports || imports.length === 0) return undefined;
+  const joined = imports.join(" ");
+  if (
+    /__extern_|__object_|__defineProperty|__get_builtin|__new_plain_object|__register_|__proto_method_call/.test(joined)
+  ) {
+    return "dynamic_object_property";
+  }
+  if (/__iterator|__array_from_iter|__gen_|generator|async_iterator/.test(joined)) return "iterator_protocol";
+  if (/RegExp_|regexp/i.test(joined)) return "regexp";
+  if (/JSON_/i.test(joined)) return "json";
+  if (/__extern_eval|__dynamic_import|Function_new/.test(joined)) return "dynamic_code";
+  if (/wasm:js-string/.test(joined)) return "js_string";
+  if (/wasi_snapshot_preview1/.test(joined)) return "wasi";
+  return "host_import";
+}
+
+function metadataFromImports(imports: any[] | undefined, reachedTest: boolean): RecordMetadata {
+  const names = summarizeImports(imports);
+  return {
+    ...(names.length > 0 ? { imports: names } : {}),
+    ...(names.length > 0 ? { hostImportLeakClass: classifyHostImportLeak(names) } : {}),
+    reachedTest,
+  };
+}
+
+function metadataFromWorkerResult(result: TestResult, reachedTestFallback = false): RecordMetadata {
+  return {
+    ...(result.imports && result.imports.length > 0 ? { imports: result.imports } : {}),
+    ...(result.hostImportLeakClass ? { hostImportLeakClass: result.hostImportLeakClass } : {}),
+    reachedTest: result.reachedTest ?? reachedTestFallback,
+  };
+}
+
 function recordResult(
   file: string,
   category: string,
@@ -251,6 +317,7 @@ function recordResult(
   timing?: { compileMs?: number; execMs?: number },
   scopeInfo?: { scope: Test262Scope; official: boolean; reason?: string; strict?: "only" | "no" | "both" },
   retryInfo?: { retried?: boolean; retryCount?: number },
+  metadata?: RecordMetadata,
 ) {
   const errorCategory = status === "fail" || status === "compile_error" ? classifyError(error) : undefined;
 
@@ -261,6 +328,10 @@ function recordResult(
     status,
     error: error || undefined,
     error_category: errorCategory,
+    error_signature: normalizeErrorSignature(status, errorCategory, error),
+    imports: metadata?.imports && metadata.imports.length > 0 ? metadata.imports : undefined,
+    host_import_leak_class: metadata?.hostImportLeakClass,
+    reached_test: metadata?.reachedTest ?? false,
     compile_ms: timing?.compileMs !== undefined ? Math.round(timing.compileMs) : undefined,
     exec_ms: timing?.execMs !== undefined ? Math.round(timing.execMs) : undefined,
     scope: scopeInfo?.scope ?? "standard",
@@ -506,18 +577,39 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   skipSemanticDiagnostics: true,
                   target: TEST262_TARGET,
                 });
+                const compileRecordMetadata = metadataFromImports(result.imports, false);
+                const reachedRecordMetadata = metadataFromImports(result.imports, true);
                 if (!result.success || result.binary.length === 0) {
                   if (isNegative) {
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      compileRecordMetadata,
+                    );
                   } else {
                     const errMsg = result.errors.map((e: any) => `L${e.line}:${e.column} ${e.message}`).join("; ");
-                    recordResult(relPath, category, "compile_error", errMsg, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "compile_error",
+                      errMsg,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      compileRecordMetadata,
+                    );
                   }
                   return;
                 }
                 // Execute the compiled binary in-process (fixture tests are rare,
                 // in-process execution is acceptable for 172 tests).
                 const buildImports = await getBuildImports();
+                let reachedFixtureTest = false;
                 try {
                   const importObj = buildImports(result.imports, undefined, result.stringPool);
                   const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
@@ -533,12 +625,31 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       // compiler is permissive and produces a module without
                       // a `test` export, which we count as the expected
                       // failure outcome — the test module never formed.
-                      recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                      recordResult(
+                        relPath,
+                        category,
+                        "pass",
+                        undefined,
+                        undefined,
+                        scopeInfo,
+                        undefined,
+                        compileRecordMetadata,
+                      );
                     } else {
-                      recordResult(relPath, category, "compile_error", "no test export", undefined, scopeInfo);
+                      recordResult(
+                        relPath,
+                        category,
+                        "compile_error",
+                        "no test export",
+                        undefined,
+                        scopeInfo,
+                        undefined,
+                        compileRecordMetadata,
+                      );
                     }
                     return;
                   }
+                  reachedFixtureTest = true;
                   const ret = testFn();
                   if (isNegative) {
                     // Negative parse/resolution test compiled, instantiated,
@@ -552,6 +663,8 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       `expected ${meta.negative!.phase} ${meta.negative!.type} but compiled, instantiated, and ran (returned ${ret})`,
                       undefined,
                       scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
                     );
                     return;
                   }
@@ -564,19 +677,58 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       `expected runtime ${meta.negative!.type} but execution succeeded`,
                       undefined,
                       scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
                     );
                   } else if (ret === 1 || ret === 1.0) {
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
+                    );
                   } else {
-                    recordResult(relPath, category, "fail", `returned ${ret}`, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "fail",
+                      `returned ${ret}`,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
+                    );
                   }
                 } catch (execErr: any) {
+                  const execRecordMetadata = metadataFromImports(result.imports, reachedFixtureTest);
                   if (isRuntimeNegative || isNegative) {
                     // For isNegative (parse/early/resolution), Wasm validation
                     // or a thrown start-function counts as the expected error.
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      execRecordMetadata,
+                    );
                   } else {
-                    recordResult(relPath, category, "fail", String(execErr), undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "fail",
+                      String(execErr),
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      execRecordMetadata,
+                    );
                   }
                 }
               } catch (e: any) {
@@ -588,7 +740,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 // is the only JSONL entry, matching the non-FIXTURE path
                 // which has no outer catch.
                 if (e instanceof ConformanceError) throw e;
-                recordResult(relPath, category, "compile_error", e.message ?? String(e), undefined, scopeInfo);
+                recordResult(
+                  relPath,
+                  category,
+                  "compile_error",
+                  e.message ?? String(e),
+                  undefined,
+                  scopeInfo,
+                  undefined,
+                  { reachedTest: false },
+                );
               }
               return;
             }
@@ -616,7 +777,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
             // Map worker result to recordResult
             if (r.status === "pass") {
-              recordResult(relPath, category, "pass", undefined, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                "pass",
+                undefined,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, true),
+              );
               return;
             }
 
@@ -648,7 +818,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 const retryInfo = { retried: true, retryCount: 1 };
 
                 if (retry.status === "pass") {
-                  recordResult(relPath, category, "pass", undefined, retryTiming, scopeInfo, retryInfo);
+                  recordResult(
+                    relPath,
+                    category,
+                    "pass",
+                    undefined,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
                   return;
                 }
                 if (retry.status === "fail") {
@@ -656,19 +835,46 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   // fail with the retry error message (preserves the new
                   // signal rather than the timeout-shaped one).
                   const error = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : "fail after retry";
-                  recordResult(relPath, category, "fail", error, retryTiming, scopeInfo, retryInfo);
+                  recordResult(
+                    relPath,
+                    category,
+                    "fail",
+                    error,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
                   return;
                 }
                 // compile_error or another compile_timeout on retry → record
                 // the retry status (with retried flag) so we can distinguish
                 // genuine-slow tests from flakes in baseline analysis.
                 const retryError = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : retry.status;
-                recordResult(relPath, category, retry.status, retryError, retryTiming, scopeInfo, retryInfo);
+                recordResult(
+                  relPath,
+                  category,
+                  retry.status,
+                  retryError,
+                  retryTiming,
+                  scopeInfo,
+                  retryInfo,
+                  metadataFromWorkerResult(retry, false),
+                );
                 return;
               }
 
               const error = r.error ? adjustErrorLines(r.error, lineAdjustOffset) : r.status;
-              recordResult(relPath, category, r.status, error, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                r.status,
+                error,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, false),
+              );
               return;
             }
 
@@ -714,12 +920,30 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 }
               }
 
-              recordResult(relPath, category, "fail", error, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                "fail",
+                error,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, true),
+              );
               return;
             }
 
             // Fallback
-            recordResult(relPath, category, r.status || "fail", r.error || "unknown", timing, scopeInfo);
+            recordResult(
+              relPath,
+              category,
+              r.status || "fail",
+              r.error || "unknown",
+              timing,
+              scopeInfo,
+              undefined,
+              metadataFromWorkerResult(r, false),
+            );
           },
           90_000,
         );

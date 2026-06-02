@@ -786,6 +786,44 @@ function compileTargetFromMessage(target) {
   return target === "linear" || target === "wasi" || target === "standalone" ? target : undefined;
 }
 
+function summarizeImportName(desc) {
+  if (!desc || typeof desc !== "object") return undefined;
+  const moduleName = desc.module ?? desc.moduleName ?? desc.module_name ?? "env";
+  const name = desc.name ?? desc.field ?? desc.fieldName ?? desc.importName;
+  if (!name) return undefined;
+  return `${moduleName}::${name}`;
+}
+
+function summarizeImports(imports) {
+  if (!Array.isArray(imports)) return [];
+  return [...new Set(imports.map(summarizeImportName).filter(Boolean))].sort();
+}
+
+function classifyHostImportLeak(importNames) {
+  if (!Array.isArray(importNames) || importNames.length === 0) return undefined;
+  const joined = importNames.join(" ");
+  if (/__extern_|__object_|__defineProperty|__get_builtin|__new_plain_object|__register_|__proto_method_call/.test(joined)) {
+    return "dynamic_object_property";
+  }
+  if (/__iterator|__array_from_iter|__gen_|generator|async_iterator/.test(joined)) return "iterator_protocol";
+  if (/RegExp_|regexp/i.test(joined)) return "regexp";
+  if (/JSON_/i.test(joined)) return "json";
+  if (/__extern_eval|__dynamic_import|Function_new/.test(joined)) return "dynamic_code";
+  if (/wasm:js-string/.test(joined)) return "js_string";
+  if (/wasi_snapshot_preview1/.test(joined)) return "wasi";
+  return "host_import";
+}
+
+function buildResultMetadata(result, reachedTest) {
+  const imports = summarizeImports(result?.imports);
+  const hostImportLeakClass = classifyHostImportLeak(imports);
+  return {
+    ...(imports.length > 0 ? { imports } : {}),
+    ...(hostImportLeakClass ? { hostImportLeakClass } : {}),
+    reachedTest,
+  };
+}
+
 function makeWorkerRecycleError(reason) {
   const err = new Error(reason);
   err.workerRecycleReason = reason;
@@ -1037,6 +1075,7 @@ process.on("message", async (msg) => {
     return;
   }
   const compileMs = performance.now() - compileStart;
+  const compileMetadata = buildResultMetadata(result, false);
 
   const hasErrors = !result.success || result.errors.some((e) => e.severity === "error");
 
@@ -1073,6 +1112,7 @@ process.on("message", async (msg) => {
         status: hasEarlyError ? "pass" : "pass",
         compileMs,
         errorCodes,
+        ...compileMetadata,
       });
     } else {
       sendResult({
@@ -1081,6 +1121,7 @@ process.on("message", async (msg) => {
         error: errMsg || "unknown",
         errorCodes,
         compileMs,
+        ...compileMetadata,
       });
     }
     return;
@@ -1092,6 +1133,7 @@ process.on("message", async (msg) => {
       status: "pass",
       compileMs,
       errorCodes: result.errors.filter((e) => e.code).map((e) => e.code),
+      ...compileMetadata,
     });
     return;
   }
@@ -1105,7 +1147,7 @@ process.on("message", async (msg) => {
         writeFileSync(msg.metaPath, JSON.stringify({ ok: false, error: errMsg, compileMs, bundle_hash: BUNDLE_HASH }));
       } catch {}
     }
-    sendResult({ id, status: "compile_error", error: errMsg, compileMs });
+    sendResult({ id, status: "compile_error", error: errMsg, compileMs, ...compileMetadata });
     return;
   }
 
@@ -1129,7 +1171,7 @@ process.on("message", async (msg) => {
 
   // Compile-only mode: done
   if (!execute) {
-    sendResult({ id, status: "compiled", compileMs });
+    sendResult({ id, status: "compiled", compileMs, ...compileMetadata });
     return;
   }
 
@@ -1146,10 +1188,11 @@ process.on("message", async (msg) => {
         status: "fail",
         error: `expected parse/early ${expectedErrorType || "error"} but compiled and instantiated successfully`,
         compileMs,
+        ...compileMetadata,
       });
     } catch {
       // Instantiation failed — pass (Wasm validation caught the error)
-      sendResult({ id, status: "pass", compileMs });
+      sendResult({ id, status: "pass", compileMs, ...compileMetadata });
     }
     return;
   }
@@ -1175,12 +1218,13 @@ process.on("message", async (msg) => {
           instantiateError: true,
           compileMs,
           execMs,
+          ...compileMetadata,
         });
         return;
       }
 
       if (isRuntimeNegative) {
-        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
+        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true, ...compileMetadata });
         return;
       }
 
@@ -1192,6 +1236,7 @@ process.on("message", async (msg) => {
         instantiateError: true,
         compileMs,
         execMs,
+        ...compileMetadata,
       });
       return;
     }
@@ -1209,6 +1254,7 @@ process.on("message", async (msg) => {
         error: "no test export",
         compileMs,
         execMs: performance.now() - execStart,
+        ...compileMetadata,
       });
       return;
     }
@@ -1227,16 +1273,17 @@ process.on("message", async (msg) => {
           compileMs,
           execMs,
           runtimeNegativeNoThrow: true,
+          ...buildResultMetadata(result, true),
         });
       } else {
-        sendResult({ id, status: ret === 1 ? "pass" : "fail", ret, compileMs, execMs });
+        sendResult({ id, status: ret === 1 ? "pass" : "fail", ret, compileMs, execMs, ...buildResultMetadata(result, true) });
       }
       return;
     } catch (execErr) {
       const execMs = performance.now() - execStart;
 
       if (isRuntimeNegative) {
-        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
+        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true, ...buildResultMetadata(result, true) });
         return;
       }
 
@@ -1257,6 +1304,7 @@ process.on("message", async (msg) => {
         isException: true,
         compileMs,
         execMs,
+        ...buildResultMetadata(result, true),
       });
       return;
     }
@@ -1278,6 +1326,7 @@ process.on("message", async (msg) => {
         isException: true,
         compileMs,
         execMs: performance.now() - execStart,
+        ...compileMetadata,
       });
     } else {
       sendResult({
@@ -1286,6 +1335,7 @@ process.on("message", async (msg) => {
         error: outerErr.message ?? String(outerErr),
         compileMs,
         execMs: performance.now() - execStart,
+        ...compileMetadata,
       });
     }
     return;

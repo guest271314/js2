@@ -1,7 +1,7 @@
 ---
 id: 1781
 title: "standalone test262 run must publish full JSONL and root-cause issue map"
-status: ready
+status: in-review
 created: 2026-06-02
 updated: 2026-06-02
 priority: high
@@ -15,6 +15,9 @@ es_edition: n/a
 sprint: 58
 related: [1662, 1776, 1472, 682, 1474, 1599, 1387, 1778, 1782, 1591, 1623, 1665]
 origin: "Investigation of all failing standalone test262 tests found that the June 1 full standalone JSONL/report artifacts were generated but not retained, leaving only summary counts and five manually documented root-cause clusters."
+claimed_by: codex-developer
+claimed_at: 2026-06-02T20:53:11.407Z
+pr: 1045
 ---
 
 # #1781 - Standalone test262 run must publish full JSONL and root-cause issue map
@@ -160,6 +163,44 @@ No high-volume standalone failure family is unowned after this pass. The only
 new issue filed from the artifact is #1782 for numeric/BigInt separator
 literal values; other buckets already had root-cause issues and were refreshed
 where the latest artifact materially changed the evidence.
+
+## 2026-06-02 implementation findings
+
+Implemented the auditability layer for standalone test262 reporting:
+
+- `tests/test262-shared.ts` now writes stable `error_signature`,
+  `imports`, `host_import_leak_class`, and `reached_test` metadata into JSONL
+  rows when that information is available from the worker or fixture compile
+  path.
+- `scripts/test262-worker.mjs` returns summarized compile imports, a
+  host-import leak class, and whether the exported `test()` function was
+  reached.
+- `scripts/build-test262-report.mjs` now supports `--target standalone`,
+  emits `root_cause_map` for standalone reports, and fails when
+  `--max-unclassified-root-causes N` is exceeded.
+- `scripts/run-test262-vitest.sh` delegates report generation to the shared
+  report builder, so local standalone runs emit the same report schema as CI.
+- `.github/workflows/test262-sharded.yml` runs the standalone merged report
+  with `--max-unclassified-root-causes 0`, making unowned standalone failures a
+  required-check failure.
+
+Validation:
+
+- `pnpm test tests/issue-1781.test.ts`
+- `pnpm test tests/build-test262-report.test.ts`
+- `pnpm test tests/issue-1781.test.ts tests/build-test262-report.test.ts`
+- `bash -n scripts/run-test262-vitest.sh`
+- `node --check scripts/build-test262-report.mjs`
+- `node --check scripts/test262-worker.mjs`
+- `pnpm exec tsc --noEmit --pretty false`
+- Fetched
+  `https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.jsonl`
+  and ran:
+  `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-issue-1781.json --target standalone --max-unclassified-root-causes 0 --include-proposals`
+
+The fetched standalone artifact classified all 40,189 non-pass/non-skip rows
+with 0 unclassified rows across 43 root-cause buckets. No full local test262
+run was performed.
 
 ## Root Cause
 
