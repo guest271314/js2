@@ -987,6 +987,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   {
     const NATIVE_STR_METHODS = new Set([
       "charAt",
+      "charCodeAt",
       "substring",
       "slice",
       "at",

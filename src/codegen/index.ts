@@ -5803,6 +5803,7 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
   // Native string methods handled in wasm (native strings mode)
   const NATIVE_STR_METHODS = new Set([
     "charAt",
+    "charCodeAt",
     "substring",
     "slice",
     "at",
