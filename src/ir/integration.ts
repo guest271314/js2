@@ -1239,6 +1239,18 @@ function preregisterIteratorSupport(ctx: CodegenContext, fns: readonly BuiltFnRe
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
         if (usesIter(instr)) {
+          if (ctx.standalone || ctx.wasi) {
+            ctx.errors.push({
+              message:
+                "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
+                "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
+                "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
+              line: 0,
+              column: 0,
+              severity: "error",
+            });
+            return;
+          }
           addIteratorImports(ctx);
           return;
         }
