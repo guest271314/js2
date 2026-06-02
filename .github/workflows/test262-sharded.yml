@@ -298,6 +298,7 @@ jobs:
         # fan out in parallel in the same CI wave. Keep chunk first so job
         # creation alternates target pairs per chunk instead of queueing one
         # whole target before the other.
+        # Smoke PR: exercise the host+standalone matrix without behavior changes.
         chunk:
           [
             1,
