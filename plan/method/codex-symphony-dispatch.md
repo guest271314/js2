@@ -11,6 +11,8 @@ the current sprint until the sprint has no claimable work left.
 - Current sprint: the sprint number named by the user, or the latest
   `plan/issues/sprints/<N>.md` with active/planning work.
 - Claimable task: `sprint: <N>` and `status: ready`.
+- Claimed/running task: `status: in-progress`; do not fresh-dispatch it as
+  another task.
 - Blocked task: `status: blocked`, missing dependency, explicit owner pin, or
   known same-function conflict.
 - Completion source: the implementation PR updates the issue file to
@@ -42,6 +44,7 @@ non-done work and states that choice before dispatching.
 5. Pick a wave up to the worker cap, avoiding overlapping write scopes,
    especially the same compiler function.
 6. For each selected issue:
+   - immediately set the issue frontmatter to `status: in-progress`
    - create or assign a worktree and branch
    - spawn one Codex worker/developer with exactly one issue
    - include the issue file, sprint number, worktree, branch, write scope, and

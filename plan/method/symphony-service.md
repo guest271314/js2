@@ -20,6 +20,20 @@ The current tracker adapter is markdown-backed because sprint membership and
 issue status are already canonical in repo frontmatter. A Linear adapter can be
 added later without changing the orchestrator or runner contracts.
 
+## Issue Status Flow
+
+- `ready`: claimable by Symphony.
+- `in-progress`: claimed, running, or resumable by an existing retry.
+- `review`: worker published a PR or handed off for lead review.
+- `done` / `wont-fix`: terminal.
+
+On dispatch, Symphony immediately flips the issue frontmatter from `ready` to
+`in-progress` in the main checkout and mirrors that status into the assigned
+worktree issue file. `WORKFLOW.md` uses `tracker.claimable_states: [ready]` for
+fresh dispatch and `tracker.active_states: [ready, in-progress]` for
+reconciliation/retries, so a claimed issue is not picked again as fresh work and
+is not cancelled just because the claim state changed.
+
 ## Agent Lanes
 
 Agents are configured as lanes in `WORKFLOW.md`.
