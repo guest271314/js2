@@ -1,9 +1,9 @@
 ---
 id: 1755
 title: "TS annotation: Uint8Array<ArrayBuffer> generic typed-array form not handled"
-status: ready
+status: done
 created: 2026-05-30
-updated: 2026-05-31
+updated: 2026-06-02
 priority: low
 feasibility: medium
 task_type: bug
@@ -13,6 +13,7 @@ goal: platform
 related: [389, 1752, 1700]
 depends_on: []
 sprint: 58
+completed: 2026-06-02
 ---
 
 # #1755 — `Uint8Array<ArrayBuffer>` generic annotation
@@ -54,3 +55,24 @@ non-generic `Uint8Array`.
 
 Low priority (annotation ergonomics, not a runtime correctness gap) but cheap if
 it's a small type-resolver erase. Distinct from #1700 (TypedArray export ABI).
+
+## Implementation Summary
+
+- What was done: Erased generic typed-array type-node annotations in the WasmGC
+  IR position resolver so `Uint8Array<ArrayBuffer>` and sibling typed-array
+  forms lower like their bare annotations. Normalized the linear backend's
+  existing `Uint8Array` annotation text checks so `Uint8Array<ArrayBuffer>` is
+  tagged as the same collection kind as bare `Uint8Array`.
+- What worked: The TypeScript checker already preserved typed-array symbols for
+  export-signature classification and legacy `resolveWasmType`; the fix only
+  needed the explicit type-node/text paths that bypass those symbol checks.
+  Focused coverage now exercises WasmGC host marshalling, standalone, WASI, and
+  the linear backend's collection-kind tagging.
+- What didn't work: No alternate lowering strategy was needed; the
+  `<ArrayBufferLike>` argument is purely compile-time metadata for js2wasm.
+- Files changed: `src/codegen/index.ts`, `src/codegen-linear/index.ts`,
+  `tests/issue-1755.test.ts`, `plan/log/issues-log.md`, and this issue file.
+- Tests: `npm test -- tests/issue-1755.test.ts`; `npm test --
+  tests/issue-1700.test.ts tests/issue-1752.test.ts tests/issue-1755.test.ts`;
+  `npx prettier --check src/codegen/index.ts src/codegen-linear/index.ts
+  tests/issue-1755.test.ts`.

@@ -24,6 +24,15 @@ const CLASS_TYPE_TAG = 5;
 /** Data segment base address — must be below HEAP_START (1024) */
 const DATA_SEGMENT_BASE = 64;
 
+function isUint8ArrayTypeText(text: string): boolean {
+  return /^Uint8Array(?:<.*>)?$/.test(text.replace(/\s+/g, ""));
+}
+
+function isNumberArrayOrUint8ArrayUnionText(text: string): boolean {
+  const parts = text.split("|").map((part) => part.trim());
+  return parts.length === 2 && parts.includes("number[]") && parts.some(isUint8ArrayTypeText);
+}
+
 /**
  * Generate a WasmModule using the linear-memory backend.
  * Compiles TS functions to standard Wasm with i32/f64 values.
@@ -1504,7 +1513,7 @@ function classifyFieldType(
     collKinds.set(propName, "Array");
     return "i32";
   }
-  if (typeStr === "Uint8Array" || typeStr.includes("Uint8Array")) {
+  if (isUint8ArrayTypeText(typeStr) || typeStr.includes("Uint8Array")) {
     collKinds.set(propName, "Uint8Array");
     return "i32";
   }
@@ -2118,7 +2127,7 @@ function detectCollectionKind(ctx: LinearContext, decl: ts.VariableDeclaration):
   if (decl.type) {
     const text = decl.type.getText();
     if (text === "number[]" || text.startsWith("Array<")) return "Array";
-    if (text === "Uint8Array") return "Uint8Array";
+    if (isUint8ArrayTypeText(text)) return "Uint8Array";
     if (text.startsWith("Map<") || text === "Map") return "Map";
     if (text.startsWith("Set<") || text === "Set") return "Set";
   }
@@ -2148,7 +2157,7 @@ function detectCollectionKind(ctx: LinearContext, decl: ts.VariableDeclaration):
       const rawType = ctx.checker.getTypeAtLocation(decl.initializer);
       const type = ctx.checker.getNonNullableType(rawType);
       const typeStr = ctx.checker.typeToString(type);
-      if (typeStr === "Uint8Array" || typeStr.includes("Uint8Array")) return "Uint8Array";
+      if (isUint8ArrayTypeText(typeStr) || typeStr.includes("Uint8Array")) return "Uint8Array";
       if (typeStr.startsWith("Map<") || typeStr === "Map") return "Map";
       if (typeStr.startsWith("Set<") || typeStr === "Set") return "Set";
       if (typeStr === "number[]" || typeStr.endsWith("[]") || typeStr.startsWith("Array<")) return "Array";
@@ -2195,7 +2204,7 @@ function getExprCollectionKind(
     const rawType = ctx.checker.getTypeAtLocation(expr);
     const type = ctx.checker.getNonNullableType(rawType);
     const typeStr = ctx.checker.typeToString(type);
-    if (typeStr === "Uint8Array" || typeStr.includes("Uint8Array")) return "Uint8Array";
+    if (isUint8ArrayTypeText(typeStr) || typeStr.includes("Uint8Array")) return "Uint8Array";
     if (typeStr.startsWith("Map<") || typeStr === "Map") return "Map";
     if (typeStr.startsWith("Set<") || typeStr === "Set") return "Set";
     if (typeStr.endsWith("[]") || typeStr.startsWith("Array<")) return "Array";
@@ -3728,7 +3737,7 @@ function scanClassDeclaration(ctx: LinearContext, classDecl: ts.ClassDeclaration
         const typeText = member.type.getText();
         if (typeText.endsWith("[]") || typeText.startsWith("Array<")) {
           fieldCollectionKinds.set(fieldName, "Array");
-        } else if (typeText === "Uint8Array") {
+        } else if (isUint8ArrayTypeText(typeText)) {
           fieldCollectionKinds.set(fieldName, "Uint8Array");
         } else if (typeText.startsWith("Map<") || typeText === "Map") {
           fieldCollectionKinds.set(fieldName, "Map");
@@ -4346,7 +4355,7 @@ function collectModuleGlobals(ctx: LinearContext, sf: ts.SourceFile): void {
         const text = decl.type.getText();
         if (text.startsWith("Set<") || text === "Set") ctx.moduleCollectionTypes.set(name, "Set");
         else if (text.startsWith("Map<") || text === "Map") ctx.moduleCollectionTypes.set(name, "Map");
-        else if (text === "Uint8Array") ctx.moduleCollectionTypes.set(name, "Uint8Array");
+        else if (isUint8ArrayTypeText(text)) ctx.moduleCollectionTypes.set(name, "Uint8Array");
         else if (text.endsWith("[]") || text.startsWith("Array<")) ctx.moduleCollectionTypes.set(name, "Array");
       }
     }
@@ -4467,7 +4476,7 @@ function detectParamCollectionTypes(
     // Check explicit type annotation
     if (param.type) {
       const text = param.type.getText();
-      if (text === "number[] | Uint8Array" || text === "Uint8Array | number[]") {
+      if (isNumberArrayOrUint8ArrayUnionText(text)) {
         fctx.collectionTypes.set(paramName, "ArrayOrUint8Array");
         continue;
       }
@@ -4475,7 +4484,7 @@ function detectParamCollectionTypes(
         fctx.collectionTypes.set(paramName, "Array");
         continue;
       }
-      if (text === "Uint8Array") {
+      if (isUint8ArrayTypeText(text)) {
         fctx.collectionTypes.set(paramName, "Uint8Array");
         continue;
       }
@@ -4492,11 +4501,11 @@ function detectParamCollectionTypes(
     try {
       const type = ctx.checker.getTypeAtLocation(param);
       const typeStr = ctx.checker.typeToString(type);
-      if (typeStr === "number[] | Uint8Array" || typeStr === "Uint8Array | number[]") {
+      if (isNumberArrayOrUint8ArrayUnionText(typeStr)) {
         fctx.collectionTypes.set(paramName, "ArrayOrUint8Array");
         continue;
       }
-      if (typeStr === "Uint8Array") {
+      if (isUint8ArrayTypeText(typeStr)) {
         fctx.collectionTypes.set(paramName, "Uint8Array");
         continue;
       }
