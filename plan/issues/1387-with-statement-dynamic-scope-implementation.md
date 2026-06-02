@@ -1,7 +1,8 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: in-progress
+status: in-review
+pr: 1049
 owner: Hooke
 created: 2026-05-08
 updated: 2026-06-03
