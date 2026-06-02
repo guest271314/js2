@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { compile } from "../src/index.js";
 
-const ISSUE_1387 = /#1387: with statement requires IR-proven closed-shape lowering/;
+const ISSUE_1387 = /#1387: with statement requires a proven closed object-literal shape/;
 
 async function compileSloppyWith(src: string) {
   return compile(src, {
@@ -14,20 +14,19 @@ async function compileSloppyWith(src: string) {
 }
 
 describe("#1387 with statement closed-shape proof gate", () => {
-  it("refuses object-literal with targets until the IR proves the closed shape soundly", async () => {
+  it("refuses inherited Object.prototype bindings until the static slice can route them soundly", async () => {
     const r = await compileSloppyWith(`function run() {
   var out = 0;
   with ({ a: 1 }) {
-    out = a;
+    out = toString;
   }
 }`);
 
     const msg = r.errors.map((e) => e.message).join("\n");
     expect(msg).toMatch(ISSUE_1387);
-    expect(msg).toContain("object literal target");
+    expect(msg).toContain('inherited Object.prototype key "toString"');
     expect(msg).toContain("Object.prototype");
     expect(msg).toContain("@@unscopables");
-    expect(msg).toContain("key-set/prototype mutation");
     expect(msg).toContain("ECMA-262 14.11.2");
     expect(msg).toContain("9.1.1.2.1");
     expect(msg).toContain("7.3.11");
@@ -47,8 +46,7 @@ describe("#1387 with statement closed-shape proof gate", () => {
 
     const msg = r.errors.map((e) => e.message).join("\n");
     expect(msg).toMatch(ISSUE_1387);
-    expect(msg).toContain('identifier target "obj"');
-    expect(msg).toContain("runtime shape and mutation history are not proven closed");
+    expect(msg).toContain("target Identifier is not a closed object literal");
   });
 
   it("does not fall back to the generic unsupported statement diagnostic", async () => {

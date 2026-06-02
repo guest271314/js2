@@ -1,9 +1,11 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: in-progress
+status: in-review
+pr: 1049
+owner: Hooke
 created: 2026-05-08
-updated: 2026-06-02
+updated: 2026-06-03
 priority: high
 feasibility: medium  # Tier 1 (IR-proven static routing) is medium and dispatchable; Tier 2 (dynamic fallback) is hard and overlaps the object-representation ceiling — slice & ship Tier 1 first.
 reasoning_effort: max
@@ -12,9 +14,8 @@ area: codegen, ir
 language_feature: with
 goal: spec-completeness
 sprint: 58
-owner: Hooke
 claimed_by: codex-developer
-claimed_at: 2026-06-02T11:02:41.007Z
+claimed_at: 2026-06-02T22:34:54.398Z
 ---
 # #1387 — `with` statement: architect exploration
 
@@ -464,3 +465,44 @@ Validation:
   expanded through the package script and ran the wider suite, including `tests/test262-vitest.test.ts`;
   it is not a scoped #1387 signal and eventually failed/OOMed after unrelated existing failures and
   missing precompile-cache/network issues.
+
+## Implementation note — 2026-06-03 Tier-1 literal slice
+
+This slice ships the first static `with` lowering rather than only diagnosing every
+`WithStatement`. The implementation is deliberately narrow and sound:
+
+- `src/codegen/with-scope.ts` proves object-literal targets with simple own data
+  properties, compiles the target once into a WasmGC struct local, and pushes a
+  per-function `withScopes` stack.
+- Bare identifier reads and simple assignments consult the stack innermost-first.
+  Proven own-property bindings lower to direct `struct.get` / `struct.set`; names
+  absent from the closed own-key set fall through to the lexical binding.
+- Nested literal `with` scopes work for the static path. Literal targets that lack a
+  TypeScript struct identity synthesize a closed anonymous struct from the literal
+  fields so nested scopes do not fall back to plain externref.
+- Body declarations are treated as lexical blockers, and inherited
+  `Object.prototype` names such as `toString` are refused for now rather than
+  unsoundly routed to the outer lexical scope.
+- Opaque targets, spreads, accessors, methods, duplicate keys, `__proto__`, dynamic
+  computed keys, static/dynamic `@@unscopables`, and closure-capturing bodies remain
+  on the #1387/#1472 diagnostic path.
+
+Focused coverage:
+
+- `tests/issue-1387.test.ts` covers literal reads, simple writes, nested literal
+  scopes, lexical shadowing, opaque-target diagnostics, and inherited-prototype
+  refusal.
+- `tests/issue-1387-with-diagnostic.test.ts` and `tests/error-reporting.test.ts`
+  were updated so diagnostics now target the residual unsupported cases.
+
+Validation:
+
+- `pnpm exec tsc --noEmit` — passed.
+- `node node_modules/vitest/dist/cli.js run tests/issue-1387.test.ts tests/issue-1387-with-diagnostic.test.ts tests/error-reporting.test.ts`
+  — 3 files passed, 16 tests passed.
+- `node node_modules/vitest/dist/cli.js run tests/equivalence.test.ts` — no such
+  test file exists in this checkout; the repo has sharded files under
+  `tests/equivalence/`.
+- `pnpm test:262 --include language/statements/with` — failed before running tests:
+  the current worktree's `test262/` directory does not contain `test262/test`, while
+  `/workspace/test262/test` exists. No test262 conformance result was produced.

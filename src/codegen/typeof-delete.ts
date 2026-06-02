@@ -18,6 +18,7 @@ import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
+import { findWithBinding } from "./with-scope.js";
 
 // ── Delete expression ─────────────────────────────────────────────────
 
@@ -768,6 +769,10 @@ export function compileTypeofExpression(
       ident = (ident as ts.ParenthesizedExpression | ts.AsExpression).expression;
     }
     if (ts.isIdentifier(ident)) {
+      const withBinding = findWithBinding(fctx, ident.text);
+      if (withBinding) {
+        return compileStringLiteral(ctx, fctx, staticTypeofForWasmType(withBinding.field.type));
+      }
       const sym = ctx.checker.getSymbolAtLocation(ident);
       const hasValueDecl = !!sym?.valueDeclaration;
       if (!hasValueDecl) {
@@ -821,6 +826,12 @@ export function compileTypeofExpression(
   return { kind: "externref" };
 }
 
+function staticTypeofForWasmType(type: ValType): string {
+  if (type.kind === "i32") return "boolean";
+  if (type.kind === "f32" || type.kind === "f64" || type.kind === "i64") return "number";
+  return "object";
+}
+
 /**
  * Compile `typeof x === "number"` / `typeof x !== "string"` etc.
  * Returns i32 result, or null if the expression is not a typeof comparison.
@@ -865,6 +876,14 @@ export function compileTypeofComparison(
       ident = (ident as ts.ParenthesizedExpression | ts.AsExpression).expression;
     }
     if (ts.isIdentifier(ident)) {
+      const withBinding = findWithBinding(fctx, ident.text);
+      if (withBinding) {
+        const actual = staticTypeofForWasmType(withBinding.field.type);
+        const matches = actual === stringLiteral;
+        const result = isEq ? (matches ? 1 : 0) : matches ? 0 : 1;
+        fctx.body.push({ op: "i32.const", value: result });
+        return { kind: "i32" };
+      }
       const sym = ctx.checker.getSymbolAtLocation(ident);
       if (!sym?.valueDeclaration) {
         const matches = "undefined" === stringLiteral;

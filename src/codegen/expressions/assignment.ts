@@ -61,6 +61,7 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
+import { compileWithBindingAssignment, findWithBinding } from "../with-scope.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -120,6 +121,10 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
 
   if (ts.isIdentifier(expr.left)) {
     const name = expr.left.text;
+    const withBinding = findWithBinding(fctx, name);
+    if (withBinding) {
+      return compileWithBindingAssignment(ctx, fctx, withBinding, expr.right);
+    }
     // const bindings — assignment throws TypeError at runtime
     if (fctx.constBindings?.has(name)) {
       // Evaluate RHS for side effects, then throw
