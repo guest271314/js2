@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 const HOST_REGEXP_IMPORT_RE =
-  /RegExp_|__regex_symbol_call|wasm:js-string|string_constants|^env::string_(match|matchAll|search|replace|replaceAll|split)$/;
+  /RegExp_|__regex_symbol_call|__proto_method_call|wasm:js-string|string_constants|^env::string_(match|matchAll|search|replace|replaceAll|split)$/;
 
 async function runStandaloneNumber(source: string): Promise<number> {
   const r = await compile(source, { fileName: "issue-682.ts", target: "standalone" });
@@ -61,6 +61,16 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     `);
 
     expect(value).toBe(0);
+  });
+
+  it("runs RegExp.prototype.test.call with a static backend receiver", async () => {
+    const value = await runStandaloneNumber(`
+      export function test(): number {
+        return RegExp.prototype.test.call(/abc/, "zzabc") ? 1 : 0;
+      }
+    `);
+
+    expect(value).toBe(1);
   });
 
   it("does not intercept a user-defined RegExp function", async () => {
@@ -134,6 +144,22 @@ describe("#682 standalone RegExp literal-substring backend", () => {
 
     expect(r.success).toBe(false);
     expect(r.errors.some((e) => /symbol protocol calls/.test(e.message) && /#682\/#1474/.test(e.message))).toBe(true);
+    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+  });
+
+  it("refuses unsupported RegExp prototype calls without the host prototype bridge", async () => {
+    const r = await compile(
+      `export function test(): boolean { return RegExp.prototype.exec.call(/abc/, "abc") !== null; }`,
+      {
+        fileName: "issue-682.ts",
+        target: "standalone",
+      },
+    );
+
+    expect(r.success).toBe(false);
+    expect(r.errors.some((e) => /RegExp\.prototype\.exec\.call/.test(e.message) && /#682\/#1474/.test(e.message))).toBe(
+      true,
+    );
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
   });
 

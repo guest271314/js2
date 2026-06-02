@@ -2596,6 +2596,31 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           expr.arguments.length >= 1
         ) {
           const typeName = objExpr.expression.text;
+          const isBuiltinRegExpPrototype = typeName === "RegExp" && isGlobalRegExpIdentifier(ctx, objExpr.expression);
+          if (ctx.standalone && isBuiltinRegExpPrototype) {
+            if (methodName === "test") {
+              const receiverArg = expr.arguments[0]!;
+              const syntheticProp = ts.factory.createPropertyAccessExpression(receiverArg, "test");
+              ts.setTextRange(syntheticProp, innerExpr);
+              const syntheticCall = ts.factory.createCallExpression(
+                syntheticProp,
+                undefined,
+                Array.from(expr.arguments).slice(1),
+              );
+              ts.setTextRange(syntheticCall, expr);
+              (syntheticCall as any).parent = expr.parent;
+              const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, syntheticCall, syntheticProp);
+              if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
+            }
+            reportError(
+              ctx,
+              expr,
+              `Codegen error: standalone RegExp literal-substring backend does not support ` +
+                `RegExp.prototype.${methodName}.call(...) (#682/#1474). Use RegExp.prototype.test ` +
+                `with a plain static pattern and no flags, or recompile without --target standalone.`,
+            );
+            return null;
+          }
           if (
             (typeName === "String" ||
               typeName === "Number" ||
@@ -2603,7 +2628,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               typeName === "Boolean" ||
               typeName === "Object" ||
               typeName === "Function" ||
-              typeName === "RegExp") &&
+              isBuiltinRegExpPrototype) &&
             expr.arguments.length >= 1
           ) {
             const protoCallIdx = ensureLateImport(

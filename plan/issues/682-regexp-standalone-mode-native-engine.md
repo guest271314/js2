@@ -35,7 +35,9 @@ files:
   src/codegen/expressions/calls.ts:
     changed:
       - "route standalone RegExp(...) and RegExp.prototype.test through the reduced native backend"
+      - "route standalone RegExp.prototype.test.call(...) through the reduced native backend instead of the host prototype bridge"
       - "refuse direct standalone RegExp symbol protocol calls before JS-host helper lowering"
+      - "refuse unsupported standalone RegExp.prototype.*.call(...) forms before JS-host prototype bridge lowering"
       - "preserve user-defined RegExp(...) calls by checking the resolved global declaration"
   src/codegen/expressions/new-super.ts:
     changed:
@@ -44,8 +46,10 @@ files:
   tests/issue-682.test.ts:
     new:
       - "standalone RegExp literal/new/call .test execution and unsupported-syntax refusals"
+      - "standalone RegExp.prototype.test.call(...) execution without host prototype bridge imports"
       - "standalone RegExp call shadowing regression"
       - "standalone refusal for direct RegExp symbol protocol calls without host imports"
+      - "standalone refusal for unsupported RegExp.prototype.*.call(...) without host prototype bridge imports"
       - "standalone refusal for opaque RegExp receivers not created by the backend"
       - "standalone RegExp-consuming string method refusals emit no JS-host string imports"
   tests/issue-682-regexp-standalone-abi.test.ts:
@@ -479,6 +483,210 @@ Scoped validation rerun:
 
 Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. No blockers were found in this verification pass.
+
+### Codex PR-state verification — 2026-06-02
+
+Re-read the assigned #682 implementation and focused tests in the
+`symphony/682` worktree. No code changes were needed in this pass. The current
+branch remains scoped to the reduced `native-literal-substring` standalone
+backend for static plain patterns with no flags and `RegExp.prototype.test`;
+unsupported syntax, symbol protocol calls, opaque receivers, and
+RegExp-consuming string methods still refuse explicitly without JS-host RegExp
+or string-method imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 is open as a draft from `symphony/682` to `main`,
+with GitHub reporting a clean merge state. No blockers were found in this
+verification pass.
+
+### Codex lane validation — 2026-06-02
+
+Reviewed the assigned #682 implementation and focused tests in the
+`symphony/682` worktree. No additional code changes were needed. The branch
+still implements the reduced `native-literal-substring` standalone backend for
+static plain patterns with no flags and `RegExp.prototype.test`, while
+unsupported syntax, direct symbol protocol calls, opaque RegExp receivers, and
+RegExp-consuming string methods refuse explicitly without JS-host RegExp or
+string-method imports.
+
+Scoped validation rerun in this lane:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 remains open as a draft from `symphony/682` to
+`main`; GitHub reports it as clean and mergeable, with the current check rollup
+green. No blockers were found.
+
+### Codex teammate validation — 2026-06-02
+
+Reviewed the assigned #682 standalone RegExp implementation and focused tests
+for this lane. No additional code change was needed: the branch remains scoped
+to the reduced `native-literal-substring` backend for static plain patterns
+with no flags and `RegExp.prototype.test`, while unsupported syntax, direct
+symbol protocol calls, opaque receivers, and RegExp-consuming string methods
+still refuse explicitly without JS-host RegExp/string imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 remains open as a draft from `symphony/682` to
+`main`; GitHub reports it as clean and mergeable, with all reported checks
+successful. No blockers were found in this validation pass.
+
+### Codex final scoped validation — 2026-06-02
+
+Re-reviewed the assigned #682 standalone RegExp implementation in this
+worktree. No additional code change was needed. The branch remains scoped to
+the reduced `native-literal-substring` backend: static plain patterns with no
+flags lower to native string `indexOf` for `RegExp.prototype.test`, and
+unsupported syntax, direct RegExp symbol protocol calls, opaque RegExp
+receivers, and RegExp-consuming string methods refuse explicitly without
+registering JS-host RegExp or string-method imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 remains open as a draft from `symphony/682` to
+`main`; GitHub reports it as clean and mergeable, with all reported checks
+successful. No blockers were found in this final scoped validation pass.
+
+### Codex developer lane verification — 2026-06-02
+
+Re-read the assigned #682 issue context, implementation, and focused tests in
+the `symphony/682` worktree. No additional code changes were needed. The branch
+continues to implement only the reduced `native-literal-substring` standalone
+backend for static plain patterns with no flags and `RegExp.prototype.test`,
+while unsupported syntax, direct symbol protocol calls, opaque RegExp
+receivers, and RegExp-consuming string methods refuse explicitly without
+registering JS-host RegExp/string imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 remains open as a draft from `symphony/682` to
+`main`; GitHub reports it as mergeable/clean at
+`8e30b7322b1656992534c962794e0467dab0f41f`, with the current reported checks
+successful. No blockers were found in this developer-lane verification pass.
+
+### Codex current handoff verification — 2026-06-02
+
+Re-read the assigned implementation, focused #682 tests, and #1474 refusal
+coverage in the `symphony/682` worktree. No additional code change was needed.
+The branch remains scoped to the reduced `native-literal-substring` standalone
+backend: static plain patterns with no flags lower to native string `indexOf`
+for `RegExp.prototype.test`, while unsupported syntax, direct RegExp symbol
+protocol calls, opaque RegExp receivers, and RegExp-consuming string methods
+continue to refuse explicitly without JS-host RegExp/string-method imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. `gh pr view` reports PR #1038 open as a draft from
+`symphony/682` to `main`, mergeable, at
+`8e30b7322b1656992534c962794e0467dab0f41f`; reported checks are successful,
+with only the baseline-promotion job skipped. No blockers were found in this
+handoff verification pass.
+
+### Codex prototype-call bridge follow-up — 2026-06-02
+
+Found and fixed one remaining standalone host-bridge escape path:
+`RegExp.prototype.test.call(re, s)` was routed through the generic
+`__proto_method_call` JS-host bridge before the reduced #682 backend could see
+it. In `--target standalone`, global `RegExp.prototype.test.call(...)` now
+rewrites into the existing standalone `.test` lowering, so static backend
+receivers still execute through native string `indexOf` with no JS-host
+prototype bridge import.
+
+Unsupported global `RegExp.prototype.*.call(...)` forms now fail with an
+explicit `#682/#1474` diagnostic before `__proto_method_call` can be requested.
+The generic prototype bridge also now requires the resolved declaration-file
+global `RegExp`, preserving user-defined `RegExp` shadows.
+
+Added focused coverage in `tests/issue-682.test.ts` for:
+
+- successful `RegExp.prototype.test.call(/abc/, "zzabc")`
+- refusal of `RegExp.prototype.exec.call(/abc/, "abc")` without
+  `__proto_method_call` imports
+
+Scoped validation in this follow-up:
+
+- `pnpm exec prettier --write src/codegen/expressions/calls.ts tests/issue-682.test.ts`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 33 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this follow-up.
+
+### Codex developer final validation — 2026-06-02
+
+Re-audited the current dirty diff in the `symphony/682` worktree. The only code
+follow-up remains the standalone `RegExp.prototype.test.call(...)` bridge fix in
+`src/codegen/expressions/calls.ts`, with focused coverage in
+`tests/issue-682.test.ts`. No additional implementation gap was found in this
+lane.
+
+Scoped validation rerun:
+
+- `pnpm exec prettier --write src/codegen/expressions/calls.ts tests/issue-682.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
+  - result: passed, unchanged
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 33 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this final developer validation
+pass.
 
 ### Phase 0 — Decision and ABI
 
