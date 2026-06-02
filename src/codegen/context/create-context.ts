@@ -8,6 +8,7 @@
 import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
+import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
 export function createCodegenContext(
@@ -160,9 +161,10 @@ export function createCodegenContext(
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,
-    // #682 — native standalone RegExp engine hook. Keep closed until the
-    // embedded engine is linked; #1474 owns today's refusal diagnostics.
-    standaloneRegExpEngine: null,
+    // #682 — native standalone RegExp engine hook. Standalone mode enables the
+    // reduced literal-substring backend; broader QuickJS libregexp ABI linking
+    // remains the follow-up path for near-JS parity.
+    standaloneRegExpEngine: options?.standalone ? nativeLiteralRegExpEngineConfig() : null,
     // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
     // expose a CLI/option flag once the CPS lowering is parity-tested.
     supportsAsyncIr: false,

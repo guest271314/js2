@@ -822,8 +822,9 @@ export interface CodegenContext {
    *  compile-error so a single source construct emits at most one error per
    *  import name. Lazily initialized in late-imports.ts. */
   standaloneRefusedImports?: Set<string>;
-  /** (#682) Native standalone RegExp engine hook. Null until the embedded
-   *  engine/link step lands; #1474 keeps owning the current refusal gate. */
+  /** (#682) Native standalone RegExp engine hook. Standalone mode currently
+   *  enables the reduced literal-substring backend; null means RegExp lowering
+   *  must stay on the explicit #1474 refusal path. */
   standaloneRegExpEngine: StandaloneRegExpEngineConfig | null;
   /**
    * (#1373b) When true, async functions flow through the IR's CPS lowering
