@@ -27,24 +27,29 @@
 //
 //   getMessage()         — read the 4-byte LE header, then exactly N body bytes
 //   sendMessage(message) — frame with the LE length prefix + write stdout
-//   main()               — the port loop: const m = getMessage(); sendMessage(m);
+//   main()               — the port loop: const m = getMessage();
+//                          sendMessageWithContinuations(m);
 //
 // <=1 MiB bodies are carried as a raw `Uint8Array` end-to-end and echoed back
-// verbatim (the strict #930 round-trip echo). Larger bodies are written as a
-// sequence of <=1 MiB response frames so the host never stages one oversized
-// stdout payload. The reported Chrome workload is a JSON `Array(...nulls...)`;
-// for that shape, large responses are emitted as valid JSON array chunks so the
-// browser can deliver each frame to `port.onMessage`. Other large byte bodies
-// are split as raw byte chunks for the harness / future Uint8Array Native
-// Messaging consumers.
+// verbatim (the strict #930 round-trip echo). Larger request bodies can arrive
+// as successive <=1 MiB frames and are reassembled up to a 64 MiB ceiling.
+// Larger responses are written as a sequence of <=1 MiB response frames so the
+// host never stages one oversized stdout payload. The reported Chrome workload
+// is a JSON `Array(...nulls...)`; for that shape, large responses are emitted
+// as valid JSON array chunks so the browser can deliver each frame to
+// `port.onMessage`. Other large byte bodies are split as raw byte chunks for
+// the harness / future Uint8Array Native Messaging consumers.
 
 declare const process: {
-  stdin: { read(buf: Uint8Array, offset?: number): number };
-  stdout: { write(chunk: Uint8Array | string): void };
+  stdin: { read(buf: Uint8Array | ArrayBuffer, offset?: number): number };
+  stdout: { write(chunk: Uint8Array | ArrayBuffer | string): void };
   stderr: { write(chunk: Uint8Array | string): void };
 };
 
-const MAX_RESPONSE_FRAME_BYTES = 1024 * 1024;
+const MAX_NATIVE_MESSAGING_FRAME_BYTES = 1024 * 1024;
+const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+const MAX_RESPONSE_FRAME_BYTES = MAX_NATIVE_MESSAGING_FRAME_BYTES;
+const MAX_REQUEST_FRAME_BYTES = MAX_NATIVE_MESSAGING_FRAME_BYTES;
 const MAX_NULL_ARRAY_ELEMENTS_PER_FRAME = 209715;
 const BYTE_OPEN_BRACKET = 91;
 const BYTE_CLOSE_BRACKET = 93;
@@ -77,10 +82,47 @@ function minI32(a: number, b: number): number {
   return a < b ? a : b;
 }
 
-function copyBytes(source: Uint8Array, sourceOffset: number, target: Uint8Array, count: number): void {
+function copyBytes(
+  source: Uint8Array,
+  sourceOffset: number,
+  target: Uint8Array,
+  targetOffset: number,
+  count: number,
+): void {
   let i = 0;
   while (i < count) {
-    target[i] = source[sourceOffset + i];
+    target[targetOffset + i] = source[sourceOffset + i];
+    i = i + 1;
+  }
+}
+
+function copyBytesToBuffer(
+  source: Uint8Array,
+  sourceOffset: number,
+  target: ArrayBuffer,
+  targetOffset: number,
+  count: number,
+): void {
+  const targetView = new DataView(target);
+  let i = 0;
+  while (i < count) {
+    targetView.setUint8(targetOffset + i, source[sourceOffset + i]);
+    i = i + 1;
+  }
+}
+
+function copyBufferToBuffer(
+  source: ArrayBuffer,
+  sourceOffset: number,
+  target: ArrayBuffer,
+  targetOffset: number,
+  count: number,
+): void {
+  const sourceView = new DataView(source);
+  const targetView = new DataView(target);
+  let i = 0;
+  while (i < count) {
+    targetView.setUint8(targetOffset + i, sourceView.getUint8(sourceOffset + i));
     i = i + 1;
   }
 }
@@ -89,20 +131,7 @@ function writeLength(len: number): void {
   process.stdout.write(new Uint8Array([len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >> 24) & 0xff]));
 }
 
-// getMessage() — read one framed Native Messaging message: the 4-byte LE length
-// header, then exactly that many body bytes. Returns the raw body `Uint8Array`,
-// or a zero-length buffer on EOF (peer closed stdin) so the port loop can stop.
-// The body is kept as raw bytes — never stringified — so normal-size messages
-// round-trip byte-exactly (#389), and large responses can be chunked without a
-// lossy string bridge.
-function getMessage(): Uint8Array {
-  const header = new Uint8Array(4);
-  // 4-byte LE length prefix. EOF here = clean shutdown → empty body.
-  if (!readExact(header, 4)) return new Uint8Array(0);
-  const declaredLen = decodeLength(header);
-
-  // Read exactly the declared body bytes. A truncated body (EOF mid-frame)
-  // also terminates the loop, signalled as an empty body.
+function readFrameBody(declaredLen: number): Uint8Array {
   const body = new Uint8Array(declaredLen);
   if (!readExact(body, declaredLen)) return new Uint8Array(0);
 
@@ -111,6 +140,24 @@ function getMessage(): Uint8Array {
   // LE prefix plus the declared body, so total bytes consumed is 4 + declaredLen.
   process.stderr.write(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}\n`);
   return body;
+}
+
+// getMessage() — read one Native Messaging request frame: the 4-byte LE length
+// header plus exactly that many body bytes. Full-size frames may be followed by
+// continuation frames; `sendMessageWithContinuations` handles that large
+// logical-message path with ArrayBuffer storage so a 64 MiB request does not
+// become an 8x f64 Uint8Array allocation. Returns a zero-length buffer on EOF /
+// truncation / oversize so the port loop can stop.
+function getMessage(): Uint8Array {
+  const header = new Uint8Array(4);
+  // 4-byte LE length prefix. EOF here = clean shutdown → empty body.
+  if (!readExact(header, 4)) return new Uint8Array(0);
+  const declaredLen = decodeLength(header);
+  if (declaredLen === 0 || declaredLen > MAX_REQUEST_FRAME_BYTES) return new Uint8Array(0);
+
+  const message = readFrameBody(declaredLen);
+  if (message.length !== declaredLen) return new Uint8Array(0);
+  return message;
 }
 
 function isNullArrayMessage(message: Uint8Array): boolean {
@@ -146,6 +193,40 @@ function countNullArrayElements(message: Uint8Array): number {
   return count;
 }
 
+function isNullArrayBufferMessage(message: ArrayBuffer, len: number): boolean {
+  if (len < 2) return false;
+  const view = new DataView(message);
+  if (view.getUint8(0) !== BYTE_OPEN_BRACKET) return false;
+  if (view.getUint8(len - 1) !== BYTE_CLOSE_BRACKET) return false;
+  if (len === 2) return true;
+
+  let cursor = 1;
+  while (cursor < len - 1) {
+    if (view.getUint8(cursor) !== BYTE_N) return false;
+    if (view.getUint8(cursor + 1) !== BYTE_U) return false;
+    if (view.getUint8(cursor + 2) !== BYTE_L) return false;
+    if (view.getUint8(cursor + 3) !== BYTE_L) return false;
+    cursor = cursor + 4;
+
+    if (cursor === len - 1) return true;
+    if (view.getUint8(cursor) !== BYTE_COMMA) return false;
+    cursor = cursor + 1;
+  }
+
+  return false;
+}
+
+function countNullArrayBufferElements(message: ArrayBuffer, len: number): number {
+  if (len === 2) return 0;
+  let count = 0;
+  let cursor = 1;
+  while (cursor < len - 1) {
+    count = count + 1;
+    cursor = cursor + 5;
+  }
+  return count;
+}
+
 function fillNullArrayChunk(chunk: Uint8Array, elements: number): number {
   chunk[0] = BYTE_OPEN_BRACKET;
   let cursor = 1;
@@ -174,12 +255,12 @@ function writeFrameFromScratch(scratch: Uint8Array, len: number): void {
   }
 
   const tail = new Uint8Array(len);
-  copyBytes(scratch, 0, tail, len);
+  copyBytes(scratch, 0, tail, 0, len);
   process.stdout.write(tail);
 }
 
-function sendNullArrayChunks(message: Uint8Array): void {
-  let remaining = countNullArrayElements(message);
+function sendNullArrayElementChunks(elements: number): void {
+  let remaining = elements;
   const chunk = new Uint8Array(MAX_RESPONSE_FRAME_BYTES);
 
   if (remaining === 0) {
@@ -196,16 +277,49 @@ function sendNullArrayChunks(message: Uint8Array): void {
   }
 }
 
+function sendNullArrayChunks(message: Uint8Array): void {
+  sendNullArrayElementChunks(countNullArrayElements(message));
+}
+
 function sendRawByteChunks(message: Uint8Array): void {
   let offset = 0;
   const chunk = new Uint8Array(MAX_RESPONSE_FRAME_BYTES);
 
   while (offset < message.length) {
     const len = minI32(MAX_RESPONSE_FRAME_BYTES, message.length - offset);
-    copyBytes(message, offset, chunk, len);
+    copyBytes(message, offset, chunk, 0, len);
     writeFrameFromScratch(chunk, len);
     offset = offset + len;
   }
+}
+
+function sendRawBufferChunks(message: ArrayBuffer, totalLen: number): void {
+  let offset = 0;
+
+  while (offset < totalLen) {
+    const len = minI32(MAX_RESPONSE_FRAME_BYTES, totalLen - offset);
+    const chunk = new ArrayBuffer(len);
+    copyBufferToBuffer(message, offset, chunk, 0, len);
+    writeLength(len);
+    process.stdout.write(chunk);
+    offset = offset + len;
+  }
+}
+
+function sendBufferMessage(message: ArrayBuffer, totalLen: number): void {
+  if (totalLen > MAX_RESPONSE_FRAME_BYTES) {
+    if (isNullArrayBufferMessage(message, totalLen)) {
+      sendNullArrayElementChunks(countNullArrayBufferElements(message, totalLen));
+    } else {
+      sendRawBufferChunks(message, totalLen);
+    }
+    return;
+  }
+
+  writeLength(totalLen);
+  const body = new ArrayBuffer(totalLen);
+  copyBufferToBuffer(message, 0, body, 0, totalLen);
+  process.stdout.write(body);
 }
 
 // sendMessage(message) — write a framed Native Messaging response: the 4-byte
@@ -231,6 +345,59 @@ function sendMessage(message: Uint8Array): void {
   process.stdout.write(message);
 }
 
+function sendMessageWithContinuations(first: Uint8Array): void {
+  if (first.length !== MAX_REQUEST_FRAME_BYTES) {
+    sendMessage(first);
+    return;
+  }
+
+  const header = new Uint8Array(4);
+  if (!readExact(header, 4)) {
+    sendMessage(first);
+    return;
+  }
+
+  let declaredLen = decodeLength(header);
+  if (declaredLen === 0) {
+    sendMessage(first);
+    return;
+  }
+  if (declaredLen > MAX_REQUEST_FRAME_BYTES || MAX_REQUEST_FRAME_BYTES + declaredLen > MAX_MESSAGE_BYTES) return;
+
+  let capacity = MAX_REQUEST_FRAME_BYTES + declaredLen;
+  let message = new ArrayBuffer(capacity);
+  copyBytesToBuffer(first, 0, message, 0, first.length);
+  let totalLen = first.length;
+
+  while (true) {
+    const chunk = readFrameBody(declaredLen);
+    if (chunk.length !== declaredLen) return;
+
+    const neededLen = totalLen + declaredLen;
+    if (neededLen > capacity) {
+      let nextCapacity = capacity * 2;
+      if (nextCapacity < neededLen) nextCapacity = neededLen;
+      if (nextCapacity > MAX_MESSAGE_BYTES) nextCapacity = MAX_MESSAGE_BYTES;
+      const next = new ArrayBuffer(nextCapacity);
+      copyBufferToBuffer(message, 0, next, 0, totalLen);
+      message = next;
+      capacity = nextCapacity;
+    }
+
+    copyBytesToBuffer(chunk, 0, message, totalLen, declaredLen);
+    totalLen = neededLen;
+
+    if (declaredLen < MAX_REQUEST_FRAME_BYTES || totalLen >= MAX_MESSAGE_BYTES) break;
+    if (!readExact(header, 4)) break;
+    declaredLen = decodeLength(header);
+    if (declaredLen === 0) break;
+    if (declaredLen > MAX_REQUEST_FRAME_BYTES) return;
+    if (totalLen + declaredLen > MAX_MESSAGE_BYTES) return;
+  }
+
+  sendBufferMessage(message, totalLen);
+}
+
 export function main(): void {
   // Long-lived port loop: read framed messages off stdin until EOF, echoing
   // each one back verbatim. getMessage() returns a zero-length body at EOF (or a
@@ -243,6 +410,6 @@ export function main(): void {
   while (true) {
     const message = getMessage();
     if (message.length === 0) break;
-    sendMessage(message);
+    sendMessageWithContinuations(message);
   }
 }

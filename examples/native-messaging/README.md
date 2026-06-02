@@ -29,19 +29,21 @@ little-endian length prefix plus the JSON body — to stdout (fd=1) with no
 trailing newline. The two stdout gaps that previously blocked this are closed
 (#1618, #1651).
 
-| Capability                                            | Status | Detail                                                                                                                                                                          |
-| ----------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); a read-until loop assembles exactly N bytes |
-| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                        |
-| Route debug to stderr (fd=2)                          | works  | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean                                                                                               |
-| Print a **string literal** to stdout                  | works  | `console.log("…")` emits UTF-8 + `\n` (#1480)                                                                                                                                   |
-| Print a **runtime/computed string** to stdout         | works  | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618)                                                  |
-| Write a **string** to stdout with no newline          | works  | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651)                                                                                                                 |
-| Emit the **binary 4-byte LE length prefix** on stdout | works  | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651)                                                                               |
+| Capability                                            | Status | Detail                                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); read-until loops assemble each frame and can concatenate successive <=1 MiB request frames up to 64 MiB |
+| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                                    |
+| Route debug to stderr (fd=2)                          | works  | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean                                                                                                                                                           |
+| Print a **string literal** to stdout                  | works  | `console.log("…")` emits UTF-8 + `\n` (#1480)                                                                                                                                                                                               |
+| Print a **runtime/computed string** to stdout         | works  | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618)                                                                                                              |
+| Write a **string** to stdout with no newline          | works  | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651)                                                                                                                                                                             |
+| Emit the **binary 4-byte LE length prefix** on stdout | works  | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651)                                                                                                                                           |
 
 The response is framed with `process.stdout.write` — a `Uint8Array` for each
 binary length prefix, then the body bytes — mirroring the Node.js host API used
 by the reference hosts (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`).
+Request bodies larger than 1 MiB can be streamed into the host as successive
+<=1 MiB Native Messaging frames, guarded by a 64 MiB aggregate ceiling.
 Responses larger than 1 MiB are split into successive Native Messaging frames
 using a reusable 1 MiB output buffer, so the host does not stage one oversized
 stdout payload. It is a drop-in Chrome host for the reported null-array stress
@@ -55,19 +57,23 @@ across runtimes:
 
 - **`getMessage()`** — reads the 4-byte little-endian length header, then
   exactly that many body bytes, via `process.stdin.read` read-until loops (a
-  `readExact` helper handles short reads). It returns the body as a raw
-  **`Uint8Array`** (a zero-length buffer signals EOF / a truncated frame). The
-  body is **never** decoded to a JS string, so normal-size messages round-trip
-  byte-exactly and large responses can be chunked without a lossy string bridge
-  (#389).
+  `readExact` helper handles short reads). It returns the first body frame as a
+  raw **`Uint8Array`** (a zero-length buffer signals EOF / a truncated or
+  oversized frame). The body is **never** decoded to a JS string, so messages
+  round-trip byte-exactly and large responses can be chunked without a lossy
+  string bridge (#389, #1753).
 - **`sendMessage(message)`** — frames a `Uint8Array` body: writes the 4-byte LE
   length prefix, then the body bytes, to stdout with no trailing newline. Bodies
   up to 1 MiB are echoed byte-for-byte. Larger bodies are emitted as a sequence
   of <=1 MiB frames through a reusable scratch chunk. For the Chrome
   `Array(...nulls...)` workload, each response frame is a valid JSON array chunk
   so `port.onMessage` can deliver it and the extension can sum `message.length`.
-- **`main()`** — the continuous port loop: `const m = getMessage();
-sendMessage(m);`, looping until `getMessage()` returns an empty body.
+- **`main()`** — the continuous port loop:
+  `const m = getMessage(); sendMessageWithContinuations(m);`, looping until
+  `getMessage()` returns an empty body. If the first frame is exactly 1 MiB, the
+  continuation helper reads successive <=1 MiB frames, concatenates the logical
+  request into ArrayBuffer storage up to the 64 MiB ceiling, and then emits <=1
+  MiB response frames.
 
 Diagnostics go to **stderr** (so they never corrupt the stdout protocol
 stream). The application logic — here, an echo for normal-size messages plus a
@@ -155,9 +161,10 @@ the same script CI runs (`.github/workflows/native-messaging-smoke.yml`):
 ### Manual wasmtime memory stress
 
 For opt-in local memory measurements, use
-[`stress-memory.mjs`](./stress-memory.mjs). It builds the WASI host, streams a
-Native Messaging frame into wasmtime, drains framed stdout without retaining the
-response body, and samples the wasmtime child RSS. The default run uses
+[`stress-memory.mjs`](./stress-memory.mjs). It builds the WASI host, streams
+<=1 MiB Native Messaging request frames into wasmtime, drains framed stdout
+without retaining the response body, and samples the wasmtime child RSS. The
+default run uses
 `JSON.stringify(Array(209715))`, whose body is exactly 1 MiB:
 
 ```bash
@@ -171,13 +178,15 @@ test, run the same harness manually:
 node examples/native-messaging/stress-memory.mjs --reported-64mib
 ```
 
-`--reported-64mib` sends the `Array(209715 * 64)` body and, by default, kills
-the wasmtime child if sampled RSS grows more than 256 MiB above the first sample
-or if the run exceeds 180 seconds. The harness streams request bytes, drains
-framed stdout without retaining response bodies, validates that each response
-frame is <=1 MiB, and checks that the delivered JSON array chunks add back up
-to 13,421,760 elements. `--allow-large-response-frame` remains only for
-measuring older wasm builds that predate the chunked writer.
+`--reported-64mib` sends the `Array(209715 * 64)` body split into <=1 MiB
+request frames and, by default, kills the wasmtime child if sampled RSS grows
+more than 256 MiB above the first sample or if the run exceeds 180 seconds. The
+harness streams request bytes, drains framed stdout without retaining response
+bodies, validates that each response frame is <=1 MiB, and checks that the
+delivered JSON array chunks add back up to 13,421,760 elements.
+`--max-request-frame-bytes` and `--max-response-frame-bytes` can tighten the
+frame budgets; `--allow-large-response-frame` remains only for measuring older
+wasm builds that predate the chunked writer.
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node

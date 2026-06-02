@@ -21,8 +21,8 @@ function usage() {
   console.log(`Usage: node examples/native-messaging/stress-memory.mjs [options]
 
 Builds examples/native-messaging/nm_js2wasm.ts, runs it under wasmtime, streams
-one Native Messaging frame into stdin, drains framed stdout, and samples the
-wasmtime child RSS.
+<=1 MiB Native Messaging request frames into stdin, drains framed stdout, and
+samples the wasmtime child RSS.
 
 Options:
   --array-elements N          Send JSON.stringify(Array(N)); default ${DEFAULT_ARRAY_ELEMENTS}
@@ -36,6 +36,8 @@ Options:
                              default 256 for --reported-64mib, disabled otherwise
   --max-response-frame-bytes N
                              Chunk budget to enforce; default ${ONE_MIB}
+  --max-request-frame-bytes N
+                             Request chunk budget; default ${ONE_MIB}
   --allow-large-response-frame
                              Permit legacy single-frame wasm when it exceeds the chunk budget
   --keep                     Keep the temporary build directory
@@ -62,6 +64,7 @@ function parseArgs(argv) {
     timeoutMs: 180_000,
     maxRssDeltaMb: undefined,
     maxResponseFrameBytes: ONE_MIB,
+    maxRequestFrameBytes: ONE_MIB,
     allowLargeResponseFrame: false,
     reported64mib: false,
     keep: false,
@@ -110,6 +113,11 @@ function parseArgs(argv) {
         readValue("--max-response-frame-bytes"),
         "--max-response-frame-bytes",
       );
+    } else if (arg === "--max-request-frame-bytes" || arg.startsWith("--max-request-frame-bytes=")) {
+      opts.maxRequestFrameBytes = parsePositiveInteger(
+        readValue("--max-request-frame-bytes"),
+        "--max-request-frame-bytes",
+      );
     } else {
       throw new Error(`unknown option: ${arg}`);
     }
@@ -117,6 +125,8 @@ function parseArgs(argv) {
 
   if (opts.sampleMs < 10) throw new Error("--sample-ms must be at least 10");
   if (opts.timeoutMs < 1000) throw new Error("--timeout-ms must be at least 1000");
+  if (opts.maxRequestFrameBytes < 1) throw new Error("--max-request-frame-bytes must be at least 1");
+  if (opts.maxRequestFrameBytes > ONE_MIB) throw new Error("--max-request-frame-bytes must be at most 1048576");
   if (opts.reported64mib && opts.maxRssDeltaMb === undefined) opts.maxRssDeltaMb = 256;
   return opts;
 }
@@ -141,47 +151,75 @@ async function writeAll(stream, chunk) {
   });
 }
 
-async function writeRawBody(stream, bytes) {
+async function writeRawBody(writeBodyChunk, bytes) {
   const maxChunk = 64 * 1024;
   let written = 0;
   while (written < bytes) {
     const n = Math.min(maxChunk, bytes - written);
     const chunk = Buffer.allocUnsafe(n);
     for (let i = 0; i < n; i++) chunk[i] = (written + i) % 251;
-    await writeAll(stream, chunk);
+    await writeBodyChunk(chunk);
     written += n;
   }
 }
 
-async function writeArrayBody(stream, elements) {
+async function writeArrayBody(writeBodyChunk, elements) {
   if (elements === 0) {
-    await writeAll(stream, Buffer.from("[]"));
+    await writeBodyChunk(Buffer.from("[]"));
     return;
   }
 
-  await writeAll(stream, Buffer.from("["));
+  await writeBodyChunk(Buffer.from("["));
   let remaining = elements;
   let first = true;
   const group = 8192;
   while (remaining > 0) {
     const count = Math.min(group, remaining);
     const text = first ? `null${",null".repeat(count - 1)}` : ",null".repeat(count);
-    await writeAll(stream, Buffer.from(text));
+    await writeBodyChunk(Buffer.from(text));
     remaining -= count;
     first = false;
   }
-  await writeAll(stream, Buffer.from("]"));
+  await writeBodyChunk(Buffer.from("]"));
 }
 
 async function writeNativeMessage(stream, opts, bytes) {
-  const header = Buffer.alloc(4);
-  header.writeUInt32LE(bytes, 0);
-  await writeAll(stream, header);
-  if (opts.bodyBytes !== undefined) {
-    await writeRawBody(stream, bytes);
-  } else {
-    await writeArrayBody(stream, opts.arrayElements);
+  if (bytes === 0) {
+    await writeAll(stream, Buffer.alloc(4));
+    stream.end();
+    return;
   }
+
+  let bodyRemaining = bytes;
+  let frameRemaining = 0;
+  const writeHeader = async (len) => {
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(len, 0);
+    await writeAll(stream, header);
+  };
+  const writeBodyChunk = async (chunk) => {
+    let offset = 0;
+    while (offset < chunk.length) {
+      if (frameRemaining === 0) {
+        if (bodyRemaining <= 0) throw new Error("attempted to write more body bytes than declared");
+        frameRemaining = Math.min(opts.maxRequestFrameBytes, bodyRemaining);
+        await writeHeader(frameRemaining);
+      }
+
+      const n = Math.min(frameRemaining, chunk.length - offset);
+      await writeAll(stream, chunk.subarray(offset, offset + n));
+      offset += n;
+      frameRemaining -= n;
+      bodyRemaining -= n;
+    }
+  };
+
+  if (opts.bodyBytes !== undefined) {
+    await writeRawBody(writeBodyChunk, bytes);
+  } else {
+    await writeArrayBody(writeBodyChunk, opts.arrayElements);
+  }
+  if (bodyRemaining !== 0) throw new Error(`body writer ended ${bodyRemaining} bytes early`);
   stream.end();
 }
 
@@ -480,6 +518,7 @@ async function main() {
     console.log(`mode=${mode}`);
     if (opts.arrayElements !== undefined) console.log(`array_elements=${opts.arrayElements}`);
     console.log(`request_body_bytes=${bodyBytes}`);
+    console.log(`request_frame_budget_bytes=${opts.maxRequestFrameBytes}`);
     console.log(`response_frames=${parser.stats.responseFrames}`);
     console.log(`response_body_bytes=${parser.stats.responseBodyBytes}`);
     if (opts.arrayElements !== undefined) console.log(`response_array_elements=${parser.stats.responseArrayElements}`);

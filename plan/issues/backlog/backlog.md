@@ -127,7 +127,7 @@ fidelity → #1463) were NOT re-filed.
 
 - [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **ready (sprint 58)**
 - [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **ready (sprint 58)**
-- [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **ready (sprint 58)**
+- [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **DONE (sprint 58)**
 - [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
 - [#1765](../1765-nullable-number-alias-narrowing-byte-assignment.md) — Nullable `number | null` sentinel not narrowed through a boolean alias before typed-array byte assignment (from GitHub #389, 2026-06-01) — medium, medium, **DONE (sprint 58)**

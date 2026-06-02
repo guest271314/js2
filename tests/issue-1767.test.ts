@@ -93,10 +93,25 @@ function runWasiRaw(binary: Uint8Array, stdin: Uint8Array): Uint8Array {
   return out;
 }
 
-function frame(body: Uint8Array): Uint8Array {
-  const out = new Uint8Array(4 + body.length);
-  new DataView(out.buffer).setUint32(0, body.length, true);
-  out.set(body, 4);
+function chunkedFrames(body: Uint8Array): Uint8Array {
+  let frameCount = 0;
+  let bodyOffset = 0;
+  while (bodyOffset < body.length) {
+    frameCount++;
+    bodyOffset += Math.min(ONE_MIB, body.length - bodyOffset);
+  }
+
+  const out = new Uint8Array(body.length + frameCount * 4);
+  let outOffset = 0;
+  bodyOffset = 0;
+  while (bodyOffset < body.length) {
+    const len = Math.min(ONE_MIB, body.length - bodyOffset);
+    new DataView(out.buffer, outOffset, 4).setUint32(0, len, true);
+    outOffset += 4;
+    out.set(body.subarray(bodyOffset, bodyOffset + len), outOffset);
+    outOffset += len;
+    bodyOffset += len;
+  }
   return out;
 }
 
@@ -125,7 +140,7 @@ describe("#1767 Native Messaging bounded large-response frames", () => {
     const body = new Uint8Array(ONE_MIB + 1);
     for (let i = 0; i < body.length; i++) body[i] = i % 251;
 
-    const frames = parseFrames(runWasiRaw(binary, frame(body)));
+    const frames = parseFrames(runWasiRaw(binary, chunkedFrames(body)));
     expect(frames.map((chunk) => chunk.length)).toEqual([ONE_MIB, 1]);
 
     let cursor = 0;
@@ -144,7 +159,7 @@ describe("#1767 Native Messaging bounded large-response frames", () => {
     const body = nullArrayBody(elements);
     expect(body.length).toBe(ONE_MIB + 5);
 
-    const frames = parseFrames(runWasiRaw(binary, frame(body)));
+    const frames = parseFrames(runWasiRaw(binary, chunkedFrames(body)));
     expect(frames.map((chunk) => chunk.length)).toEqual([ONE_MIB, 6]);
 
     let receivedElements = 0;

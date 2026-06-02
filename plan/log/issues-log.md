@@ -515,3 +515,4 @@ sprint: 0
 | 1768 | 2026-06-01 | allowJs native-messaging sendMessage shape now emits valid WASI wasm; fixed native-string sentinel fallbacks and vec inference for subarray/set | Sprint-58 |
 | 1773 | 2026-06-01 | Dependency graph data is now generated during Pages builds and published to labs instead of tracked as public source JSON | Sprint-58 |
 | 1767 | 2026-06-01 | Native-messaging large responses now use bounded <=1 MiB frames with guarded stress validation for the reported 64 MiB array path | Sprint-58 |
+| 1753 | 2026-06-02 | Native-messaging host now reads large requests as <=1 MiB continuation frames up to 64 MiB and responds with <=1 MiB byte-exact chunks using bounded ArrayBuffer aggregation | Sprint-58 |
