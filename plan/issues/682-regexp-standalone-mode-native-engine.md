@@ -688,6 +688,32 @@ Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. No blockers were found in this final developer validation
 pass.
 
+### Codex validation handoff — 2026-06-02
+
+Re-reviewed the assigned #682 implementation, focused tests, and #1474 refusal
+coverage in the `symphony/682` worktree. No additional code change was needed in
+this pass. The branch remains scoped to the reduced `native-literal-substring`
+standalone backend: static plain patterns with no flags lower through native
+string `indexOf` for `RegExp.prototype.test`, while unsupported syntax, direct
+RegExp symbol protocol calls, opaque RegExp receivers, and RegExp-consuming
+string methods refuse explicitly without JS-host RegExp/string-method imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 33 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. PR #1038 remains open as a draft from `symphony/682` to `main`
+and is mergeable at `5408ab8a8ba95342255b52010825c24745e9de28`; current
+GitHub check reporting shows the listed checks passing except `test262 shard
+111`, which is still pending. No local implementation blockers were found in
+this handoff pass.
+
 ### Phase 0 — Decision and ABI
 
 Pick QuickJS libregexp. Rationale:
