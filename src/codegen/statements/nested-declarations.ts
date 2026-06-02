@@ -8,7 +8,7 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { isStrictFunction } from "../helpers/is-strict-function.js";
-import type { Instr, ValType } from "../../ir/types.js";
+import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
   collectFunctionOwnLocals,
   collectReferencedIdentifiers,
@@ -147,10 +147,15 @@ export function compileNestedClassDeclaration(
   }
 }
 
+interface CompileNestedFunctionOptions {
+  reuseReservedEntry?: WasmFunction;
+}
+
 export function compileNestedFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.FunctionDeclaration,
+  opts: CompileNestedFunctionOptions = {},
 ): void {
   if (!stmt.name || !stmt.body) return;
   const funcName = stmt.name.text;
@@ -343,6 +348,27 @@ export function compileNestedFunctionDeclaration(
     ctx.funcUsesArguments.add(funcName);
   }
 
+  if (captures.length > 0 && opts.reuseReservedEntry) {
+    opts.reuseReservedEntry.body = [];
+    appendDefaultReturn(
+      {
+        name: funcName,
+        params: [],
+        locals: [],
+        localMap: new Map(),
+        returnType,
+        body: opts.reuseReservedEntry.body,
+        blockDepth: 0,
+        breakStack: [],
+        continueStack: [],
+        labelMap: new Map(),
+        savedBodies: [],
+      },
+      returnType,
+    );
+    return;
+  }
+
   if (captures.length === 0) {
     // No captures — compile as a regular module-level function
     const funcTypeIdx = addFuncType(ctx, paramTypes, results, `${funcName}_type`);
@@ -472,19 +498,25 @@ export function compileNestedFunctionDeclaration(
     if (savedFunc) ctx.parentBodiesStack.pop();
     ctx.currentFunc = savedFunc;
 
-    // (#1312) No-captures branch keeps late funcMap registration (the
-    // pre-#1312 behaviour). Pre-registering here regressed 38
-    // Function.caller/arguments tests; see comment at the start of this
-    // branch for the full rationale.
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
-      name: funcName,
-      typeIdx: funcTypeIdx,
-      locals: liftedFctx.locals,
-      body: liftedFctx.body,
-      exported: false,
-    });
-    ctx.funcMap.set(funcName, funcIdx);
+    if (opts.reuseReservedEntry) {
+      opts.reuseReservedEntry.typeIdx = funcTypeIdx;
+      opts.reuseReservedEntry.locals = liftedFctx.locals;
+      opts.reuseReservedEntry.body = liftedFctx.body;
+    } else {
+      // (#1312) No-captures branch keeps late funcMap registration (the
+      // pre-#1312 behaviour). Pre-registering here regressed 38
+      // Function.caller/arguments tests; see comment at the start of this
+      // branch for the full rationale.
+      const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      ctx.mod.functions.push({
+        name: funcName,
+        typeIdx: funcTypeIdx,
+        locals: liftedFctx.locals,
+        body: liftedFctx.body,
+        exported: false,
+      });
+      ctx.funcMap.set(funcName, funcIdx);
+    }
   } else {
     // Has captures — lift with captures as leading parameters, use direct call
     // For mutable captures, use ref cell types so writes propagate back
@@ -736,24 +768,35 @@ export function hoistFunctionDeclarations(
 ): void {
   for (const stmt of stmts) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
-      if (!ctx.funcMap.has(stmt.name.text)) {
+      const funcName = stmt.name.text;
+      const hasReservedBodylessEntry = ctx.preRegisteredBodyless?.has(funcName) ?? false;
+      const reservedFuncIdx = hasReservedBodylessEntry ? ctx.funcMap.get(funcName) : undefined;
+      const reservedEntry =
+        reservedFuncIdx !== undefined ? ctx.mod.functions[reservedFuncIdx - ctx.numImportFuncs] : undefined;
+      if (!ctx.funcMap.has(funcName) || reservedEntry) {
         // Save state so we can roll back if compilation fails
         const errorsBefore = ctx.errors.length;
         const funcsBefore = ctx.mod.functions.length;
-        const funcName = stmt.name.text;
 
-        compileNestedFunctionDeclaration(ctx, fctx, stmt);
+        compileNestedFunctionDeclaration(ctx, fctx, stmt, reservedEntry ? { reuseReservedEntry: reservedEntry } : {});
 
         // If new errors were added during hoisting, roll back
         if (ctx.errors.length > errorsBefore) {
           ctx.errors.length = errorsBefore;
           ctx.mod.functions.length = funcsBefore;
-          ctx.funcMap.delete(funcName);
-          ctx.nestedFuncCaptures.delete(funcName);
-          ctx.funcOptionalParams.delete(funcName);
+          if (reservedEntry) {
+            reservedEntry.locals = [];
+            reservedEntry.body = [];
+          } else {
+            ctx.funcMap.delete(funcName);
+            ctx.nestedFuncCaptures.delete(funcName);
+            ctx.funcOptionalParams.delete(funcName);
+          }
           // Track failed hoist so compileStatement doesn't re-attempt
           if (!ctx.hoistFailedFuncs) ctx.hoistFailedFuncs = new Set();
           ctx.hoistFailedFuncs.add(funcName);
+        } else if (reservedEntry) {
+          ctx.preRegisteredBodyless?.delete(funcName);
         }
       }
     }

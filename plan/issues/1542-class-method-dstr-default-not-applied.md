@@ -1,9 +1,10 @@
 ---
 id: 1542
 title: "Class method destructured-pattern param default not applied; throws \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"Cannot destructure null\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\" instead"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-31
+updated: 2026-06-02
+completed: 2026-06-02
 priority: high
 feasibility: hard
 goal: test262-conformance
@@ -1167,3 +1168,45 @@ the respec is *where* the pre-hoist hooks (descent-time, not top-level) and
 *how* the sibling body is owned (fill-the-reserved-bodyless-entry, not
 index-only), which is what makes the +134 actually land under the `wrapTest`
 shape without orphaning.
+
+## Completion Notes (codex-developer, 2026-06-02)
+
+Implemented the amended order-only fix without propagating `insideFunction`
+through the recursive `compileClassesFromStatements` descents:
+
+- Added bodyless pre-registration for closure-free sibling
+  `FunctionDeclaration`s in statement lists that contain an eagerly compiled
+  class declaration/expression.
+- Recorded those reserved entries in `ctx.preRegisteredBodyless` so class
+  method parameter defaults can resolve `g()` during eager class-body
+  compilation.
+- Updated nested function hoisting and statement-order function declaration
+  compilation to fill the reserved `WasmFunction` entry instead of skipping on
+  `funcMap.has`.
+- Left closure-capturing sibling functions out of the pre-registration target
+  set; those remain a known non-goal for this issue.
+
+Focused tests were added in `tests/issue-1542.test.ts` for:
+
+- wrapTest-style `try` nesting with sibling generator declared before and after
+  the class;
+- nested BindingElement default shape from the test262 class family;
+- private, static, and anonymous class-expression methods;
+- a control-flow nested class body execution guard.
+
+Scoped validation:
+
+- `pnpm test tests/issue-1542.test.ts` — pass (6 tests).
+- `pnpm typecheck` — pass.
+- Direct `runTest262File` spot checks against `/workspace/public/tests/test262`
+  object-pattern files — pass for statements/expressions class private and
+  public method defaults.
+- Direct `runTest262File` spot checks against four array-pattern class files no
+  longer fail with `Cannot destructure null`; they now fail later on
+  `assert.sameValue(second, 0)`, matching the pre-existing generator
+  iterator-close issue noted in this file's suspended-work section.
+
+Full local test262 was intentionally not run. The repository-local `test262`
+directory in this workspace is empty, and this issue's instructions require
+scoped validation only; full sharded CI remains the merge gate for the
+historical -1219 regression risk.

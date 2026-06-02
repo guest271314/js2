@@ -215,12 +215,23 @@ function compileStatementInner(ctx: CodegenContext, fctx: FunctionContext, stmt:
   }
 
   if (ts.isFunctionDeclaration(stmt)) {
-    // Skip if already hoisted (pre-compiled in function hoisting pass)
-    if (stmt.name && ctx.funcMap.has(stmt.name.text)) return;
+    // Skip if already hoisted (pre-compiled in function hoisting pass). A
+    // bodyless pre-registration is only a reserved slot; fill it here if the
+    // hoist pre-pass did not.
+    const funcName = stmt.name?.text;
+    const hasReservedBodylessEntry = funcName ? (ctx.preRegisteredBodyless?.has(funcName) ?? false) : false;
+    if (funcName && ctx.funcMap.has(funcName) && !hasReservedBodylessEntry) return;
     // Re-attempt compilation even if hoisting failed — the failure may have been
     // due to const/let captures not yet in scope during the hoisting pre-pass.
     // Now that we're in statement order, those locals should be available.
-    compileNestedFunctionDeclaration(ctx, fctx, stmt);
+    if (funcName && hasReservedBodylessEntry) {
+      const funcIdx = ctx.funcMap.get(funcName);
+      const reservedEntry = funcIdx !== undefined ? ctx.mod.functions[funcIdx - ctx.numImportFuncs] : undefined;
+      compileNestedFunctionDeclaration(ctx, fctx, stmt, reservedEntry ? { reuseReservedEntry: reservedEntry } : {});
+      ctx.preRegisteredBodyless?.delete(funcName);
+    } else {
+      compileNestedFunctionDeclaration(ctx, fctx, stmt);
+    }
     return;
   }
 

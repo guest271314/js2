@@ -548,6 +548,12 @@ export interface CodegenContext {
   generatorFunctions: Set<string>;
   /** Map from generator function name → yield element type */
   generatorYieldType: Map<string, ValType>;
+  /**
+   * Function declarations pre-registered during module-pass eager class body
+   * compilation. The entry has a reserved `mod.functions` slot and signature,
+   * but its body still belongs to the normal nested-function hoist pass.
+   */
+  preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
   /** Deferred `export default <variable>` where variable is a module global (#1108).
