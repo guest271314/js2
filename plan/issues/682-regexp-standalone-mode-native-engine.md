@@ -709,10 +709,9 @@ Scoped validation rerun:
 
 Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. PR #1038 remains open as a draft from `symphony/682` to `main`
-and is mergeable at `5408ab8a8ba95342255b52010825c24745e9de28`; current
-GitHub check reporting shows the listed checks passing except `test262 shard
-111`, which is still pending. No local implementation blockers were found in
-this handoff pass.
+and is mergeable. The local handoff update was pushed to the PR branch; GitHub
+checks may rerun after that docs-only branch update. No local implementation
+blockers were found in this handoff pass.
 
 ### Phase 0 — Decision and ABI
 
