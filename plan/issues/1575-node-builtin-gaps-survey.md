@@ -1,7 +1,7 @@
 ---
 id: 1575
 title: "Node.js built-in module support — gap survey (js2wasm → npm)"
-status: ready
+status: in-review
 created: 2026-05-20
 updated: 2026-06-02
 priority: high
@@ -11,6 +11,9 @@ sprint: 58
 required_by: [1766, 1774]
 owner: tech-lead
 related: [1032, 1033, 1044, 1287, 1289, 1400, 1471, 1472, 1473, 1474, 1480, 1481, 1482, 1483, 1484, 1490, 1491, 1492, 1493, 1494, 1535, 640]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T20:53:04.188Z
+pr: 1043
 ---
 # Node.js built-in module support — gap survey
 
@@ -125,6 +128,24 @@ It also fails *on Node* when:
   with a Buffer argument the Wasm side can't unpack — see #983).
 - The return value is a stream the Wasm code tries to consume by
   property access on a hot path.
+
+### 2026-06-02 validation note
+
+Added `tests/issue-1575.test.ts` as an executable survey guard. It confirms:
+
+- `NODE_BUILTIN_MODULES` currently covers 33 normalized builtin module names.
+- Default builtin imports for unsupported modules (`path`, `http`, `events`)
+  still route through opaque whole-module imports (`__node_<module>` with
+  `node_builtin` intent).
+- Typed single-function exceptions remain limited to the current `fs`
+  (`readFileSync`/`writeFileSync`, gated by `allowFs`) and `crypto`
+  (`randomBytes`/`randomUUID`) paths.
+- Unsupported named imports are an even sharper npm gap than the default import
+  path: `import { join } from "node:path"` and
+  `import { createHash } from "node:crypto"` compile today as generic env
+  function stubs (`join`, `createHash`) rather than `node_builtin` or
+  `node_builtin_fn` imports. Follow-up builtin work should therefore cover both
+  default/namespace and named-import forms.
 
 ## Top 5 highest-leverage builtins to invest in
 
