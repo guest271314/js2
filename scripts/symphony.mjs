@@ -879,7 +879,7 @@ class Orchestrator {
       this.releaseIssue(key, reason);
       return;
     }
-    entry.child.kill("TERM");
+    entry.child.kill("SIGTERM");
     this.logger.event("run_cancelled_operator", {
       issue_id: key,
       issue_identifier: entry.issue.identifier,
@@ -1225,7 +1225,7 @@ class Orchestrator {
             this.claimed.delete(id);
             releaseDispatchClaim(id, "channel dispatch stalled");
           } else {
-            entry.child.kill("TERM");
+            entry.child.kill("SIGTERM");
           }
           this.logger.event("run_stalled", { issue_id: id, issue_identifier: entry.issue.identifier });
         }
@@ -1243,7 +1243,7 @@ class Orchestrator {
           this.claimed.delete(id);
           releaseDispatchClaim(id, `issue entered terminal state ${issue.state}`);
         } else {
-          entry.child.kill("TERM");
+          entry.child.kill("SIGTERM");
         }
         this.logger.event("workspace_preserved_terminal", {
           issue_id: id,
@@ -1261,7 +1261,7 @@ class Orchestrator {
           this.claimed.delete(id);
           releaseDispatchClaim(id, `issue became ineligible: ${issue.state}`);
         } else {
-          entry.child.kill("TERM");
+          entry.child.kill("SIGTERM");
         }
         this.logger.event("run_cancelled_ineligible", {
           issue_id: id,

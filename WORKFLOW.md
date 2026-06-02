@@ -29,11 +29,6 @@ agent:
       command: $SYMPHONY_CODEX_COMMAND
       prompt_mode: argument
       max_concurrent: 3
-    - name: claude-team-lead
-      kind: claude-channel
-      role: team-lead
-      recipient: claude-lead
-      max_concurrent: 3
 codex:
   command: codex exec -c approval_policy="never" --sandbox danger-full-access --skip-git-repo-check --json
   turn_timeout_ms: 3600000
@@ -55,8 +50,7 @@ Agent lane: {{ agent.name }} ({{ agent.kind }} / {{ agent.role }})
 
 Rules:
 
-- If the lane kind is `claude-channel`, act as the interactive Claude Code team lead: populate or update the native Claude Team TaskList and delegate to isolated Claude teammates. Do not implement the issue directly unless the user explicitly asks.
-- If the lane kind is executable (for example `codex`), work only inside the assigned workspace.
+- Work only inside the assigned workspace.
 - Do not edit the main checkout directly.
 - Read `AGENTS.md`, `.claude/memory/MEMORY.md`, and the assigned issue file before substantial work.
 - Handle exactly this issue; do not claim or self-serve another task.
