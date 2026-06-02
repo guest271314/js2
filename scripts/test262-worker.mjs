@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, wasmPath?, metaPath? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, wasmPath?, metaPath? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -723,7 +723,11 @@ function restoreBuiltins() {
   }
 }
 
-async function doCompile(source, sourceMapUrl) {
+function compileTargetFromMessage(target) {
+  return target === "linear" || target === "wasi" || target === "standalone" ? target : undefined;
+}
+
+async function doCompile(source, sourceMapUrl, target) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
   // interruption scenarios it may not have completed. Doing a cheap pre-
@@ -732,13 +736,14 @@ async function doCompile(source, sourceMapUrl) {
   restoreBuiltins();
   const compileFn = incrementalCompiler ? incrementalCompiler.compile : compile;
   return incrementalCompiler
-    ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map" })
+    ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map", target })
     : (await compile(source, {
               fileName: "test.ts",
               sourceMap: true,
               sourceMapUrl: sourceMapUrl || "test.wasm.map",
               emitWat: false,
               skipSemanticDiagnostics: true,
+              target,
             }));
 }
 
@@ -881,7 +886,7 @@ function extractWatFunctionSnippet(wat, funcName) {
   return snippet.length > 220 ? `${snippet.slice(0, 217)}...` : snippet;
 }
 
-async function buildInvalidBinaryError(source, sourceMapUrl, result) {
+async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
   let detailErr;
   try {
     const imports = buildImports(result.imports, undefined, result.stringPool);
@@ -906,6 +911,7 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result) {
       sourceMapUrl: sourceMapUrl || "test.wasm.map",
       emitWat: true,
       skipSemanticDiagnostics: true,
+      target,
     });
     if (watResult.success && watResult.wat) {
       const snippet = extractWatFunctionSnippet(watResult.wat, funcName);
@@ -918,11 +924,12 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result) {
 
 process.on("message", async (msg) => {
   const { id, source, execute, isNegative, isRuntimeNegative, expectedErrorType } = msg;
+  const target = compileTargetFromMessage(msg.target);
   const compileStart = performance.now();
 
   let result;
   try {
-    result = await doCompile(source, msg.sourceMapUrl);
+    result = await doCompile(source, msg.sourceMapUrl, target);
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
@@ -1018,7 +1025,7 @@ process.on("message", async (msg) => {
 
   // Validate Wasm binary before proceeding
   if (!WebAssembly.validate(result.binary)) {
-    const errMsg = await buildInvalidBinaryError(source, msg.sourceMapUrl, result);
+    const errMsg = await buildInvalidBinaryError(source, msg.sourceMapUrl, result, target);
     if (msg.wasmPath && msg.metaPath) {
       try {
         writeFileSync(msg.wasmPath, new Uint8Array(0));

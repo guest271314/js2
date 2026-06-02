@@ -1,3 +1,3 @@
-/** Test262 chunk 10/115 — round-robin by test for even distribution. */
+/** Test262 chunk 10/57 — weighted by historical runtime for even distribution. */
 import { runTest262Chunk } from "./test262-shared.js";
-runTest262Chunk(9, 115);
+runTest262Chunk(9, 57);

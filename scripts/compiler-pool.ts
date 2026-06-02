@@ -150,6 +150,7 @@ export class CompilerPool {
     label?: string,
     wasmPath?: string,
     metaPath?: string,
+    target?: "gc" | "linear" | "wasi" | "standalone",
   ): Promise<PoolResult> {
     return this.enqueue(
       {
@@ -157,6 +158,7 @@ export class CompilerPool {
         sourceMapUrl,
         wasmPath,
         metaPath,
+        target,
         execute: false,
       },
       timeoutMs,
@@ -174,6 +176,7 @@ export class CompilerPool {
       wasmPath?: string;
       metaPath?: string;
       label?: string;
+      target?: "gc" | "linear" | "wasi" | "standalone";
     } = {},
     timeoutMs = 30_000,
   ): Promise<TestResult> {
@@ -186,6 +189,7 @@ export class CompilerPool {
         expectedErrorType: opts.expectedErrorType,
         wasmPath: opts.wasmPath,
         metaPath: opts.metaPath,
+        target: opts.target,
       },
       timeoutMs,
       opts.label,

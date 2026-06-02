@@ -16,6 +16,21 @@ LOCKDIR="/tmp/js2wasm-test262.lockdir"
 RESULTS_DIR="$MAIN_DIR/benchmarks/results"
 RUN_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 INCLUDE_PROPOSALS=1
+TEST262_TARGET="${TEST262_TARGET:-gc}"
+TEST262_REPORTER="${TEST262_REPORTER:-verbose}"
+
+case "$TEST262_TARGET" in
+  gc|linear|wasi|standalone) ;;
+  *)
+    echo "ERROR: TEST262_TARGET must be one of: gc, linear, wasi, standalone"
+    exit 1
+    ;;
+esac
+
+RESULT_PREFIX="test262"
+if [ "$TEST262_TARGET" != "gc" ]; then
+  RESULT_PREFIX="test262-${TEST262_TARGET}"
+fi
 
 forwarded_args=()
 for arg in "$@"; do
@@ -28,6 +43,8 @@ for arg in "$@"; do
   fi
 done
 export TEST262_INCLUDE_PROPOSALS="$INCLUDE_PROPOSALS"
+export TEST262_TARGET
+export TEST262_RESULT_PREFIX="$RESULT_PREFIX"
 
 resolve_esbuild() {
   if [ -n "${ESBUILD_BIN:-}" ] && [ -x "${ESBUILD_BIN:-}" ]; then
@@ -161,7 +178,7 @@ fi
   --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen 2>&1 | tail -1
 
 # ── Prepare result files ─────────────────────────────────────────
-# Vitest writes to timestamped test262-results-YYYYMMDD-HHMMSS.jsonl directly.
+# Vitest writes to timestamped ${RESULT_PREFIX}-results-YYYYMMDD-HHMMSS.jsonl directly.
 # RUN_TIMESTAMP env var tells test262-shared.ts which filename to use.
 export RUN_TIMESTAMP
 
@@ -172,6 +189,8 @@ if [ "$USE_WORKTREE" = "1" ]; then
 fi
 
 echo "Run ID: $RUN_TIMESTAMP"
+echo "Target: $TEST262_TARGET"
+echo "Reporter: $TEST262_REPORTER"
 echo "Worktree at $(git -C "$WT_DIR" rev-parse --short HEAD)"
 echo "Running vitest (unified compile+execute in fork pool)..."
 
@@ -210,8 +229,8 @@ else
 fi
 
 # ── Run vitest chunk-by-chunk FROM THE WORKTREE ─────────────────
-# Local runs use 16 round-robin shards (tests/test262-local-shard{1..16}.test.ts).
-# CI uses the 50-chunk matrix (tests/test262-chunk{1..50}.test.ts) — needs many
+# Local runs use 16 weighted shards (tests/test262-local-shard{1..16}.test.ts).
+# CI uses the 57-chunk matrix (tests/test262-chunk{1..57}.test.ts) — needs many
 # parallel runners. Locally vitest.config.ts has maxForks=1, so wall time scales
 # linearly with shard count → fewer/larger shards = faster local runs.
 # Override pattern via TEST262_LOCAL_SHARD_GLOB env to scope a quick subset.
@@ -232,27 +251,27 @@ if [ -n "$CHUNKS" ]; then
   echo "Running $CHUNK_COUNT local shard files in one vitest invocation..."
   if [ ${#forwarded_args[@]} -gt 0 ]; then
     node node_modules/vitest/dist/cli.js run $LOCAL_SHARD_GLOB \
-      --reporter=verbose \
+      --reporter="$TEST262_REPORTER" \
       "${forwarded_args[@]}" 2>&1 | tee /tmp/test262-vitest-run.log || true
   else
     node node_modules/vitest/dist/cli.js run $LOCAL_SHARD_GLOB \
-      --reporter=verbose 2>&1 | tee /tmp/test262-vitest-run.log || true
+      --reporter="$TEST262_REPORTER" 2>&1 | tee /tmp/test262-vitest-run.log || true
   fi
 else
   # Single file mode: run the monolithic test file
   echo "Running single test file..."
   if [ ${#forwarded_args[@]} -gt 0 ]; then
     node node_modules/vitest/dist/cli.js run tests/test262-vitest.test.ts \
-      --reporter=verbose \
+      --reporter="$TEST262_REPORTER" \
       "${forwarded_args[@]}" 2>&1 | tee /tmp/test262-vitest-run.log || true
   else
     node node_modules/vitest/dist/cli.js run tests/test262-vitest.test.ts \
-      --reporter=verbose 2>&1 | tee /tmp/test262-vitest-run.log || true
+      --reporter="$TEST262_REPORTER" 2>&1 | tee /tmp/test262-vitest-run.log || true
   fi
 fi
 # Generate report.json from JSONL (atomic — no fork race condition)
-JSONL_FILE="$RESULTS_DIR/test262-results-${RUN_TIMESTAMP}.jsonl"
-REPORT_FILE="$RESULTS_DIR/test262-report-${RUN_TIMESTAMP}.json"
+JSONL_FILE="$RESULTS_DIR/${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl"
+REPORT_FILE="$RESULTS_DIR/${RESULT_PREFIX}-report-${RUN_TIMESTAMP}.json"
 COMPLETED=false
 if [ -f "$JSONL_FILE" ] && [ -s "$JSONL_FILE" ]; then
   python3 -c "
@@ -308,6 +327,7 @@ def build_summary(counter):
 report = {
     'timestamp': '$(date -Iseconds)',
     'mode': {
+        'target': '$TEST262_TARGET',
         'include_proposals': ${INCLUDE_PROPOSALS},
         'label': 'official test262 + proposals' if ${INCLUDE_PROPOSALS} else 'official test262 (default scope)',
     },
@@ -354,14 +374,14 @@ fi
 # ── Handle results ───────────────────────────────────────────────
 echo ""
 
-# Files are already timestamped (vitest writes to test262-results-${RUN_TIMESTAMP}.jsonl)
-RUN_REPORT="$RESULTS_DIR/test262-report-${RUN_TIMESTAMP}.json"
-RUN_JSONL="$RESULTS_DIR/test262-results-${RUN_TIMESTAMP}.jsonl"
+# Files are already timestamped (vitest writes to ${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl)
+RUN_REPORT="$RESULTS_DIR/${RESULT_PREFIX}-report-${RUN_TIMESTAMP}.json"
+RUN_JSONL="$RESULTS_DIR/${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl"
 
 if [ "$COMPLETED" = true ]; then
   # Update symlinks to point to latest timestamped files
-  ln -sf "$(basename "$RUN_REPORT")" "$RESULTS_DIR/test262-report.json"
-  ln -sf "$(basename "$RUN_JSONL")" "$RESULTS_DIR/test262-results.jsonl"
+  ln -sf "$(basename "$RUN_REPORT")" "$RESULTS_DIR/${RESULT_PREFIX}-report.json"
+  ln -sf "$(basename "$RUN_JSONL")" "$RESULTS_DIR/${RESULT_PREFIX}-results.jsonl"
 
   PASS=$(python3 -c "import json; d=json.load(open('$RUN_REPORT')); print(d['summary']['pass'])" 2>/dev/null || echo "?")
   TOTAL=$(python3 -c "import json; d=json.load(open('$RUN_REPORT')); print(d['summary']['total'])" 2>/dev/null || echo "?")
