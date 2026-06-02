@@ -13,7 +13,7 @@ language_feature: test262-standalone
 goal: standalone-mode
 es_edition: n/a
 sprint: 58
-related: [1662, 1776, 1472, 682, 1474, 1599, 1387, 1778]
+related: [1662, 1776, 1472, 682, 1474, 1599, 1387, 1778, 1782, 1591, 1623, 1665]
 origin: "Investigation of all failing standalone test262 tests found that the June 1 full standalone JSONL/report artifacts were generated but not retained, leaving only summary counts and five manually documented root-cause clusters."
 ---
 
@@ -56,7 +56,13 @@ owners such as #1103, #1335, #1470, #1473, #1474, and #1599.
 ## Published artifact
 
 A full standalone rerun was published on 2026-06-02 to
-`loopdive/js2wasm-baselines` at commit
+`loopdive/js2wasm-baselines`. The latest checked baseline commit is
+`b4684d8f97a462c6414716aea46f31b67f48b959`, with
+`test262-standalone-current.jsonl` and `test262-standalone-report.json`
+pointing at js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The repo also retains the timestamped first artifact commit
 `fef6d42c21ffcb933f4916b5f4a8e8eeeb98ec52`:
 
 - `test262-standalone-results-20260602-124735.jsonl`
@@ -67,8 +73,6 @@ A full standalone rerun was published on 2026-06-02 to
 - `test262-standalone-report.json`
 
 Run command: `TEST262_TARGET=standalone TEST262_REPORTER=dot bash scripts/run-test262-vitest.sh`.
-The run used local standalone-runner plumbing on js2wasm commit
-`02a143f33a49674faa77f63afc191fb07961d2b8`.
 
 Validated counts:
 
@@ -76,10 +80,86 @@ Validated counts:
 - Full summary: 7,788 pass, 6,412 fail, 33,793 compile_error,
   3 compile_timeout, 114 skip
 - Official summary: 7,594 pass / 43,128 total (17.6%)
-- JSONL SHA-256:
+- Current JSONL SHA-256:
+  `509c07be2eee43e933db76959d4bc26f0d126d0756a9cff339ab5fdcb9bc8a07`
+- Current report SHA-256:
+  `26a3e86ab400edd78a83bdfcb2fcfde1ae7dcd725235f7b4d2280ea34c8c3d79`
+- Timestamped JSONL SHA-256:
   `9096fce194cad887af6b0642fca7e6df898523684329509ebe752ec6da2edc5e`
-- Report SHA-256:
+- Timestamped report SHA-256:
   `91cf08789581b7381566ee482babf765b719fcea9b85a38c5b3e37a6e833aee9`
+
+## 2026-06-02 root-cause classification
+
+Source artifact: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`. The classifier covers every non-pass,
+non-skip row: 33,793 `compile_error`, 6,412 `fail`, and 3
+`compile_timeout` rows, for 40,208 rows total.
+
+Classification method: ordered primary match by diagnostic, error category,
+and path cluster. Some families are intentionally non-exclusive in the raw
+artifact (for example, a RegExp test can first hit #1472 object dispatch), so
+the table below is the primary owner for root-cause tracking, not a claim that
+the issue id is the only text matched in that row.
+
+| Count | Primary owner | Root-cause bucket |
+| ---: | --- | --- |
+| 26,880 | #1472 | Standalone dynamic object/property operation gate (`__extern_*`, `__object_*`, `__defineProperty_*`, `__get_builtin`, `__new_plain_object`, etc.) |
+| 2,351 | #1623/#1666/#1525b | Invalid Wasm at type/coercion boundaries, late globals, and trampolines |
+| 1,660 | #1591/#1365/#1364 | Class element, prototype, own-property, private-name, and descriptor reconciliation gaps |
+| 1,513 | #682/#1474 | RegExp literals/constructor/String-RegExp paths still refused or missing native engine |
+| 1,436 | #1776 | Residual standalone `isSameValue` invalid-Wasm validator failures after PR #1025 |
+| 876 | #1525/#1525b/#1759 | ToPrimitive / object-to-string dispatch residuals |
+| 643 | #1358/#1461/#1654 | Array, TypedArray, DataView, and buffer semantics |
+| 532 | #1665/#681 | Generic iterator protocol still needs a pure-Wasm standalone path |
+| 327 | #1472/#176/#281/#1466 | Object/property/destructuring semantic mismatches behind the object model |
+| 279 | #1105/#1442/#1381 | String methods and string coercion residuals in standalone |
+| 228 | #1577/#779 | Miscellaneous low-volume spec-completeness tail, after #1782 numeric separators are carved out |
+| 264 | #1594/#1050 | Annex B function/eval semantics |
+| 236 | #1343 | Date prototype formatting/coercion |
+| 218 | #1335/#1663/#1689 | Number parsing, formatting, and coercion |
+| 197 | #1732/#562/#160 | Math method descriptors and coercion edge cases |
+| 197 | #661 | Temporal proposal/polyfill gap |
+| 178 | #731/#1732/#1596 | Function object name/length/prototype/call semantics |
+| 168 | #334/#1456/#540 | Assignment targets, private refs, and short-circuit semantics |
+| 157 | #1103 | Wasm-native Map/Set/Weak collection semantics |
+| 155 | #1066/#1073/#990 | Eval and `new Function` semantics |
+| 154 | #1665/#1718 | Iterator protocol / for-of semantic failures after compile |
+| 154 | #1511/#1726 | Arguments object fidelity |
+| 153 | #1315/#1435 | `import.defer` / `import.source` proposal syntax and early errors |
+| 115 | #1089/#1512 | Dynamic import unsupported / early errors |
+| 95 | #1599 | Standalone JSON codec, after Phase 1 refusal |
+| 91 | #1644 | BigInt typed-path/coercion |
+| 86 | #1665/#680 | Generators and async iteration |
+| 82 | #1128/#990/#1726 | Lexical scope, TDZ, and declaration semantics |
+| 77 | #1326c/#1116/#1694 | Promise and async standalone semantics |
+| 68 | #1046/#1527 | Module semantics and harness export shape |
+| 64 | #602/#787 | Tail-call/control-flow loop semantics, including 3 compile timeouts |
+| 62 | #927/#1435/#990 | Missing parse/early/runtime SyntaxError or ReferenceError |
+| 62 | #1387 | `with` statement dynamic-scope lowering residuals |
+| 50 | #1782/#53 | Numeric and BigInt separator literals evaluate to wrong values |
+| 45 | #1759/#836 | Template literal and tagged-template semantics |
+| 43 | #832/#270 | Unicode/reserved-word identifier handling |
+| 41 | #1036/#990 | DisposableStack / explicit resource management |
+| 41 | #787/#1378 | Completion values and control-flow semantics |
+| 33 | #812/#1559 | Extern class dependency metadata |
+| 32 | #843/#1551 | `super`, spread, and receiver-evaluation semantics |
+| 32 | #1535/#1644 | Standalone BigInt host/typed-path residual |
+| 29 | #270/#990 | Strict-mode reserved words and directive prologue |
+| 26 | #674/#1354 | SharedArrayBuffer / Atomics backlog |
+| 25 | #1519/#1609/#1603 | `new`, spread, and optional-chaining semantics |
+| 20 | #1038/#1732 | Function.prototype.bind / function-object descriptors |
+| 18 | #1435/#832 | Lexical grammar, hashbang, whitespace, and line terminators |
+| 6 | #680/#1665 | Recursive/generator/iterator stack overflow |
+| 5 | #826/#1623 | Illegal-cast/type-boundary residual |
+| 2 | #1663 | Standalone parseInt/parseFloat constructor metadata |
+| 2 | #820 | Null/undefined TypeError lowering residual |
+
+No high-volume standalone failure family is unowned after this pass. The only
+new issue filed from the artifact is #1782 for numeric/BigInt separator
+literal values; other buckets already had root-cause issues and were refreshed
+where the latest artifact materially changed the evidence.
 
 ## Root Cause
 

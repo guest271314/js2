@@ -62,6 +62,15 @@ From the dev-1553b destructuring-lane verification sweep.
 - [#1777](../1777-landing-es-edition-slider-2026-notch-thumb-offset.md) — landing page ES edition slider shows ES2026 as a published notch and the thumb drifts right of ticks while dragging — medium, easy, **ready (sprint 59)**.
 - [#1778](../1778-landing-standalone-test262-pass-rate-real-number.md) — landing page JS-host toggle should show the real standalone-mode test262 pass rate instead of a scaled estimate — medium, medium, **DONE (sprint 58)**.
 
+## Standalone test262 root-cause refresh (2026-06-02)
+
+From the full standalone JSONL published in `loopdive/js2wasm-baselines`
+commit `b4684d8f97a462c6414716aea46f31b67f48b959` and mapped in #1781.
+Existing high-volume root causes were updated in their owning issue files;
+only one new root-cause issue was needed.
+
+- [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
+
 ## Sprint 55 — repo structure / website (2026-05-24)
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
