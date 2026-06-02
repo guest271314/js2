@@ -3,7 +3,7 @@ id: 1472
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
 status: in-progress
 created: 2026-05-20
-updated: 2026-06-02
+updated: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -329,8 +329,29 @@ the gate — it emits struct.get/struct.set and never calls
   `pnpm exec vitest run tests/issue-1472-standalone-object-imports.test.ts`
   (1 file passed, 5 tests passed). Full test262 was not run.
 
-**Phase B** (Wasm-native open-object runtime) and **Phase C** (Proxy
-refusal + Reflect dispatch) remain as follow-up work — see plan below.
+2026-06-03 Codex follow-up slice:
+
+- Added the explicit Phase C standalone Proxy refusal for `new Proxy(...)` in
+  `src/codegen/expressions/new-super.ts` and `Proxy.revocable(...)` in
+  `src/codegen/expressions/calls.ts`. Both now report
+  `Codegen error: Proxy not supported in standalone mode (#1472 Phase C).`
+  before compiling arguments or registering `__proxy_*` imports.
+- Moved the focused regression suite to `tests/issue-1472.test.ts` per the
+  sprint lane instruction, expanded the banned-host-import assertion to cover
+  `__get_builtin`, `__proto_method_call`, and `__proxy_*`, and added coverage
+  for standalone `new Proxy`, standalone `Proxy.revocable`, and default-GC
+  `new Proxy`.
+- Validation: `pnpm exec prettier --write
+  src/codegen/expressions/calls.ts src/codegen/expressions/new-super.ts
+  tests/issue-1472.test.ts` (unchanged); `pnpm exec vitest run
+  tests/issue-1472.test.ts` (1 file passed, 8 tests passed);
+  `pnpm exec biome lint src/codegen/expressions/calls.ts
+  src/codegen/expressions/new-super.ts tests/issue-1472.test.ts
+  --diagnostic-level=error --no-errors-on-unmatched` (exit 0). Full local
+  test262 was not run.
+
+**Phase B** (Wasm-native open-object runtime) and Reflect-specific Phase C
+dispatch remain as follow-up work — see plan below.
 
 #### Phase B (follow-up issue): Wasm-native open-object runtime
 
@@ -475,27 +496,28 @@ already resolved a struct field via `getFieldEntry`, it emits
 only consulted when the static type is `any` / index access / open
 literal.
 
-#### Phase C (follow-up): Proxy refusal + Reflect.* dispatch
+#### Phase C (partial): Proxy refusal + Reflect.* dispatch
 
 When `ctx.standalone` is set:
 
 - `new Proxy(target, handler)` → compile-time error (per
   acceptance criteria): "Proxy not supported in standalone mode
   (#1472 Phase C)". Emitted from
-  `src/codegen/expressions/new-super.ts` and
-  `src/codegen/builtin-tags.ts:180` allowed-ctor list.
-- `Proxy.revocable(...)` → same error.
+  `src/codegen/expressions/new-super.ts`. **Implemented 2026-06-03.**
+- `Proxy.revocable(...)` → same error. **Implemented 2026-06-03** from
+  `src/codegen/expressions/calls.ts`.
 - `Reflect.*` methods that don't have a `Object.*` equivalent
   (`Reflect.construct` with proxy target, `Reflect.apply` against
   externrefs) → error. Pure-Wasm `Reflect.get` / `Reflect.set` /
-  `Reflect.has` are aliases of the `$__obj_*` helpers.
+  `Reflect.has` are aliases of the `$__obj_*` helpers. **Still follow-up.**
 
 ### Test approach
 
-- **Phase A**: `tests/standalone-objects-refuse.test.ts` — assert
+- **Phase A / C refusal coverage**: `tests/issue-1472.test.ts` — assert
   the compile error fires for `let o: any = {x: 1}; o.y = 2;`
-  with the message above; assert closed-shape struct programs
-  compile clean with zero `env::__extern_*` imports.
+  with the message above; assert `new Proxy(...)` /
+  `Proxy.revocable(...)` emit the standalone Proxy error; assert closed-shape
+  struct programs compile clean with zero object/proxy host imports.
 - **Phase B**: `tests/standalone-objects.test.ts` — wasmtime
   smoke test for: object literals, property add/read/delete,
   `Object.keys/values/entries`, `for (k in o)`, `Object.assign`,
@@ -506,8 +528,9 @@ When `ctx.standalone` is set:
   `built-ins/Reflect/*` subset (excluding Proxy) in standalone
   mode; track regression budget against the same suite in default
   mode.
-- **Phase C**: `tests/standalone-proxy-refuse.test.ts` — assert
-  `new Proxy(...)` emits the expected compile error.
+- **Phase C follow-up**: extend `tests/issue-1472.test.ts` for
+  Reflect-specific standalone dispatch/refusal once the Wasm-native object
+  runtime exists.
 
 ### Dependency ordering within #1472
 
