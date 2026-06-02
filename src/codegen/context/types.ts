@@ -125,6 +125,30 @@ export interface ClosureInfo {
   paramTypes: ValType[];
 }
 
+/** Metadata for a generator lowered to an in-module WasmGC state machine (#680). */
+export interface NativeGeneratorInfo {
+  /** Source-level generator function name. */
+  functionName: string;
+  /** Original declaration; used to emit the resume function lazily. */
+  decl: ts.FunctionDeclaration;
+  /** Per-generator state struct type index. */
+  stateTypeIdx: number;
+  /** Shared IteratorResult-like struct type index. */
+  resultTypeIdx: number;
+  /** Absolute function index for the generated resume function, once emitted. */
+  resumeFuncIdx?: number;
+  /** Parameter names copied into the state struct at construction time. */
+  paramNames: string[];
+  /** Parameter value types copied into the state struct at construction time. */
+  paramTypes: ValType[];
+  /** Field index where captured params start in the state struct. */
+  paramFieldOffset: number;
+  /** Number of top-level yield suspension points. */
+  yieldCount: number;
+  /** Terminal state value. */
+  doneState: number;
+}
+
 export type NullishExclusion = "null" | "undefined" | "nullish";
 
 export interface NullGuardFact {
@@ -569,6 +593,10 @@ export interface CodegenContext {
   generatorFunctions: Set<string>;
   /** Map from generator function name → yield element type */
   generatorYieldType: Map<string, ValType>;
+  /** Shared native generator IteratorResult-like struct type index, or -1 before registration. */
+  nativeGeneratorResultTypeIdx: number;
+  /** Function declarations lowered to Wasm-native generator state machines (#680). */
+  nativeGenerators: Map<string, NativeGeneratorInfo>;
   /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,

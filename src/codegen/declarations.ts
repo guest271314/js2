@@ -52,6 +52,11 @@ import {
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import {
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+  sourceNeedsGeneratorHostImports,
+} from "./generators-native.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
 import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import {
@@ -692,7 +697,8 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       ts.isFunctionDeclaration(node) &&
       node.asteriskToken &&
       node.body &&
-      !hasDeclareModifier(node)
+      !hasDeclareModifier(node) &&
+      !((ctx.standalone || ctx.wasi) && isNativeGeneratorCandidate(ctx, node))
     ) {
       state.unionFound = true;
     }
@@ -1251,7 +1257,9 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // claims a generator function (#1169f). The helper is idempotent —
   // guards on `ctx.funcMap.has("__gen_create_buffer")` internally.
   if (state.generatorFound) {
-    addGeneratorImports(ctx);
+    if (!((ctx.standalone || ctx.wasi) && !sourceNeedsGeneratorHostImports(ctx, state.sourceFile))) {
+      addGeneratorImports(ctx);
+    }
   }
 
   // ── collectIteratorImports finalize ──
@@ -2275,7 +2283,8 @@ function registerBodylessFunctionDeclaration(
       }
       params.push(wasmType);
     }
-    results = [{ kind: "externref" }];
+    const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
+    results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }];
   } else if (resolved) {
     params = resolved.params;
     results = resolved.results;
@@ -2758,7 +2767,8 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           }
           params.push(wasmType);
         }
-        results = [{ kind: "externref" }]; // Returns a JS Generator object
+        const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
+        results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }]; // JS-host fallback returns a Generator object
       } else if (resolved) {
         // Use call-site resolved types for generic functions
         params = resolved.params;
