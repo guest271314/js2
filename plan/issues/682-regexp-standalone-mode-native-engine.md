@@ -253,7 +253,7 @@ Validation for this slice:
 - `pnpm exec prettier --write src/codegen/regexp-standalone.ts src/codegen/context/types.ts src/codegen/context/create-context.ts src/codegen/typeof-delete.ts src/codegen/expressions/new-super.ts src/codegen/expressions/calls.ts tests/issue-682.test.ts tests/issue-1474-standalone-regex-refuse.test.ts plan/issues/682-regexp-standalone-mode-native-engine.md`
   - result: passed
 - `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
-  - result: passed, 3 files / 25 tests
+  - result: passed, 3 files / 33 tests
 - `pnpm run typecheck`
   - result: passed
 - `git diff --check`
@@ -712,6 +712,32 @@ validation rule. PR #1038 remains open as a draft from `symphony/682` to `main`
 and is mergeable. The GitHub check rollup observed during this verification had
 completed checks green while some long test262 shards were still in progress.
 No local implementation blockers were found in this handoff pass.
+
+### Codex verification refresh — 2026-06-02
+
+Re-reviewed the assigned #682 implementation, focused tests, and #1474 refusal
+coverage in the `symphony/682` worktree. No source changes were needed in this
+pass. The current branch still implements the reduced
+`native-literal-substring` standalone backend for static plain patterns with no
+flags and `RegExp.prototype.test`; unsupported syntax, direct symbol protocol
+calls, opaque receivers, and RegExp-consuming string methods refuse explicitly
+without JS-host RegExp/string-method imports.
+
+Scoped validation rerun:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 33 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. `gh pr view` reports PR #1038 open as a draft from
+`symphony/682` to `main`, mergeable, at
+`c23f8f821ce77368bff4e8260c81f2f48bc8782c`; reported checks are green except
+for Test262 shards 106 and 111, which were still in progress during this
+verification. No local implementation blockers were found in this refresh.
 
 ### Phase 0 — Decision and ABI
 
