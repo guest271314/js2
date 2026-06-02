@@ -1,7 +1,7 @@
 ---
 id: 1747
 title: "Array.prototype.pop() on an empty array traps instead of returning undefined (compiled WasmGC)"
-status: in-progress
+status: in-review
 created: 2026-05-30
 updated: 2026-06-02
 priority: medium
@@ -15,6 +15,7 @@ sprint: 58
 related: [1584, 1748]
 claimed_by: codex-developer
 claimed_at: 2026-06-02T20:53:18.030Z
+pr: 1044
 ---
 # #1747 — `[].pop()` on an empty array traps instead of returning `undefined`
 
