@@ -4,11 +4,14 @@
  */
 import { ts, forEachChild } from "../../ts-api.js";
 import {
+  getNullablePrimitiveInfo,
+  isBigIntType,
   isBooleanType,
   isHeterogeneousUnion,
-  isNullableNumberType,
   isNumberType,
   isStringType,
+  type NullablePrimitiveInfo,
+  type NullablePrimitiveKind,
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
@@ -272,14 +275,45 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
-function isDeclaredNullableNumberIdentifier(ctx: CodegenContext, id: ts.Identifier): boolean {
+function getDeclaredNullablePrimitiveInfo(ctx: CodegenContext, id: ts.Identifier): NullablePrimitiveInfo | null {
   const symbol = ctx.checker.getSymbolAtLocation(id);
   const decl = symbol?.valueDeclaration;
-  if (!decl) return false;
+  if (!decl) return null;
   if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
-    return isNullableNumberType(ctx.checker.getTypeAtLocation(decl));
+    return getNullablePrimitiveInfo(ctx.checker.getTypeAtLocation(decl));
   }
-  return false;
+  return null;
+}
+
+function emitNullablePrimitiveUnbox(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  primitiveKind: NullablePrimitiveKind,
+): ValType | null {
+  if (primitiveKind === "string") return null;
+  addUnionImports(ctx);
+  if (primitiveKind === "number") {
+    const funcIdx = ctx.funcMap.get("__unbox_number");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "f64" };
+    }
+  }
+  if (primitiveKind === "boolean") {
+    const funcIdx = ctx.funcMap.get("__unbox_boolean");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i32" };
+    }
+  }
+  if (primitiveKind === "bigint") {
+    const funcIdx = ctx.funcMap.get("__to_bigint");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i64", bigint: true };
+    }
+  }
+  return null;
 }
 
 /**
@@ -469,12 +503,11 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;
-      if (fctx.aliasedNullGuardNonNull?.has(name) && isDeclaredNullableNumberIdentifier(ctx, id)) {
-        addUnionImports(ctx);
-        const funcIdx = ctx.funcMap.get("__unbox_number");
-        if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
-          return { kind: "f64" };
+      if (fctx.narrowedNonNull?.has(name)) {
+        const declaredNullable = getDeclaredNullablePrimitiveInfo(ctx, id);
+        if (declaredNullable) {
+          const unboxed = emitNullablePrimitiveUnbox(ctx, fctx, declaredNullable.primitiveKind);
+          if (unboxed) return unboxed;
         }
       }
     }
@@ -799,6 +832,14 @@ function narrowTypeToUnbox(ctx: CodegenContext, fctx: FunctionContext, narrowedT
     if (funcIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx });
       return { kind: "i32" };
+    }
+  }
+  if (isBigIntType(narrowedType)) {
+    addUnionImports(ctx);
+    const funcIdx = ctx.funcMap.get("__to_bigint");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i64", bigint: true };
     }
   }
   // String stays as externref — no unboxing needed

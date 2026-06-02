@@ -5,7 +5,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { Instr } from "../../ir/types.js";
-import type { FunctionContext } from "../context/types.js";
+import type { FunctionContext, NullGuardFact } from "../context/types.js";
 
 /**
  * Adjust the depth of all entries in the catchRethrowStack by `delta`.
@@ -47,7 +47,7 @@ export interface BlockScopeSave {
   locals: Map<string, number> | null;
   tdzFlags: Map<string, number> | null;
   constBindings: Map<string, boolean> | null;
-  nullGuardAliases: Map<string, { varName: string; narrowedBranch: "then" | "else" } | null> | null;
+  nullGuardAliases: Map<string, NullGuardFact | null> | null;
 }
 
 function collectBindingPatternNames(pattern: ts.BindingPattern, names: string[]): void {
@@ -104,7 +104,7 @@ export function saveBlockScopedShadows(fctx: FunctionContext, block: ts.Block): 
   let savedLocals: Map<string, number> | null = null;
   let savedTdz: Map<string, number> | null = null;
   let savedConstBindings: Map<string, boolean> | null = null;
-  let savedNullGuardAliases: Map<string, { varName: string; narrowedBranch: "then" | "else" } | null> | null = null;
+  let savedNullGuardAliases: Map<string, NullGuardFact | null> | null = null;
   for (const name of blockNames) {
     if (!savedConstBindings) savedConstBindings = new Map();
     savedConstBindings.set(name, fctx.constBindings?.has(name) ?? false);

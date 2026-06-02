@@ -6,7 +6,7 @@ import {
   isBooleanType,
   isExternalDeclaredClass,
   isHeterogeneousUnion,
-  isNullableNumberType,
+  isNullablePrimitiveType,
   isNumberType,
   isStringType,
   isVoidType,
@@ -10129,7 +10129,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullableNumberType(varType)
+      initForcesExternref || isNullablePrimitiveType(varType)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
@@ -10450,7 +10450,7 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
           ? { kind: "externref" }
           : isI32Coerced
             ? { kind: "i32" }
-            : isNullableNumberType(varType)
+            : isNullablePrimitiveType(varType)
               ? { kind: "externref" }
               : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
         allocLocal(fctx, name, wasmType);

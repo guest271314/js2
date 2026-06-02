@@ -228,20 +228,54 @@ export function isNumberType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Number) !== 0 || (type.flags & ts.TypeFlags.NumberLiteral) !== 0;
 }
 
-/** Check if a type is a nullable numeric sentinel, e.g. number | null. */
-export function isNullableNumberType(type: ts.Type): boolean {
-  if (!type.isUnion()) return false;
+export type NullablePrimitiveKind = "number" | "boolean" | "string" | "bigint";
+
+export interface NullablePrimitiveInfo {
+  primitiveKind: NullablePrimitiveKind;
+  hasNull: boolean;
+  hasUndefined: boolean;
+}
+
+function primitiveKindOfType(type: ts.Type): NullablePrimitiveKind | null {
+  if (isNumberType(type)) return "number";
+  if (isBooleanType(type)) return "boolean";
+  if (isStringType(type)) return "string";
+  if (isBigIntType(type)) return "bigint";
+  return null;
+}
+
+/** Check if a type is a nullable primitive sentinel, e.g. number | null or boolean | undefined. */
+export function getNullablePrimitiveInfo(type: ts.Type): NullablePrimitiveInfo | null {
+  if (!type.isUnion()) return null;
   let hasNull = false;
+  let hasUndefined = false;
   const nonNullTypes: ts.Type[] = [];
   for (const part of type.types) {
     if (part.flags & ts.TypeFlags.Null) {
       hasNull = true;
       continue;
     }
-    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) return false;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
+      hasUndefined = true;
+      continue;
+    }
     nonNullTypes.push(part);
   }
-  return hasNull && nonNullTypes.length > 0 && nonNullTypes.every((part) => isNumberType(part));
+  if (!hasNull && !hasUndefined) return null;
+  if (nonNullTypes.length === 0) return null;
+  const firstKind = primitiveKindOfType(nonNullTypes[0]!);
+  if (!firstKind) return null;
+  if (!nonNullTypes.every((part) => primitiveKindOfType(part) === firstKind)) return null;
+  return { primitiveKind: firstKind, hasNull, hasUndefined };
+}
+
+export function isNullablePrimitiveType(type: ts.Type): boolean {
+  return getNullablePrimitiveInfo(type) !== null;
+}
+
+/** Check if a type is a nullable numeric sentinel, e.g. number | null or number | undefined. */
+export function isNullableNumberType(type: ts.Type): boolean {
+  return getNullablePrimitiveInfo(type)?.primitiveKind === "number";
 }
 
 /** Check if a ts.Type represents boolean */
