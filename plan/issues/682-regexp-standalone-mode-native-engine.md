@@ -16,6 +16,7 @@ files:
       - "typed native standalone RegExp ABI scaffold and engine availability hook"
       - "reduced native literal-substring backend for static standalone RegExp.test"
       - "global RegExp identifier guard so local shadows are not lowered as builtins"
+      - "opaque RegExp receiver provenance guard for standalone .test"
   src/codegen/context/types.ts:
     changed:
       - "CodegenContext.standaloneRegExpEngine documents the enabled reduced backend and refusal fallback"
@@ -45,6 +46,7 @@ files:
       - "standalone RegExp literal/new/call .test execution and unsupported-syntax refusals"
       - "standalone RegExp call shadowing regression"
       - "standalone refusal for direct RegExp symbol protocol calls without host imports"
+      - "standalone refusal for opaque RegExp receivers not created by the backend"
       - "standalone RegExp-consuming string method refusals emit no JS-host string imports"
   tests/issue-682-regexp-standalone-abi.test.ts:
     new:
@@ -394,6 +396,38 @@ Scoped validation in this follow-up:
   - result: passed
 - `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
   - result: passed, 3 files / 30 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule. No blockers were found in this follow-up.
+
+### Codex opaque receiver provenance follow-up — 2026-06-02
+
+Found and fixed one remaining over-acceptance path in the standalone
+`RegExp.prototype.test` reduction. A value typed as declaration-file `RegExp`
+but supplied opaquely, such as an exported `re: RegExp` parameter, previously
+entered the reduced backend and was cast from `externref` to the private
+`$__StandaloneRegExp` struct. That could compile a value the backend did not
+create, leaving a runtime cast trap instead of an explicit standalone refusal.
+
+`src/codegen/regexp-standalone.ts` now requires static provenance before
+casting an `externref` receiver back into the reduced backend. Direct RegExp
+literals/constructors and variables initialized from those forms are still
+eligible; opaque receivers now report a `#682/#1474` compile error.
+
+Added a focused regression in `tests/issue-682.test.ts` proving an exported
+`RegExp` parameter receiver is refused and emits no `RegExp_*`,
+`__regex_symbol_call`, `wasm:js-string`, or `string_constants` imports.
+
+Scoped validation in this follow-up:
+
+- `pnpm exec vitest run tests/issue-682.test.ts --reporter verbose`
+  - result: passed, 1 file / 13 tests
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 31 tests
 - `pnpm run typecheck`
   - result: passed
 - `git diff --check`

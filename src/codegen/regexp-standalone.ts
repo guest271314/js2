@@ -139,6 +139,33 @@ function stripStaticWrapper(expr: ts.Expression): ts.Expression {
   return expr;
 }
 
+function isStaticStandaloneRegExpCreation(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripStaticWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
+  if (ts.isNewExpression(unwrapped)) {
+    const callee = stripStaticWrapper(unwrapped.expression);
+    return ts.isIdentifier(callee) && isGlobalRegExpIdentifier(ctx, callee);
+  }
+  if (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken) {
+    const callee = stripStaticWrapper(unwrapped.expression);
+    return ts.isIdentifier(callee) && isGlobalRegExpIdentifier(ctx, callee);
+  }
+  return false;
+}
+
+function isKnownBackendCreatedRegExpReceiver(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripStaticWrapper(expr);
+  if (isStaticStandaloneRegExpCreation(ctx, unwrapped)) return true;
+  if (!ts.isIdentifier(unwrapped)) return false;
+
+  const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+  const decls = sym?.getDeclarations() ?? [];
+  return decls.some(
+    (decl) =>
+      ts.isVariableDeclaration(decl) && !!decl.initializer && isStaticStandaloneRegExpCreation(ctx, decl.initializer),
+  );
+}
+
 export function isGlobalRegExpIdentifier(ctx: CodegenContext, ident: ts.Identifier): boolean {
   if (ident.text !== "RegExp") return false;
   const sym = ctx.checker.getSymbolAtLocation(ident);
@@ -344,6 +371,14 @@ export function tryCompileStandaloneRegExpTest(
   const regexpType = compileExpression(ctx, fctx, propAccess.expression);
   let storedRegexpType = regexpType;
   if (regexpType?.kind === "externref") {
+    if (!isKnownBackendCreatedRegExpReceiver(ctx, propAccess.expression)) {
+      reportStandaloneRegExpUnsupported(
+        ctx,
+        propAccess.expression,
+        "RegExp values not created by this standalone backend",
+      );
+      return null;
+    }
     const typeIdx = ensureStandaloneRegExpStruct(ctx);
     fctx.body.push({ op: "any.convert_extern" } as Instr);
     fctx.body.push({ op: "ref.cast", typeIdx } as Instr);

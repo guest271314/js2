@@ -137,6 +137,21 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
   });
 
+  it("refuses opaque RegExp receivers not created by the standalone backend", async () => {
+    const r = await compile(`export function test(re: RegExp): boolean { return re.test("abc"); }`, {
+      fileName: "issue-682.ts",
+      target: "standalone",
+    });
+
+    expect(r.success).toBe(false);
+    expect(
+      r.errors.some(
+        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#682\/#1474/.test(e.message),
+      ),
+    ).toBe(true);
+    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+  });
+
   it("refuses RegExp-consuming string methods without JS-host string imports", async () => {
     const r = await compile(`export function test(s: string): string { return s.replace(/a/g, "b"); }`, {
       fileName: "issue-682.ts",
