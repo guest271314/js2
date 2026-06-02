@@ -1,9 +1,9 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: in-progress
+status: in-review
 created: 2026-03-20
-updated: 2026-06-02
+updated: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -19,6 +19,7 @@ files:
       - "yield compiles to state save + return, next() resumes from saved state"
 claimed_by: codex-developer
 claimed_at: 2026-06-02T22:52:32.748Z
+pr: 1052
 ---
 # #680 — Wasm-native generators (state machines) with optional JS host fallback
 
