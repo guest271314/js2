@@ -1270,7 +1270,9 @@ export function compileNativeStringMethodCall(
   // Helper: emit a flatten call to convert ref $AnyString → ref $NativeString
   const emitFlatten = () => fctx.body.push({ op: "call", funcIdx: flattenIdx });
 
-  // charCodeAt: inline array.get_u with offset (must flatten first)
+  // charCodeAt: inline array.get_u with offset (must flatten first).
+  // ECMA-262 §22.1.3.3: ToIntegerOrInfinity(pos), then return NaN when
+  // the resulting position is outside [0, string length).
   if (method === "charCodeAt") {
     compileExpression(ctx, fctx, propAccess.expression);
     // Flatten to FlatString (handles ConsString → FlatString)
@@ -1279,25 +1281,45 @@ export function compileNativeStringMethodCall(
     // Store flat string ref in a temp local to access both data and off
     const tmpLocal = allocLocal(fctx, "__charCodeAt_tmp", flatStringType(ctx));
     fctx.body.push({ op: "local.set", index: tmpLocal });
-    // Push data ref (field 2)
-    fctx.body.push({ op: "local.get", index: tmpLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // .data
-    // Compute off + idx (off is field 1)
-    fctx.body.push({ op: "local.get", index: tmpLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // .off
+    const idxLocal = allocLocal(fctx, "__charCodeAt_idx", { kind: "i32" });
     if (expr.arguments.length > 0) {
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
       if (!argType) {
         fctx.body.push({ op: "i32.const", value: 0 });
       } else if (argType.kind === "f64") {
         fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      } else if (argType.kind === "i32") {
+        // already an integer index
       }
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    fctx.body.push({ op: "i32.add" }); // off + idx
-    fctx.body.push({ op: "array.get_u", typeIdx: strDataTypeIdx });
-    return { kind: "i32" };
+    fctx.body.push({ op: "local.set", index: idxLocal });
+
+    fctx.body.push({ op: "local.get", index: idxLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.lt_s" });
+    fctx.body.push({ op: "local.get", index: idxLocal });
+    fctx.body.push({ op: "local.get", index: tmpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // .len
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "i32.or" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN }],
+      else: [
+        { op: "local.get", index: tmpLocal },
+        { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // .data
+        { op: "local.get", index: tmpLocal },
+        { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // .off
+        { op: "local.get", index: idxLocal },
+        { op: "i32.add" }, // off + idx
+        { op: "array.get_u", typeIdx: strDataTypeIdx },
+        { op: "f64.convert_i32_u" },
+      ],
+    } as Instr);
+    return { kind: "f64" };
   }
 
   // charAt: native helper
