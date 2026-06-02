@@ -90,4 +90,19 @@ describe("#1105 nativeStrings charCodeAt", () => {
     expect((exports.negativeFraction as () => number)()).toBe(65);
     expect((exports.positiveFraction as () => number)()).toBe(90);
   });
+
+  it("does not fold out-of-range charCodeAt into an i32-pure arithmetic leaf", async () => {
+    const exports = await compileNative(`
+      export function inRange(): number {
+        return (1 + "AZ".charCodeAt(1)) | 0;
+      }
+
+      export function outOfRange(): number {
+        return (1 + "AZ".charCodeAt(9)) | 0;
+      }
+    `);
+
+    expect((exports.inRange as () => number)()).toBe(91);
+    expect((exports.outOfRange as () => number)()).toBe(0);
+  });
 });
