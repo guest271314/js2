@@ -209,6 +209,11 @@ function compileStatementInner(ctx: CodegenContext, fctx: FunctionContext, stmt:
     return;
   }
 
+  if (ts.isWithStatement(stmt)) {
+    reportWithStatementDiagnostic(ctx, stmt);
+    return;
+  }
+
   if (ts.isFunctionDeclaration(stmt)) {
     // Skip if already hoisted (pre-compiled in function hoisting pass)
     if (stmt.name && ctx.funcMap.has(stmt.name.text)) return;
@@ -255,6 +260,32 @@ function compileStatementInner(ctx: CodegenContext, fctx: FunctionContext, stmt:
   }
 
   reportError(ctx, stmt, `Unsupported statement: ${ts.SyntaxKind[stmt.kind]}`);
+}
+
+function reportWithStatementDiagnostic(ctx: CodegenContext, stmt: ts.WithStatement): void {
+  reportError(
+    ctx,
+    stmt,
+    `#1387: with statement requires IR-proven closed-shape lowering before codegen; cannot safely prove HasBinding for ${describeWithTarget(
+      stmt.expression,
+    )}. ECMA-262 14.11.2 creates an Object Environment Record, 9.1.1.2.1 checks HasProperty plus @@unscopables, and 7.3.11 includes inherited properties. Dynamic fallback is deferred to #1472.`,
+  );
+}
+
+function describeWithTarget(expr: ts.Expression): string {
+  if (ts.isObjectLiteralExpression(expr)) {
+    return "object literal target because the current IR has no closed-shape fact for Object.prototype, @@unscopables, and key-set/prototype mutation";
+  }
+  if (ts.isIdentifier(expr)) {
+    return `identifier target "${expr.text}" because its runtime shape and mutation history are not proven closed`;
+  }
+  if (ts.isPropertyAccessExpression(expr)) {
+    return `property access target "${expr.getText()}" because its runtime shape and mutation history are not proven closed`;
+  }
+  if (ts.isCallExpression(expr) || ts.isNewExpression(expr)) {
+    return `${ts.SyntaxKind[expr.kind]} target because calls may return open or host objects`;
+  }
+  return `${ts.SyntaxKind[expr.kind]} target`;
 }
 
 // Register compileStatement delegate in shared.ts so index.ts (and any other
