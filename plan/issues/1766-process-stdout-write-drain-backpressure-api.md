@@ -3,7 +3,7 @@ id: 1766
 title: "process.stdout.write backpressure / once('drain') pattern not supported"
 status: blocked
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -14,7 +14,7 @@ area: host-interop
 goal: platform
 related: [389, 1042, 1326, 1575, 1753]
 depends_on: [1042, 1326, 1575]
-sprint: 58
+sprint: 59
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 ---
 
