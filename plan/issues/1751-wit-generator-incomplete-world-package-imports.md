@@ -1,9 +1,9 @@
 ---
 id: 1751
 title: "WIT generator emits an incomplete world: hardcoded package name + no WASI imports"
-status: ready
+status: review
 created: 2026-05-30
-updated: 2026-05-31
+updated: 2026-06-02
 priority: medium
 feasibility: medium
 task_type: feature
@@ -74,3 +74,21 @@ output is thin.
 - The emitted `world` includes the module's `import`s, not just exports.
 - A regression test covers the native-messaging host shape (`export main` +
   WASI imports) and ideally a `wasm-tools` round-trip.
+
+## Implementation status (2026-06-02)
+
+Status: implemented on `symphony/1751`; ready for review.
+
+Changes:
+- Added `--wit-package <ns:name[@version]>` to the CLI. The flag implies `--wit`.
+- WIT package names now default to `js2wasm:<input-basename>` when no package is supplied, replacing `local:module`.
+- WIT generation consumes the compiled module's import/type table and emits function imports in the world, preserving the original core import module/name in doc comments.
+- WASI native-messaging shape now emits `fd-read`, `fd-write`, and `proc-exit` imports plus `export main: func();`.
+
+Validation:
+- `pnpm test tests/issue-1751.test.ts tests/wit-generator.test.ts`
+- `pnpm exec tsc --noEmit --pretty false`
+
+Notes:
+- `wasm-tools` is not installed in the workspace, so the stretch round-trip parity check was not added.
+- Non-function core imports are not emitted as WIT world imports because WIT world items express functions/interfaces, not raw core globals/tables/tags.

@@ -201,7 +201,8 @@ export interface CompileOptions {
   skipSemanticDiagnostics?: boolean;
   /** Generate a WIT (WebAssembly Interface Types) file from exported functions.
    *  When set, the result will include a `wit` field with the WIT interface definition.
-   *  Value can be true (use defaults) or an object with packageName/worldName options. */
+   *  Value can be true (derive package name from fileName/moduleName) or an object with
+   *  packageName/worldName options. */
   wit?: boolean | { packageName?: string; worldName?: string };
   /** Run Binaryen wasm-opt post-processing on the output binary (default: false).
    *  Requires either the 'binaryen' npm package or wasm-opt on PATH.

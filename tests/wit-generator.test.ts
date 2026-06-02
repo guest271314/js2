@@ -24,7 +24,7 @@ describe("WIT generator", () => {
     const wit = result.wit!;
 
     // Should have package declaration
-    expect(wit).toContain("package local:module;");
+    expect(wit).toContain("package js2wasm:input;");
     // Should have world
     expect(wit).toContain("world module {");
 

@@ -685,7 +685,7 @@ export function compileSourceSync(
   let witOutput: string | undefined;
   if (options.wit) {
     const witOpts = typeof options.wit === "object" ? options.wit : undefined;
-    witOutput = generateWit(ast, witOpts);
+    witOutput = generateWit(ast, { ...witOpts, imports: mod.imports, types: mod.types });
   }
 
   return {
@@ -967,6 +967,11 @@ export async function compileMultiSource(
   };
   const dts = generateDts(entryAst, mod);
   const importsHelper = generateImportsHelper(mod);
+  let witOutput: string | undefined;
+  if (options.wit) {
+    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
+    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  }
 
   return {
     binary,
@@ -978,6 +983,7 @@ export async function compileMultiSource(
     stringPool: mod.stringPool,
     sourceMap: sourceMapJson,
     imports: buildImportManifest(mod),
+    wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
@@ -1211,6 +1217,11 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   };
   const dts = generateDts(entryAst, mod);
   const importsHelper = generateImportsHelper(mod);
+  let witOutput: string | undefined;
+  if (options.wit) {
+    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
+    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  }
 
   return {
     binary,
@@ -1222,6 +1233,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     stringPool: mod.stringPool,
     sourceMap: sourceMapJson,
     imports: buildImportManifest(mod),
+    wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,

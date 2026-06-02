@@ -55,6 +55,8 @@ Options:
   --no-wat          Skip WAT output
   --no-dts          Skip .d.ts output
   --wit             Generate WIT interface file for Component Model
+  --wit-package <p> Package name for --wit output (ns:name[@version]).
+                    Implies --wit. Defaults to js2wasm:<input-basename>.
   -O, --optimize    Run Binaryen wasm-opt optimizer (default: -O3)
   -O1..-O4          Set optimization level (1-4)
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
@@ -95,6 +97,7 @@ let watOnly = false;
 let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
 let emitWit = false;
+let witPackageName: string | undefined;
 let allowFs = false;
 let quiet = false;
 let utf8Storage = false;
@@ -125,6 +128,22 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === "--no-dts") {
     emitDts = false;
   } else if (arg === "--wit") {
+    emitWit = true;
+  } else if (arg === "--wit-package") {
+    const pkg = args[++i];
+    if (!pkg) {
+      console.error("--wit-package requires a package name argument");
+      process.exit(1);
+    }
+    witPackageName = pkg;
+    emitWit = true;
+  } else if (arg.startsWith("--wit-package=")) {
+    const pkg = arg.slice("--wit-package=".length);
+    if (!pkg) {
+      console.error("--wit-package requires a package name argument");
+      process.exit(1);
+    }
+    witPackageName = pkg;
     emitWit = true;
   } else if (arg === "--allow-fs") {
     allowFs = true;
@@ -199,9 +218,10 @@ const dir = outDir ? resolve(outDir) : dirname(absInput);
 const result = await compile(source, {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
-  ...(emitWit ? { wit: true } : {}),
+  ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
+  fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
 });

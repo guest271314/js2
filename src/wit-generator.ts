@@ -20,12 +20,17 @@
 
 import { ts } from "./ts-api.js";
 import type { TypedAST } from "./checker/index.js";
+import type { Import, TypeDef, ValType } from "./ir/types.js";
 
 export interface WitGeneratorOptions {
-  /** Package name for the WIT world (default: "local:module") */
+  /** Package name for the WIT world (default: derived from the source filename) */
   packageName?: string;
   /** World name (default: "module") */
   worldName?: string;
+  /** Compiled module imports to include in the world import surface. */
+  imports?: readonly Import[];
+  /** Compiled module type table used to render import function signatures. */
+  types?: readonly TypeDef[];
 }
 
 interface WitRecord {
@@ -39,18 +44,25 @@ interface WitFunc {
   result: string | null;
 }
 
+interface WitImportFunc extends WitFunc {
+  sourceModule: string;
+  sourceName: string;
+}
+
 /**
  * Generate a WIT interface definition from a TypedAST.
  * Extracts all exported functions and referenced interfaces/type aliases,
  * then maps them to WIT types.
  */
 export function generateWit(ast: TypedAST, options?: WitGeneratorOptions): string {
-  const packageName = options?.packageName ?? "local:module";
+  const packageName = options?.packageName ?? defaultPackageNameForSource(ast.sourceFile.fileName);
   const worldName = options?.worldName ?? "module";
 
   const records: WitRecord[] = [];
   const recordNames = new Set<string>();
   const funcs: WitFunc[] = [];
+  const importResources = new Set<string>();
+  const importFuncs = importsToWit(options?.imports ?? [], options?.types ?? [], importResources);
 
   const sf = ast.sourceFile;
   const checker = ast.checker;
@@ -91,6 +103,13 @@ export function generateWit(ast: TypedAST, options?: WitGeneratorOptions): strin
   lines.push("");
   lines.push(`world ${worldName} {`);
 
+  for (const resource of importResources) {
+    lines.push(`  resource ${resource};`);
+  }
+  if (importResources.size > 0 && (records.length > 0 || importFuncs.length > 0 || funcs.length > 0)) {
+    lines.push("");
+  }
+
   // Emit records
   for (const rec of records) {
     lines.push(`  record ${rec.name} {`);
@@ -98,6 +117,17 @@ export function generateWit(ast: TypedAST, options?: WitGeneratorOptions): strin
       lines.push(`    ${field.name}: ${field.type},`);
     }
     lines.push("  }");
+    lines.push("");
+  }
+
+  // Emit compiled module imports
+  for (const func of importFuncs) {
+    const params = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+    const returnPart = func.result ? ` -> ${func.result}` : "";
+    lines.push(`  /// Core import: ${func.sourceModule}.${func.sourceName}`);
+    lines.push(`  import ${func.name}: func(${params})${returnPart};`);
+  }
+  if (importFuncs.length > 0 && funcs.length > 0) {
     lines.push("");
   }
 
@@ -168,7 +198,7 @@ function mapTypeToWit(
     }
 
     // Named type reference -> check if it's a known record
-    const witName = toKebabCase(typeName);
+    const witName = toWitIdentifier(typeName);
     if (recordNames.has(witName)) {
       return witName;
     }
@@ -212,7 +242,7 @@ function mapTypeToWit(
     const fields: { name: string; type: string }[] = [];
     for (const member of typeNode.members) {
       if (ts.isPropertySignature(member) && member.name && member.type) {
-        const fieldName = toKebabCase(member.name.getText(sf));
+        const fieldName = toWitIdentifier(member.name.getText(sf));
         const fieldType = mapTypeToWit(member.type, sf, checker, records, recordNames);
         if (fieldType) {
           fields.push({ name: fieldName, type: fieldType });
@@ -248,12 +278,12 @@ function interfaceToRecord(
   records: WitRecord[],
   recordNames: Set<string>,
 ): WitRecord | null {
-  const name = toKebabCase(node.name.text);
+  const name = toWitIdentifier(node.name.text);
   const fields: { name: string; type: string }[] = [];
 
   for (const member of node.members) {
     if (ts.isPropertySignature(member) && member.name && member.type) {
-      const fieldName = toKebabCase(member.name.getText(sf));
+      const fieldName = toWitIdentifier(member.name.getText(sf));
       const fieldType = mapTypeToWit(member.type, sf, checker, records, recordNames);
       if (fieldType) {
         fields.push({ name: fieldName, type: fieldType });
@@ -272,13 +302,13 @@ function typeAliasToRecord(
   records: WitRecord[],
   recordNames: Set<string>,
 ): WitRecord | null {
-  const name = toKebabCase(node.name.text);
+  const name = toWitIdentifier(node.name.text);
 
   if (ts.isTypeLiteralNode(node.type)) {
     const fields: { name: string; type: string }[] = [];
     for (const member of node.type.members) {
       if (ts.isPropertySignature(member) && member.name && member.type) {
-        const fieldName = toKebabCase(member.name.getText(sf));
+        const fieldName = toWitIdentifier(member.name.getText(sf));
         const fieldType = mapTypeToWit(member.type, sf, checker, records, recordNames);
         if (fieldType) {
           fields.push({ name: fieldName, type: fieldType });
@@ -314,7 +344,7 @@ function resolveObjectTypeToRecord(
     const propType = checker.getTypeOfSymbolAtLocation(prop, decl);
     const witType = mapTsTypeToWit(propType, checker, records, recordNames);
     if (witType) {
-      fields.push({ name: toKebabCase(prop.name), type: witType });
+      fields.push({ name: toWitIdentifier(prop.name), type: witType });
     }
   }
 
@@ -364,11 +394,11 @@ function functionToWit(
 ): WitFunc | null {
   if (!node.name) return null;
 
-  const name = toKebabCase(node.name.text);
+  const name = toWitIdentifier(node.name.text);
   const params: { name: string; type: string }[] = [];
 
   for (const param of node.parameters) {
-    const paramName = ts.isIdentifier(param.name) ? toKebabCase(param.name.text) : `p${params.length}`;
+    const paramName = ts.isIdentifier(param.name) ? toWitIdentifier(param.name.text) : `p${params.length}`;
     const paramType = mapTypeToWit(param.type, sf, checker, records, recordNames);
     if (paramType) {
       params.push({ name: paramName, type: paramType });
@@ -394,4 +424,168 @@ function toKebabCase(name: string): string {
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
     .replace(/([A-Z])([A-Z][a-z])/g, "$1-$2")
     .toLowerCase();
+}
+
+const WIT_KEYWORDS = new Set([
+  "as",
+  "bool",
+  "borrow",
+  "char",
+  "constructor",
+  "enum",
+  "export",
+  "flags",
+  "f32",
+  "f64",
+  "from",
+  "func",
+  "future",
+  "import",
+  "include",
+  "interface",
+  "list",
+  "option",
+  "own",
+  "package",
+  "record",
+  "resource",
+  "result",
+  "s8",
+  "s16",
+  "s32",
+  "s64",
+  "static",
+  "stream",
+  "string",
+  "tuple",
+  "type",
+  "u8",
+  "u16",
+  "u32",
+  "u64",
+  "use",
+  "variant",
+  "with",
+  "world",
+]);
+
+const KNOWN_IMPORT_PARAM_NAMES = new Map<string, string[]>([
+  ["wasi_snapshot_preview1.fd_write", ["fd", "iovs", "iovs-len", "nwritten"]],
+  ["wasi_snapshot_preview1.fd_read", ["fd", "iovs", "iovs-len", "nread"]],
+  ["wasi_snapshot_preview1.proc_exit", ["code"]],
+  ["wasi_snapshot_preview1.random_get", ["buf", "buf-len"]],
+  ["wasi_snapshot_preview1.poll_oneoff", ["in", "out", "nsubscriptions", "nevents"]],
+  ["wasi_snapshot_preview1.environ_sizes_get", ["count", "buf-size"]],
+  ["wasi_snapshot_preview1.environ_get", ["environ", "environ-buf"]],
+  ["wasi_snapshot_preview1.clock_time_get", ["clock-id", "precision", "time"]],
+  [
+    "wasi_snapshot_preview1.path_open",
+    ["fd", "dirflags", "path", "path-len", "oflags", "rights-base", "rights-inheriting", "fdflags", "fd-out"],
+  ],
+  ["wasi_snapshot_preview1.fd_close", ["fd"]],
+  ["env.__wasi_env_get_str", ["key"]],
+]);
+
+function importsToWit(imports: readonly Import[], types: readonly TypeDef[], resources: Set<string>): WitImportFunc[] {
+  const funcs: WitImportFunc[] = [];
+  const usedNames = new Set<string>();
+
+  for (const imp of imports) {
+    if (imp.desc.kind !== "func") continue;
+    const typeDef = types[imp.desc.typeIdx];
+    if (!typeDef || typeDef.kind !== "func") continue;
+
+    const sourceKey = `${imp.module}.${imp.name}`;
+    const knownParamNames = KNOWN_IMPORT_PARAM_NAMES.get(sourceKey) ?? [];
+    const params = typeDef.params.map((paramType, i) => ({
+      name: toWitIdentifier(knownParamNames[i] ?? `p${i}`),
+      type: mapWasmValTypeToWit(paramType, resources),
+    }));
+    const results = typeDef.results.map((resultType) => mapWasmValTypeToWit(resultType, resources));
+    const result = results.length === 0 ? null : results.length === 1 ? results[0]! : `tuple<${results.join(", ")}>`;
+
+    funcs.push({
+      name: uniqueWitImportName(toWitIdentifier(imp.name), imp.module, usedNames),
+      params,
+      result,
+      sourceModule: imp.module,
+      sourceName: imp.name,
+    });
+  }
+
+  return funcs;
+}
+
+function mapWasmValTypeToWit(type: ValType, resources: Set<string>): string {
+  switch (type.kind) {
+    case "i8":
+      return "s8";
+    case "i16":
+      return "s16";
+    case "i32":
+      return "s32";
+    case "i64":
+      return "s64";
+    case "f32":
+      return "f32";
+    case "f64":
+      return "f64";
+    case "v128":
+      return "list<u8>";
+    case "funcref":
+      resources.add("host-func");
+      return "host-func";
+    case "externref":
+    case "ref_extern":
+    case "eqref":
+    case "anyref":
+    case "ref":
+    case "ref_null":
+      resources.add("host-ref");
+      return "host-ref";
+  }
+}
+
+function uniqueWitImportName(baseName: string, moduleName: string, usedNames: Set<string>): string {
+  if (!usedNames.has(baseName)) {
+    usedNames.add(baseName);
+    return baseName;
+  }
+
+  const modulePrefixed = `${toWitIdentifier(moduleName)}-${baseName}`;
+  if (!usedNames.has(modulePrefixed)) {
+    usedNames.add(modulePrefixed);
+    return modulePrefixed;
+  }
+
+  let suffix = 2;
+  while (usedNames.has(`${modulePrefixed}-${suffix}`)) suffix++;
+  const unique = `${modulePrefixed}-${suffix}`;
+  usedNames.add(unique);
+  return unique;
+}
+
+function defaultPackageNameForSource(fileName: string): string {
+  return `js2wasm:${toPackageIdentifier(baseNameWithoutExtension(fileName))}`;
+}
+
+function baseNameWithoutExtension(fileName: string): string {
+  const normalized = fileName.replace(/\\/g, "/");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1) || "module";
+  return base.replace(/\.[^.]+$/, "") || "module";
+}
+
+function toPackageIdentifier(name: string): string {
+  const ident = toKebabCase(name)
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-")
+    .toLowerCase();
+  if (!ident) return "module";
+  return /^[0-9]/.test(ident) ? `x-${ident}` : ident;
+}
+
+function toWitIdentifier(name: string): string {
+  const ident = toPackageIdentifier(name);
+  return WIT_KEYWORDS.has(ident) ? `%${ident}` : ident;
 }
