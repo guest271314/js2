@@ -57,6 +57,11 @@ From the dev-1553b destructuring-lane verification sweep.
 - [#1771](../1771-prepush-issue-integrity-committed-tree.md) — Pre-push issue integrity must check the committed tree so dangling `depends_on` edges cannot be masked by uncommitted sibling issue files — medium, easy, **DONE (sprint 58)**.
 - [#1773](../1773-generate-graph-data-in-ci-and-labs.md) — Generate `website/public/graph-data.json` in CI/build output and publish the snapshot to labs instead of tracking the generated JSON in public source — medium, easy, **DONE (sprint 58)**.
 
+## Landing page / conformance dashboard UX (2026-06-02)
+
+- [#1777](../1777-landing-es-edition-slider-2026-notch-thumb-offset.md) — landing page ES edition slider shows ES2026 as a published notch and the thumb drifts right of ticks while dragging — medium, easy, **ready**.
+- [#1778](../1778-landing-standalone-test262-pass-rate-real-number.md) — landing page JS-host toggle should show the real standalone-mode test262 pass rate instead of a scaled estimate — medium, medium, **ready (s58)**.
+
 ## Sprint 55 — repo structure / website (2026-05-24)
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.
