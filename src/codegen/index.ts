@@ -136,6 +136,11 @@ export const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
   "Float64Array",
 ]);
 
+function typedArrayNameFromTypeNode(node: ts.TypeNode): string | null {
+  if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) return null;
+  return TYPED_ARRAY_NAMES.has(node.typeName.text) ? node.typeName.text : null;
+}
+
 /**
  * (#1700) Classify a TS type at an export boundary for the runtime
  * `wrapExports` marshalling step. The Wasm signature for `Uint8Array` and
@@ -440,6 +445,14 @@ function resolvePositionType(
           const cs = classShapes.get(ref.text);
           if (cs) return { kind: "class", shape: cs };
         }
+      }
+      // TypedArray<TArrayBuffer> (TS 5.7+) carries an ArrayBufferLike type
+      // argument that is erased at runtime. Lower it exactly like the bare
+      // typed-array annotation.
+      if (typedArrayNameFromTypeNode(node)) {
+        const elemWasm: ValType = { kind: "f64" };
+        const vecIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
+        return irVal({ kind: "ref_null", typeIdx: vecIdx });
       }
       // Slice 6 part 2 (#1181) — `Array<T>` TypeReferenceNode resolves
       // to a vec ref, parallel to the `T[]` ArrayTypeNode arm above.
