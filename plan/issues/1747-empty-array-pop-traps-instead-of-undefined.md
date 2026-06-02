@@ -1,7 +1,7 @@
 ---
 id: 1747
 title: "Array.prototype.pop() on an empty array traps instead of returning undefined (compiled WasmGC)"
-status: ready
+status: in-review
 created: 2026-05-30
 updated: 2026-06-02
 priority: medium
@@ -13,6 +13,9 @@ language_feature: array-pop, empty-array, undefined
 goal: standalone-correctness
 sprint: 58
 related: [1584, 1748]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T20:53:18.030Z
+pr: 1044
 ---
 # #1747 — `[].pop()` on an empty array traps instead of returning `undefined`
 
@@ -64,3 +67,25 @@ code doesn't hit the same trap.
   codegen path.
 - See [[1748]] for a sibling codegen trap found in the same investigation
   (`readonly` nested array field).
+
+## Implementation notes
+
+- Verified ECMA-262 §23.1.3.22 (`Array.prototype.pop`) and §23.1.3.27
+  (`Array.prototype.shift`): both return `undefined` immediately when
+  `length = 0`.
+- Current branch already guarded the raw array read, so the reproduced failure
+  was no longer an out-of-bounds trap; it was an observable wrong result for
+  `number[]` because the intrinsic returned the primitive element type and
+  could not carry `undefined`.
+- Updated `pop`/`shift` lowering to use an `externref` result when the call's
+  TypeScript return includes `undefined` and no numeric expected type is
+  requesting the old primitive path. Empty arrays initialize that result to JS
+  `undefined`; non-empty numeric elements are boxed before storing into the
+  result local.
+- Left discarded calls (`arr.pop();`) on the primitive path because their
+  returned value is not observable and this avoids unnecessary late imports.
+
+## Validation
+
+- `pnpm vitest run tests/issue-1747.test.ts tests/issue-1377.test.ts tests/array-oob-bounds-check.test.ts`
+- `pnpm run typecheck`
