@@ -334,6 +334,8 @@ for (const fileName of [
   "playground-benchmark-sidebar-no-jit.json",
   "loadtime-benchmarks.json",
   "size-benchmarks.json",
+  "wasm-host-wasmtime-hot-runtime.json",
+  "wasm-host-wasmtime-module-size-per-test.json",
 ]) {
   const source = resolvePreferredFileOrNull(join(BENCHMARKS_RESULTS_DIR, fileName), join(PUBLIC_BENCH, fileName));
   if (source) {

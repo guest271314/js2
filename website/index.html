@@ -3263,7 +3263,7 @@ match (value) {
             runtimes use their full optimizing pipeline. Press the button to run the benchmark in your browser including
             additional DOM benchmarks. These public website benchmarks run in a JS host: the compiled Wasm is
             instantiated by the js2wasm JavaScript runtime and compared with the same source running in V8.
-            Standalone/WASI benchmark figures are hidden until the current regression is fixed.
+            Wasmtime/WASI benchmark figures are shown separately in the WASI host section below.
           </p>
           <div class="conformance-diagrams">
             <div class="diagram-panel">
@@ -3289,7 +3289,7 @@ match (value) {
           </div>
         </div>
 
-        <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
+        <div class="host-bench-group" id="wasmtime-bench-group">
           <h3 class="host-bench-title">WASI host</h3>
           <p class="host-bench-subcopy">
             Per-request cost of running the same JavaScript programs (source for each is shown inline below) across four
@@ -3349,7 +3349,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3364,7 +3363,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3411,7 +3409,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3426,7 +3423,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3477,7 +3473,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3492,7 +3487,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3548,7 +3542,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3563,7 +3556,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3587,7 +3579,6 @@ export function run(n) {
               <div
                 class="diagram-panel"
                 data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
               >
                 <perf-benchmark-chart
                   src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
@@ -4055,37 +4046,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
     <script type="module" src="./components/site-nav.js"></script>
     <script type="module" src="./components/t262-charts.js"></script>
     <script type="module" src="./components/perf-benchmark-chart.js"></script>
-    <!-- Standalone/WASI benchmark loader retained for later re-enable; disabled while standalone regression is fixed.
-    <script>
-      (async () => {
-        const group = document.getElementById("wasmtime-bench-group");
-        if (!(group instanceof HTMLElement)) return;
-        const panels = Array.from(group.querySelectorAll("[data-benchmark-src]"));
-        let visibleCount = 0;
-        await Promise.all(
-          panels.map(async (panel) => {
-            if (!(panel instanceof HTMLElement)) return;
-            const src = panel.dataset.benchmarkSrc;
-            if (!src) return;
-            try {
-              const resp = await fetch(src, { cache: "no-store" });
-              if (!resp.ok) return;
-              const data = await resp.json();
-              if (Array.isArray(data) && data.length > 0) {
-                panel.style.display = "";
-                visibleCount += 1;
-              }
-            } catch {
-              // Leave unavailable benchmark panels hidden.
-            }
-          }),
-        );
-        if (visibleCount > 0) {
-          group.style.display = "";
-        }
-      })();
-    </script>
-    -->
     <script src="./components/trend-chart.js"></script>
 
     <script>
