@@ -50,15 +50,6 @@ Additionally, `destructureParamObject` lacked a null guard — unlike
 
 ## Implementation Summary
 
-<<<<<<< Updated upstream
-Added a null guard to `destructureParamObject` in `src/codegen/index.ts`, matching the existing pattern in `destructureParamArray`. When a parameter has `ref_null` type (nullable), the destructuring instructions are wrapped in an `if-not-null` block using `ref.is_null`. If the parameter is null, the destructuring is skipped and locals retain their zero-initialized defaults.
-
-Changes:
-- `src/codegen/index.ts`: Added `ensureBindingLocals` call before destructuring loop, saved/swapped body for nullable params, emitted `ref.is_null` + `if/else` guard around struct field accesses
-- `tests/null-destructure-param-object.test.ts`: New test file verifying no crash on undefined object destructuring params
-
-This prevents the "RuntimeError: dereferencing a null pointer" crash for the 707 test262 tests that pass undefined/null to functions with object destructuring parameters.
-=======
 ### What was done
 - Widened parameter types from `ref` to `ref_null` for parameters with default
   values in 6 locations in `src/codegen/index.ts`:
@@ -71,19 +62,26 @@ This prevents the "RuntimeError: dereferencing a null pointer" crash for the 707
 - Added null guard to `destructureParamObject` with pre-allocation of binding
   locals and if-not-null wrapping of struct.get operations.
 - Added test file `tests/null-pointer-deref.test.ts` with 4 test cases.
+- Added `tests/null-destructure-param-object.test.ts`, verifying no crash on
+  undefined object destructuring params.
 
 ### Files changed
 - `src/codegen/index.ts` — param type widening + destructureParamObject null guard
 - `tests/null-pointer-deref.test.ts` — new test file
+- `tests/null-destructure-param-object.test.ts` — null object destructuring guard
+  coverage
 
 ### What worked
 - Standalone functions already had the `ref` -> `ref_null` widening for default
   params; the fix was applying the same pattern to class members.
 - The `destructureParamArray` null guard pattern was directly reusable for
-  `destructureParamObject`.
+  `destructureParamObject`. When a nullable parameter is null, destructuring is
+  skipped and binding locals keep their zero-initialized defaults.
+- This prevents the "RuntimeError: dereferencing a null pointer" crash for the
+  test262 cases that pass undefined/null to functions with object destructuring
+  parameters.
 
 ### What didn't work
 - Initial approach of adding null guards only to struct.get sites was too broad
   (hundreds of sites). The root cause was the parameter type itself, not the
   access sites.
->>>>>>> Stashed changes
