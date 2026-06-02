@@ -2,18 +2,19 @@
 id: 1713
 title: "IR backend-trait: audit WasmGC bias in lower.ts + define BackendEmitter seam"
 status: done
-completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
+completed: 2026-05-29
 priority: high
 feasibility: hard
 reasoning_effort: high
 task_type: refactor
 area: ir, codegen, architecture
 language_feature: n/a
-es_edition: n/a
 goal: backend-agnostic-ir
 sprint: 57
+required_by: [1714, 1715]
+es_edition: n/a
 related: [1131, 1527, 1530, 1584, 1714, 1715]
 needs_architect_spec: true
 ---

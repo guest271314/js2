@@ -19,8 +19,7 @@ files:
 ---
 # #573 — struct.get on null ref in class tests (751 CE + 223 null pointer FAIL)
 
-## Status: review
-
+## Status: in-review
 974 tests fail because of null struct references in class compilation:
 - 751 CE: Wasm validation "struct.get expected (ref null N), found ref.null" — the compiler emits struct.get on a bare ref.null instead of a typed nullable ref
 - 223 FAIL: "RuntimeError: dereferencing a null pointer" — struct.get on an actual null at runtime

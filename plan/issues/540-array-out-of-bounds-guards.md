@@ -25,8 +25,7 @@ files:
 ---
 # #540 -- Array out of bounds guards (14+ FAIL)
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 14+ test262 tests fail at runtime with array out-of-bounds traps. Several code paths emit unchecked `array.get` or `array.set` on user-provided or compile-time indices without verifying the array is long enough.

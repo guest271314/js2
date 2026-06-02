@@ -5,7 +5,6 @@ status: done
 created: 2026-05-29
 updated: 2026-05-30
 completed: 2026-05-30
-followups: [1749, 1750]
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -14,6 +13,7 @@ area: codegen, runtime
 language_feature: array-object-identity, destructuring-iterator-protocol
 goal: object-representation
 sprint: Backlog
+followups: [1749, 1750]
 es_edition: 2015
 test262_fail: 71
 test262_category: language/expressions, language/statements
@@ -22,7 +22,6 @@ canonical_tracking: array-object-value-representation
 supersedes_approach: intactness-gate (PR #937 / branch issue-1719-impl) — invalid premise
 dispatch: senior-dev-led foundational (multi-PR slices)
 ---
-
 # #1719 — Array destructuring must use the (possibly overridden) Array iterator (71 fails)
 
 ## Problem

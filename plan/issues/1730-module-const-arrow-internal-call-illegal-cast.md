@@ -12,7 +12,6 @@ language_feature: closures, arrow-functions
 goal: test262-conformance
 related: [1727, 1115]
 ---
-
 # #1730 — internal call to a module-level `const` arrow → "illegal cast"
 
 ## Problem

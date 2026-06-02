@@ -3,6 +3,7 @@ id: 1738
 title: "DataView.prototype.set* (setUint8 etc.) 'not a function' in JS-host mode"
 status: backlog
 created: 2026-05-29
+updated: 2026-05-29
 priority: medium
 feasibility: medium
 task_type: bugfix

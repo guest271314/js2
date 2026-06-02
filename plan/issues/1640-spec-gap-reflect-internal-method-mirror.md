@@ -4,9 +4,6 @@ title: "spec gap: Reflect.* invariant checks mirror internal-method bugs (47 tes
 status: blocked
 created: 2026-05-08
 updated: 2026-05-28b
-blocked_on: [1629, 1596]
-investigation_done: 2026-05-27
-reverified: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -17,6 +14,9 @@ goal: spec-completeness
 sprint: 50
 renumbered_from: 1346
 parent: 1328
+blocked_on: [1629, 1596]
+investigation_done: 2026-05-27
+reverified: 2026-05-28
 related: [1334, 1629, 1596, 1630, 1631, 1130]
 ---
 # #1346 — Reflect: invariant checks mirror internal-method bugs

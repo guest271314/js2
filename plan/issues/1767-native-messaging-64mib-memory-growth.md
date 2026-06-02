@@ -8,20 +8,19 @@ completed: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: high
-es_edition: n/a
-language_feature: typed-arrays
-task_type: bug
+task_type: bugfix
 area: runtime
+language_feature: typed-arrays
 goal: platform
-parent: 1753
-related: [389, 1655, 1723, 1724, 1753]
-depends_on: [1753]
 sprint: 58
+parent: 1753
+depends_on: [1753]
+es_edition: n/a
+related: [389, 1655, 1723, 1724, 1753]
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 claimed_by: codex-developer
 claimed_at: 2026-06-02T11:04:55.165Z
 ---
-
 # #1767 — native-messaging 64 MiB run grows wasmtime memory toward OOM
 
 ## Problem

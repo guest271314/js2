@@ -16,8 +16,7 @@ files:
 ---
 # Issue #290: Instanceof compile errors -- class hierarchy and expressions
 
-## Status: review
-
+## Status: in-review
 ## Summary
 ~20 tests fail in language/expressions/instanceof with compile errors. These involve instanceof checks against class expressions, function constructors, or values from complex expressions. The current instanceof implementation only handles simple class names.
 

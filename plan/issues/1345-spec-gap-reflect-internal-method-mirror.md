@@ -2,10 +2,8 @@
 id: 1345
 title: "spec gap: Reflect.* invariant checks mirror internal-method bugs (46 test262 fails as of 2026-05-28)"
 status: blocked
-blocked_on: [1130, 1596]
 created: 2026-05-08
 updated: 2026-05-28
-reverified: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -15,6 +13,8 @@ language_feature: reflection
 goal: spec-completeness
 sprint: 50
 parent: 1328
+blocked_on: [1130, 1596]
+reverified: 2026-05-28
 related: [1334, 1640, 1513, 1629, 1630, 1631, 1596, 1130]
 ---
 # #1345 — Reflect: invariant checks mirror internal-method bugs

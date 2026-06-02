@@ -27,8 +27,7 @@ files:
 ---
 # #336 -- For-of assignment destructuring on non-struct refs
 
-## Status: review
-
+## Status: in-review
 11 test262 tests fail with "for-of assignment destructuring: element is not a struct ref". Object destructuring in for-of loops fails when the iterated value is a primitive (boolean, number, string) or when the destructuring pattern expects named properties.
 
 ## Error pattern

@@ -13,9 +13,9 @@ area: wasi, runtime, docs
 language_feature: stdin, stdout, process.env
 goal: wasi-completeness
 sprint: 55
+depends_on: [1653, 1654]
 github_issue: 389
 filed_by: guest271314
-depends_on: [1653, 1654]
 related: [1482, 1483, 1484, 1651, 1653, 1654, 1655]
 ---
 ## Problem

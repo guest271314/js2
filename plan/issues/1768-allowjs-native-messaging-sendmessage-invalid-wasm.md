@@ -8,17 +8,15 @@ completed: 2026-06-01
 priority: high
 feasibility: medium
 reasoning_effort: high
-es_edition: multi
-language_feature: allowjs
-task_type: bug
+task_type: bugfix
 area: compiler
+language_feature: allowjs
 goal: platform
-related: [389, 80, 1061, 1654, 1753]
-depends_on: []
 sprint: 58
+es_edition: multi
+related: [389, 80, 1061, 1654, 1753]
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 ---
-
 # #1768 — allowJs native-messaging `sendMessage` emits invalid WASI wasm
 
 ## Problem

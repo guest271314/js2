@@ -6,14 +6,12 @@ created: 2026-05-30
 updated: 2026-05-30
 priority: medium
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: packaging
 goal: platform
-related: [389, 1530]
-depends_on: []
 sprint: Backlog
+related: [389, 1530]
 ---
-
 # #1754 — Build-from-repo: `@loopdive/js2` re-export unresolved
 
 ## Context

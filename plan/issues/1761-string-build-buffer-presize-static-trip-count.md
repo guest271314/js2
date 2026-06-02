@@ -11,11 +11,9 @@ task_type: perf
 area: codegen
 language_feature: strings
 goal: spec-completeness
-related: [1746, 1580, 1744]
-depends_on: []
 sprint: Backlog
+related: [1746, 1580, 1744]
 ---
-
 # #1761 — presize the string-build buffer from a static loop trip count
 
 Carved out of the #1746 umbrella as **lever #3 (array presizing)**, which the

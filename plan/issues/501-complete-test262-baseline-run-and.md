@@ -20,8 +20,7 @@ files:
 ---
 # #501 — Complete test262 baseline run and pin results
 
-## Status: review
-
+## Status: in-review
 The current `test262-report.json` is empty (runner crashed before writing it). The JSONL in `runs/2026-03-17_07-56-35` has 22,865 deduped results but was never promoted to a report.
 
 ## Tasks

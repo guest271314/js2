@@ -18,8 +18,7 @@ files:
 ---
 # #516 — struct.new argument count mismatch in class constructors (1,781 CE)
 
-## Status: review
-
+## Status: in-review
 1,781 tests fail Wasm validation because `struct.new` is called with the wrong number of arguments. The compiler emits fewer arguments than the struct type requires.
 
 Mostly in class constructors (`C_new`, `__anonClass_0_new`). The struct has fields from the class hierarchy (inherited + own + private) but the constructor doesn't push values for all of them.

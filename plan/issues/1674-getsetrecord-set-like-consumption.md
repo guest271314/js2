@@ -2,10 +2,8 @@
 id: 1674
 title: "GetSetRecord set-like consumption: .size NaN, coercion count, has/keys callable checks"
 status: blocked
-escalation: needs-architect-spec
 created: 2026-05-27
 updated: 2026-05-27
-verified: 2026-05-27
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -15,6 +13,8 @@ language_feature: set
 goal: spec-completeness
 sprint: Backlog
 parent: 1675
+escalation: needs-architect-spec
+verified: 2026-05-27
 ---
 # #1674 — GetSetRecord set-like consumption residuals
 

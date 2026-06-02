@@ -15,7 +15,6 @@ sprint: Backlog
 related: [1530, 1617, 1618]
 supersedes: 1617
 ---
-
 ## Problem
 
 `console.log` in WASI mode always appends a newline and UTF-8-encodes its argument.

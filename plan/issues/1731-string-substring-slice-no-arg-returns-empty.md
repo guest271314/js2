@@ -2,9 +2,9 @@
 id: 1731
 title: "String.prototype.substring()/slice() with no args returns '' instead of the whole string"
 status: done
-completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
+completed: 2026-05-29
 priority: medium
 feasibility: easy
 task_type: bugfix

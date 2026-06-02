@@ -1,7 +1,7 @@
 ---
 id: 1470
 title: "host-independence: eliminate JS host string ops for standalone Wasm"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

@@ -18,8 +18,7 @@ files:
 ---
 # #625 — Wasm local.set type mismatch (552 CE)
 
-## Status: review
-
+## Status: in-review
 552 tests fail with Wasm validation: local.set expects one type but receives another. Common patterns:
 - `local.set expected (ref null N), found externref`
 - `local.set expected f64, found i32`

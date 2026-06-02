@@ -3,6 +3,7 @@ id: 1740
 title: "String.prototype.padStart/padEnd omitted fillString defaults to 'null' instead of space"
 status: done
 created: 2026-05-29
+updated: 2026-05-29
 completed: 2026-05-29
 priority: medium
 feasibility: easy

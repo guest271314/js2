@@ -18,8 +18,7 @@ files:
 ---
 # #603 -- Remove ~5,100 stale skip filters blocking already-implemented features
 
-## Status: review
-
+## Status: in-review
 ~5,100 tests were blocked by skip filters for features that have been implemented or that were overly broad. The skip filters in `test262-runner.ts` were not updated when the corresponding issues were completed.
 
 ## Filters removed (15 total)

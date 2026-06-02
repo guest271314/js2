@@ -12,8 +12,7 @@ sprint: 19
 ---
 # #767 -- Equivalence test coverage gaps: RegExp, Promise, async iterators
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 Several implemented or partially-implemented features lack equivalence tests (Wasm vs JS comparison). This means regressions can go undetected. Key gaps:

@@ -16,8 +16,7 @@ files:
 ---
 # Issue #305: Runtime failures -- computed property names and types/reference
 
-## Status: review
-
+## Status: in-review
 ## Summary
 2 tests fail at runtime: 1 in language/computed-property-names and 1 in language/types/reference. The computed property name test likely has an evaluation order issue, and the reference test likely has a type coercion or assignment edge case.
 

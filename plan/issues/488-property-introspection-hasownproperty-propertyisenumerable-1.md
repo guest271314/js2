@@ -19,8 +19,7 @@ files:
 ---
 # #488 — Property introspection: hasOwnProperty / propertyIsEnumerable (1,617 tests)
 
-## Status: review
-
+## Status: in-review
 1,617 tests skipped because they use `hasOwnProperty`, `propertyIsEnumerable`, or `Object.prototype.hasOwnProperty.call()`.
 
 ## Approach

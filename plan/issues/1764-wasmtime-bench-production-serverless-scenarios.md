@@ -8,14 +8,13 @@ completed: 2026-06-01
 priority: medium
 feasibility: hard
 reasoning_effort: high
-task_type: enhancement
+task_type: feature
 area: benchmarks
 goal: platform
 sprint: 58
 related: [1760, 1580, 1746]
 origin: project lead asked to (1) strip commercial platform names from the edge-serverless benchmark framing and (2) make the cold lane model how production edge runtimes actually serve a request — a per-request context/instance from a warm engine — instead of a full OS-process spawn per request.
 ---
-
 # #1764 — model production edge-serverless per-request instantiation (warm engine), not full process spawns
 
 ## Problem

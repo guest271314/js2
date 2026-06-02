@@ -12,10 +12,9 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
-related: [1744, 1580, 1199, 1175, 1210]
 sprint: 57
+related: [1744, 1580, 1199, 1175, 1210]
 ---
-
 # #1746 — string-hash: close (and potentially beat) the warm-V8 gap
 
 ## Context

@@ -15,7 +15,6 @@ goal: spec-completeness
 sprint: 50
 renumbered_from: 1351
 parent: 1328
-updated: 2026-05-27
 ---
 # #1351 — Set new methods: accept any set-like (size + has + keys)
 

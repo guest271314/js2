@@ -18,8 +18,7 @@ files:
 ---
 # #414 -- Super keyword unsupported in remaining positions
 
-## Status: review
-
+## Status: in-review
 11 tests fail with "Unsupported expression: SuperKeyword". While #375 (done) added basic super support, some positions remain unhandled.
 
 ## Root cause

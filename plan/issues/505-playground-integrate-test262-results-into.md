@@ -26,7 +26,7 @@ files:
 <<<<<<< HEAD
 ## Status: in-progress
 =======
-## Status: review
+## Status: in-review
 >>>>>>> 2516a48f (feat: integrate test262 results into playground dashboard (#505))
 
 The playground has a test262 tab that currently only browses test files — it shows no results (pass/fail/skip). Add conformance data to make it a live dashboard.

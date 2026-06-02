@@ -2,9 +2,9 @@
 id: 1318
 title: "test harness: 'returned N' bare exit code — capture last assertion detail (~8,900 vague failures)"
 status: done
-completed: 2026-05-27
 created: 2026-05-07
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: medium

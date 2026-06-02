@@ -2,9 +2,9 @@
 id: 1529
 title: "codegen: 'illegal cast' umbrella at closure & destructuring parameter boundaries"
 status: done
-completed: 2026-05-28
 created: 2026-05-20
 updated: 2026-05-20
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: high

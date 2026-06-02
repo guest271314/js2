@@ -11,12 +11,10 @@ reasoning_effort: low
 task_type: infrastructure
 area: ci
 goal: platform
-related: [1067, 1616, 1771]
-depends_on: []
 sprint: 58
+related: [1067, 1616, 1771]
 origin: "Project lead feedback after repeated website/public/graph-data.json merge conflicts."
 ---
-
 # #1773 - generate dependency graph data in CI and publish to labs
 
 ## Problem

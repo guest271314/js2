@@ -14,6 +14,7 @@ language_feature: strings
 goal: platform
 sprint: 55
 depends_on: [1586]
+required_by: [1650]
 es_edition: multi
 ---
 # #1588 — String encoding tracking: prove UTF-8 guarantees for zero-copy Component Model interop

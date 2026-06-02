@@ -1,7 +1,7 @@
 ---
 id: 1466
 title: "spec gap: Proxy + Reflect trap / operation fidelity"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

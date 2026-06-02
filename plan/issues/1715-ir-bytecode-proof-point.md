@@ -11,14 +11,13 @@ reasoning_effort: high
 task_type: feature
 area: ir, runtime, architecture
 language_feature: n/a
-es_edition: n/a
 goal: backend-agnostic-ir
 sprint: 57
 depends_on: [1713]
+es_edition: n/a
 related: [1584, 1131, 1714]
 needs_architect_spec: true
 ---
-
 # #1715 — Minimal bytecode emitter + dispatch loop for an IR subset (proof point)
 
 ## Problem

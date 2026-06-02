@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #180 — JS var re-declaration: "Subsequent variable declarations must have the same type"
 
-## Status: review
-
+## Status: in-review
 ## Summary
 26 test262 compile errors from TypeScript rejecting `var` re-declarations with different inferred types. In JavaScript, `var x = 1; var x = "hello";` is legal but TypeScript rejects it when the types differ.
 

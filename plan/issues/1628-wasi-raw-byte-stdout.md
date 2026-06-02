@@ -4,6 +4,7 @@ title: "wasi: raw-byte stdout primitive (writeStdout(bytes)) for binary protocol
 status: wont-fix
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium

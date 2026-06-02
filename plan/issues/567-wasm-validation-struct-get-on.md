@@ -18,8 +18,7 @@ files:
 ---
 # #567 — Wasm validation: struct.get on null ref type (860 CE)
 
-## Status: review
-
+## Status: in-review
 860 tests fail Wasm validation with "struct.get[0] expected type (ref null N), found ref.null" — the compiler accesses struct fields on a bare `ref.null` instead of a properly typed nullable ref.
 
 This is the #1 Wasm validation error. The compiler needs to ensure all struct field accesses have properly typed references, even when the value could be null.

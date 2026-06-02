@@ -15,7 +15,6 @@ github_issue: 601
 filed_by: guest271314
 related: [601, 1661, 1471]
 ---
-
 ## Motivation
 
 From GitHub issue **#601** (guest271314). In default (JS-host) mode, the

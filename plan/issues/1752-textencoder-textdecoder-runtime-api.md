@@ -10,11 +10,9 @@ task_type: feature
 area: runtime
 language_feature: web-api
 goal: platform
-related: [389, 1588, 1655]
-depends_on: []
 sprint: 58
+related: [389, 1588, 1655]
 ---
-
 # #1752 — TextEncoder / TextDecoder runtime API
 
 ## Context

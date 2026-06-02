@@ -1,7 +1,7 @@
 ---
 id: 1462
 title: "spec gap: Object.getOwnPropertyDescriptor + Object.create descriptor surface"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

@@ -19,8 +19,7 @@ files:
 ---
 # #563 — Unsupported call expression (826 CE remaining)
 
-## Status: review
-
+## Status: in-review
 Still the #1 CE bucket. 826 tests fail with "Unsupported call expression" (down from 3,491 after tech lead fixes). Down from 3,711 last run but still dominant (46% of all CEs).
 
 Needs sub-analysis to identify which specific call patterns remain after previous fixes (#409, #517, #530 all done).

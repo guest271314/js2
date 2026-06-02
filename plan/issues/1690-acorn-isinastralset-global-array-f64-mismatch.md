@@ -16,7 +16,6 @@ sprint: Backlog
 related: [1679, 1677, 1666, 1618, 1314, 1710, 1711, 1712]
 note: "Surfaced behind #1679. With #1679's `new this(...)` blocker gone on current main (e622751f7), acorn.mjs now compiles to success=true with 0 errors but emits INVALID Wasm — the next blocker. Distinct from #1679 (which is codegen-acceptance only)."
 ---
-
 ## Root cause + fix (2026-05-28)
 
 The hypothesis in the issue body was almost right (an index-shift

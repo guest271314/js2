@@ -16,7 +16,6 @@ sprint: Backlog
 depends_on: [1654]
 related: [1651, 1653, 1654]
 ---
-
 ## Problem
 
 #1651 added `process.stdout.write(str)` and

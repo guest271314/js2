@@ -1,7 +1,7 @@
 ---
 id: 1751
 title: "WIT generator emits an incomplete world: hardcoded package name + no WASI imports"
-status: review
+status: in-review
 created: 2026-05-30
 updated: 2026-06-02
 priority: medium
@@ -9,11 +9,9 @@ feasibility: medium
 task_type: feature
 area: wit-generator
 goal: platform
-related: [600, 639, 389]
-depends_on: []
 sprint: 58
+related: [600, 639, 389]
 ---
-
 # #1751 — WIT generator emits an incomplete world
 
 ## Context

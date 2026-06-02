@@ -7,7 +7,7 @@ updated: 2026-05-31
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-task_type: bug
+task_type: bugfix
 area: benchmarks
 goal: platform
 sprint: Backlog

@@ -1,7 +1,7 @@
 ---
 id: 1502
 title: "browser: localStorage / sessionStorage host imports with standalone fallback"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

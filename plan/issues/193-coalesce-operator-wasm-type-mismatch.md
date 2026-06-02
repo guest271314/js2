@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #193 — Coalesce operator wasm type mismatch
 
-## Status: review
-
+## Status: in-review
 ## Summary
 7 coalesce (`??`) operator tests fail to compile. While 11 pass, the remaining errors involve wasm type mismatches when the left/right operands have different types.
 

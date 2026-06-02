@@ -44,7 +44,7 @@ Planning → Open → In Progress → Review → Done → Deploy → Next Sprint
 ```markdown
 # Issue #N: Title
 
-## Status: backlog|open|in-progress|review|done
+## Status: backlog|open|in-progress|in-review|done
 
 ## Summary
 Brief description of the feature or bug.

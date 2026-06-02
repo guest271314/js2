@@ -17,8 +17,7 @@ files:
 ---
 # #701 — resolveWasmType infinite recursion with skipSemanticDiagnostics
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 When `skipSemanticDiagnostics: true` is used (for 140x compile speedup), TypeScript's `getTypeArguments()` API can return incomplete type info for generic types like `Promise<T>` and `Array<T>`. Instead of returning the proper inner type, it may return the container type itself — causing `resolveWasmType()` to recurse infinitely.

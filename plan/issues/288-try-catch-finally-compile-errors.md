@@ -17,8 +17,7 @@ files:
 ---
 # Issue #288: Try/catch/finally compile errors -- complex patterns
 
-## Status: review
-
+## Status: in-review
 ## Summary
 ~40 tests fail in language/statements/try with compile errors. These involve try/catch with complex catch binding patterns, try/catch/finally with return values, or nested try blocks. The existing try/catch implementation does not handle all patterns.
 

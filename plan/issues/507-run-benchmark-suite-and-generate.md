@@ -24,8 +24,7 @@ files:
 ---
 # #507 — Run benchmark suite and generate latest.json
 
-## Status: review
-
+## Status: in-review
 Benchmarks have never been run with `npx tsx benchmarks/run.ts`. No `latest.json` or `history.json` exists. #504 (auto-generated README tables) depends on this data.
 
 ## Tasks

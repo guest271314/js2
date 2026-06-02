@@ -2,9 +2,9 @@
 id: 1605
 title: "codegen: class computed-property-name / setter param-scope emits invalid wasm (local.tee externref mismatch)"
 status: done
-completed: 2026-05-28
 created: 2026-05-24
 updated: 2026-05-27
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 task_type: bugfix

@@ -11,6 +11,7 @@ area: codegen, standalone
 language_feature: generators, iterators
 goal: standalone-mode
 sprint: Backlog
+required_by: [1344, 1732]
 related: [1662, 1376, 1103, 1320, 1340, 1464, 1718]
 ---
 # #1665 — Wasm-native generators for standalone mode

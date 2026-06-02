@@ -4,6 +4,7 @@ title: "codegen: object-method trampoline forwards args without coercion → inv
 status: done
 created: 2026-05-25
 updated: 2026-05-25
+completed: 2026-05-25
 priority: high
 feasibility: hard
 task_type: bugfix

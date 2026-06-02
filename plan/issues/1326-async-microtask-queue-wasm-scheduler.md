@@ -1,9 +1,9 @@
 ---
 id: 1326
 title: "Async standalone: implement microtask queue + CPS scheduler in Wasm for Promise/async without JS host"
-status: review
+status: in-review
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-06-02
 priority: low
 feasibility: hard
 reasoning_effort: max
@@ -11,8 +11,8 @@ task_type: feature
 area: codegen, runtime
 language_feature: async, promises, generators
 goal: standalone-mode
-sprint: 50
-required_by: [1326c]
+sprint: 58
+required_by: [1326c, 1766, 1774]
 ---
 # #1326 — Async standalone: Wasm microtask queue + CPS desugaring
 

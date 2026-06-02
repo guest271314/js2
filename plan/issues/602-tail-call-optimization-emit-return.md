@@ -17,8 +17,7 @@ files:
 ---
 # #602 -- Tail call optimization: emit return_call for recursive functions
 
-## Status: review
-
+## Status: in-review
 ts2wasm emits zero `return_call` or `return_call_ref` instructions. Both V8 and SpiderMonkey support the tail-call proposal. For recursive patterns (tree traversal, state machines, recursive descent), `return_call` eliminates stack growth and allows engines to reuse frames.
 
 ## Detection

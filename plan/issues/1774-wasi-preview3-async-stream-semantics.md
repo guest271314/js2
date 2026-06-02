@@ -7,17 +7,16 @@ updated: 2026-06-01
 priority: medium
 feasibility: hard
 reasoning_effort: high
-es_edition: n/a
-language_feature: wasi
 task_type: architecture
 area: wasi
+language_feature: wasi
 goal: platform
-related: [389, 1651, 1484]
-depends_on: [1042, 1326, 1575]
 sprint: 58
+depends_on: [1042, 1326, 1575]
+es_edition: n/a
+related: [389, 1651, 1484]
 origin: "Follow-up from guest271314's PR #1016 comment on fd_write synchrony wording."
 ---
-
 # #1774 - wasi preview3 async stream semantics for Node stdout/stderr
 
 ## Problem

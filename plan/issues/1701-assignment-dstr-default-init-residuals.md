@@ -2,9 +2,9 @@
 id: 1701
 title: "Assignment destructuring residuals — empty pattern + non-iterable RHS + iterator close"
 status: done
-completed: 2026-05-28
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium
