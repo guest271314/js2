@@ -14,7 +14,7 @@ area: wasi
 goal: platform
 related: [389, 1651, 1484]
 depends_on: [1042, 1326, 1575]
-sprint: 59
+sprint: Backlog
 origin: "Follow-up from guest271314's PR #1016 comment on fd_write synchrony wording."
 ---
 

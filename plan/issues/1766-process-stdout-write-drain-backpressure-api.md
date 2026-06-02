@@ -14,7 +14,7 @@ area: host-interop
 goal: platform
 related: [389, 1042, 1326, 1575, 1753]
 depends_on: [1042, 1326, 1575]
-sprint: 59
+sprint: Backlog
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 ---
 
@@ -96,3 +96,6 @@ Preview-1 direct-call WASI compatibility landed locally:
 Remaining blocked scope: the fully idiomatic async helper
 `await new Promise((resolve) => process.stdout.once("drain", resolve))` still
 depends on the broader async/EventEmitter work tracked by #1042/#1326/#1575.
+Future implementation work should stay in the Node process API lowering module
+(`src/codegen/node-process-api.ts`) rather than drifting back into generic call
+expression lowering.
