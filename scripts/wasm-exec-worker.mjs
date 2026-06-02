@@ -13,12 +13,100 @@
  */
 import { parentPort } from "node:worker_threads";
 import { readFileSync } from "node:fs";
+import { createContext, runInContext } from "node:vm";
 import { buildImports } from "./runtime-bundle.mjs";
 
 // Suppress unhandled Promise rejections — Promise tests create async
 // operations that reject after the test function returns. Without this,
 // the rejection propagates and crashes the parent's IPC channel.
 process.on("unhandledRejection", () => {});
+
+// #1310: keep host-import global mutations inside a replaceable VM realm.
+// This older worker-thread executor is not the primary sharded path anymore,
+// but it still runs test262 binaries in a persistent worker process.
+const SANDBOX_GLOBAL_NAMES = [
+  "Array",
+  "Object",
+  "Function",
+  "String",
+  "Number",
+  "Boolean",
+  "Symbol",
+  "Promise",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "Date",
+  "RegExp",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "Math",
+  "JSON",
+  "Reflect",
+  "Uint8Array",
+];
+
+const SANDBOX_SENTINEL_KEYS = [
+  ["Array", "prototype", "push"],
+  ["Array", "prototype", "map"],
+  ["Array", "prototype", "values"],
+  ["Object", "prototype", "hasOwnProperty"],
+  ["Function", "prototype", "call"],
+  ["String", "prototype", "slice"],
+  ["RegExp", "prototype", "exec"],
+  ["RegExp", "prototype", "test"],
+  ["Promise", "prototype", "then"],
+  ["Set", "prototype", "add"],
+  ["Map", "prototype", "set"],
+  ["WeakMap", "prototype", "set"],
+  ["WeakSet", "prototype", "add"],
+  ["Uint8Array", "prototype", "set"],
+  ["Uint8Array", "prototype", "slice"],
+];
+
+function buildFreshSandbox() {
+  const sandbox = Object.create(null);
+  const ctx = createContext(sandbox);
+  for (const name of SANDBOX_GLOBAL_NAMES) {
+    try {
+      sandbox[name] = runInContext(name, ctx);
+    } catch {}
+  }
+  sandbox.globalThis = sandbox;
+  return sandbox;
+}
+
+function readSandboxSentinels(sandbox) {
+  return SANDBOX_SENTINEL_KEYS.map((path) => {
+    let cur = sandbox;
+    for (const key of path) cur = cur?.[key];
+    return cur;
+  });
+}
+
+let globalSandbox = buildFreshSandbox();
+let globalSandboxSentinels = readSandboxSentinels(globalSandbox);
+
+function getWorkerTestSandbox() {
+  let dirty = false;
+  for (let i = 0; i < SANDBOX_SENTINEL_KEYS.length; i++) {
+    let cur = globalSandbox;
+    for (const key of SANDBOX_SENTINEL_KEYS[i]) cur = cur?.[key];
+    if (cur !== globalSandboxSentinels[i]) {
+      dirty = true;
+      break;
+    }
+  }
+  if (dirty) {
+    globalSandbox = buildFreshSandbox();
+    globalSandboxSentinels = readSandboxSentinels(globalSandbox);
+  }
+  return globalSandbox;
+}
 
 /**
  * Extract a human-readable message from a Wasm runtime error. Returns
@@ -70,7 +158,7 @@ parentPort.on("message", async (msg) => {
   let instance;
   try {
     // Build the import object
-    const importObj = buildImports(imports, undefined, stringPool);
+    const importObj = buildImports(imports, undefined, stringPool, { globalSandbox: getWorkerTestSandbox() });
 
     // Instantiate the Wasm module
     try {

@@ -21,6 +21,7 @@ import {
   classifyError,
   classifyTestScope,
   findTestFiles,
+  getTestSandbox,
   matchesPathFilter,
   parseMeta,
   shouldSkip,
@@ -519,7 +520,10 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 // in-process execution is acceptable for 172 tests).
                 const buildImports = await getBuildImports();
                 try {
-                  const importObj = buildImports(result.imports, undefined, result.stringPool);
+                  const sandbox = getTestSandbox();
+                  const importObj = buildImports(result.imports, undefined, result.stringPool, {
+                    globalSandbox: sandbox,
+                  });
                   const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
                   if (typeof (importObj as any).setExports === "function") {
                     (importObj as any).setExports(instance.exports);

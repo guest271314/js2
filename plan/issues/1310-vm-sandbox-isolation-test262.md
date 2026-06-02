@@ -3,7 +3,7 @@ id: 1310
 title: "vm.createContext sandbox isolation for test262 global contamination"
 status: done
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-06-02
 completed: 2026-05-24
 priority: medium
 feasibility: medium
@@ -101,3 +101,33 @@ poisons every subsequent test in the shard, producing flaky
 landed, the test262 runner becomes deterministic with respect to
 prototype mutation tests, and the existing `__extern_set`-related
 "#1160 follow-up" gap noted in `runtime.ts` is closed.
+
+## Follow-up: sharded worker + standalone lane coverage (2026-06-02)
+
+The original implementation only covered the `runTest262File` path in
+`tests/test262-runner.ts`. The 57-shard host+standalone CI rollout exposed
+that the full sharded path uses `scripts/test262-worker.mjs` directly, so its
+`buildImports(...)` calls were still unsandboxed. Both matrix targets share
+that worker; standalone usually has no host imports, but any import-backed
+standalone execution should use the same dirty-check guard as JS-host.
+
+Follow-up changes:
+
+- Added the VM sandbox manager to `scripts/test262-worker.mjs` and threaded it
+  through all worker `buildImports(...)` calls.
+- Applied the same sandbox to the rare in-process fixture branch in
+  `tests/test262-shared.ts`.
+- Applied the same guard to the legacy `scripts/wasm-exec-worker.mjs` executor.
+- Expanded sentinels beyond the original minimal set to cover Array iterator
+  methods, RegExp methods, and `Uint8Array` methods seen in the catastrophic
+  prototype-poisoning cluster.
+
+Verification:
+
+- `node --check scripts/test262-worker.mjs`
+- `node --check scripts/wasm-exec-worker.mjs`
+- `pnpm exec prettier --check scripts/test262-worker.mjs scripts/wasm-exec-worker.mjs tests/test262-runner.ts tests/test262-shared.ts`
+- `pnpm exec tsc --noEmit --pretty false`
+- `pnpm exec vitest run tests/issue-1310.test.ts --reporter=dot`
+- `TEST262_TARGET=standalone ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
+- `TEST262_TARGET=gc ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
