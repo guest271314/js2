@@ -272,79 +272,28 @@ JSONL_FILE="$RESULTS_DIR/${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl"
 REPORT_FILE="$RESULTS_DIR/${RESULT_PREFIX}-report-${RUN_TIMESTAMP}.json"
 COMPLETED=false
 if [ -f "$JSONL_FILE" ] && [ -s "$JSONL_FILE" ]; then
-  python3 -c "
-import json
-from collections import Counter
-
-statuses = Counter()
-official_statuses = Counter()
-strict_counts = Counter()
-cats = {}
-errors = Counter()
-skips = Counter()
-scope_counts = {
-    'standard': Counter(),
-    'annex_b': Counter(),
-    'proposal': Counter(),
-}
-
-with open('$JSONL_FILE') as f:
-    for line in f:
-        r = json.loads(line)
-        s = r['status']
-        statuses[s] += 1
-        scope = r.get('scope', 'standard')
-        scope_counts.setdefault(scope, Counter())
-        scope_counts[scope][s] += 1
-        if r.get('scope_official', scope != 'proposal'):
-            official_statuses[s] += 1
-            if r.get('strict', 'both') != 'no':
-                strict_counts[s] += 1
-        cat = r.get('category', 'unknown')
-        if cat not in cats:
-            cats[cat] = {'pass': 0, 'fail': 0, 'compile_error': 0, 'compile_timeout': 0, 'skip': 0, 'total': 0}
-        cats[cat][s] = cats[cat].get(s, 0) + 1
-        cats[cat]['total'] += 1
-        if r.get('error_category'):
-            errors[r['error_category']] += 1
-        if s == 'skip' and r.get('error'):
-            skips[r['error']] += 1
-
-def build_summary(counter):
-    return {
-        'total': sum(counter.values()),
-        'pass': counter.get('pass', 0),
-        'fail': counter.get('fail', 0),
-        'compile_error': counter.get('compile_error', 0),
-        'compile_timeout': counter.get('compile_timeout', 0),
-        'skip': counter.get('skip', 0),
-        'compilable': counter.get('pass', 0) + counter.get('fail', 0),
-        'stale': 0,
-    }
-
-report = {
-    'timestamp': '$(date -Iseconds)',
-    'mode': {
-        'target': '$TEST262_TARGET',
-        'include_proposals': ${INCLUDE_PROPOSALS},
-        'label': 'official test262 + proposals' if ${INCLUDE_PROPOSALS} else 'official test262 (default scope)',
-    },
-    'summary': build_summary(official_statuses),
-    'official_summary': build_summary(official_statuses),
-    'full_summary': build_summary(statuses),
-    'strict_summary': build_summary(strict_counts),
-    'scope_summaries': {name: build_summary(counter) for name, counter in sorted(scope_counts.items())},
-    'categories': [{'name': n, **c} for n, c in sorted(cats.items())],
-    'error_categories': dict(errors),
-    'skip_reasons': dict(skips),
-}
-
-with open('$REPORT_FILE', 'w') as f:
-    json.dump(report, f, indent=2)
-
-s = report['summary']
-print('Report: %d pass / %d total (%.1f%%)' % (s['pass'], s['total'], s['pass']/s['total']*100))
-" && COMPLETED=true
+  report_args=(
+    scripts/build-test262-report.mjs
+    --input "$JSONL_FILE"
+    --output "$REPORT_FILE"
+    --target "$TEST262_TARGET"
+    --baseline-generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  )
+  if [ "$INCLUDE_PROPOSALS" = "1" ]; then
+    report_args+=(--include-proposals)
+  fi
+  if [ "$TEST262_TARGET" = "standalone" ]; then
+    report_args+=(--max-unclassified-root-causes "${TEST262_MAX_UNCLASSIFIED_ROOT_CAUSES:-0}")
+  fi
+  if node "${report_args[@]}"; then
+    PASS_SUMMARY=$(node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); const s=d.summary; console.log('Report: '+s.pass+' pass / '+s.total+' total ('+(s.total ? (s.pass/s.total*100).toFixed(1) : '0.0')+'%)')" "$REPORT_FILE")
+    echo "$PASS_SUMMARY"
+    COMPLETED=true
+  else
+    report_status=$?
+    echo "Report generation failed with exit status $report_status"
+    exit "$report_status"
+  fi
 fi
 
 # ── Stop memory monitor ──────────────────────────────────────────

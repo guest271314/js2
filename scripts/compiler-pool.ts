@@ -37,6 +37,9 @@ export interface TestResult {
   status: "pass" | "fail" | "compile_error" | "compile_timeout" | "compiled" | "skip";
   error?: string;
   errorCodes?: number[];
+  imports?: string[];
+  hostImportLeakClass?: string;
+  reachedTest?: boolean;
   ret?: number;
   compileMs?: number;
   execMs?: number;
