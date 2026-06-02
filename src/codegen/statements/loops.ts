@@ -3390,6 +3390,8 @@ function findStructFieldsByTypeIdx(
  */
 function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
   // Compile the iterable expression
+  const bodyLenBefore = fctx.body.length;
+  const localsLenBefore = fctx.locals.length;
   const iterableType = compileExpression(ctx, fctx, stmt.expression);
   if (!iterableType) {
     reportError(ctx, stmt, "for-of: failed to compile iterable expression");
@@ -3419,6 +3421,19 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   }
 
   // Fallback: host-delegated iterator protocol
+  if (ctx.standalone || ctx.wasi) {
+    fctx.body.length = bodyLenBefore;
+    fctx.locals.length = localsLenBefore;
+    reportError(
+      ctx,
+      stmt,
+      "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
+        "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
+        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
+    );
+    return;
+  }
+
   // Ensure iterator host imports are registered before using them
   addIteratorImports(ctx);
 

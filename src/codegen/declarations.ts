@@ -1224,12 +1224,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectIteratorImports finalize ──
-  if (state.iteratorFound) {
+  if (state.iteratorFound && !ctx.standalone && !ctx.wasi) {
     addIteratorImports(ctx);
   }
 
   // ── collectArrayIteratorImports finalize ──
-  if (state.arrayIteratorFound) {
+  if (state.arrayIteratorFound && !ctx.standalone && !ctx.wasi) {
     addArrayIteratorImports(ctx);
     // Array iterator results are externref iterators consumed via for-of generic path
     if (!state.iteratorFound) {
