@@ -12,7 +12,7 @@
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
 import { ts } from "../ts-api.js";
-import { isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
+import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -632,6 +632,17 @@ function compileExpressionBody(
           const funcIdx = ctx.funcMap.get("__any_box_bool");
           if (funcIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx });
+            return expectedType;
+          }
+        }
+      }
+      if (result.kind === "i32" && expectedType.kind === "externref") {
+        const tsType = ctx.checker.getTypeAtLocation(expr);
+        if (isBooleanType(tsType)) {
+          const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (boxBoolIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
             return expectedType;
           }
         }

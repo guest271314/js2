@@ -3,11 +3,11 @@
  * Variable declaration statement lowering.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isNullableNumberType, isStringType, isVoidType } from "../../checker/type-mapper.js";
+import { isNullablePrimitiveType, isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
-import type { CodegenContext, FunctionContext } from "../context/types.js";
+import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType } from "../index.js";
@@ -97,23 +97,60 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
 function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
-  return isNullableNumberType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
+  return isNullablePrimitiveType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
 }
 
-function detectNullGuardAlias(expr: ts.Expression): { varName: string; narrowedBranch: "then" | "else" } | null {
+function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) return "undefined";
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return "undefined";
+  return null;
+}
+
+function nullishPresenceOfType(type: ts.Type): { hasNull: boolean; hasUndefined: boolean } {
+  let hasNull = false;
+  let hasUndefined = false;
+  const parts = type.isUnion() ? type.types : [type];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.Null) hasNull = true;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) hasUndefined = true;
+  }
+  return { hasNull, hasUndefined };
+}
+
+function excludesAllNullish(type: ts.Type, excludes: NullishExclusion): boolean {
+  const presence = nullishPresenceOfType(type);
+  if (!presence.hasNull && !presence.hasUndefined) return false;
+  if (presence.hasNull && excludes === "undefined") return false;
+  if (presence.hasUndefined && excludes === "null") return false;
+  return true;
+}
+
+function detectNullGuardAlias(ctx: CodegenContext, expr: ts.Expression): NullGuardFact | null {
   if (!ts.isBinaryExpression(expr)) return null;
   const op = expr.operatorToken.kind;
-  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
-  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
+  const isNeq = isStrictNeq || isLooseNeq;
+  const isEq = isStrictEq || isLooseEq;
   if (!isNeq && !isEq) return null;
 
-  const rightIsNull = expr.right.kind === ts.SyntaxKind.NullKeyword;
-  const leftIsNull = expr.left.kind === ts.SyntaxKind.NullKeyword;
-  if (!rightIsNull && !leftIsNull) return null;
+  const rightNullish = nullishLiteralKind(expr.right);
+  const leftNullish = nullishLiteralKind(expr.left);
+  if (!rightNullish && !leftNullish) return null;
 
-  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  const comparedNullish = rightNullish ?? leftNullish;
+  const nonNullSide = rightNullish ? expr.left : expr.right;
   if (!ts.isIdentifier(nonNullSide)) return null;
-  return { varName: nonNullSide.text, narrowedBranch: isNeq ? "then" : "else" };
+  const excludes: NullishExclusion = isLooseEq || isLooseNeq ? "nullish" : comparedNullish!;
+  return {
+    varName: nonNullSide.text,
+    narrowedBranch: isNeq ? "then" : "else",
+    excludes,
+    provesNonNull: excludesAllNullish(ctx.checker.getTypeAtLocation(nonNullSide), excludes),
+  };
 }
 
 /** Check if an expression is a string method call that returns a host array (externref). */
@@ -231,7 +268,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       if (!fctx.constBindings) fctx.constBindings = new Set();
       fctx.constBindings.add(name);
       if (decl.initializer) {
-        const alias = detectNullGuardAlias(decl.initializer);
+        const alias = detectNullGuardAlias(ctx, decl.initializer);
         if (alias) {
           if (!fctx.nullGuardAliases) fctx.nullGuardAliases = new Map();
           fctx.nullGuardAliases.set(name, alias);
