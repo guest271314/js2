@@ -152,6 +152,31 @@ export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./
  * Used to determine whether the result needs Promise.resolve() wrapping (#919).
  */
 function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  // Built-in Promise static methods already return a Promise object. Wrapping
+  // `Promise.resolve(v)` in another `Promise.resolve(...)` is harmless in the
+  // JS host due to native assimilation, but standalone `$Promise` currently has
+  // no assimilation step, so the callback would receive the inner Promise
+  // object instead of `v` (#1326).
+  if (
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "Promise"
+  ) {
+    return false;
+  }
+  if (
+    isStandalonePromiseActive(ctx) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.name.text === "then"
+  ) {
+    const receiverType = ctx.checker.getTypeAtLocation(expr.expression.expression);
+    const receiverSym = receiverType.getSymbol()?.name;
+    const apparentSym = ctx.checker.getApparentType(receiverType).getSymbol()?.name;
+    if (receiverSym === "Promise" || apparentSym === "Promise") {
+      return false;
+    }
+  }
+
   if (ts.isIdentifier(expr.expression)) {
     if (ctx.asyncFunctions.has(expr.expression.text)) return true;
   }

@@ -2,8 +2,9 @@
 id: 1326
 title: "Async standalone: implement microtask queue + CPS scheduler in Wasm for Promise/async without JS host"
 status: in-review
+pr: 1051
 created: 2026-05-07
-updated: 2026-06-02
+updated: 2026-06-03
 priority: low
 feasibility: hard
 reasoning_effort: max
@@ -13,6 +14,8 @@ language_feature: async, promises, generators
 goal: standalone-mode
 sprint: 58
 required_by: [1326c, 1766, 1774]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T22:45:33.452Z
 ---
 # #1326 — Async standalone: Wasm microtask queue + CPS desugaring
 
@@ -80,6 +83,29 @@ This is a significant undertaking (~1,500 LoC). Phase it:
 2. `.then()` chaining executes in correct microtask order
 3. Rejection propagates through unhandled-rejection path
 4. `tests/issue-1326.test.ts` — basic promise chaining in standalone mode
+
+## Implementation Notes (codex-developer, 2026-06-03)
+
+Implemented the standalone WASI `Promise.then` path on top of the existing
+WasmGC microtask queue:
+
+- Added `$PromiseCallback` linked-list nodes and `$__then_caps` structs for
+  pending callbacks and chained-promise captures.
+- Added internal `__promise_fulfill` / `__promise_reject` settlement helpers
+  that enqueue callbacks through `__microtask_enqueue`.
+- Lowered standalone `.then(onFulfilled, onRejected?)` to synthesized Wasm
+  wrappers, chained pending `$Promise` creation, and drain-time settlement.
+- Kept JS-host Promise lowering unchanged; the standalone path is still gated
+  on WASI mode.
+- Prevented generic async-call wrapping from wrapping native standalone
+  `Promise.resolve` / `.then` results, which otherwise produced Promise-of-
+  Promise values and broke chained `.then` payloads.
+
+Focused validation:
+
+- `pnpm exec vitest run tests/issue-1326.test.ts`
+- `pnpm exec tsc --noEmit`
+- `pnpm exec biome lint src/codegen/async-scheduler.ts src/codegen/expressions/calls.ts src/codegen/expressions.ts tests/issue-1326.test.ts --diagnostic-level=error --max-diagnostics=50`
 
 ## Files
 
