@@ -2437,6 +2437,9 @@ function lowerStringMethodCall(
   }
 
   const useNative = cx.resolver?.nativeStrings?.() === true;
+  if (useNative && (methodName === "indexOf" || methodName === "includes")) {
+    return null;
+  }
   const funcName = useNative ? `__str_${methodName}` : `string_${methodName}`;
 
   // Build the argument list. params[0] is always the receiver
