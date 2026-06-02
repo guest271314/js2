@@ -7878,6 +7878,7 @@ export function addArrayIteratorImports(ctx: CodegenContext): void {
  *   - `__get_caught_exception` () → externref  (for the body's try/catch wrapper)
  */
 export function addGeneratorImports(ctx: CodegenContext): void {
+  if (ctx.standalone || ctx.wasi) return;
   // Guard: only register once
   if (ctx.funcMap.has("__gen_create_buffer")) return;
 

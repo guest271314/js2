@@ -1,9 +1,9 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: ready
+status: in-progress
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -17,6 +17,8 @@ files:
   src/codegen/expressions.ts:
     breaking:
       - "yield compiles to state save + return, next() resumes from saved state"
+claimed_by: codex-developer
+claimed_at: 2026-06-02T22:52:32.748Z
 ---
 # #680 — Wasm-native generators (state machines) with optional JS host fallback
 
@@ -220,6 +222,27 @@ Acceptance per phase:
 - Phase 1: ≥60% of test262 generator tests pass.
 - Phase 2: ≥85%.
 - Phase 3: ≥95%.
+
+## Implementation notes — 2026-06-03
+
+- Added a Phase 1 Wasm-native generator path for standalone/WASI targets:
+  top-level non-async `function*` declarations with sequential numeric
+  `yield` statements and optional numeric `return` lower to a WasmGC state
+  struct plus a generated resume function.
+- Native `.next()` / `.return(value)` calls dispatch directly to the generated
+  resume/state update path, and `IteratorResult.value` / `.done` lower to
+  `struct.get` on the native result struct.
+- Generator parameters are copied into the state struct at construction so
+  simple yielded expressions can read them across suspension.
+- The existing eager JS-host generator buffer path remains active for default
+  JS-host builds. Standalone/WASI no longer registers `__gen_*` /
+  `__create_generator` imports; unsupported generator shapes receive a scoped
+  compile diagnostic instead of silently depending on JS host helpers.
+
+Validation:
+
+- `pnpm exec vitest run tests/issue-680.test.ts`
+- `pnpm exec tsc --noEmit --pretty false`
 
 ### Dependencies
 

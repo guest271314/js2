@@ -24,6 +24,7 @@ import {
 } from "./expressions/helpers.js";
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { addUnionImports, resolveWasmType } from "./index.js";
+import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -2275,6 +2276,8 @@ export function compilePropertyAccess(
 
   // Handle IteratorResult property access: .value and .done
   if (isIteratorResultType(objType) || isGeneratorIteratorResultLike(ctx, objType, propName)) {
+    const nativeResult = tryCompileNativeGeneratorResultProperty(ctx, fctx, expr.expression, propName);
+    if (nativeResult !== undefined) return nativeResult;
     if (propName === "value") {
       compileExpression(ctx, fctx, expr.expression);
       // Check the expected value type from the IteratorResult<T>

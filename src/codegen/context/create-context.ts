@@ -92,6 +92,8 @@ export function createCodegenContext(
     asyncFunctions: new Set(),
     generatorFunctions: new Set(),
     generatorYieldType: new Map(),
+    nativeGeneratorResultTypeIdx: -1,
+    nativeGenerators: new Map(),
     moduleGlobals: new Map(),
     moduleInitStatements: [],
     nestedFuncCaptures: new Map(),

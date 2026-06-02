@@ -107,6 +107,7 @@ import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
+import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
 import {
   ensureNativeStringExternBridge,
   ensureTextEncodingHelpers,
@@ -5430,6 +5431,14 @@ function compileCallExpression(
     // Generator method calls: gen.next(), gen.return(value), gen.throw(error)
     if (isGeneratorType(receiverType)) {
       const methodName = propAccess.name.text;
+      const nativeResult = tryCompileNativeGeneratorMethodCall(
+        ctx,
+        fctx,
+        propAccess.expression,
+        methodName,
+        expr.arguments,
+      );
+      if (nativeResult !== undefined) return nativeResult;
       if (methodName === "next") {
         compileExpression(ctx, fctx, propAccess.expression);
         const funcIdx = ctx.funcMap.get("__gen_next");
@@ -6894,6 +6903,14 @@ function compileCallExpression(
 
       if (isAnyOrExternref) {
         const methodName = propAccess.name.text;
+        const nativeResult = tryCompileNativeGeneratorMethodCall(
+          ctx,
+          fctx,
+          propAccess.expression,
+          methodName,
+          expr.arguments,
+        );
+        if (nativeResult !== undefined) return nativeResult;
 
         // Generator protocol: .next(), .return(value), .throw(error) on any/externref
         // These are very common in test262 generator tests where variables are typed as `any`.
