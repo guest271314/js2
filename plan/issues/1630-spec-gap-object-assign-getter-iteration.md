@@ -4,6 +4,7 @@ title: "spec gap: Object.assign drops getters / Symbol keys (27 of 38 test262 fa
 status: done
 created: 2026-05-08
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium

@@ -25,8 +25,7 @@ files:
 ---
 # #586 — Deduplicate array method callbacks (~1,500 lines)
 
-## Status: review
-
+## Status: in-review
 `forEach`, `filter`, `map`, `reduce`, `find`, `findIndex`, `some`, `every` (expressions.ts) each implement nearly identical logic:
 
 1. Get array length

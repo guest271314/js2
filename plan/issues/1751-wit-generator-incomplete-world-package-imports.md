@@ -1,19 +1,18 @@
 ---
 id: 1751
 title: "WIT generator emits an incomplete world: hardcoded package name + no WASI imports"
-status: review
+status: in-review
 created: 2026-05-30
 updated: 2026-06-02
+completed: 2026-06-02
 priority: medium
 feasibility: medium
 task_type: feature
 area: wit-generator
 goal: platform
-related: [600, 639, 389]
-depends_on: []
 sprint: 58
+related: [600, 639, 389]
 ---
-
 # #1751 — WIT generator emits an incomplete world
 
 ## Context
@@ -77,7 +76,7 @@ output is thin.
 
 ## Implementation status (2026-06-02)
 
-Status: implemented on `symphony/1751`; ready for review.
+Status: done on main via commit `4d231b51f`.
 
 Changes:
 - Added `--wit-package <ns:name[@version]>` to the CLI. The flag implies `--wit`.

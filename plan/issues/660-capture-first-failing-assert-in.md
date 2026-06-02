@@ -17,8 +17,7 @@ files:
 ---
 # #660 — Capture first failing assert in test output for returned-0 tests
 
-## Status: review
-
+## Status: in-review
 12,974 tests fail with "returned 0" but no information about WHICH assertion failed. The wrapTest function wraps the body in try/catch and sets __fail=1, but doesn't record the failing assert.
 
 ### Implementation

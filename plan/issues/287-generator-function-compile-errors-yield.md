@@ -28,8 +28,7 @@ files:
 ---
 # Issue #287: Generator function compile errors -- yield in nested contexts
 
-## Status: review
-
+## Status: in-review
 ## Summary
 ~119 tests fail in language/expressions/generators and language/statements/generators with compile errors. Generator functions with yield in loops, conditionals, try/catch, and nested functions fail to compile. The generator state machine needs to handle these control flow patterns.
 

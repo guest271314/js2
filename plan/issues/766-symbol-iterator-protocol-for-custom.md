@@ -20,8 +20,7 @@ files:
 ---
 # #766 -- Symbol.iterator protocol for custom iterables
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 `for-of`, spread, and destructuring currently assume the iterable is an array. The ES spec requires looking up `Symbol.iterator` on the object and calling it to get an iterator. This breaks:

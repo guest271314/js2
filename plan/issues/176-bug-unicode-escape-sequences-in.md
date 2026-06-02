@@ -18,8 +18,7 @@ files:
 ---
 # #176 — Bug: Unicode escape sequences in property names not resolved
 
-## Status: review
-
+## Status: in-review
 ## Summary
 Object property access using unicode escape sequences in identifier names (e.g., `obj.bre\u0061k`) does not resolve to the correct property name. 42 test262 failures in assignment member-expr-ident-name tests.
 

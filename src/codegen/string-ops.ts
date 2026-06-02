@@ -14,7 +14,7 @@ import { allocLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
 import { addStringImports, addUnionImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
-import { ensureNativeStringExternBridge } from "./native-strings.js";
+import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -1471,11 +1471,9 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
     fctx.body.push({ op: "i32.const", value: 0 });
     return;
   }
-  const argType = compileExpression(ctx, fctx, arg, { kind: "f64" });
+  const argType = compileExpression(ctx, fctx, arg, { kind: "i32" });
   if (!argType) {
     fctx.body.push({ op: "i32.const", value: 0 });
-  } else if (argType.kind === "f64") {
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else if (argType.kind === "i64") {
     // BigInt fell through static detection (e.g. `any` widened to bigint).
     // Drop the i64 and throw TypeError per §7.1.4.
@@ -1503,6 +1501,26 @@ export function compileNativeStringMethodCall(
 
   // Helper: emit a flatten call to convert ref $AnyString → ref $NativeString
   const emitFlatten = () => fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const compileStringValueToLocal = (value: ts.Expression | undefined, fallback: string, name: string): number => {
+    const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, nativeStringType(ctx));
+    if (value) {
+      compileExpression(ctx, fctx, value, nativeStringType(ctx));
+    } else {
+      compileStringLiteral(ctx, fctx, fallback);
+    }
+    fctx.body.push({ op: "local.set", index: local });
+    return local;
+  };
+  const compileIntegerValueToLocal = (value: ts.Expression | undefined, fallback: number, name: string): number => {
+    const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, { kind: "i32" });
+    if (value) {
+      compileStringIntegerArg(ctx, fctx, value);
+    } else {
+      fctx.body.push({ op: "i32.const", value: fallback });
+    }
+    fctx.body.push({ op: "local.set", index: local });
+    return local;
+  };
 
   // charCodeAt: inline array.get_u with offset (must flatten first).
   // ECMA-262 §22.1.3.3: ToIntegerOrInfinity(pos), then return NaN when
@@ -1651,104 +1669,65 @@ export function compileNativeStringMethodCall(
 
   // indexOf: native helper
   if (method === "indexOf") {
-    compileExpression(ctx, fctx, propAccess.expression);
-    emitFlatten();
-    // search string arg
-    if (expr.arguments.length > 0) {
-      compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
-    } else {
-      fctx.body.push({ op: "ref.null", typeIdx: strTypeIdx });
-    }
-    // fromIndex arg (ToInteger per spec — throws TypeError on BigInt/Symbol)
-    if (expr.arguments.length > 1) {
-      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
-    } else {
-      fctx.body.push({ op: "i32.const", value: 0 });
-    }
+    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_indexOf_recv");
+    const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_indexOf_search");
+    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_indexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
+    fctx.body.push({ op: "local.get", index: receiverLocal });
+    fctx.body.push({ op: "local.get", index: searchLocal });
+    fctx.body.push({ op: "local.get", index: fromLocal });
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "i32" };
   }
 
   // lastIndexOf: native helper
   if (method === "lastIndexOf") {
-    compileExpression(ctx, fctx, propAccess.expression);
-    emitFlatten();
-    if (expr.arguments.length > 0) {
-      compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
-    } else {
-      fctx.body.push({ op: "ref.null", typeIdx: strTypeIdx });
-    }
-    if (expr.arguments.length > 1) {
-      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
-    } else {
-      fctx.body.push({ op: "i32.const", value: 0x7fffffff });
-    }
+    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_lastIndexOf_recv");
+    const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_lastIndexOf_search");
+    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_lastIndexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_lastIndexOf")!;
+    fctx.body.push({ op: "local.get", index: receiverLocal });
+    fctx.body.push({ op: "local.get", index: searchLocal });
+    fctx.body.push({ op: "local.get", index: fromLocal });
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "i32" };
   }
 
   // includes: native helper
   if (method === "includes") {
-    compileExpression(ctx, fctx, propAccess.expression);
-    emitFlatten();
-    if (expr.arguments.length > 0) {
-      compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
-    } else {
-      fctx.body.push({ op: "ref.null", typeIdx: strTypeIdx });
-    }
-    if (expr.arguments.length > 1) {
-      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
-    } else {
-      fctx.body.push({ op: "i32.const", value: 0 });
-    }
+    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_includes_recv");
+    const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_includes_search");
+    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_includes_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_includes")!;
+    fctx.body.push({ op: "local.get", index: receiverLocal });
+    fctx.body.push({ op: "local.get", index: searchLocal });
+    fctx.body.push({ op: "local.get", index: fromLocal });
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "i32" };
   }
 
   // startsWith: native helper
   if (method === "startsWith") {
-    compileExpression(ctx, fctx, propAccess.expression);
-    emitFlatten();
-    if (expr.arguments.length > 0) {
-      compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
-    } else {
-      fctx.body.push({ op: "ref.null", typeIdx: strTypeIdx });
-    }
-    if (expr.arguments.length > 1) {
-      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
-    } else {
-      fctx.body.push({ op: "i32.const", value: 0 });
-    }
+    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_startsWith_recv");
+    const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_startsWith_search");
+    const posLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_startsWith_pos");
     const funcIdx = ctx.nativeStrHelpers.get("__str_startsWith")!;
+    fctx.body.push({ op: "local.get", index: receiverLocal });
+    fctx.body.push({ op: "local.get", index: searchLocal });
+    fctx.body.push({ op: "local.get", index: posLocal });
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "i32" };
   }
 
   // endsWith: native helper
   if (method === "endsWith") {
-    compileExpression(ctx, fctx, propAccess.expression);
-    emitFlatten();
-    // suffix arg
-    if (expr.arguments.length > 0) {
-      compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
-    } else {
-      fctx.body.push({ op: "ref.null", typeIdx: strTypeIdx });
-    }
-    // endPosition arg — default to string length
-    if (expr.arguments.length > 1) {
-      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
-    } else {
-      fctx.body.push({ op: "i32.const", value: 0x7fffffff });
-    }
+    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_endsWith_recv");
+    const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_endsWith_search");
+    const endLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_endsWith_end");
     const funcIdx = ctx.nativeStrHelpers.get("__str_endsWith")!;
+    fctx.body.push({ op: "local.get", index: receiverLocal });
+    fctx.body.push({ op: "local.get", index: searchLocal });
+    fctx.body.push({ op: "local.get", index: endLocal });
     fctx.body.push({ op: "call", funcIdx });
     return { kind: "i32" };
   }
@@ -1792,12 +1771,11 @@ export function compileNativeStringMethodCall(
         {
           const rangeErrMsg = "RangeError: Invalid count value";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
             else: [],
           });
         }
@@ -1984,28 +1962,103 @@ export function compileNativeStringMethodCall(
   }
 
   // codePointAt: like charCodeAt but returns f64 (code point value)
-  // For BMP characters (most common), codePoint === charCode.
-  // Full surrogate pair handling would be more complex, but this covers most test262 cases.
+  // ECMA-262 §22.1.3.4 delegates to CodePointAt: out-of-range produces
+  // undefined in JS. This numeric lowering uses NaN as the existing f64
+  // sentinel, and combines a valid UTF-16 surrogate pair when one starts at
+  // position.
   if (method === "codePointAt") {
     compileExpression(ctx, fctx, propAccess.expression);
     emitFlatten();
     const tmpLocal = allocLocal(fctx, "__codePointAt_tmp", flatStringType(ctx));
     fctx.body.push({ op: "local.set", index: tmpLocal });
-    // Push data ref (field 2)
-    fctx.body.push({ op: "local.get", index: tmpLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // .data
-    // Compute off + idx
-    fctx.body.push({ op: "local.get", index: tmpLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // .off
+    const idxLocal = allocLocal(fctx, `__codePointAt_idx_${fctx.locals.length}`, { kind: "i32" });
     if (expr.arguments.length > 0) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[0]!);
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    fctx.body.push({ op: "i32.add" }); // off + idx
-    fctx.body.push({ op: "array.get_u", typeIdx: strDataTypeIdx });
-    // Convert i32 code unit to f64
-    fctx.body.push({ op: "f64.convert_i32_u" });
+    fctx.body.push({ op: "local.set", index: idxLocal });
+    const firstLocal = allocLocal(fctx, `__codePointAt_first_${fctx.locals.length}`, { kind: "i32" });
+    const secondLocal = allocLocal(fctx, `__codePointAt_second_${fctx.locals.length}`, { kind: "i32" });
+
+    fctx.body.push({ op: "local.get", index: idxLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.lt_s" });
+    fctx.body.push({ op: "local.get", index: idxLocal });
+    fctx.body.push({ op: "local.get", index: tmpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 });
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "i32.or" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN }],
+      else: [
+        { op: "local.get", index: tmpLocal },
+        { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+        { op: "local.get", index: tmpLocal },
+        { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: idxLocal },
+        { op: "i32.add" },
+        { op: "array.get_u", typeIdx: strDataTypeIdx },
+        { op: "local.tee", index: firstLocal },
+        { op: "i32.const", value: 0xd800 },
+        { op: "i32.ge_u" },
+        { op: "local.get", index: firstLocal },
+        { op: "i32.const", value: 0xdbff },
+        { op: "i32.le_u" },
+        { op: "i32.and" },
+        { op: "local.get", index: idxLocal },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.get", index: tmpLocal },
+        { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+        { op: "i32.lt_s" },
+        { op: "i32.and" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [
+            { op: "local.get", index: tmpLocal },
+            { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+            { op: "local.get", index: tmpLocal },
+            { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+            { op: "local.get", index: idxLocal },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "local.tee", index: secondLocal },
+            { op: "i32.const", value: 0xdc00 },
+            { op: "i32.ge_u" },
+            { op: "local.get", index: secondLocal },
+            { op: "i32.const", value: 0xdfff },
+            { op: "i32.le_u" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [
+                { op: "local.get", index: firstLocal },
+                { op: "i32.const", value: 0xd800 },
+                { op: "i32.sub" },
+                { op: "i32.const", value: 10 },
+                { op: "i32.shl" },
+                { op: "local.get", index: secondLocal },
+                { op: "i32.const", value: 0xdc00 },
+                { op: "i32.sub" },
+                { op: "i32.add" },
+                { op: "i32.const", value: 0x10000 },
+                { op: "i32.add" },
+                { op: "f64.convert_i32_u" },
+              ],
+              else: [{ op: "local.get", index: firstLocal }, { op: "f64.convert_i32_u" }],
+            },
+          ],
+          else: [{ op: "local.get", index: firstLocal }, { op: "f64.convert_i32_u" }],
+        },
+      ],
+    } as Instr);
     return { kind: "f64" };
   }
 
@@ -2021,9 +2074,8 @@ export function compileNativeStringMethodCall(
           // Static RangeError — emit unconditional throw
           const rangeErrMsg = "RangeError: The normalization form should be one of NFC, NFD, NFKC, NFKD";
           addStringConstantGlobal(ctx, rangeErrMsg);
-          const strIdx = ctx.stringGlobalMap.get(rangeErrMsg)!;
           const tagIdx = ensureExnTag(ctx);
-          fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+          fctx.body.push(...stringConstantExternrefInstrs(ctx, rangeErrMsg));
           fctx.body.push({ op: "throw", tagIdx } as Instr);
           return null;
         }
@@ -2042,22 +2094,20 @@ export function compileNativeStringMethodCall(
   // --target standalone (Phase 1: refuse-and-document).
   //   - match / matchAll / search: the spec coerces the (string) argument to a
   //     RegExp, so they always route through the host regex engine.
-  //   - replace / replaceAll / split: only when the first argument is
-  //     statically a RegExp (string-arg forms use the native helpers above and
-  //     never reach this fall-through).
+  //   - replace / replaceAll / split: only when the first argument needs
+  //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
+  //     above and never reach this fall-through).
   if (ctx.standalone) {
-    const argIsRegExp = (): boolean => {
-      if (expr.arguments.length === 0) return false;
-      const argType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-      return argType.getSymbol()?.getName() === "RegExp";
-    };
     const alwaysRegExp = method === "match" || method === "matchAll" || method === "search";
-    const regexArgForm = (method === "replace" || method === "replaceAll" || method === "split") && argIsRegExp();
-    if (alwaysRegExp || regexArgForm) {
+    const symbolProtocolArgForm =
+      (method === "replace" || method === "replaceAll" || method === "split") &&
+      expr.arguments.length > 0 &&
+      !firstArgIsStringLike;
+    if (alwaysRegExp || symbolProtocolArgForm) {
       reportError(
         ctx,
         expr,
-        `Codegen error: String.prototype.${method}(...) with a RegExp is not supported in ` +
+        `Codegen error: String.prototype.${method}(...) with a RegExp or symbol-protocol search value is not supported in ` +
           "--target standalone (#1474). Pass a string pattern instead, or " +
           "recompile without --target standalone.",
       );

@@ -19,8 +19,7 @@ files:
 ---
 # #498 — Proxy via type-aware compilation with trap inlining (70 tests)
 
-## Status: review
-
+## Status: in-review
 70 tests use `new Proxy(target, handler)`. Previously considered impossible in WasmGC, but achievable with compile-time specialization.
 
 ## Approach: Type-aware proxy compilation

@@ -22,8 +22,7 @@ files:
 ---
 # #705 — Wasm validation: not enough arguments on the stack (361 CE)
 
-## Status: review
-
+## Status: in-review
 ### 2026-03-22 Update
 
 Residual count essentially unchanged: 362 CE (was 361). The fix for `compileArrayPrototypeEvery`/`compileArrayPrototypeSome` was correct. The remaining 362 are dominated by missing harness includes (180+) and async closure patterns (85+) as documented in the root cause analysis below.

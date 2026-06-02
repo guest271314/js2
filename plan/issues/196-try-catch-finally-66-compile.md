@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #196 — Try/catch/finally: 66 compile errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 66 test262 compile errors in `language/statements/try`. Try-catch-finally blocks have compilation issues beyond the throw-replacement workaround.
 

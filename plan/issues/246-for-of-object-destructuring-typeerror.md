@@ -10,8 +10,7 @@ sprint: 3
 ---
 # Issue #246: For-of object destructuring -- TypeError on primitive coercion
 
-## Status: review
-
+## Status: in-review
 ## Summary
 
 5 tests in `language/statements/for-of/dstr/` fail with "TypeError: Cannot convert object to primitive value". These tests destructure objects from arrays in for-of loops, like `for (var {x = 1} of [{y: 2}]) {}`. The runtime attempts to convert the object to a primitive value, which fails.

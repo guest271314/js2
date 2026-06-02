@@ -110,7 +110,7 @@ function extractSprintNumberFromLabel(label) {
 function normalizeIssueStatus(rawStatus) {
   const status = String(rawStatus || "").trim();
   if (status === "in_progress") return "in-progress";
-  if (status === "in-review" || status === "in_review") return "review";
+  if (status === "review" || status === "in-review" || status === "in_review") return "in-review";
   if (status) return status;
   return "ready";
 }
@@ -123,7 +123,7 @@ const STATUS_PRIORITY = {
   done: 0,
   "wont-fix": 1,
   blocked: 2,
-  review: 3,
+  "in-review": 3,
   "in-progress": 4,
   ready: 5,
   deferred: 6,
@@ -196,7 +196,7 @@ for (const iss of loadIssues()) {
     issues.blocked.push(iss);
   } else if (iss.status === "in-progress") {
     issues.inprogress.push(iss);
-  } else if (iss.status === "review") {
+  } else if (iss.status === "in-review") {
     issues.review.push(iss);
   } else if (iss.status === "done" || iss.status === "wont-fix") {
     // wont-fix is a label, not a separate lane — shown in Done with a tag

@@ -19,8 +19,7 @@ files:
 ---
 # #659 — Call type mismatch residual (609 CE)
 
-## Status: review
-
+## Status: in-review
 609 tests fail with call/call_ref argument type mismatches. #626 fixed the main paths but 609 remain — closure calls through globals, method calls with coercion, indirect dispatch.
 
 ## Complexity: M

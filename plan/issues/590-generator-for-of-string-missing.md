@@ -17,8 +17,7 @@ files:
 ---
 # #590 — Generator for-of-string missing return depth update
 
-## Status: review
-
+## Status: in-review
 `compileForOfString` (statements.ts:2975-3023) adjusts `breakStack` and `continueStack` but does NOT update `generatorReturnDepth`. Compare with `compileForOfArray` (line 3148) which correctly updates it.
 
 If a generator function uses `for (const c of str)`, a `return` statement inside the loop targets the wrong Wasm block depth.

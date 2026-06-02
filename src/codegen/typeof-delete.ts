@@ -12,6 +12,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
+import { compileStandaloneRegExpLiteral } from "./regexp-standalone.js";
 import { addImport } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
@@ -307,19 +308,14 @@ export function compileDeleteExpression(
  * The pattern and flags strings are loaded from the string pool, then RegExp_new is called.
  */
 export function compileRegExpLiteral(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): ValType | null {
-  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
-  // regex engine yet. Refuse in --target standalone (Phase 1: refuse-and-document).
-  if (ctx.standalone) {
-    reportError(
-      ctx,
-      expr,
-      "Codegen error: RegExp literals are not supported in --target standalone (#1474). " +
-        "Recompile without --target standalone, or replace the regex with " +
-        "String.prototype.{indexOf, startsWith, slice}.",
-    );
-    return null;
-  }
   const { pattern, flags } = parseRegExpLiteral(expr.getText());
+
+  // #682 — standalone mode has a reduced native literal-substring backend.
+  // Unsupported syntax still reports #1474-compatible diagnostics rather than
+  // falling back to a JS-host RegExp import.
+  if (ctx.standalone) {
+    return compileStandaloneRegExpLiteral(ctx, fctx, pattern, flags, expr);
+  }
 
   // Load pattern string
   const patternResult = compileStringLiteral(ctx, fctx, pattern, expr);

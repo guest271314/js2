@@ -4,18 +4,16 @@ title: "TS annotation: Uint8Array<ArrayBuffer> generic typed-array form not hand
 status: done
 created: 2026-05-30
 updated: 2026-06-02
+completed: 2026-06-02
 priority: low
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: type-system
 language_feature: typed-arrays
 goal: platform
-related: [389, 1752, 1700]
-depends_on: []
 sprint: 58
-completed: 2026-06-02
+related: [389, 1752, 1700]
 ---
-
 # #1755 — `Uint8Array<ArrayBuffer>` generic annotation
 
 ## Context

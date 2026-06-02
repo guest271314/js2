@@ -3,7 +3,9 @@ tracker:
   kind: markdown
   issues_dir: plan/issues
   sprint: latest
-  active_states: [ready]
+  active_states: [ready, in-progress]
+  claimable_states: [ready]
+  claim_state: in-progress
   terminal_states: [done, wont-fix]
 polling:
   interval_ms: 30000
@@ -19,7 +21,7 @@ hooks:
       ln -s /workspace/node_modules node_modules
     fi
 agent:
-  max_concurrent_agents: 3
+  max_concurrent_agents: 8
   max_turns: 1
   max_retry_backoff_ms: 300000
   lanes:
@@ -28,7 +30,7 @@ agent:
       role: teammate
       command: $SYMPHONY_CODEX_COMMAND
       prompt_mode: argument
-      max_concurrent: 3
+      max_concurrent: 8
 codex:
   command: codex exec -c approval_policy="never" --sandbox danger-full-access --skip-git-repo-check --json
   turn_timeout_ms: 3600000
@@ -64,6 +66,8 @@ Rules:
 - Push the assigned branch to `origin`.
 - Open a ready, non-draft pull request against `main`; do not mark the issue `done` until the PR
   exists.
+- Record the PR number in the issue frontmatter as `pr: <number>` and leave the issue
+  `status: in-review`; the PR-status poller flips it to `done` after GitHub reports the PR merged.
 - Enqueue the PR in the merge queue when GitHub accepts it. If required checks are still pending,
   enable auto-merge/merge-queue entry so GitHub queues it as soon as checks pass.
 - Report changed files, validation, commit SHA, PR URL, and merge-queue or auto-merge state before

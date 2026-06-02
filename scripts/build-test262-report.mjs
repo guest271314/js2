@@ -10,6 +10,8 @@ function parseArgs(argv) {
     includeProposals: false,
     baselineSha: "",
     baselineGeneratedAt: "",
+    target: "",
+    maxUnclassifiedRootCauses: undefined,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -24,12 +26,22 @@ function parseArgs(argv) {
       args.baselineSha = argv[++i] || "";
     } else if (arg === "--baseline-generated-at") {
       args.baselineGeneratedAt = argv[++i] || "";
+    } else if (arg === "--target") {
+      args.target = argv[++i] || "";
+    } else if (arg === "--max-unclassified-root-causes") {
+      const raw = argv[++i] || "";
+      const parsed = Number.parseInt(raw, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        console.error(`Invalid --max-unclassified-root-causes value: ${raw}`);
+        process.exit(1);
+      }
+      args.maxUnclassifiedRootCauses = parsed;
     }
   }
 
   if (!args.input || !args.output) {
     console.error(
-      "Usage: node scripts/build-test262-report.mjs --input <results.jsonl> --output <report.json> [--include-proposals]",
+      "Usage: node scripts/build-test262-report.mjs --input <results.jsonl> --output <report.json> [--include-proposals] [--target standalone] [--max-unclassified-root-causes N]",
     );
     process.exit(1);
   }
@@ -61,8 +73,486 @@ function buildSummary(counter) {
   };
 }
 
+function inferTarget(args) {
+  if (args.target) return args.target;
+  return `${args.input} ${args.output}`.includes("standalone") ? "standalone" : "gc";
+}
+
+function textOf(record) {
+  return [
+    record.file,
+    record.category,
+    record.status,
+    record.error,
+    record.error_category,
+    record.error_signature,
+    record.host_import_leak_class,
+    Array.isArray(record.imports) ? record.imports.join(" ") : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function hasAny(text, patterns) {
+  return patterns.some((pattern) => {
+    if (typeof pattern === "string") return text.includes(pattern);
+    return pattern.test(text);
+  });
+}
+
+function pathHas(record, patterns) {
+  const path = `${record.file ?? ""} ${record.category ?? ""}`.toLowerCase();
+  return hasAny(path, patterns);
+}
+
+const STANDALONE_ROOT_CAUSE_BUCKETS = [
+  {
+    id: "numeric-separator-literal-values",
+    issues: ["#1782", "#53"],
+    label: "Numeric and BigInt separator literals evaluate to wrong values",
+    match: (record, text) =>
+      hasAny(text, ["numericseparator", "numeric-separator", "numeric separator", "bigint separator"]),
+  },
+  {
+    id: "import-proposal-syntax",
+    issues: ["#1315", "#1435"],
+    label: "import.defer / import.source proposal syntax and early errors",
+    match: (record, text) =>
+      pathHas(record, ["import-defer", "import-source", "source-phase", "defer-import"]) ||
+      hasAny(text, ["import.defer", "import.source", "source phase"]),
+  },
+  {
+    id: "temporal-proposal",
+    issues: ["#661"],
+    label: "Temporal proposal/polyfill gap",
+    match: (record) => pathHas(record, ["built-ins/temporal"]),
+  },
+  {
+    id: "disposable-stack",
+    issues: ["#1036", "#990"],
+    label: "DisposableStack / explicit resource management",
+    match: (record) => pathHas(record, ["disposablestack", "asyncdisposablestack", "explicit-resource-management"]),
+  },
+  {
+    id: "dynamic-import",
+    issues: ["#1089", "#1512"],
+    label: "Dynamic import unsupported / early errors",
+    match: (record, text) =>
+      pathHas(record, ["dynamic-import"]) || hasAny(text, ["__dynamic_import", "dynamic import"]),
+  },
+  {
+    id: "with-statement",
+    issues: ["#1387"],
+    label: "`with` statement dynamic-scope lowering residuals",
+    match: (record, text) =>
+      pathHas(record, ["language/statements/with"]) || hasAny(text, ["with statement", "with-scope"]),
+  },
+  {
+    id: "standalone-json-codec",
+    issues: ["#1599"],
+    label: "Standalone JSON parser/stringifier",
+    match: (record, text) =>
+      record.host_import_leak_class === "json" ||
+      pathHas(record, ["built-ins/json"]) ||
+      hasAny(text, ["json_parse", "json_stringify"]),
+  },
+  {
+    id: "standalone-regexp",
+    issues: ["#682", "#1474"],
+    label: "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
+    match: (record, text) =>
+      record.host_import_leak_class === "regexp" ||
+      pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
+      hasAny(text, ["regexp", "regular expression"]),
+  },
+  {
+    id: "issamevalue-invalid-wasm",
+    issues: ["#1776"],
+    label: "Residual standalone isSameValue invalid-Wasm validator failures",
+    match: (record, text) => hasAny(text, ["issamevalue", "samevalue"]),
+  },
+  {
+    id: "standalone-dynamic-object-property",
+    issues: ["#1472"],
+    label: "Standalone dynamic object/property operation gate",
+    match: (record, text) =>
+      record.host_import_leak_class === "dynamic_object_property" ||
+      hasAny(text, [
+        "__extern_",
+        "__object_",
+        "__defineproperty",
+        "__get_builtin",
+        "__new_plain_object",
+        "__register_",
+        "__proto_method_call",
+        "dynamic object",
+        "no dependency provided for imported function",
+      ]),
+  },
+  {
+    id: "standalone-iterator-protocol",
+    issues: ["#1665", "#681", "#1718"],
+    label: "Generic iterator protocol still needs a pure-Wasm standalone path",
+    match: (record, text) =>
+      record.host_import_leak_class === "iterator_protocol" ||
+      pathHas(record, [
+        "built-ins/iterator",
+        "iteratorprototype",
+        "arrayiteratorprototype",
+        "stringiteratorprototype",
+        "mapiteratorprototype",
+        "setiteratorprototype",
+        "language/statements/for-of",
+      ]) ||
+      hasAny(text, ["iterator", "__iterator", "__array_from_iter"]),
+  },
+  {
+    id: "generator-async-iteration",
+    issues: ["#680", "#1665"],
+    label: "Generators and async iteration",
+    match: (record, text) =>
+      pathHas(record, ["generator", "asyncgenerator", "for-await"]) || hasAny(text, ["generator", "async iterator"]),
+  },
+  {
+    id: "class-prototype-private-descriptor",
+    issues: ["#1591", "#1365", "#1364"],
+    label: "Class element, prototype, private-name, and descriptor reconciliation gaps",
+    match: (record, text) =>
+      pathHas(record, [
+        "language/classes",
+        "language/statements/class",
+        "language/expressions/class",
+        "/class/",
+        "private",
+        "computed-property-names",
+        "built-ins/object/getownpropertydescriptor",
+      ]) || hasAny(text, ["private", "class element", "prototype", "property descriptor", "getownpropertydescriptor"]),
+  },
+  {
+    id: "object-to-primitive",
+    issues: ["#1525", "#1525b", "#1759"],
+    label: "ToPrimitive / object-to-string dispatch residuals",
+    match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
+  },
+  {
+    id: "array-typedarray-buffer",
+    issues: ["#1358", "#1461", "#1654"],
+    label: "Array, TypedArray, DataView, and buffer semantics",
+    match: (record) =>
+      pathHas(record, [
+        "built-ins/array/",
+        "built-ins/arraybuffer",
+        "built-ins/dataview",
+        "built-ins/typedarray",
+        "typedarrayconstructors",
+        "uint8array",
+        "int8array",
+        "float32array",
+        "float64array",
+      ]),
+  },
+  {
+    id: "object-property-semantics",
+    issues: ["#1472", "#176", "#281", "#1466"],
+    label: "Object/property/destructuring semantic mismatches behind the object model",
+    match: (record, text) =>
+      pathHas(record, ["built-ins/object", "language/destructuring", "object-"]) ||
+      hasAny(text, ["object.", "destructuring", "property"]),
+  },
+  {
+    id: "string-methods-coercion",
+    issues: ["#1105", "#1442", "#1381"],
+    label: "String methods and string coercion residuals in standalone",
+    match: (record) => pathHas(record, ["built-ins/string", "stringiteratorprototype", "language/literals/string"]),
+  },
+  {
+    id: "annex-b-function-eval",
+    issues: ["#1594", "#1050"],
+    label: "Annex B function/eval semantics",
+    match: (record) => pathHas(record, ["annexb"]),
+  },
+  {
+    id: "date-formatting-coercion",
+    issues: ["#1343"],
+    label: "Date prototype formatting/coercion",
+    match: (record) => pathHas(record, ["built-ins/date"]),
+  },
+  {
+    id: "number-parsing-formatting",
+    issues: ["#1335", "#1663", "#1689"],
+    label: "Number parsing, formatting, and coercion",
+    match: (record, text) =>
+      pathHas(record, ["built-ins/number", "parseint", "parsefloat"]) ||
+      hasAny(text, ["parseint", "parsefloat", "number."]),
+  },
+  {
+    id: "math-descriptors-coercion",
+    issues: ["#1732", "#562", "#160"],
+    label: "Math method descriptors and coercion edge cases",
+    match: (record) => pathHas(record, ["built-ins/math"]),
+  },
+  {
+    id: "function-object-semantics",
+    issues: ["#731", "#1732", "#1596"],
+    label: "Function object name/length/prototype/call semantics",
+    match: (record) =>
+      pathHas(record, ["built-ins/function", "language/function", "language/expressions/arrow-function"]),
+  },
+  {
+    id: "assignment-private-short-circuit",
+    issues: ["#334", "#1456", "#540"],
+    label: "Assignment targets, private refs, and short-circuit semantics",
+    match: (record) =>
+      pathHas(record, ["language/expressions/assignment", "language/expressions/logical", "short-circuit"]),
+  },
+  {
+    id: "map-set-weak-collections",
+    issues: ["#1103"],
+    label: "Wasm-native Map/Set/Weak collection semantics",
+    match: (record) => pathHas(record, ["built-ins/map", "built-ins/set", "built-ins/weakmap", "built-ins/weakset"]),
+  },
+  {
+    id: "eval-new-function",
+    issues: ["#1066", "#1073", "#990"],
+    label: "Eval and `new Function` semantics",
+    match: (record, text) =>
+      pathHas(record, ["eval-code", "built-ins/eval", "function-constructor"]) ||
+      hasAny(text, ["__extern_eval", "new function", "eval"]),
+  },
+  {
+    id: "arguments-object",
+    issues: ["#1511", "#1726"],
+    label: "Arguments object fidelity",
+    match: (record) => pathHas(record, ["arguments-object", "mapped-arguments", "unmapped-arguments"]),
+  },
+  {
+    id: "bigint-typed-path",
+    issues: ["#1644", "#1535"],
+    label: "Standalone BigInt host/typed-path residual",
+    match: (record, text) => pathHas(record, ["built-ins/bigint", "bigint"]) || hasAny(text, ["bigint"]),
+  },
+  {
+    id: "lexical-scope-tdz-declarations",
+    issues: ["#1128", "#990", "#1726"],
+    label: "Lexical scope, TDZ, and declaration semantics",
+    match: (record, text) =>
+      pathHas(record, [
+        "block-scope",
+        "identifier-resolution",
+        "scope",
+        "let",
+        "const",
+        "built-ins/global",
+        "language/global-code",
+      ]) || hasAny(text, ["tdz", "referenceerror"]),
+  },
+  {
+    id: "promise-async",
+    issues: ["#1326c", "#1116", "#1694"],
+    label: "Promise and async standalone semantics",
+    match: (record, text) =>
+      pathHas(record, ["built-ins/promise", "asyncfunction", "async-function"]) || hasAny(text, ["promise", "async"]),
+  },
+  {
+    id: "module-semantics",
+    issues: ["#1046", "#1527"],
+    label: "Module semantics and harness export shape",
+    match: (record) => pathHas(record, ["module-code", "language/import", "language/export"]),
+  },
+  {
+    id: "tail-call-control-flow",
+    issues: ["#602", "#787"],
+    label: "Tail-call/control-flow loop semantics, including compile timeouts",
+    match: (record, text) =>
+      record.status === "compile_timeout" ||
+      pathHas(record, ["tail-call", "language/statements", "control-flow"]) ||
+      hasAny(text, ["completion value"]),
+  },
+  {
+    id: "syntax-reference-errors",
+    issues: ["#927", "#1435", "#990"],
+    label: "Missing parse/early/runtime SyntaxError or ReferenceError",
+    match: (record, text) =>
+      record.error_category === "syntax_error" ||
+      pathHas(record, [
+        "language/asi",
+        "language/directive-prologue",
+        "language/comments",
+        "line-terminators",
+        "reserved-words",
+      ]) ||
+      hasAny(text, [
+        "syntaxerror",
+        "referenceerror",
+        "early error",
+        "hashbang",
+        "duplicate identifier",
+        "a class may only have one constructor",
+        "class constructor may not",
+      ]),
+  },
+  {
+    id: "template-literals",
+    issues: ["#1759", "#836"],
+    label: "Template literal and tagged-template semantics",
+    match: (record) => pathHas(record, ["template", "tagged-template"]),
+  },
+  {
+    id: "unicode-identifiers",
+    issues: ["#832", "#270"],
+    label: "Unicode/reserved-word identifier handling",
+    match: (record, text) =>
+      pathHas(record, ["unicode", "identifier", "reserved"]) || hasAny(text, ["unicode", "reserved word"]),
+  },
+  {
+    id: "completion-control-flow",
+    issues: ["#787", "#1378"],
+    label: "Completion values and control-flow semantics",
+    match: (record) => pathHas(record, ["break", "continue", "return", "switch", "try", "throw"]),
+  },
+  {
+    id: "extern-class-metadata",
+    issues: ["#812", "#1559"],
+    label: "Extern class dependency metadata",
+    match: (record, text) => hasAny(text, ["extern class", "dependency metadata", "extern_class"]),
+  },
+  {
+    id: "super-spread-receiver",
+    issues: ["#843", "#1551"],
+    label: "`super`, spread, and receiver-evaluation semantics",
+    match: (record) => pathHas(record, ["super", "spread", "optional-chaining", "new-target"]),
+  },
+  {
+    id: "sharedarraybuffer-atomics",
+    issues: ["#674", "#1354"],
+    label: "SharedArrayBuffer / Atomics backlog",
+    match: (record) => pathHas(record, ["sharedarraybuffer", "atomics"]),
+  },
+  {
+    id: "new-spread-optional-chain",
+    issues: ["#1519", "#1609", "#1603"],
+    label: "`new`, spread, and optional-chaining semantics",
+    match: (record) => pathHas(record, ["language/expressions/new", "optional-chaining", "spread"]),
+  },
+  {
+    id: "function-bind-descriptors",
+    issues: ["#1038", "#1732"],
+    label: "Function.prototype.bind / function-object descriptors",
+    match: (record) => pathHas(record, ["function/prototype/bind", "bind/"]),
+  },
+  {
+    id: "illegal-cast-boundary",
+    issues: ["#826", "#1623"],
+    label: "Illegal-cast/type-boundary residual",
+    match: (record, text) => hasAny(text, ["illegal cast", "ref.cast", "cast failure"]),
+  },
+  {
+    id: "null-undefined-typeerror",
+    issues: ["#820"],
+    label: "Null/undefined TypeError lowering residual",
+    match: (record, text) => hasAny(text, ["null/undefined", "dereferencing a null", "undefined access"]),
+  },
+  {
+    id: "invalid-wasm-boundaries",
+    issues: ["#1623", "#1666", "#1525b"],
+    label: "Invalid Wasm at type/coercion boundaries, late globals, and trampolines",
+    match: (record, text) =>
+      record.error_category === "wasm_compile" ||
+      hasAny(text, [
+        "invalid wasm",
+        "compiling function",
+        "type mismatch",
+        "not a subtype",
+        "trampoline",
+        "late global",
+        "wasm_compile",
+      ]),
+  },
+  {
+    id: "misc-spec-tail",
+    issues: ["#1577", "#779"],
+    label: "Miscellaneous low-volume spec-completeness tail",
+    match: (record, text) =>
+      hasAny(text, [
+        "assertion_fail",
+        "exception_in_test",
+        "returned #",
+        "runtime_error",
+        "range_error",
+        "rangeerror",
+        "maximum call stack",
+        "typeerror",
+      ]),
+  },
+];
+
+function emptyRootCauseBucket(bucket) {
+  return {
+    id: bucket.id,
+    issues: bucket.issues,
+    label: bucket.label,
+    count: 0,
+    statuses: createCounts(),
+    error_categories: {},
+    sample_files: [],
+    sample_signatures: [],
+  };
+}
+
+function addSample(samples, value, limit = 5) {
+  if (!value || samples.includes(value) || samples.length >= limit) return;
+  samples.push(value);
+}
+
+function recordRootCauseHit(target, record) {
+  target.count++;
+  target.statuses.total++;
+  target.statuses[record.status] = (target.statuses[record.status] ?? 0) + 1;
+  if (record.error_category) {
+    target.error_categories[record.error_category] = (target.error_categories[record.error_category] ?? 0) + 1;
+  }
+  addSample(target.sample_files, record.file);
+  addSample(target.sample_signatures, record.error_signature ?? record.error);
+}
+
+function buildStandaloneRootCauseMap(records, maxUnclassified) {
+  const buckets = STANDALONE_ROOT_CAUSE_BUCKETS.map(emptyRootCauseBucket);
+  const byId = new Map(buckets.map((bucket) => [bucket.id, bucket]));
+  const unclassified = {
+    id: "unclassified",
+    issues: [],
+    label: "Unclassified standalone failures",
+    count: 0,
+    statuses: createCounts(),
+    error_categories: {},
+    sample_files: [],
+    sample_signatures: [],
+  };
+
+  for (const record of records) {
+    const text = textOf(record);
+    const bucketDef = STANDALONE_ROOT_CAUSE_BUCKETS.find((bucket) => bucket.match(record, text));
+    if (bucketDef) {
+      recordRootCauseHit(byId.get(bucketDef.id), record);
+    } else {
+      recordRootCauseHit(unclassified, record);
+    }
+  }
+
+  return {
+    target: "standalone",
+    total_non_pass_non_skip: records.length,
+    classified: records.length - unclassified.count,
+    unclassified_threshold: maxUnclassified ?? null,
+    buckets: buckets.filter((bucket) => bucket.count > 0),
+    unclassified,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const target = inferTarget(args);
 
   const statuses = createCounts();
   const officialStatuses = createCounts();
@@ -75,6 +565,7 @@ async function main() {
     ["annex_b", createCounts()],
     ["proposal", createCounts()],
   ]);
+  const rootCauseRecords = [];
 
   const rl = createInterface({
     input: createReadStream(args.input),
@@ -118,6 +609,9 @@ async function main() {
     if (status === "skip" && record.error) {
       skipReasons.set(record.error, (skipReasons.get(record.error) ?? 0) + 1);
     }
+    if (target === "standalone" && status !== "pass" && status !== "skip") {
+      rootCauseRecords.push(record);
+    }
   }
 
   // #106 — split totals by ECMAScript-current-standard vs proposals.
@@ -138,6 +632,7 @@ async function main() {
     baseline_generated_at: args.baselineGeneratedAt || new Date().toISOString(),
     baseline_sha: args.baselineSha || "",
     mode: {
+      target,
       include_proposals: args.includeProposals ? 1 : 0,
       label: args.includeProposals ? "official test262 + proposals" : "official test262 (default scope)",
     },
@@ -173,7 +668,22 @@ async function main() {
     skip_reasons: Object.fromEntries([...skipReasons.entries()].sort(([a], [b]) => a.localeCompare(b))),
   };
 
+  if (target === "standalone") {
+    report.root_cause_map = buildStandaloneRootCauseMap(rootCauseRecords, args.maxUnclassifiedRootCauses);
+  }
+
   writeFileSync(args.output, JSON.stringify(report, null, 2));
+
+  if (
+    target === "standalone" &&
+    args.maxUnclassifiedRootCauses !== undefined &&
+    report.root_cause_map.unclassified.count > args.maxUnclassifiedRootCauses
+  ) {
+    console.error(
+      `Standalone root-cause map has ${report.root_cause_map.unclassified.count} unclassified failures; threshold is ${args.maxUnclassifiedRootCauses}.`,
+    );
+    process.exitCode = 1;
+  }
 
   // #1201 — also write a standalone categories file at
   // `<output-dir>/test262-categories.json` for clients that only need
@@ -182,7 +692,8 @@ async function main() {
   // report and avoids the indirection of "fetch report.json then read
   // .categories". Same schema as `report.categories`.
   const outputDir = args.output.replace(/[^/\\]+$/, "");
-  const categoriesPath = outputDir + "test262-categories.json";
+  const categoriesFile = target === "standalone" ? "test262-standalone-categories.json" : "test262-categories.json";
+  const categoriesPath = outputDir + categoriesFile;
   const categoriesPayload = {
     timestamp: report.timestamp,
     baseline_generated_at: report.baseline_generated_at,

@@ -12,7 +12,6 @@ language_feature: async-functions, type-coercion
 goal: test262-conformance
 related: [1042, 1373, 1151]
 ---
-
 # #1727 — internal async-function call result reads as NaN
 
 ## Problem

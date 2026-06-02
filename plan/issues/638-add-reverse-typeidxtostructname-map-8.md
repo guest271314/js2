@@ -16,8 +16,7 @@ files:
 ---
 # #638 — Add reverse typeIdxToStructName map (8 O(N) → O(1))
 
-## Status: review
-
+## Status: in-review
 8 occurrences of `for (const [name, idx] of ctx.structMap)` doing reverse lookups (find struct name by type index). Each is O(N) where N = number of struct types.
 
 ### Fix

@@ -17,7 +17,6 @@ test262_fail: 17
 test262_category: built-ins/ArrayBuffer
 related: [1645, 1595]
 ---
-
 # #1717 — ArrayBuffer.prototype.slice not implemented (17 fails)
 
 ## Problem

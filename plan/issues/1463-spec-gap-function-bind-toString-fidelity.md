@@ -1,7 +1,7 @@
 ---
 id: 1463
 title: "spec gap: Function.prototype.bind / toString / Symbol.hasInstance fidelity"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

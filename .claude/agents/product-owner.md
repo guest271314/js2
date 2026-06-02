@@ -104,7 +104,7 @@ When creating new issues:
 ## Conventions
 
 - **Never change code** — only manage `plan/` files
-- Issue status flow: `backlog → ready → in-progress → review → done`
+- Issue status flow: `backlog → ready → in-progress → in-review → done`
 - Keep issue frontmatter machine-readable and current; status, sprint, and
   lifecycle dates must match the real planning state
 - ES-edition, feature, and task-type metadata are mandatory and should be kept

@@ -90,6 +90,11 @@ import { compileOptionalCallExpression } from "./calls-optional.js";
 import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
+  compileStandaloneRegExpConstructor,
+  isGlobalRegExpIdentifier,
+  tryCompileStandaloneRegExpTest,
+} from "../regexp-standalone.js";
+import {
   emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
@@ -1663,7 +1668,12 @@ function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expressi
   return out;
 }
 
-function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
+function compileCallExpression(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  expectedType?: ValType,
+): InnerResult {
   // Optional chaining on calls: obj?.method()
   if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
@@ -1722,30 +1732,22 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
   // RegExp(pattern, flags) called without `new` — per spec, equivalent to
   // `new RegExp(pattern, flags)` (unless pattern is already a RegExp with
-  // flags undefined, an edge case we accept). Emit the RegExp_new host call
-  // directly so the host constructor runs and validates modifier syntax,
-  // throwing SyntaxError on invalid patterns. (#1055)
-  // #1474 — RegExp delegates to the JS host engine; refuse `RegExp(...)`
-  // (no `new`) in --target standalone (Phase 1: refuse-and-document).
+  // flags undefined, an edge case we accept). Host mode emits RegExp_new
+  // directly; standalone mode routes static literal patterns to #682's native
+  // subset and keeps unsupported forms on the explicit refusal path.
   if (
     ctx.standalone &&
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "RegExp"
+    isGlobalRegExpIdentifier(ctx, expr.expression)
   ) {
-    reportError(
-      ctx,
-      expr,
-      "Codegen error: RegExp(...) is not supported in --target standalone (#1474). " +
-        "Recompile without --target standalone.",
-    );
-    return null;
+    return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
   }
 
   if (
     !expr.questionDotToken &&
     ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "RegExp" &&
+    isGlobalRegExpIdentifier(ctx, expr.expression) &&
     ctx.externClasses.has("RegExp")
   ) {
     const externInfo = ctx.externClasses.get("RegExp")!;
@@ -2194,6 +2196,9 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
 
+    const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, expr, propAccess);
+    if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
+
     // Handle Array.prototype.METHOD.call(obj, ...args) — inline as array method on shape-inferred obj
     {
       const callResult = compileArrayPrototypeCall(ctx, fctx, expr, propAccess);
@@ -2596,6 +2601,31 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           expr.arguments.length >= 1
         ) {
           const typeName = objExpr.expression.text;
+          const isBuiltinRegExpPrototype = typeName === "RegExp" && isGlobalRegExpIdentifier(ctx, objExpr.expression);
+          if (ctx.standalone && isBuiltinRegExpPrototype) {
+            if (methodName === "test") {
+              const receiverArg = expr.arguments[0]!;
+              const syntheticProp = ts.factory.createPropertyAccessExpression(receiverArg, "test");
+              ts.setTextRange(syntheticProp, innerExpr);
+              const syntheticCall = ts.factory.createCallExpression(
+                syntheticProp,
+                undefined,
+                Array.from(expr.arguments).slice(1),
+              );
+              ts.setTextRange(syntheticCall, expr);
+              (syntheticCall as any).parent = expr.parent;
+              const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, syntheticCall, syntheticProp);
+              if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
+            }
+            reportError(
+              ctx,
+              expr,
+              `Codegen error: standalone RegExp literal-substring backend does not support ` +
+                `RegExp.prototype.${methodName}.call(...) (#682/#1474). Use RegExp.prototype.test ` +
+                `with a plain static pattern and no flags, or recompile without --target standalone.`,
+            );
+            return null;
+          }
           if (
             (typeName === "String" ||
               typeName === "Number" ||
@@ -2603,7 +2633,7 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
               typeName === "Boolean" ||
               typeName === "Object" ||
               typeName === "Function" ||
-              typeName === "RegExp") &&
+              isBuiltinRegExpPrototype) &&
             expr.arguments.length >= 1
           ) {
             const protoCallIdx = ensureLateImport(
@@ -6098,7 +6128,15 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
 
     // Array method calls
     {
-      const arrMethodResult = compileArrayMethodCall(ctx, fctx, propAccess, expr, receiverType);
+      const arrMethodResult = compileArrayMethodCall(
+        ctx,
+        fctx,
+        propAccess,
+        expr,
+        receiverType,
+        undefined,
+        expectedType,
+      );
       if (arrMethodResult !== undefined) return arrMethodResult;
     }
 
@@ -8825,6 +8863,17 @@ function compileCallExpression(ctx: CodegenContext, fctx: FunctionContext, expr:
           const recvIsUserClass = !!resolvedClassName && ctx.classSet.has(resolvedClassName);
           const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
           if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
+            if (ctx.standalone) {
+              reportError(
+                ctx,
+                expr,
+                `Codegen error: standalone RegExp literal-substring backend does not support ` +
+                  `${methodName} symbol protocol calls (#682/#1474). Use RegExp.prototype.test ` +
+                  `with a plain static pattern and no flags, or recompile without --target standalone.`,
+              );
+              return null;
+            }
+
             // Push receiver as externref (already a RegExp host object)
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {

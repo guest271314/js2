@@ -15,7 +15,6 @@ sprint: 50
 parent: 1328
 depends_on: [1665]
 ---
-
 ## Triage 2026-05-28 — NOT a localized receiver-check fix
 
 **Brand-check half is already done.** Issue #820j (TaskList #111, completed)

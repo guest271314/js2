@@ -2,10 +2,8 @@
 id: 1776
 title: "standalone test262 isSameValue emits invalid Wasm for externref operands"
 status: done
-owner: Tesla
 created: 2026-06-01
 updated: 2026-06-02
-completed: 2026-06-01
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -14,9 +12,9 @@ area: codegen, testing
 language_feature: equality
 goal: standalone-mode
 sprint: 58
+owner: Tesla
 related: [1228, 1472]
 ---
-
 # #1776 - standalone test262 isSameValue emits invalid Wasm for externref operands
 
 ## Problem
@@ -148,3 +146,41 @@ Both scoped runs passed locally.
 ## Completion - PR #1025
 
 Closed by merged PR [#1025](https://github.com/loopdive/js2/pull/1025), which refreshed the late-import call indices for externref equality fallbacks and added the focused standalone regression coverage above.
+
+## Reopened evidence - refreshed standalone artifact 2026-06-02
+
+The latest published standalone baseline still contains this root cause after
+PR #1025 landed. Source:
+`loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The root-cause classifier assigns **1,436** bad rows primarily to this issue.
+A raw non-exclusive search for `isSameValue` validator failures finds **1,469**
+rows, because a small number also match earlier classifier buckets.
+
+Representative residual signatures:
+
+```text
+Compiling function #47:"isSameValue" failed: call[0] expected type i32,
+found local.get of type externref
+```
+
+```text
+Compiling function #70:"isSameValue" failed: f64.eq[0] expected type f64,
+found call of type i32
+```
+
+Example files:
+
+- `test/language/statements/async-generator/dflt-params-ref-self.js`
+- `test/language/statements/async-generator/dstr/dflt-ary-ptrn-rest-id.js`
+- `test/language/statements/class/elements/after-same-line-static-async-gen-rs-static-method-privatename-identifier.js`
+- `test/language/statements/class/subclass/derived-class-return-override-catch-finally-arrow.js`
+
+Interpretation: PR #1025 fixed the late-import index path captured by the
+focused unit test, but it did not retire the broader standalone SameValue /
+dynamic equality typing bug in the test262 harness. Keep this issue open until
+the standalone artifact has zero `isSameValue` validator failures, including
+the `f64.eq ... found call of type i32` variant.

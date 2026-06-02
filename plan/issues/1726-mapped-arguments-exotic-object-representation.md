@@ -2,6 +2,8 @@
 id: 1726
 title: "spec gap: mapped `arguments` exotic-object representation (§10.4.4)"
 status: ready
+created: 2026-05-29
+updated: 2026-05-29
 feasibility: hard
 area: codegen, runtime
 language_feature: arguments-object
@@ -9,10 +11,7 @@ goal: test262-conformance
 sprint: Backlog
 parent: 1511
 related: [1511, 849, 779e, 1053, 1382]
-created: 2026-05-29
-updated: 2026-05-29
 ---
-
 > **ID-collision note (read first):** the numeric id `1432` is *already in
 > use* by the **done** issue
 > `plan/issues/1432-spec-gap-parameter-list-rest-destructuring.md` (merged

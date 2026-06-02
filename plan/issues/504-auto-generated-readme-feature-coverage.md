@@ -22,8 +22,7 @@ files:
 ---
 # #504 — Auto-generated README feature coverage + benchmark tables
 
-## Status: review
-
+## Status: in-review
 README.md has a manually maintained "Supported TypeScript Subset" table (line 142) that's outdated. Create a script that auto-generates it from test results.
 
 ## Deliverable: `scripts/update-readme.ts`

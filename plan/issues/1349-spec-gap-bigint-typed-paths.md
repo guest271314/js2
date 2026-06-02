@@ -4,6 +4,7 @@ title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 i
 status: wont-fix
 created: 2026-05-08
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium

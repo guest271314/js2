@@ -428,6 +428,7 @@ async function main() {
     let stderrBytes = 0;
     let stderrPreview = "";
     let spawnError;
+    let writeError;
     let firstRssKb;
     let peakSampledRssKb = 0;
     let peakHwmKb;
@@ -438,6 +439,9 @@ async function main() {
 
     child.once("error", (err) => {
       spawnError = err;
+    });
+    child.stdin.on("error", (err) => {
+      if (!writeError) writeError = err;
     });
     child.stdout.on("data", (chunk) => parser.push(chunk));
     child.stderr.on("data", (chunk) => {
@@ -476,7 +480,6 @@ async function main() {
     }, opts.timeoutMs);
     timeout.unref?.();
 
-    let writeError;
     const closePromise = new Promise((resolve) => {
       child.once("close", (code, signal) => resolve({ code, signal }));
     });

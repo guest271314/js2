@@ -16,8 +16,7 @@ files:
 ---
 # #636 — Extract createCodegenContext() factory (fixes WASI multi-module bug)
 
-## Status: review
-
+## Status: in-review
 CodegenContext initialization is duplicated between generateModule (line ~455) and generateMultiModule (line ~694) — ~90 identical lines. generateMultiModule is missing WASI fields, silently disabling WASI for multi-file compilation.
 
 ### Fix

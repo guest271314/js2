@@ -17,8 +17,7 @@ files:
 ---
 # #370 -- WeakMap and WeakSet (skip filter narrowing)
 
-## Status: review
-
+## Status: in-review
 10 WeakMap + 8 WeakSet tests. Full implementation needs weak reference semantics.
 
 ## Pragmatic approach (implemented)

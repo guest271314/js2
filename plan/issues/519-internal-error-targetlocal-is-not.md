@@ -18,8 +18,7 @@ files:
 ---
 # #519 — Internal error: targetLocal is not defined (66 CE)
 
-## Status: review
-
+## Status: in-review
 66 tests crash the compiler with "Internal error compiling statement: targetLocal is not defined". This is a compiler bug — a variable reference is unresolved during codegen.
 
 Likely cause: destructuring in for-of or catch blocks where the binding variable isn't registered in the local scope before use.

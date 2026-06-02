@@ -1,7 +1,7 @@
 ---
 id: 1450
 title: "spec gap: NamedEvaluation — anonymous fn/class names from binding identifiers in destructuring defaults"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

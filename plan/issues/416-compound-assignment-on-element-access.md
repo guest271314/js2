@@ -17,8 +17,7 @@ files:
 ---
 # #416 -- Compound assignment on element access (non-ref targets)
 
-## Status: review
-
+## Status: in-review
 11 tests fail when compound assignment operators (`+=`, `-=`, `*=`, etc.) are applied to element access expressions like `arr[i] += value`. The compiler cannot resolve the target type for the read-modify-write sequence.
 
 ## Root cause

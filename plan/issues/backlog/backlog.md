@@ -12,7 +12,7 @@ Architectural sprint (no pass-count target; zero-regression guard). Goals:
 Track 1 — acorn dogfood:
 - [#1710](../1710-acorn-dogfood-harness.md) — acorn harness: compile + validate + diff-AST vs node-acorn — high, medium, **ready (s57)**.
 - [#1711](../1711-acorn-failure-surface-triage.md) — triage harness surface → file sized child issues — high, medium, **ready (s57)**, depends on #1710.
-- [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **carried to sprint 58** (#1710/#1711 done; unblocked by #1745).
+- [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **carried to sprint 59** (#1710/#1711 done; unblocked by #1745).
 - Prior blockers #1679/#1690/#1690b are **done**.
 
 Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
@@ -29,7 +29,7 @@ Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--targ
 - [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
 - [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
 - [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
-- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, ready (after #1666).
+- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, **ready (sprint 58; after #1666)**.
 
 ## Harvest 2026-05-24b (fixable test262 compile-error causes — CE decomposition)
 
@@ -59,8 +59,17 @@ From the dev-1553b destructuring-lane verification sweep.
 
 ## Landing page / conformance dashboard UX (2026-06-02)
 
-- [#1777](../1777-landing-es-edition-slider-2026-notch-thumb-offset.md) — landing page ES edition slider shows ES2026 as a published notch and the thumb drifts right of ticks while dragging — medium, easy, **ready**.
-- [#1778](../1778-landing-standalone-test262-pass-rate-real-number.md) — landing page JS-host toggle should show the real standalone-mode test262 pass rate instead of a scaled estimate — medium, medium, **ready (s58)**.
+- [#1777](../1777-landing-es-edition-slider-2026-notch-thumb-offset.md) — landing page ES edition slider shows ES2026 as a published notch and the thumb drifts right of ticks while dragging — medium, easy, **ready (sprint 59)**.
+- [#1778](../1778-landing-standalone-test262-pass-rate-real-number.md) — landing page JS-host toggle should show the real standalone-mode test262 pass rate instead of a scaled estimate — medium, medium, **DONE (sprint 58)**.
+
+## Standalone test262 root-cause refresh (2026-06-02)
+
+From the full standalone JSONL published in `loopdive/js2wasm-baselines`
+commit `b4684d8f97a462c6414716aea46f31b67f48b959` and mapped in #1781.
+Existing high-volume root causes were updated in their owning issue files;
+only one new root-cause issue was needed.
+
+- [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
 
 ## Sprint 55 — repo structure / website (2026-05-24)
 
@@ -130,23 +139,26 @@ fidelity → #1463) were NOT re-filed.
 
 ### Platform / Component Model & runtime (from GitHub #389)
 
-- [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **ready (sprint 58)**
-- [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **ready (sprint 58)**
+- [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **DONE (sprint 58)**
+- [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **DONE (sprint 58)**
+- [#1754](../1754-build-from-repo-loopdive-js2-unresolved.md) — Build-from-repo `packages/index.js` re-exports unresolved `@loopdive/js2` — medium, medium, **ready (backlog)**
+- [#1779](../1779-wit-generator-wasm-tools-roundtrip-parity.md) — Follow-up for #1751: WIT generator `wasm-tools` round-trip parity check — medium, medium, **ready (backlog)**
+- [#1780](../1780-textencoder-encodeinto-standalone-wasi.md) — Follow-up for #1752: `TextEncoder.encodeInto` support for standalone/WASI — medium, medium, **ready (backlog)**
 - [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **DONE (sprint 58)**
-- [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **ready (sprint 58)**
-- [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **ready (sprint 58)**
+- [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **DONE (sprint 58)**
+- [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **DONE (sprint 58)**
 - [#1765](../1765-nullable-number-alias-narrowing-byte-assignment.md) — Nullable `number | null` sentinel not narrowed through a boolean alias before typed-array byte assignment (from GitHub #389, 2026-06-01) — medium, medium, **DONE (sprint 58)**
-- [#1766](../1766-process-stdout-write-drain-backpressure-api.md) — Node-style `process.stdout.write` backpressure / `once("drain")` pattern not supported; Preview-1 direct `fd_write` `write()`→`true` + no-op `once("drain")` shim done, full async helper still blocked (from GitHub #389, 2026-06-01) — medium, hard, **blocked (sprint 58)** on #1042/#1326/#1575
+- [#1766](../1766-process-stdout-write-drain-backpressure-api.md) — Node-style `process.stdout.write` backpressure / `once("drain")` pattern not supported; Preview-1 direct `fd_write` `write()`→`true` + no-op `once("drain")` shim done, full async helper still blocked (from GitHub #389, 2026-06-01) — medium, hard, **blocked (backlog)** on #1042/#1326/#1575
 - [#1772](../1772-edgejs-node-wasi-shim-spike.md) — Spike edge.js as a separate Node API module / WASI shim layer for imported `node:process`-style compatibility instead of accumulating host API cases inline in the compiler — medium, medium, **backlog**
 - [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **DONE (sprint 58)**, follow-up to #1765
-- [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run grows wasmtime memory toward OOM despite protocol-level chunking; write-side chunked response slice + guarded stress harness in progress (from GitHub #389, 2026-06-01) — high, hard, **in-progress (sprint 58)**
+- [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run now streams continuations without staging the full request; guarded wasmtime 64x array run peaked at 36.1 MiB RSS (from GitHub #389, 2026-06-01) — high, hard, **DONE (sprint 58)**
 - [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
-- [#1774](../1774-wasi-preview3-async-stream-semantics.md) — WASI 0.3 / Preview 3 async stream semantics for Node stdout/stderr: map `Writable.write()` backpressure, `drain`, callbacks, and errors onto component-model `stream<u8>` / `future` shapes when that backend exists (follow-up from PR #1016 comment, 2026-06-01) — medium, hard, **ready (sprint 58)**, depends on #1042/#1326/#1575
+- [#1774](../1774-wasi-preview3-async-stream-semantics.md) — WASI 0.3 / Preview 3 async stream semantics for Node stdout/stderr: map `Writable.write()` backpressure, `drain`, callbacks, and errors onto component-model `stream<u8>` / `future` shapes when that backend exists (follow-up from PR #1016 comment, 2026-06-01) — medium, hard, **ready (backlog)**, depends on #1042/#1326/#1575
 
 ### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
 
 Native differential (PR #997) found the string **build** loop is ~99% of warm wall
 time (the i32 hash path lever is DONE and already faster/char than V8). Two sized levers:
 
-- [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready**
+- [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready (sprint 59)**
 - [#1762](../1762-linear-memory-string-backing-build-hash-hot-path.md) — Linear-memory string backing for the build/hash hot path — drop the WasmGC `(array i16)` GC barrier (strategic ceiling; dual-backend like #679/#682/#1714) — **high**, hard, **ready, likely needs arch spec**

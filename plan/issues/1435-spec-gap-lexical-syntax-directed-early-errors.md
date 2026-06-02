@@ -1,7 +1,7 @@
 ---
 id: 1435
 title: "spec gap: lexical grammar and syntax-directed early errors"
-status: review
+status: in-review
 created: 2026-05-11
 updated: 2026-05-11
 priority: medium

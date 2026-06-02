@@ -3,7 +3,7 @@ id: 53
 title: "Issue 53: Numeric separators"
 status: done
 created: 2026-03-02
-updated: 2026-04-14
+updated: 2026-06-02
 completed: 2026-03-02
 goal: compilable
 sprint: 0
@@ -39,3 +39,11 @@ const binary = 0b1010_0001;     // 161
 ## Complexity
 
 XS — ~5 lines, 1 file (likely already works, just needs verification + test)
+
+## Follow-up - standalone residual 2026-06-02
+
+#53 remains the historical parser/codegen support issue, but the refreshed
+standalone test262 artifact shows **50** remaining separator literal value
+failures: 30 numeric literals and 20 BigInt literals. Those are tracked in
+#1782 because they are assertion failures in standalone literal evaluation, not
+the original compile-error support gap.

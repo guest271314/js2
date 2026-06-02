@@ -4,6 +4,7 @@ title: "host-indep: gate __throw_reference_error in standalone mode"
 status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: medium
 feasibility: easy
 reasoning_effort: low

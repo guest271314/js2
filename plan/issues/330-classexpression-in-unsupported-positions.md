@@ -30,8 +30,7 @@ files:
 ---
 # #330 -- ClassExpression in unsupported positions
 
-## Status: review
-
+## Status: in-review
 25 test262 tests fail with "Unsupported expression: ClassExpression". Class expressions used as values in assignment, nested class definitions, and private member shadowing contexts are not handled.
 
 ## Error pattern

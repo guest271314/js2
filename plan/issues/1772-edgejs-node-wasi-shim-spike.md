@@ -7,17 +7,15 @@ updated: 2026-06-01
 priority: medium
 feasibility: medium
 reasoning_effort: medium
-es_edition: n/a
-language_feature: node-api-compat
 task_type: research
 area: host-interop
+language_feature: node-api-compat
 goal: platform
-related: [389, 1575, 1766]
-depends_on: []
 sprint: Backlog
+es_edition: n/a
+related: [389, 1575, 1766]
 origin: "Follow-up from PR #1010 review direction"
 ---
-
 # #1772 — Spike edge.js as a Node API module / WASI shim layer
 
 ## Problem

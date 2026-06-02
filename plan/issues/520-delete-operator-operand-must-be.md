@@ -17,8 +17,7 @@ files:
 ---
 # #520 — Delete operator: operand must be optional (80 CE)
 
-## Status: review
-
+## Status: in-review
 80 tests fail with "The operand of a 'delete' operator must be optional" (62) or "cannot be a read-only property" (18). TypeScript's strict mode rejects `delete obj.prop` unless the property is optional.
 
 ## Approach

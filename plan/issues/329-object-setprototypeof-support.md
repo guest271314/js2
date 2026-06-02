@@ -26,8 +26,7 @@ files:
 ---
 # #329 -- Object.setPrototypeOf support
 
-## Status: review
-
+## Status: in-review
 7 test262 tests fail with "Property setPrototypeOf does not exist on type ObjectConstructor". These tests use Object.setPrototypeOf() which is part of the prototype chain system.
 
 ## Error pattern

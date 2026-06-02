@@ -2,7 +2,6 @@
 id: 1743
 title: "Bytecode VM: coordinated stack → register+accumulator encoding flip"
 status: ready
-sprint: Backlog
 created: 2026-05-30
 updated: 2026-05-30
 priority: medium
@@ -12,6 +11,7 @@ task_type: feature
 area: runtime
 language_feature: eval
 goal: spec-completeness
+sprint: Backlog
 parent: 1584
 depends_on: [1584]
 ---

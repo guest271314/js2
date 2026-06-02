@@ -514,7 +514,9 @@ sprint: 0
 | 1765 | 2026-06-01 | Nullable number sentinels now preserve null and narrow through direct/aliased guards before typed-array byte writes | Sprint-58 |
 | 1768 | 2026-06-01 | allowJs native-messaging sendMessage shape now emits valid WASI wasm; fixed native-string sentinel fallbacks and vec inference for subarray/set | Sprint-58 |
 | 1773 | 2026-06-01 | Dependency graph data is now generated during Pages builds and published to labs instead of tracked as public source JSON | Sprint-58 |
-| 1767 | 2026-06-01 | Native-messaging large responses now use bounded <=1 MiB frames with guarded stress validation for the reported 64 MiB array path | Sprint-58 |
+| 1767 | 2026-06-02 | Native-messaging 64 MiB continuations now stream without staging the full request; guarded wasmtime reported-array run completed with 64 <=1 MiB response frames and 36.1 MiB peak RSS | Sprint-58 |
 | 1753 | 2026-06-02 | Native-messaging host now reads large requests as <=1 MiB continuation frames up to 64 MiB and responds with <=1 MiB byte-exact chunks using bounded ArrayBuffer aggregation | Sprint-58 |
 | 1769 | 2026-06-02 | Nullable primitive unions now preserve nullish sentinels in externref storage and unbox through reusable non-null proofs across writes, arithmetic, calls, and returns | Sprint-58 |
 | 1755 | 2026-06-02 | Generic typed-array annotations such as Uint8Array<ArrayBuffer> now erase to the bare typed-array lowering across IR, export metadata, and the existing linear Uint8Array collection tagging paths | Sprint-58 |
+| 682 | 2026-06-02 | Reduced standalone RegExp backend supports static plain `.test` forms without JS-host imports; PR #1038 merged via the merge queue | Sprint-58 |
+| 1668 | 2026-05-25 | Catastrophic test262 regression guard landed in the required merge-report job via PR #619 | Sprint-55 |

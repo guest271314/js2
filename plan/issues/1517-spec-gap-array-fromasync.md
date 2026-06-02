@@ -1,7 +1,7 @@
 ---
 id: 1517
 title: "spec gap: Array.fromAsync — ES2024 async-iteration constructor"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

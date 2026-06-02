@@ -18,8 +18,7 @@ files:
 ---
 # #393 -- Compound assignment on externref element access (13 CE)
 
-## Status: review
-
+## Status: in-review
 13 tests fail because compound assignment operators (`+=`, `-=`, etc.) on element access expressions with externref base are not supported.
 
 ## Details

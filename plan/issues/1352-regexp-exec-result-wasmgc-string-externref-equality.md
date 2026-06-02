@@ -2,9 +2,9 @@
 id: 1352
 title: "RegExp exec result: wasmGC string struct ≠ externref string in strict equality (S15.10.2 cluster)"
 status: done
-completed: 2026-05-28
 created: 2026-05-08
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -15,7 +15,6 @@ goal: spec-completeness
 sprint: ~
 parent: 1333
 ---
-
 ## Resolution (2026-05-28, developer reconciliation)
 
 **ALREADY FIXED ON MAIN — close as `done`, no implementation work needed.**

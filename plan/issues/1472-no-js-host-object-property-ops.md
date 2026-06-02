@@ -1,7 +1,7 @@
 ---
 id: 1472
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 updated: 2026-06-02
 priority: high
@@ -13,6 +13,8 @@ language_feature: objects, property access, prototype chain
 goal: host-independence
 sprint: 58
 related: []
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:02:41.042Z
 ---
 # #1472 — Eliminate JS host object/property ops for standalone Wasm
 
@@ -92,6 +94,45 @@ cluster are `__extern_get` (11,841), `__extern_is_undefined` (7,476),
 `__get_builtin` (6,410), `__extern_length` (5,460), `__extern_set` (5,459),
 `__new_plain_object` (4,632), `__extern_get_idx` (4,618), and
 `__extern_method_call` (4,322).
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The full artifact has 48,110 rows. Excluding passes/skips leaves 40,208 bad
+rows; the root-cause classifier assigns **26,880** of them primarily to #1472.
+That is still the dominant standalone root cause, and it is now mostly a
+successful refusal diagnostic rather than an unknown import crash.
+
+Representative diagnostic:
+
+```text
+Codegen error: '__new_plain_object' (dynamic-shape object/property operation)
+is not yet supported in --target standalone (#1472 Phase B).
+```
+
+Raw, non-exclusive helper mentions in the latest current JSONL:
+
+| Helper | Rows mentioning helper |
+| --- | ---: |
+| `__extern_get` | 15,597 |
+| `__extern_is_undefined` | 7,970 |
+| `__extern_method_call` | 7,465 |
+| `__get_builtin` | 6,565 |
+| `__extern_length` | 5,808 |
+| `__extern_set` | 5,414 |
+| `__new_plain_object` | 5,008 |
+| `__defineProperty_accessor` | 2,713 |
+| `__defineProperty_value` | 1,486 |
+| `__hasOwnProperty` | 1,416 |
+| `__proto_method_call` | 659 |
+
+This keeps Phase B as the main pass-rate lever: the standalone lane now tells
+users exactly where dynamic object semantics are missing, but the corpus cannot
+recover until the open-object runtime replaces these host-side sidecars.
 
 ## Standalone alternative
 

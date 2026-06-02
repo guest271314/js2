@@ -1,7 +1,7 @@
 ---
 id: 1443
 title: "spec gap: String.prototype.replace/replaceAll/match/search delegate to argument's Symbol.* method"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

@@ -22,8 +22,7 @@ files:
 ---
 # #593 -- Minor security/correctness fixes across emit + runtime
 
-## Status: review
-
+## Status: in-review
 Small fixes identified in code review:
 
 1. **WAT string escaping** (wat.ts): Added `escapeWatString` helper that escapes backslash, double-quote, newline, carriage return, tab, and other control characters. Applied to import module/name strings and export name strings.

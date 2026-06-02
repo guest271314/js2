@@ -1,7 +1,7 @@
 ---
 id: 1456
 title: "spec gap: private-reference assignment to readonly accessor / method throws TypeError"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

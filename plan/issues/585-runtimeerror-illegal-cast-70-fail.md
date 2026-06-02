@@ -17,8 +17,7 @@ files:
 ---
 # #585 — RuntimeError: illegal cast (70 FAIL)
 
-## Status: review
-
+## Status: in-review
 70 tests fail with "RuntimeError: illegal cast" — ref.cast encounters a value whose runtime type doesn't match the expected struct type.
 
 ### Root cause

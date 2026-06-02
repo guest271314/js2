@@ -12,8 +12,7 @@ test262_ce: 12
 ---
 # #333 -- Dynamic import modifier syntax errors
 
-## Status: review
-
+## Status: in-review
 12 test262 tests fail with "Modifiers cannot appear here" errors. These are FIXTURE files for dynamic import tests that use import/export syntax the TypeScript compiler rejects.
 
 ## Error pattern

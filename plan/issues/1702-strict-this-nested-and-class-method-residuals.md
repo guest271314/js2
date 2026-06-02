@@ -2,15 +2,15 @@
 id: 1702
 title: "Residual strict-mode `this` regressions: function-expression direct-call + nested fn-decl in class method"
 status: done
-sprint: 56
-goal: core-semantics
-parent: 1636
-area: codegen
-feasibility: medium
 created: 2026-05-29
+updated: 2026-05-29
 completed: 2026-05-29
+feasibility: medium
+area: codegen
+goal: core-semantics
+sprint: 56
+parent: 1636
 ---
-
 # Residual strict-mode `this` (the #873 / #895 follow-up)
 
 Follow-up to PR #895 / #1636-S1. A baseline-diff investigation found the pass

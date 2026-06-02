@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #209 -- For-loop continue with string concatenation: any-typed += dispatch
 
-## Status: review
-
+## Status: in-review
 ## Summary
 For-loop tests fail where the loop body uses `continue` to skip iterations and concatenates results into a string. The root cause is that `any`-typed variables assigned string literals are not recognized as strings by the `+=` compound assignment operator, causing numeric addition instead of string concatenation.
 

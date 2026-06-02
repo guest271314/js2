@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #205 — String.prototype.indexOf type coercion errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 5 test262 compile errors in `built-ins/String/prototype/indexOf`. While 1 test passes, the remaining fail with wasm validation type mismatches.
 

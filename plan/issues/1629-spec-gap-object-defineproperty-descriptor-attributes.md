@@ -16,7 +16,6 @@ renumbered_from: 1335
 parent: 1328
 related: [1629a, 1629b, 1629c, 1630, 1631, 1130, 1364b]
 ---
-
 > **UNIFIED DESCRIPTOR-MODEL SPEC (architect, 2026-05-29).** The single
 > coherent implementation plan for the whole Object property-descriptor
 > family is the **"## Unified Implementation Plan — Object property-descriptor

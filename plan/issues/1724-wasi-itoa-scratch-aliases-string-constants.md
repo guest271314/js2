@@ -8,7 +8,7 @@ completed: 2026-05-29
 priority: critical
 feasibility: hard
 reasoning_effort: max
-task_type: bug
+task_type: bugfix
 area: codegen, runtime
 language_feature: wasi, native-strings, number-to-string
 goal: real-world-compat, spec-completeness

@@ -16,8 +16,7 @@ files:
 ---
 # Issue #274: Property access on function type -- .name, .length, .call, .apply
 
-## Status: review
-
+## Status: in-review
 ## Summary
 ~40 tests fail with "Property X does not exist on type Y" or "Cannot access property 'name'" when accessing properties on function values. Functions should expose `.name` (string), `.length` (number), `.call()`, and `.apply()` as built-in properties.
 

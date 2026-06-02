@@ -4,6 +4,7 @@ title: "Symbol→string implicit coercion must throw TypeError (value-representa
 status: wont-fix
 created: 2026-05-27
 updated: 2026-05-27
+completed: 2026-05-27
 priority: medium
 feasibility: medium
 reasoning_effort: medium

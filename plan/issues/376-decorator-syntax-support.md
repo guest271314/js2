@@ -17,8 +17,7 @@ files:
 ---
 # #376 -- Decorator syntax support
 
-## Status: review
-
+## Status: in-review
 10+ tests use class decorators (@decorator), which cause compile errors because TypeScript diagnostic codes related to decorators were not suppressed.
 
 ## Pragmatic approach

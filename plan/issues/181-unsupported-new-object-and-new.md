@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #181 — Unsupported `new Object()` and `new Function()` constructor calls
 
-## Status: review
-
+## Status: in-review
 ## Summary
 58 test262 compile errors from `new Object(...)` (39 tests) and `new Function(...)` (19 tests). These are built-in constructors that need special handling.
 

@@ -32,5 +32,5 @@ An issue is **done** when all of the following are true:
 ## What "done" is NOT
 - Code committed but not merged
 - Tests pass on branch but not after integration with main
-- Issue frontmatter still says `ready`, `blocked`, or `review`
+- Issue frontmatter still says `ready`, `blocked`, or `in-review`
 - "It works on my machine" without recorded test results

@@ -1020,14 +1020,19 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
       "split",
     ]);
     for (const method of state.stringMethodNeeded) {
-      if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && !state.stringRegexpMethodNeeded.has(method)) {
+      const nativeStringMethod = ctx.nativeStrings && NATIVE_STR_METHODS.has(method);
+      if (nativeStringMethod) {
         ensureNativeStringHelpers(ctx);
+      }
+      // #682/#1474: standalone refuses RegExp-consuming string methods during
+      // lowering, so do not pre-register JS-host string_* imports for them.
+      if (ctx.standalone && (method === "match" || method === "matchAll" || method === "search")) {
         continue;
       }
-      if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && state.stringRegexpMethodNeeded.has(method)) {
-        // Need BOTH native helpers AND host import for RegExp-arg calls
-        ensureNativeStringHelpers(ctx);
+      if (ctx.standalone && state.stringRegexpMethodNeeded.has(method)) {
+        continue;
       }
+      if (nativeStringMethod && !state.stringRegexpMethodNeeded.has(method)) continue;
       const sig = STRING_METHODS[method]!;
       const params: ValType[] = [{ kind: "externref" }, ...sig.params];
       const t = addFuncType(ctx, params, [sig.result]);
