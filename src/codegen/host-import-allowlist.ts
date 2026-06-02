@@ -284,24 +284,24 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
     reason: "Host trampolines for invoking JS callbacks (__call_1_i32, __call_2_f64, ...); #1470.",
   },
 
-  // ---- #1376 Generator helpers (retired as part of IR fallback budget) ----
+  // ---- #1665 Generator helpers (retired by Wasm-native generator lowering) ----
   {
     kind: "prefix",
     name: "__gen_",
-    trackingIssue: 1376,
-    reason: "Generator scheduler primitives implemented JS-side; native path tracked in #1376.",
+    trackingIssue: 1665,
+    reason: "Generator scheduler primitives implemented JS-side; native path tracked in #1665.",
   },
   {
     kind: "prefix",
     name: "__create_generator",
-    trackingIssue: 1376,
-    reason: "Sync generator constructor host-side; #1376.",
+    trackingIssue: 1665,
+    reason: "Sync generator constructor host-side; #1665.",
   },
   {
     kind: "prefix",
     name: "__create_async_generator",
-    trackingIssue: 1376,
-    reason: "Async generator constructor host-side; #1376.",
+    trackingIssue: 1665,
+    reason: "Async generator constructor host-side; #1665.",
   },
 
   // ---- #1632a Function.prototype.bind / .apply / .call (host-delegated) ----

@@ -480,9 +480,34 @@ let _iteratorHelpersInstalled = false;
 function _installIteratorHelperPolyfills(): void {
   if (_iteratorHelpersInstalled) return;
   _iteratorHelpersInstalled = true;
-  const I: any = (globalThis as any).Iterator;
-  if (typeof I !== "function" || typeof I.prototype !== "object" || I.prototype == null) return;
-  const Iproto: any = I.prototype;
+  const compilerIteratorProto = _getIteratorPrototype();
+  let I: any = (globalThis as any).Iterator;
+  if (typeof I !== "function" || typeof I.prototype !== "object" || I.prototype == null) {
+    I = function Iterator(this: any) {
+      throw new TypeError("Iterator is not a constructor");
+    };
+    I.prototype = compilerIteratorProto;
+    Object.defineProperty(globalThis, "Iterator", {
+      value: I,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  const Iproto: any = typeof I.prototype === "object" && I.prototype != null ? I.prototype : compilerIteratorProto;
+
+  if (Iproto !== compilerIteratorProto) {
+    let wouldCycle = false;
+    for (let p = Iproto; p != null; p = Object.getPrototypeOf(p)) {
+      if (p === compilerIteratorProto) {
+        wouldCycle = true;
+        break;
+      }
+    }
+    if (!wouldCycle && Object.getPrototypeOf(compilerIteratorProto) !== Iproto) {
+      Object.setPrototypeOf(compilerIteratorProto, Iproto);
+    }
+  }
 
   // ES2025 GetIteratorFlattenable — accepts an iterable OR a raw iterator.
   function _getFlattenable(obj: any): any {
@@ -512,6 +537,295 @@ function _installIteratorHelperPolyfills(): void {
       return this;
     };
     return obj;
+  }
+
+  function _requireIteratorReceiver(receiver: any, name: string): any {
+    if (receiver == null || typeof receiver.next !== "function") {
+      throw new TypeError("Iterator.prototype." + name + " called on non-iterator");
+    }
+    return receiver;
+  }
+
+  function _closeIterator(iter: any): void {
+    try {
+      iter?.return?.();
+    } catch {}
+  }
+
+  if (typeof I.from !== "function") {
+    Object.defineProperty(I, "from", {
+      value: function from(iterable: any) {
+        return _getFlattenable(iterable);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (typeof Iproto.map !== "function") {
+    _installBuiltinMethod(Iproto, "map", 1, function (this: any, mapper: any) {
+      const outer = _requireIteratorReceiver(this, "map");
+      if (typeof mapper !== "function") {
+        throw new TypeError("Iterator.prototype.map: mapper is not a function");
+      }
+      let counter = 0;
+      let done = false;
+      return _makeHelperIterator(
+        function next() {
+          if (done) return { value: undefined, done: true };
+          const r = outer.next();
+          if (r && r.done) {
+            done = true;
+            return { value: undefined, done: true };
+          }
+          try {
+            return { value: mapper(r.value, counter++), done: false };
+          } catch (e) {
+            done = true;
+            _closeIterator(outer);
+            throw e;
+          }
+        },
+        function returnFn() {
+          done = true;
+          _closeIterator(outer);
+          return { value: undefined, done: true };
+        },
+      );
+    });
+  }
+
+  if (typeof Iproto.filter !== "function") {
+    _installBuiltinMethod(Iproto, "filter", 1, function (this: any, predicate: any) {
+      const outer = _requireIteratorReceiver(this, "filter");
+      if (typeof predicate !== "function") {
+        throw new TypeError("Iterator.prototype.filter: predicate is not a function");
+      }
+      let counter = 0;
+      let done = false;
+      return _makeHelperIterator(
+        function next() {
+          if (done) return { value: undefined, done: true };
+          while (true) {
+            const r = outer.next();
+            if (r && r.done) {
+              done = true;
+              return { value: undefined, done: true };
+            }
+            let keep: any;
+            try {
+              keep = predicate(r.value, counter++);
+            } catch (e) {
+              done = true;
+              _closeIterator(outer);
+              throw e;
+            }
+            if (keep) return { value: r.value, done: false };
+          }
+        },
+        function returnFn() {
+          done = true;
+          _closeIterator(outer);
+          return { value: undefined, done: true };
+        },
+      );
+    });
+  }
+
+  if (typeof Iproto.take !== "function") {
+    _installBuiltinMethod(Iproto, "take", 1, function (this: any, limit: any) {
+      const outer = _requireIteratorReceiver(this, "take");
+      let remaining = Number(limit);
+      if (!Number.isFinite(remaining)) remaining = Infinity;
+      remaining = Math.trunc(remaining);
+      if (remaining < 0) throw new RangeError("Iterator.prototype.take: limit must be non-negative");
+      let done = false;
+      return _makeHelperIterator(
+        function next() {
+          if (done || remaining <= 0) {
+            done = true;
+            return { value: undefined, done: true };
+          }
+          remaining--;
+          const r = outer.next();
+          if (r && r.done) {
+            done = true;
+            return { value: undefined, done: true };
+          }
+          return { value: r.value, done: false };
+        },
+        function returnFn() {
+          done = true;
+          _closeIterator(outer);
+          return { value: undefined, done: true };
+        },
+      );
+    });
+  }
+
+  if (typeof Iproto.drop !== "function") {
+    _installBuiltinMethod(Iproto, "drop", 1, function (this: any, limit: any) {
+      const outer = _requireIteratorReceiver(this, "drop");
+      let remaining = Number(limit);
+      if (!Number.isFinite(remaining)) remaining = Infinity;
+      remaining = Math.trunc(remaining);
+      if (remaining < 0) throw new RangeError("Iterator.prototype.drop: limit must be non-negative");
+      let done = false;
+      return _makeHelperIterator(
+        function next() {
+          if (done) return { value: undefined, done: true };
+          while (remaining > 0) {
+            remaining--;
+            const skipped = outer.next();
+            if (skipped && skipped.done) {
+              done = true;
+              return { value: undefined, done: true };
+            }
+          }
+          const r = outer.next();
+          if (r && r.done) {
+            done = true;
+            return { value: undefined, done: true };
+          }
+          return { value: r.value, done: false };
+        },
+        function returnFn() {
+          done = true;
+          _closeIterator(outer);
+          return { value: undefined, done: true };
+        },
+      );
+    });
+  }
+
+  if (typeof Iproto.toArray !== "function") {
+    _installBuiltinMethod(Iproto, "toArray", 0, function (this: any) {
+      const iter = _requireIteratorReceiver(this, "toArray");
+      const out: any[] = [];
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return out;
+        out.push(r.value);
+      }
+    });
+  }
+
+  if (typeof Iproto.forEach !== "function") {
+    _installBuiltinMethod(Iproto, "forEach", 1, function (this: any, fn: any) {
+      const iter = _requireIteratorReceiver(this, "forEach");
+      if (typeof fn !== "function") {
+        throw new TypeError("Iterator.prototype.forEach: callback is not a function");
+      }
+      let counter = 0;
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return undefined;
+        try {
+          fn(r.value, counter++);
+        } catch (e) {
+          _closeIterator(iter);
+          throw e;
+        }
+      }
+    });
+  }
+
+  if (typeof Iproto.some !== "function") {
+    _installBuiltinMethod(Iproto, "some", 1, function (this: any, predicate: any) {
+      const iter = _requireIteratorReceiver(this, "some");
+      if (typeof predicate !== "function") {
+        throw new TypeError("Iterator.prototype.some: predicate is not a function");
+      }
+      let counter = 0;
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return false;
+        try {
+          if (predicate(r.value, counter++)) {
+            _closeIterator(iter);
+            return true;
+          }
+        } catch (e) {
+          _closeIterator(iter);
+          throw e;
+        }
+      }
+    });
+  }
+
+  if (typeof Iproto.every !== "function") {
+    _installBuiltinMethod(Iproto, "every", 1, function (this: any, predicate: any) {
+      const iter = _requireIteratorReceiver(this, "every");
+      if (typeof predicate !== "function") {
+        throw new TypeError("Iterator.prototype.every: predicate is not a function");
+      }
+      let counter = 0;
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return true;
+        try {
+          if (!predicate(r.value, counter++)) {
+            _closeIterator(iter);
+            return false;
+          }
+        } catch (e) {
+          _closeIterator(iter);
+          throw e;
+        }
+      }
+    });
+  }
+
+  if (typeof Iproto.find !== "function") {
+    _installBuiltinMethod(Iproto, "find", 1, function (this: any, predicate: any) {
+      const iter = _requireIteratorReceiver(this, "find");
+      if (typeof predicate !== "function") {
+        throw new TypeError("Iterator.prototype.find: predicate is not a function");
+      }
+      let counter = 0;
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return undefined;
+        try {
+          if (predicate(r.value, counter++)) {
+            _closeIterator(iter);
+            return r.value;
+          }
+        } catch (e) {
+          _closeIterator(iter);
+          throw e;
+        }
+      }
+    });
+  }
+
+  if (typeof Iproto.reduce !== "function") {
+    _installBuiltinMethod(Iproto, "reduce", 1, function (this: any, reducer: any, initial?: any) {
+      const iter = _requireIteratorReceiver(this, "reduce");
+      if (typeof reducer !== "function") {
+        throw new TypeError("Iterator.prototype.reduce: reducer is not a function");
+      }
+      let counter = 0;
+      let acc: any = initial;
+      if (arguments.length < 2) {
+        const first = iter.next();
+        if (first && first.done) {
+          throw new TypeError("Iterator.prototype.reduce: empty iterator with no initial value");
+        }
+        acc = first.value;
+        counter = 1;
+      }
+      for (;;) {
+        const r = iter.next();
+        if (r && r.done) return acc;
+        try {
+          acc = reducer(acc, r.value, counter++);
+        } catch (e) {
+          _closeIterator(iter);
+          throw e;
+        }
+      }
+    });
   }
 
   if (typeof I.zip !== "function") {

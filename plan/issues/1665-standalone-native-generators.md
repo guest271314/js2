@@ -1,18 +1,20 @@
 ---
 id: 1665
 title: "host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler)"
-status: ready
+status: in-progress
 created: 2026-05-25
-updated: 2026-06-02
+updated: 2026-06-03
 priority: medium
 feasibility: hard
 task_type: feature
 area: codegen, standalone
 language_feature: generators, iterators
 goal: standalone-mode
-sprint: Backlog
+sprint: 58
 required_by: [1344, 1732]
 related: [1662, 1376, 1103, 1320, 1340, 1464, 1718]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T22:53:01.322Z
 ---
 # #1665 — Wasm-native generators for standalone mode
 
@@ -470,3 +472,35 @@ link via prototype so resolution is lazy and single-sourced.
 - Local unit: a `function*` whose `.map(f).toArray()` round-trips, and
   `Object.getPrototypeOf(Object.getPrototypeOf(g.prototype))` identity
   assertion (regression guard for the `setPrototypeOf` re-base).
+
+## Implementation update — 2026-06-03
+
+Landed the iterator-prototype bridge slice, not the full standalone-native
+generator state machine:
+
+- `src/runtime.ts` now links the compiler-owned `%IteratorPrototype%` to the
+  helper-bearing `Iterator.prototype` when the host provides one, preserving
+  the object identity that generator-prototype tests inspect.
+- The same install path now creates a compiler-owned `Iterator` fallback when
+  the host lacks one and installs missing prototype helpers
+  (`map`, `filter`, `take`, `drop`, `flatMap`, `toArray`, `forEach`, `some`,
+  `every`, `find`, `reduce`) per method.
+- `src/codegen/host-import-allowlist.ts` now assigns the `__gen_*` /
+  `__create_generator*` entries to #1665 instead of the stale #1376 IR
+  fallback gate.
+- `tests/issue-1665.test.ts` covers compiled generator `.map(...).toArray()`,
+  the `%IteratorPrototype%` re-base identity, and the allowlist ownership.
+
+Scoped validation:
+
+- `node node_modules/vitest/dist/cli.js run tests/issue-1665.test.ts`
+- `node node_modules/vitest/dist/cli.js run tests/issue-1665.test.ts tests/issue-1639.test.ts tests/issue-1718-flatmap.test.ts tests/host-import-allowlist-gate.test.ts`
+
+Remaining standalone work:
+
+- The eager JS-host generator scheduler remains in place; `__gen_*` and
+  `__create_generator*` are still allowlisted until the shared native
+  `$Iterator` / generator state-machine lowering lands.
+- A mis-scoped `pnpm test -- tests/issue-1665.test.ts` run invoked the broad
+  suite, reported unrelated existing failures, and ended with a Vitest worker
+  OOM. The direct scoped commands above passed.
