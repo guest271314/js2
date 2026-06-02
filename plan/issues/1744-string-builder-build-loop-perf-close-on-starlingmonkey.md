@@ -3,6 +3,7 @@ id: 1744
 title: "string-builder build-loop perf: close the remaining gap on StarlingMonkey / the JS lane"
 status: done
 created: 2026-05-30
+updated: 2026-05-30
 completed: 2026-05-30
 priority: medium
 feasibility: hard

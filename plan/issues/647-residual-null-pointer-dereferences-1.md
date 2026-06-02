@@ -21,8 +21,7 @@ files:
 ---
 # #647 — Residual null pointer dereferences (1,374 FAIL)
 
-## Status: review
-
+## Status: in-review
 1,374 tests fail with "RuntimeError: dereferencing a null pointer". #622 fixed destructureParamObject but many more codepaths access struct fields on potentially-null references.
 
 ### Root cause

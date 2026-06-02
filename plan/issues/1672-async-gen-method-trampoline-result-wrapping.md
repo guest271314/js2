@@ -1,16 +1,17 @@
 ---
 id: 1672
 title: "async / async-gen object+class method trampolines must return the real result, not null (completes #1671)"
-sprint: 55
 status: done
+created: 2026-05-25
+updated: 2026-05-27
 completed: 2026-05-27
 feasibility: hard
 reasoning_effort: max
+goal: test262-conformance
+sprint: 55
 depends_on: [1671]
 references: [1669, 1602, 621, 623]
-goal: test262-conformance
 ---
-
 ## Problem
 
 After #1671 recovered the SYNC object/class method dispatch path, a residual

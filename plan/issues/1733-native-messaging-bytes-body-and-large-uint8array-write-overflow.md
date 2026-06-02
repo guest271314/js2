@@ -8,7 +8,7 @@ completed: 2026-05-29
 priority: high
 feasibility: medium
 reasoning_effort: high
-task_type: bug
+task_type: bugfix
 area: codegen, runtime, docs
 language_feature: wasi, stdout-write, uint8array, arraybuffer
 goal: real-world-compat, wasi-completeness

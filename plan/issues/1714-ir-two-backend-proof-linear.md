@@ -2,19 +2,19 @@
 id: 1714
 title: "Lower one IR node kind through the BackendEmitter trait to BOTH WasmGC and linear"
 status: done
-completed: 2026-05-29
 created: 2026-05-29
 updated: 2026-05-29
+completed: 2026-05-29
 priority: high
 feasibility: hard
 reasoning_effort: high
 task_type: feature
 area: ir, codegen-linear, architecture
 language_feature: arrays
-es_edition: n/a
 goal: backend-agnostic-ir
 sprint: 57
 depends_on: [1713]
+es_edition: n/a
 related: [1131, 1527, 1530]
 needs_architect_spec: true
 ---

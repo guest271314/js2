@@ -2,20 +2,21 @@
 id: 1711
 title: "acorn failure-surface triage: bucket harness output + file sized child issues"
 status: done
-completed: 2026-05-29
 created: 2026-05-29
-updated: 2026-05-29
-child_issues: [1725]
+updated: 2026-06-02
+completed: 2026-05-29
 priority: high
 feasibility: medium
 reasoning_effort: medium
 task_type: planning
 area: triage
 language_feature: n/a
-es_edition: multi
 goal: self-hosting-dogfood
-sprint: 57
+sprint: 58
 depends_on: [1710]
+required_by: [1712]
+child_issues: [1725]
+es_edition: multi
 related: [1690, 1690b, 1679]
 ---
 # #1711 — acorn failure-surface triage: bucket harness output + file sized child issues

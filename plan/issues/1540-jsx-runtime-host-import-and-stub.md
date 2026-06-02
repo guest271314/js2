@@ -2,9 +2,9 @@
 id: 1540
 title: "JSX runtime: bind _jsx/_jsxs/_Fragment as host import (default) and standalone stub"
 status: done
-completed: 2026-05-23
 created: 2026-05-20
 updated: 2026-05-28
+completed: 2026-05-23
 priority: medium
 feasibility: medium
 reasoning_effort: medium

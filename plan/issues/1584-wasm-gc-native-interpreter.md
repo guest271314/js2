@@ -13,9 +13,9 @@ language_feature: eval
 goal: spec-completeness
 sprint: Backlog
 depends_on: [1058, 1006, 1066, 1102]
+required_by: [1743]
 es_edition: multi
 ---
-
 # #1584 — Wasm-GC-native bytecode interpreter with Acorn for eval and dynamic fallback
 
 Strategy proposal for executing genuinely dynamic JavaScript inside the

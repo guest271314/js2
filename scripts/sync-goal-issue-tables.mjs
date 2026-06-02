@@ -13,7 +13,7 @@ const STATUS_PRIORITY = {
   done: 0,
   "wont-fix": 1,
   blocked: 2,
-  review: 3,
+  "in-review": 3,
   "in-progress": 4,
   ready: 5,
   deferred: 6,
@@ -96,7 +96,7 @@ function issueIdFromPath(file) {
 function normalizeStatus(rawStatus) {
   const status = String(rawStatus || "").trim();
   if (status === "in_progress") return "in-progress";
-  if (status === "in-review" || status === "in_review") return "review";
+  if (status === "review" || status === "in-review" || status === "in_review") return "in-review";
   if (status) return status;
   return "ready";
 }

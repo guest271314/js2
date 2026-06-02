@@ -4,6 +4,7 @@ title: "cli: --standalone should reject --allow-fs (logically mutually exclusive
 status: done
 created: 2026-05-20
 updated: 2026-05-28
+completed: 2026-05-28
 priority: low
 feasibility: easy
 reasoning_effort: low

@@ -3,7 +3,7 @@ id: 1665
 title: "host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler)"
 status: ready
 created: 2026-05-25
-updated: 2026-05-29
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 task_type: feature
@@ -11,6 +11,7 @@ area: codegen, standalone
 language_feature: generators, iterators
 goal: standalone-mode
 sprint: Backlog
+required_by: [1344, 1732]
 related: [1662, 1376, 1103, 1320, 1340, 1464, 1718]
 ---
 # #1665 — Wasm-native generators for standalone mode
@@ -40,6 +41,35 @@ The allowlist entries for `__gen_` / `__create_generator` /
 *IR fallback telemetry gate* (done) — it tracks generators as an IR
 *fallback*, not a native-implementation issue. There is no issue that owns a
 **Wasm-native generator engine**. This issue fills that ownership gap.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The ordered root-cause classifier assigns these primary standalone buckets to
+the generator/iterator work:
+
+| Rows | Bucket |
+| ---: | --- |
+| 532 | Generic/custom iterable `for-of` and `for-await-of` still require the JS-host iterator protocol (#681 shared owner) |
+| 154 | Iterator protocol / for-of semantic failures after compile (#1718 shared owner) |
+| 86 | Generator and async-iteration semantics |
+| 6 | Recursive/generator/iterator stack-overflow residuals |
+
+Representative compile diagnostic:
+
+```text
+Codegen error: #681 standalone/WASI for-of over this iterable still requires
+the JS-host iterator protocol; known array for-of lowers to an index loop, but
+generic/custom iterables need a future pure-Wasm Iterator implementation.
+```
+
+This confirms the original decomposition: #1665 should not grow a
+generator-only local iterator path. The pass-rate recovery needs the shared
+pure-Wasm iterator interface, then native generator lowering on top.
 
 ## Standalone alternative
 

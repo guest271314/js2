@@ -18,8 +18,7 @@ files:
 ---
 # #561 — Math.hypot closure captures ref instead of f64 (1 CE)
 
-## Status: review
-
+## Status: in-review
 `built-ins/Math/hypot/Math.hypot_ToNumberErr.js` fails because valueOf closures with void return types are not called during ref-to-f64 coercion. The coerceType eqref dispatch path only included closures returning f64/i32, skipping void-returning closures entirely. This meant valueOf side effects (counter++, throw) were never executed.
 
 ### Fix

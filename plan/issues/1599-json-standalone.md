@@ -1,8 +1,7 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: ready
-owner: Copernicus
+status: in-progress
 created: 2026-05-24
 updated: 2026-06-02
 priority: high
@@ -13,9 +12,11 @@ area: codegen, runtime
 language_feature: json
 goal: standalone-wasm
 sprint: 58
+owner: Copernicus
 related: [1474, 1539]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:02:41.061Z
 ---
-
 # #1599 — JSON standalone: refuse-and-document then pure-Wasm implementation
 
 ## Problem
@@ -45,6 +46,34 @@ Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
 baseline of 30,480 / 43,106 (70.7%). JSON unsupported appears in 134
 non-exclusive standalone failures. Phase 1 refusal avoids host imports; Phase 2
 needs the pure-Wasm parser/stringifier to recover this test262 surface.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The ordered root-cause classifier assigns **95** rows primarily to #1599:
+87 `compile_error` rows and 8 assertion-failure rows. The latest diagnostics
+show Phase 1 is doing the right thing for unsupported standalone JSON paths:
+the host imports are gone and the rows now fail at compile time with a
+specific #1599 message. Phase 2 remains the pass-rate recovery work.
+
+Representative diagnostics:
+
+```text
+Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (#1599).
+```
+
+```text
+Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (#1599).
+```
+
+Example files:
+
+- `test/built-ins/JSON/parse/15.12.1.1-0-9.js`
+- `test/built-ins/JSON/stringify/space-string-range.js`
 
 ## Phase 1 — Refuse-and-document (fast follow to #1474 pattern)
 

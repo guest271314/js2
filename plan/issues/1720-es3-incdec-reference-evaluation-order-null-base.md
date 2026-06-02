@@ -17,7 +17,6 @@ test262_fail: 10
 test262_category: language/expressions/postfix-increment, postfix-decrement, prefix-increment, prefix-decrement
 related: [1379]
 ---
-
 # #1720 — ES3: UpdateExpression reference evaluated exactly once, before deref
 
 ## Problem (edition ≤ ES3, sputnik S11.x)

@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #212: Object computed property name runtime failures
 
-## Status: review
-
+## Status: in-review
 ## Problem
 15 test262 failures in `language/expressions/object` for computed property names.
 Tests use `var obj = { [expression]: value }` where the computed key is an arithmetic/ternary/logical expression.

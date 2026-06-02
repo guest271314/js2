@@ -165,6 +165,10 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     }
   } catch (err) {
     // Strategy not supported for this benchmark
+    // Some optimizer failures (notably Binaryen's Emscripten wrapper) set a
+    // process exit code before throwing. Since this path explicitly treats the
+    // strategy as skipped, clear that sticky failure state here.
+    process.exitCode = undefined;
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`\n    [${strategy} skipped: ${msg.split("\n")[0]}]\n`);
     return null;

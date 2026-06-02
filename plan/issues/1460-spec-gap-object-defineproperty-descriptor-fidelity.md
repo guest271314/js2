@@ -1,7 +1,7 @@
 ---
 id: 1460
 title: "spec gap: Object.defineProperty / defineProperties descriptor fidelity"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

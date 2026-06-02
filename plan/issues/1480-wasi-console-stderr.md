@@ -1,7 +1,7 @@
 ---
 id: 1480
 title: "wasi: console.error and console.warn should write to stderr (fd=2)"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

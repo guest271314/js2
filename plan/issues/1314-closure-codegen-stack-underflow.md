@@ -2,9 +2,9 @@
 id: 1314
 title: "Wasm codegen: __closure_N stack underflow — call emits wrong argument count"
 status: done
-completed: 2026-05-27
 created: 2026-05-07
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 reasoning_effort: high

@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #220 -- ClassDeclaration compile errors in all statement positions
 
-## Status: review
-
+## Status: in-review
 ## Summary
 686+ test262 compile errors from "Unsupported statement: ClassDeclaration". Sprint 1 (#150) added
 `compileNestedClassDeclaration` support but guarded it with `&& stmt.name`, causing anonymous

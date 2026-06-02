@@ -5,12 +5,11 @@ import { compile } from "../src/index.js";
 /**
  * #1474 Phase 1 — refuse-and-document.
  *
- * RegExp delegates entirely to the JS host engine; there is no Wasm-native
- * regex engine yet. In `--target standalone` (pure WasmGC, no JS host), any
- * regex literal, `new RegExp(...)` / `RegExp(...)` call, or host-routed string
- * method that builds/consumes a RegExp must fail at compile time with a clear
- * `#1474` message and a source location — rather than emitting an
- * `env::RegExp_new` import that fails at `wasmtime instantiate`.
+ * RegExp used to delegate entirely to the JS host engine. In `--target
+ * standalone` (pure WasmGC, no JS host), forms outside #682's reduced native
+ * literal-substring subset must still fail at compile time with a clear `#1474`
+ * message and a source location — rather than emitting an `env::RegExp_new`
+ * import that fails at `wasmtime instantiate`.
  *
  * Phase 2 (a pure-Wasm NFA engine) is a separate follow-up issue.
  */

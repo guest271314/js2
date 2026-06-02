@@ -30,8 +30,7 @@ files:
 ---
 # #723 -- TDZ violations: throw ReferenceError before let/const init (230 FAIL)
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 230 tests expect `ReferenceError` when accessing `let`/`const` variables before their declaration (Temporal Dead Zone). Our compiler allows the access, returning 0 or undefined.

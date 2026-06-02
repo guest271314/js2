@@ -1,7 +1,7 @@
 ---
 id: 1454
 title: "spec gap: iterator protocol — error propagation and IteratorClose during destructuring"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

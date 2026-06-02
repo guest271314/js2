@@ -10,8 +10,7 @@ sprint: 3
 ---
 # Issue #247: Arithmetic with null/undefined produces wrong results
 
-## Status: review
-
+## Status: in-review
 ## Summary
 
 Several tests fail because arithmetic operations with null/undefined values produce wrong results. Tests like `S11.5.1_A3_T1.5.js` (multiplication) and `S11.6.2_A3_T1.5.js` (subtraction) check that `null * null === 0`, `undefined - undefined` is NaN, etc. The runtime returns wrong values.

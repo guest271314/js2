@@ -3,7 +3,7 @@ id: 1315
 title: "import.defer / import.source missing early error detection — 157 negative tests false-pass"
 status: in-progress
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-06-02
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -47,3 +47,19 @@ Two gaps:
 - The 27 `Debug Failure` compile errors disappear — replaced by a clean "unsupported feature" error.
 - The 157 negative-test false-passes flip to `pass` (compiler raises SyntaxError at the right phase).
 - No regressions in module tests.
+
+## Refreshed standalone evidence - 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **153** rows primarily to the
+`import.defer` / `import.source` syntax and early-error family. This is
+effectively the same size as the original 157 negative-test false-pass report,
+but in the standalone artifact it is mixed with proposal syntax compile errors
+and module-loader/runtime diagnostics. The root cause remains the same:
+recognize the proposal forms in early-error detection and produce deliberate
+syntax/unsupported-feature diagnostics instead of falling through into generic
+codegen or runtime behavior.

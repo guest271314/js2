@@ -1,9 +1,10 @@
 ---
 id: 1618
 title: "wasi: console.log of a runtime string emits corrupted [object] placeholder"
-status: in-review
+status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -101,3 +102,6 @@ output triggered. Both are fixed:
 Tests: `tests/issue-1618-1651-wasi-stdout.test.ts` (console.log + template
 runtime strings, no host-import leak) and the byte-exact round-trip in
 `tests/issue-1530.test.ts`.
+
+Landed on main in PR #573 / commit `17fee538b`, with follow-up integer-print
+cleanup in `88b9e3921`.

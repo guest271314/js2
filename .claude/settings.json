@@ -114,7 +114,7 @@
       },
       {
         "matcher": "Bash",
-        "if": "Bash(git worktree add*)",
+        "if": "Bash(*worktree add*)",
         "hooks": [
           {
             "type": "command",
@@ -157,7 +157,7 @@
       },
       {
         "matcher": "Bash",
-        "if": "Bash(git worktree add*)",
+        "if": "Bash(*worktree add*)",
         "hooks": [
           {
             "type": "command",

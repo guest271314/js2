@@ -17,7 +17,6 @@ es_edition: n/a
 related: [986, 1757, 1763]
 origin: "Follow-up from GitHub #986 comments about moved Bun/Deno standalone bundles looking for node_modules/typescript/lib."
 ---
-
 # #1775 - standalone CLI bundle embeds TypeScript lib declarations
 
 ## Problem

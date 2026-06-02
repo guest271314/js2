@@ -20,8 +20,7 @@ files:
 ---
 # #419 -- Null pointer in destructuring: dereferencing null struct during pattern matching
 
-## Status: review
-
+## Status: in-review
 116 tests fail at runtime with "RuntimeError: dereferencing a null pointer" during destructuring operations. The compiled Wasm attempts `struct.get` on a null reference.
 
 ## Root cause

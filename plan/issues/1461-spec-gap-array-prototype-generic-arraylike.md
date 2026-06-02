@@ -1,7 +1,7 @@
 ---
 id: 1461
 title: "spec gap: Array.prototype.* called on array-like / exotic receivers"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

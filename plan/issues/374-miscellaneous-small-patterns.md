@@ -20,8 +20,7 @@ files:
 ---
 # #374 -- Miscellaneous small patterns
 
-## Status: review
-
+## Status: in-review
 Catch-all for remaining small test262 skip patterns (42 tests total).
 
 ## Details

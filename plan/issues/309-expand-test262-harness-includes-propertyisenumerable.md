@@ -18,8 +18,7 @@ files:
 ---
 # Issue #309: Expand test262 harness includes -- propertyIsEnumerable, fnGlobalObject
 
-## Status: review
-
+## Status: in-review
 ## Summary
 Many tests are skipped because they require harness includes beyond assert.js, sta.js, and compareArray.js. Adding support for additional harness files (like propertyIsEnumerable.js, fnGlobalObject.js, isConstructor.js) would unlock more tests for compilation.
 

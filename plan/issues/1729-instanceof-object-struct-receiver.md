@@ -13,7 +13,6 @@ language_feature: instanceof, prototype-chain
 goal: test262-conformance
 related: [1455, 1366, 1720]
 ---
-
 # #1729 — `instanceof Object` false for struct-backed values
 
 ## Problem

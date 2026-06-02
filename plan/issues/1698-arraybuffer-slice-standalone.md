@@ -2,9 +2,9 @@
 id: 1698
 title: "ArrayBuffer.prototype.slice() not implemented in --target wasi (dual-mode gap, same shape as #1654)"
 status: done
-completed: 2026-05-28
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -15,7 +15,6 @@ goal: wasi-completeness
 sprint: Backlog
 related: [1654, 1530, 1595]
 ---
-
 ## Problem
 
 Under `--target wasi`, `ArrayBuffer.prototype.slice(begin, end)` **compiles**

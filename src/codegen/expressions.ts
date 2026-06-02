@@ -579,7 +579,7 @@ function compileExpressionBody(
   const bodyLenBefore = fctx.body.length;
   let result: InnerResult;
   try {
-    result = compileExpressionInner(ctx, fctx, expr);
+    result = compileExpressionInner(ctx, fctx, expr, expectedType);
   } catch (e) {
     fctx.body.length = bodyLenBefore;
     const msg = e instanceof Error ? e.message : String(e);
@@ -768,7 +768,12 @@ export function coerceType(
   return coerceTypeImpl(ctx, fctx, from, to, toPrimitiveHint);
 }
 
-function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): InnerResult {
+function compileExpressionInner(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  expectedType?: ValType,
+): InnerResult {
   if (ts.isNumericLiteral(expr)) {
     const value = Number(expr.text.replace(/_/g, ""));
     if (ctx.fast && Number.isInteger(value) && value >= -2147483648 && value <= 2147483647) {
@@ -1023,12 +1028,12 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isParenthesizedExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isCallExpression(expr)) {
     const callStart = fctx.body.length;
-    const callResult = compileCallExpression(ctx, fctx, expr);
+    const callResult = compileCallExpression(ctx, fctx, expr, expectedType);
     if (fctx.pendingCallbackWritebacks && fctx.pendingCallbackWritebacks.length > 0) {
       fctx.body.push(...fctx.pendingCallbackWritebacks);
       fctx.pendingCallbackWritebacks = undefined;
@@ -1125,15 +1130,15 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isAsExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isNonNullExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isAwaitExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isYieldExpression(expr)) {
@@ -1208,7 +1213,7 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isSpreadElement(expr as any)) {
-    return compileExpressionInner(ctx, fctx, (expr as any as ts.SpreadElement).expression);
+    return compileExpressionInner(ctx, fctx, (expr as any as ts.SpreadElement).expression, expectedType);
   }
 
   reportError(ctx, expr, `Unsupported expression: ${ts.SyntaxKind[expr.kind]}`);

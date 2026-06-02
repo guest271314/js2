@@ -3,7 +3,7 @@ id: 1761
 title: "perf(string-hash): presize string-build buffer from static loop-trip-count to kill reallocs + per-append cap-check"
 status: ready
 created: 2026-05-31
-updated: 2026-05-31
+updated: 2026-06-02
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,11 +11,9 @@ task_type: perf
 area: codegen
 language_feature: strings
 goal: spec-completeness
-related: [1746, 1580, 1744]
-depends_on: []
 sprint: Backlog
+related: [1746, 1580, 1744]
 ---
-
 # #1761 — presize the string-build buffer from a static loop trip count
 
 Carved out of the #1746 umbrella as **lever #3 (array presizing)**, which the

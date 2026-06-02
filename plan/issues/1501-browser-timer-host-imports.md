@@ -1,7 +1,7 @@
 ---
 id: 1501
 title: "browser: setTimeout/setInterval/clearTimeout/clearInterval host imports"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

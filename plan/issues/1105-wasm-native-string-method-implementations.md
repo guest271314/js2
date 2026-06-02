@@ -1,23 +1,27 @@
 ---
 id: 1105
 title: "Wasm-native String method implementations for standalone mode"
-status: ready
+status: in-review
 created: 2026-04-12
-updated: 2026-04-12
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: string-methods
 goal: standalone-mode
-sprint: Backlog
+sprint: 58
 es_edition: multi
+claimed_by: codex-developer
+claimed_at: 2026-06-02T20:52:56.870Z
+pr: 1046
 ---
+
 # #1105 — Wasm-native String method implementations for standalone mode
 
 ## Problem
 
-The `--nativeStrings` flag stores strings as WasmGC i16 arrays instead of wasm:js-string, but string *methods* (split, replace, match, indexOf, slice, trim, etc.) are still delegated to the JS host via `string_*` host imports in runtime.ts. In standalone mode, these methods are unavailable.
+The `--nativeStrings` flag stores strings as WasmGC i16 arrays instead of wasm:js-string, but string _methods_ (split, replace, match, indexOf, slice, trim, etc.) are still delegated to the JS host via `string_*` host imports in runtime.ts. In standalone mode, these methods are unavailable.
 
 ## Current state
 
@@ -30,7 +34,9 @@ The `--nativeStrings` flag stores strings as WasmGC i16 arrays instead of wasm:j
 Implement string methods as Wasm functions operating on `(array i16)`:
 
 ### Tier 1 — Pure array operations (no RegExp dependency)
+
 These can be implemented purely in terms of i16 array operations:
+
 - `charAt`, `charCodeAt`, `codePointAt`
 - `indexOf`, `lastIndexOf`, `includes`, `startsWith`, `endsWith`
 - `slice`, `substring`
@@ -43,13 +49,16 @@ These can be implemented purely in terms of i16 array operations:
 - `at`
 
 ### Tier 2 — RegExp-dependent (depends on #682)
+
 These need a standalone RegExp engine:
+
 - `match`, `matchAll`
 - `replace`, `replaceAll` (with RegExp pattern)
 - `search`
 - `split` (with RegExp separator)
 
 ### Tier 3 — Locale-dependent
+
 - `localeCompare`, `toLocaleLowerCase`, `toLocaleUpperCase`
 - These may need ICU data or simplified locale handling
 
@@ -82,6 +91,7 @@ infrastructure and the first three methods as exemplars.)
 `src/codegen/native-strings.ts` (existing). Add per-method emitter
 functions invoked from `compileMemberCall` in
 `src/codegen/expressions.ts` when:
+
 1. `ctx.nativeStrings || ctx.wasi` is true.
 2. Receiver static type is `string`.
 3. Method name is in the Tier-1 list.
@@ -122,19 +132,19 @@ sorted i32 array constant; use binary search.
 
 ### Method coverage — Tier 1 (all in scope for this issue)
 
-| Method | LOC est | Special notes |
-|--------|---------|---------------|
-| charAt, charCodeAt, codePointAt | 30 | bounds-check returns NaN |
-| at | 20 | negative index |
-| indexOf, lastIndexOf, includes | 40 each | naive O(nm); Boyer-Moore later |
-| startsWith, endsWith | 25 each | |
-| slice, substring | 40 each | substring has min/max swap |
-| trim, trimStart, trimEnd | 30 each | whitespace constant table |
-| padStart, padEnd | 35 each | pad-string repeat handling |
-| repeat | 25 | overflow check; throws RangeError if > 2^28 |
-| concat | 30 | accepts varargs; length sum |
-| split (string sep) | 50 | empty-sep → codepoint split |
-| toUpperCase, toLowerCase | 60 + table | Unicode case mapping |
+| Method                          | LOC est    | Special notes                               |
+| ------------------------------- | ---------- | ------------------------------------------- |
+| charAt, charCodeAt, codePointAt | 30         | bounds-check returns NaN                    |
+| at                              | 20         | negative index                              |
+| indexOf, lastIndexOf, includes  | 40 each    | naive O(nm); Boyer-Moore later              |
+| startsWith, endsWith            | 25 each    |                                             |
+| slice, substring                | 40 each    | substring has min/max swap                  |
+| trim, trimStart, trimEnd        | 30 each    | whitespace constant table                   |
+| padStart, padEnd                | 35 each    | pad-string repeat handling                  |
+| repeat                          | 25         | overflow check; throws RangeError if > 2^28 |
+| concat                          | 30         | accepts varargs; length sum                 |
+| split (string sep)              | 50         | empty-sep → codepoint split                 |
+| toUpperCase, toLowerCase        | 60 + table | Unicode case mapping                        |
 
 ### Unicode case mapping
 
@@ -183,3 +193,35 @@ Acceptance: Tier 1 ≥70% pass rate.
 - **Spec edge cases**: ToString coercion on arg objects (e.g. arg
   with `Symbol.toPrimitive`) needs #1525 — for now, fail with
   TypeError when arg is a wasmgc object.
+
+## Implementation Update — 2026-06-02
+
+- Stabilized the existing native string helper path for standalone Tier 1
+  coverage instead of adding host imports.
+- Search-style methods (`indexOf`, `lastIndexOf`, `includes`,
+  `startsWith`, `endsWith`) now stage receiver, search value, and position
+  arguments in locals before calling native helpers. This keeps the fast-mode
+  stack-balance pass from inserting numeric coercions into string literal
+  construction and also handles omitted search values as `"undefined"`.
+- Native `repeat` and `normalize` RangeError paths now materialize throw
+  messages as native string constants rather than reading `stringGlobalMap`
+  sentinel globals.
+- Native `codePointAt` now checks bounds before array access and combines
+  valid UTF-16 surrogate pairs. The f64 lowering returns `NaN` for
+  out-of-range positions.
+- Native IR lowering for `indexOf` and `includes` falls back to the legacy
+  member-call path so these helpers keep the native receiver/search/position
+  staging above.
+
+Scoped validation:
+
+- `pnpm exec vitest run tests/issue-1105.test.ts --reporter=dot`
+- `pnpm exec vitest run tests/issue-1105.test.ts tests/native-strings.test.ts tests/issue-1105-charcodeat.test.ts tests/native-strings-standalone.test.ts --reporter=dot`
+- `pnpm exec vitest run tests/issue-1232.test.ts tests/issue-1470-standalone-string-imports.test.ts tests/host-import-allowlist-gate.test.ts --reporter=dot`
+
+Remaining scope:
+
+- Full test262 Tier 1 coverage was not run locally per scoped validation
+  rules.
+- Unicode case-mapping tables, locale behavior, and RegExp-dependent methods
+  remain outside this focused implementation pass.

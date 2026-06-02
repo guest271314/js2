@@ -14,7 +14,6 @@ goal: test262-conformance
 sprint: 58
 related: [1719, 1629, 1636]
 ---
-
 # #1742 — Closure `this`-receiver member reads trap "illegal cast" for compiled vec/struct receivers
 
 ## Problem

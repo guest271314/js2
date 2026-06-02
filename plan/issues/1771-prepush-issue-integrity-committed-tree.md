@@ -11,12 +11,10 @@ reasoning_effort: low
 task_type: infrastructure
 area: ci
 goal: platform
-related: [1616, 1769]
-depends_on: []
 sprint: 58
+related: [1616, 1769]
 origin: "Project lead feedback after PR #1013 quality gate failed on a dangling depends_on."
 ---
-
 # #1771 - pre-push issue integrity can miss committed dangling dependencies
 
 ## Problem

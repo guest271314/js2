@@ -3,15 +3,15 @@ id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
 status: ready
 created: 2026-04-11
-updated: 2026-04-28
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max
 goal: async-model
-sprint: Backlog
+sprint: 58
 parent: 1032
 depends_on: [680]
-required_by: [1058]
+required_by: [1058, 1766, 1774]
 note: "Verified 2026-05-21: AwaitExpression no-op at expressions.ts:973 (drifted from cited L790). Multiple other line refs in this issue may need re-verification before dispatch."
 ---
 # #1042 — Real `async`/`await` state-machine lowering
@@ -873,4 +873,3 @@ after any await).
 6. Pre-merge: run `tests/equivalence.test.ts` + `tests/issue-1042.test.ts`.
    Open PR, monitor `.claude/ci-status/pr-<N>.json` per the standard
    `dev-self-merge` skill.
-

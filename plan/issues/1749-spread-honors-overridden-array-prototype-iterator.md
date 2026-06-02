@@ -11,10 +11,9 @@ area: codegen, runtime
 language_feature: array-object-identity, spread, iterator-protocol
 goal: object-representation
 sprint: Backlog
-related: [1719, 1320]
 parent: 1719
+related: [1719, 1320]
 ---
-
 # #1749 — Spread must drive the (possibly overridden) Array iterator
 
 ## Problem

@@ -23,8 +23,7 @@ files:
 ---
 # #483 — Symbol() constructor and typeof symbol (207 tests)
 
-## Status: review
-
+## Status: in-review
 207 tests use `Symbol()` as a constructor (not as a property key). Basic `Symbol()` returning a unique i32 was implemented in #471. These tests likely just need the skip filter narrowed.
 
 ## Approach

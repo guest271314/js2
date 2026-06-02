@@ -17,8 +17,7 @@ files:
 ---
 # #736 -- SyntaxError detection at compile time (316 tests)
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 316+ tests expect `SyntaxError` to be thrown but the compiler does not detect the syntax error.

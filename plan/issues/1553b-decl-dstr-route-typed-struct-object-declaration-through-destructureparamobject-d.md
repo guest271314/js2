@@ -4,7 +4,7 @@ title: "decl-dstr: route typed-struct object declaration through destructurePara
 status: done
 created: 2026-05-20
 updated: 2026-05-24
-resolution: "Covered by #1553c externref delegation work (commit d447400e9). The typed-struct path in compileObjectDestructuring already delegates to destructureParamObject({mode:'decl', bindingKind}) — see the `// #1553b` block at src/codegen/statements/destructuring.ts:500-570. Verified 2026-05-24 with cases: nested-default-fires, nested-no-default, simple-typed, top-level-default, nested-null-throws. Locked in with regression tests in tests/issue-1553b.test.ts (9 cases)."
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -16,6 +16,7 @@ sprint: 55
 parent: 1553
 depends_on: [1553a]
 required_by: [1553c]
+resolution: "Covered by #1553c externref delegation work (commit d447400e9). The typed-struct path in compileObjectDestructuring already delegates to destructureParamObject({mode:'decl', bindingKind}) — see the `// #1553b` block at src/codegen/statements/destructuring.ts:500-570. Verified 2026-05-24 with cases: nested-default-fires, nested-no-default, simple-typed, top-level-default, nested-null-throws. Locked in with regression tests in tests/issue-1553b.test.ts (9 cases)."
 unblocks: [1553c]
 related: [1450, 1454, 1550]
 note: "Line numbers verified against main 2026-05-21: compileObjectDestructuring at 376, emitNestedBindingDefault at 207, emitDefaultValueCheck at 297"

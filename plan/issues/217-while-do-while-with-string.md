@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #217 -- While/do-while with string/object loop conditions and labeled block break
 
-## Status: review
-
+## Status: in-review
 ## Summary
 While/do-while tests fail where the loop condition involves non-boolean values (strings, objects) that need truthiness coercion, and labeled block break (break from a non-loop labeled block) doesn't work correctly.
 

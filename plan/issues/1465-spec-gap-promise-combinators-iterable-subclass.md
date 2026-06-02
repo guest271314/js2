@@ -1,7 +1,7 @@
 ---
 id: 1465
 title: "spec gap: Promise.all / allSettled / any / race iterable + subclass fidelity"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

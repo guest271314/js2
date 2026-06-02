@@ -1616,10 +1616,12 @@
                  baseline. Off by default so the headline number reflects
                  shipped ECMAScript only. -->
             <div class="feat-filter conformance-scope-toggle">
+              <!-- JS-host switch retained for later re-enable; disabled while standalone regression is fixed.
               <label class="feat-toggle">
                 <input type="checkbox" id="host-support-toggle" checked />
                 <span>JS host</span>
               </label>
+              -->
               <label class="feat-toggle">
                 <input type="checkbox" id="strict-only-toggle" />
                 <span>Strict mode</span>
@@ -3259,7 +3261,9 @@ match (value) {
             both runtimes to their baseline tier — the no-optimizing-JIT execution path that matters for cold-start,
             multi-tenant edge runtimes, and engines without a top tier. The right chart is the production setup — both
             runtimes use their full optimizing pipeline. Press the button to run the benchmark in your browser including
-            additional DOM benchmarks.
+            additional DOM benchmarks. These public website benchmarks run in a JS host: the compiled Wasm is
+            instantiated by the js2wasm JavaScript runtime and compared with the same source running in V8.
+            Wasmtime/WASI benchmark figures are shown separately in the WASI host section below.
           </p>
           <div class="conformance-diagrams">
             <div class="diagram-panel">
@@ -3285,7 +3289,7 @@ match (value) {
           </div>
         </div>
 
-        <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
+        <div class="host-bench-group" id="wasmtime-bench-group">
           <h3 class="host-bench-title">WASI host</h3>
           <p class="host-bench-subcopy">
             Per-request cost of running the same JavaScript programs (source for each is shown inline below) across four
@@ -3345,7 +3349,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3360,7 +3363,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3407,7 +3409,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3422,7 +3423,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3473,7 +3473,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3488,7 +3487,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3544,7 +3542,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3559,7 +3556,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3583,7 +3579,6 @@ export function run(n) {
               <div
                 class="diagram-panel"
                 data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
               >
                 <perf-benchmark-chart
                   src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
@@ -3882,8 +3877,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
                   <strong>not</strong>
                   cover Web APIs, Node.js or other host behavior, or whether an arbitrary real-world npm package runs
                   unchanged. A high pass rate is necessary but not sufficient for &ldquo;runs real JavaScript.&rdquo;
-                  Second, the standalone (no-JS-host) path is less complete than the JS-host path. Check the per-feature
-                  report before relying on anything specific.
+                  Second, the public website figures are currently pinned to the JS-host path; standalone
+                  (no-JS-host) figures are hidden until the current regression is fixed. Check the per-feature report
+                  before relying on anything specific.
                 </p>
               </div>
             </details>
@@ -4050,35 +4046,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
     <script type="module" src="./components/site-nav.js"></script>
     <script type="module" src="./components/t262-charts.js"></script>
     <script type="module" src="./components/perf-benchmark-chart.js"></script>
-    <script>
-      (async () => {
-        const group = document.getElementById("wasmtime-bench-group");
-        if (!(group instanceof HTMLElement)) return;
-        const panels = Array.from(group.querySelectorAll("[data-benchmark-src]"));
-        let visibleCount = 0;
-        await Promise.all(
-          panels.map(async (panel) => {
-            if (!(panel instanceof HTMLElement)) return;
-            const src = panel.dataset.benchmarkSrc;
-            if (!src) return;
-            try {
-              const resp = await fetch(src, { cache: "no-store" });
-              if (!resp.ok) return;
-              const data = await resp.json();
-              if (Array.isArray(data) && data.length > 0) {
-                panel.style.display = "";
-                visibleCount += 1;
-              }
-            } catch {
-              // Leave unavailable benchmark panels hidden.
-            }
-          }),
-        );
-        if (visibleCount > 0) {
-          group.style.display = "";
-        }
-      })();
-    </script>
     <script src="./components/trend-chart.js"></script>
 
     <script>
@@ -4588,7 +4555,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       // Feature table toggles
       (function () {
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
         const tables = document.querySelector(".feat-tables");
         if (tables) {
           const hostRows = Array.from(document.querySelectorAll(".feat-row")).filter((row) =>
@@ -4604,21 +4571,24 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           });
           const sync = () => {
             if (strictToggle) tables.classList.toggle("strict-only", strictToggle.checked);
-            if (hostToggle) tables.classList.toggle("host-off", !hostToggle.checked);
-            const hostEnabled = hostToggle ? hostToggle.checked : true;
+            // if (hostToggle) tables.classList.toggle("host-off", !hostToggle.checked);
+            // const hostEnabled = hostToggle ? hostToggle.checked : true;
             hostRows.forEach((row) => {
               const badge = row.querySelector(".feat-badge");
               if (!(badge instanceof HTMLElement)) return;
               const origClass = badge.dataset.origClass || "";
               const origText = badge.dataset.origText || "";
               badge.className = "feat-badge";
-              if (hostEnabled) {
-                if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
-                badge.textContent = origText;
-              } else {
-                badge.classList.add("none");
-                badge.textContent = "×";
-              }
+              // JS-host switch branch retained for later re-enable:
+              // if (hostEnabled) {
+              //   if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
+              //   badge.textContent = origText;
+              // } else {
+              //   badge.classList.add("none");
+              //   badge.textContent = "×";
+              // }
+              if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
+              badge.textContent = origText;
             });
             if (typeof window.updateEditionPassBars === "function") {
               window.updateEditionPassBars();
@@ -4629,7 +4599,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           };
           sync();
           strictToggle?.addEventListener("change", sync);
-          hostToggle?.addEventListener("change", sync);
+          // hostToggle?.addEventListener("change", sync);
         }
       })();
 
@@ -4882,15 +4852,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const donutSlot = document.getElementById("conformance-donut-slot");
         const editionTimeline = document.getElementById("conformance-edition-timeline");
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
         const rateEl = document.getElementById("compat-pass-rate");
         const rateLabelEl = document.getElementById("compat-pass-rate-label");
         if (!donutSlot || !(editionTimeline instanceof HTMLElement)) return;
 
-        const STANDALONE_TEST262_REPORT_URLS = [
-          "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.json",
-          "./benchmarks/results/test262-standalone-report.json",
-        ];
         const donutStyle = "--t262-bg: var(--bg, #060a14)";
         const renderDonut = (summary, captionMain = "ECMAScript", captionSub = "conformance") => {
           const pass = Number(summary?.pass ?? 0);
@@ -4912,19 +4878,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           donut.setAttribute("caption-sub", captionSub);
           donut.setAttribute("style", donutStyle);
           updateHeadlineStat({ pass, fail, ce, skip, total }, captionMain, captionSub);
-        };
-        const renderUnavailable = (captionMain, captionSub, detail) => {
-          donutSlot.innerHTML = `
-            <div class="conformance-unavailable" role="status" aria-live="polite">
-              <div>
-                <div class="conformance-unavailable-value">Unavailable</div>
-                <div class="conformance-unavailable-title">${captionMain}</div>
-                <div class="conformance-unavailable-title">${captionSub}</div>
-                <div class="conformance-unavailable-copy">${detail}</div>
-              </div>
-            </div>
-          `;
-          updateHeadlineUnavailable(captionMain, captionSub, detail);
         };
         const normalizeSummary = (summary, fallback = {}) => {
           const pass = Number(summary?.pass ?? fallback.pass ?? 0);
@@ -4950,21 +4903,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           rateEl.textContent = `${pct}%`;
           rateLabelEl.textContent = `${captionMain} ${captionSub}: ${pass.toLocaleString()} / ${total.toLocaleString()} test262 tests passing`;
         };
-        const updateHeadlineUnavailable = (captionMain, captionSub, detail) => {
-          if (!rateEl || !rateLabelEl) return;
-          window.__conformanceHeadlineHydrated = true;
-          rateEl.textContent = "Unavailable";
-          rateLabelEl.textContent = `${captionMain} ${captionSub}: ${detail}`;
-        };
-        const hasUsableSummary = (summary) => {
-          const pass = Number(summary?.pass ?? 0);
-          const total = Number(summary?.total ?? 0);
-          return Number.isFinite(pass) && Number.isFinite(total) && total > 0;
-        };
-        const summaryHasStaleResults = (summary) => {
-          const stale = Number(summary?.stale ?? 0);
-          return Number.isFinite(stale) && stale > 0;
-        };
         const statusRatio = (filtered, base, key) => {
           const baseValue = Number(base?.[key] ?? 0);
           if (baseValue <= 0) return 1;
@@ -4977,112 +4915,148 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           const skip = Math.round(summary.skip * ratios.skip);
           return { pass, fail, ce, skip, total: pass + fail + ce + skip };
         };
-        const fetchJson = async (url) => {
-          const resp = await fetch(url);
-          if (!resp.ok) throw new Error(`unavailable: ${url}`);
-          return resp.json();
-        };
-        const standalonePayloadFromHostReport = (report) => {
-          if (report?.standalone?.summary || report?.standalone?.official_summary) {
-            return report.standalone;
-          }
-          if (report?.standalone_summary || report?.standalone_full_summary || report?.standalone_strict_summary) {
-            return {
-              summary: report.standalone_summary,
-              official_summary: report.standalone_summary,
-              full_summary: report.standalone_full_summary,
-              strict_summary: report.standalone_strict_summary,
-              edition_summaries: report.standalone_edition_summaries,
-            };
-          }
-          return null;
-        };
-        const loadStandaloneReport = async (hostReport) => {
-          const embedded = standalonePayloadFromHostReport(hostReport);
-          if (embedded && hasUsableSummary(embedded.summary ?? embedded.official_summary)) {
-            return { report: embedded, source: "test262-current.json" };
-          }
-          for (const url of STANDALONE_TEST262_REPORT_URLS) {
-            try {
-              const report = await fetchJson(url);
-              if (hasUsableSummary(report?.summary ?? report?.official_summary)) {
-                return { report, source: url };
-              }
-            } catch {
-              // Try the next configured source.
-            }
-          }
-          return null;
-        };
-        const getNamedSummary = (report, names) => {
-          for (const name of names) {
-            if (hasUsableSummary(report?.[name])) return report[name];
-          }
-          return null;
-        };
-        const getStandaloneEditionSummary = (report, scope, strictOnly) => {
-          const editionMaps = [
-            strictOnly ? report?.strict_edition_summaries : null,
-            strictOnly ? report?.standalone_strict_edition_summaries : null,
-            report?.edition_summaries,
-            report?.standalone_edition_summaries,
-          ].filter(Boolean);
-          for (const map of editionMaps) {
-            const candidate = map?.[scope] ?? map?.[normalizeEditionLabel(scope)];
-            if (hasUsableSummary(candidate)) return candidate;
-          }
-
-          const editionRows = [
-            strictOnly ? report?.strict_editions : null,
-            strictOnly ? report?.standalone_strict_editions : null,
-            report?.editions,
-            report?.standalone_editions,
-          ].filter(Array.isArray);
-          for (const rows of editionRows) {
-            const candidate = rows.find((row) => {
-              const label = String(row?.edition ?? row?.rawEdition ?? row?.label ?? "");
-              return label === scope || normalizeEditionLabel(label) === normalizeEditionLabel(scope);
-            });
-            if (hasUsableSummary(candidate)) return candidate;
-          }
-          return null;
-        };
-        const getStandaloneSummary = (standaloneData, scope, strictOnly) => {
-          if (!standaloneData?.report) {
-            return {
-              summary: null,
-              reason: "No standalone test262 baseline has been published for this build.",
-            };
-          }
-          const report = standaloneData.report;
-          let summary = null;
-          if (scope === "overall") {
-            summary = strictOnly
-              ? getNamedSummary(report, ["strict_summary", "standalone_strict_summary"])
-              : getNamedSummary(report, ["summary", "official_summary", "standalone_summary"]);
-          } else if (scope === "overall+proposal") {
-            summary = strictOnly
-              ? getNamedSummary(report, ["strict_full_summary", "standalone_strict_full_summary"])
-              : getNamedSummary(report, ["full_summary", "standalone_full_summary"]);
-          } else {
-            summary = getStandaloneEditionSummary(report, scope, strictOnly);
-          }
-
-          if (!hasUsableSummary(summary)) {
-            return {
-              summary: null,
-              reason: `Standalone test262 data is not available for ${strictOnly ? "strict " : ""}${scope} scope yet.`,
-            };
-          }
-          if (summaryHasStaleResults(summary)) {
-            return {
-              summary: null,
-              reason: `Standalone test262 data is stale for ${strictOnly ? "strict " : ""}${scope} scope.`,
-            };
-          }
-          return { summary: normalizeSummary(summary), reason: "", source: standaloneData.source };
-        };
-
+        /*
+         * Disabled JS-host switch path retained for later re-enable after the
+         * standalone regression is fixed.
+         *
+         * const STANDALONE_TEST262_REPORT_URLS = [
+         *   "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.json",
+         *   "./benchmarks/results/test262-standalone-report.json",
+         * ];
+         * const renderUnavailable = (captionMain, captionSub, detail) => {
+         *   donutSlot.innerHTML = `
+         *     <div class="conformance-unavailable" role="status" aria-live="polite">
+         *       <div>
+         *         <div class="conformance-unavailable-value">Unavailable</div>
+         *         <div class="conformance-unavailable-title">${captionMain}</div>
+         *         <div class="conformance-unavailable-title">${captionSub}</div>
+         *         <div class="conformance-unavailable-copy">${detail}</div>
+         *       </div>
+         *     </div>
+         *   `;
+         *   updateHeadlineUnavailable(captionMain, captionSub, detail);
+         * };
+         * const updateHeadlineUnavailable = (captionMain, captionSub, detail) => {
+         *   if (!rateEl || !rateLabelEl) return;
+         *   window.__conformanceHeadlineHydrated = true;
+         *   rateEl.textContent = "Unavailable";
+         *   rateLabelEl.textContent = `${captionMain} ${captionSub}: ${detail}`;
+         * };
+         * const hasUsableSummary = (summary) => {
+         *   const pass = Number(summary?.pass ?? 0);
+         *   const total = Number(summary?.total ?? 0);
+         *   return Number.isFinite(pass) && Number.isFinite(total) && total > 0;
+         * };
+         * const summaryHasStaleResults = (summary) => {
+         *   const stale = Number(summary?.stale ?? 0);
+         *   return Number.isFinite(stale) && stale > 0;
+         * };
+         * const fetchJson = async (url) => {
+         *   const resp = await fetch(url);
+         *   if (!resp.ok) throw new Error(`unavailable: ${url}`);
+         *   return resp.json();
+         * };
+         * const standalonePayloadFromHostReport = (report) => {
+         *   if (report?.standalone?.summary || report?.standalone?.official_summary) {
+         *     return report.standalone;
+         *   }
+         *   if (report?.standalone_summary || report?.standalone_full_summary || report?.standalone_strict_summary) {
+         *     return {
+         *       summary: report.standalone_summary,
+         *       official_summary: report.standalone_summary,
+         *       full_summary: report.standalone_full_summary,
+         *       strict_summary: report.standalone_strict_summary,
+         *       edition_summaries: report.standalone_edition_summaries,
+         *     };
+         *   }
+         *   return null;
+         * };
+         * const loadStandaloneReport = async (hostReport) => {
+         *   const embedded = standalonePayloadFromHostReport(hostReport);
+         *   if (embedded && hasUsableSummary(embedded.summary ?? embedded.official_summary)) {
+         *     return { report: embedded, source: "test262-current.json" };
+         *   }
+         *   for (const url of STANDALONE_TEST262_REPORT_URLS) {
+         *     try {
+         *       const report = await fetchJson(url);
+         *       if (hasUsableSummary(report?.summary ?? report?.official_summary)) {
+         *         return { report, source: url };
+         *       }
+         *     } catch {
+         *       // Try the next configured source.
+         *     }
+         *   }
+         *   return null;
+         * };
+         * const getNamedSummary = (report, names) => {
+         *   for (const name of names) {
+         *     if (hasUsableSummary(report?.[name])) return report[name];
+         *   }
+         *   return null;
+         * };
+         * const getStandaloneEditionSummary = (report, scope, strictOnly) => {
+         *   const editionMaps = [
+         *     strictOnly ? report?.strict_edition_summaries : null,
+         *     strictOnly ? report?.standalone_strict_edition_summaries : null,
+         *     report?.edition_summaries,
+         *     report?.standalone_edition_summaries,
+         *   ].filter(Boolean);
+         *   for (const map of editionMaps) {
+         *     const candidate = map?.[scope] ?? map?.[normalizeEditionLabel(scope)];
+         *     if (hasUsableSummary(candidate)) return candidate;
+         *   }
+         *
+         *   const editionRows = [
+         *     strictOnly ? report?.strict_editions : null,
+         *     strictOnly ? report?.standalone_strict_editions : null,
+         *     report?.editions,
+         *     report?.standalone_editions,
+         *   ].filter(Array.isArray);
+         *   for (const rows of editionRows) {
+         *     const candidate = rows.find((row) => {
+         *       const label = String(row?.edition ?? row?.rawEdition ?? row?.label ?? "");
+         *       return label === scope || normalizeEditionLabel(label) === normalizeEditionLabel(scope);
+         *     });
+         *     if (hasUsableSummary(candidate)) return candidate;
+         *   }
+         *   return null;
+         * };
+         * const getStandaloneSummary = (standaloneData, scope, strictOnly) => {
+         *   if (!standaloneData?.report) {
+         *     return {
+         *       summary: null,
+         *       reason: "No standalone test262 baseline has been published for this build.",
+         *     };
+         *   }
+         *   const report = standaloneData.report;
+         *   let summary = null;
+         *   if (scope === "overall") {
+         *     summary = strictOnly
+         *       ? getNamedSummary(report, ["strict_summary", "standalone_strict_summary"])
+         *       : getNamedSummary(report, ["summary", "official_summary", "standalone_summary"]);
+         *   } else if (scope === "overall+proposal") {
+         *     summary = strictOnly
+         *       ? getNamedSummary(report, ["strict_full_summary", "standalone_strict_full_summary"])
+         *       : getNamedSummary(report, ["full_summary", "standalone_full_summary"]);
+         *   } else {
+         *     summary = getStandaloneEditionSummary(report, scope, strictOnly);
+         *   }
+         *
+         *   if (!hasUsableSummary(summary)) {
+         *     return {
+         *       summary: null,
+         *       reason: `Standalone test262 data is not available for ${strictOnly ? "strict " : ""}${scope} scope yet.`,
+         *     };
+         *   }
+         *   if (summaryHasStaleResults(summary)) {
+         *     return {
+         *       summary: null,
+         *       reason: `Standalone test262 data is stale for ${strictOnly ? "strict " : ""}${scope} scope.`,
+         *     };
+         *   }
+         *   return { summary: normalizeSummary(summary), reason: "", source: standaloneData.source };
+         * };
+         */
         try {
           const reportResp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!reportResp.ok) throw new Error("conformance data unavailable");
@@ -5109,23 +5083,24 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             withProposal.ce !== overall.ce ||
             withProposal.skip !== overall.skip ||
             withProposal.total !== overall.total;
-          const standaloneData = await loadStandaloneReport(report);
+          // const standaloneData = await loadStandaloneReport(report);
 
           let lastDetail = null;
           const conformanceOptions = () => {
             const strictOnly = strictToggle ? strictToggle.checked : false;
-            const hostEnabled = hostToggle ? hostToggle.checked : true;
+            // const hostEnabled = hostToggle ? hostToggle.checked : true;
             return {
               strictOnly,
-              hostEnabled,
-              captionSub:
-                strictOnly && !hostEnabled
-                  ? "strict standalone conformance"
-                  : strictOnly
-                    ? "strict conformance"
-                    : hostEnabled
-                      ? "conformance"
-                      : "standalone conformance",
+              // hostEnabled,
+              // captionSub:
+              //   strictOnly && !hostEnabled
+              //     ? "strict standalone conformance"
+              //     : strictOnly
+              //       ? "strict conformance"
+              //       : hostEnabled
+              //         ? "conformance"
+              //         : "standalone conformance",
+              captionSub: strictOnly ? "strict conformance" : "conformance",
             };
           };
           const applyConformanceOptions = (summary, { exactStrictSummary = null } = {}) => {
@@ -5141,17 +5116,17 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             return { summary: next, options };
           };
           const renderSelectedConformance = (scope, hostSummary, captionMain, { exactStrictSummary = null } = {}) => {
-            const options = conformanceOptions();
-            if (!options.hostEnabled) {
-              const standalone = getStandaloneSummary(standaloneData, scope, options.strictOnly);
-              if (!standalone.summary) {
-                renderUnavailable(captionMain, options.captionSub, standalone.reason);
-                return;
-              }
-              renderDonut(standalone.summary, captionMain, options.captionSub);
-              return;
-            }
-            const { summary } = applyConformanceOptions(hostSummary, { exactStrictSummary });
+            // const options = conformanceOptions();
+            // if (!options.hostEnabled) {
+            //   const standalone = getStandaloneSummary(standaloneData, scope, options.strictOnly);
+            //   if (!standalone.summary) {
+            //     renderUnavailable(captionMain, options.captionSub, standalone.reason);
+            //     return;
+            //   }
+            //   renderDonut(standalone.summary, captionMain, options.captionSub);
+            //   return;
+            // }
+            const { summary, options } = applyConformanceOptions(hostSummary, { exactStrictSummary });
             renderDonut(summary, captionMain, options.captionSub);
           };
           const applyScopeFromDetail = (detail) => {
@@ -5183,7 +5158,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             if (lastDetail) applyScopeFromDetail(lastDetail);
           };
           strictToggle?.addEventListener("change", window.updateConformanceDonut);
-          hostToggle?.addEventListener("change", window.updateConformanceDonut);
+          // hostToggle?.addEventListener("change", window.updateConformanceDonut);
 
           editionTimeline.addEventListener("edition-change", (event) => {
             applyScopeFromDetail(event.detail);
@@ -5311,13 +5286,22 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
       (function hydrateEditionPassBars() {
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
 
-        const scoreRow = (row, hostEnabled) => {
+        // Host-aware scoring retained for later re-enable:
+        // const scoreRow = (row, hostEnabled) => {
+        //   const badge = row.querySelector(".feat-badge");
+        //   const usesHost = !!row.querySelector(".feat-host");
+        //   if (!badge) return 0;
+        //   if (usesHost && !hostEnabled) return 0;
+        //   if (badge.classList.contains("full")) return 1;
+        //   if (badge.classList.contains("partial")) return 0.5;
+        //   return 0;
+        // };
+
+        const scoreRow = (row) => {
           const badge = row.querySelector(".feat-badge");
-          const usesHost = !!row.querySelector(".feat-host");
           if (!badge) return 0;
-          if (usesHost && !hostEnabled) return 0;
           if (badge.classList.contains("full")) return 1;
           if (badge.classList.contains("partial")) return 0.5;
           return 0;
@@ -5356,7 +5340,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
         const renderHeuristicEditionPassBars = () => {
           const strictOnly = strictToggle ? strictToggle.checked : false;
-          const hostEnabled = hostToggle ? hostToggle.checked : true;
+          // const hostEnabled = hostToggle ? hostToggle.checked : true;
 
           document.querySelectorAll(".feat-section").forEach((section) => {
             const header = ensureEditionLabel(section)?.el;
@@ -5369,7 +5353,8 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             });
 
             const total = rows.length;
-            const score = rows.reduce((sum, row) => sum + scoreRow(row, hostEnabled), 0);
+            // const score = rows.reduce((sum, row) => sum + scoreRow(row, hostEnabled), 0);
+            const score = rows.reduce((sum, row) => sum + scoreRow(row), 0);
             const pct = total > 0 ? Math.round((score / total) * 100) : 0;
             const fill = bar.querySelector(".feat-edition-passbar-fill");
             const text = bar.querySelector(".feat-edition-passbar-text");

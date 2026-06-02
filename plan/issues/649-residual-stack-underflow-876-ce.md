@@ -20,8 +20,7 @@ files:
 ---
 # #649 — Residual stack underflow (876 CE)
 
-## Status: review
-
+## Status: in-review
 876 tests originally hit "not enough arguments on the stack". #627 fixed void RHS in &&/||/??. Remaining 13 CEs were dominated by type mismatch errors in wrapper constructor contexts.
 
 ### Root cause

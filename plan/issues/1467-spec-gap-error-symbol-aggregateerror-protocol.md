@@ -1,7 +1,7 @@
 ---
 id: 1467
 title: "spec gap: Error / AggregateError / Symbol prototype protocol"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

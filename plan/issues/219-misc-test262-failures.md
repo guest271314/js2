@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #219: Misc test262 failures
 
-## Status: review
-
+## Status: in-review
 ## Problem
 Several test262 tests were reported as failing:
 - S12.11_A1_T1.js - switch statement string matching

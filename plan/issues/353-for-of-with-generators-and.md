@@ -20,8 +20,7 @@ files:
 ---
 # #353 -- For-of with generators and custom iterators
 
-## Status: review
-
+## Status: in-review
 152 tests use for-of with generators or custom iterator objects. Generator support exists but for-of doesn't integrate with the iterator protocol yet. Also includes for-of with object destructuring from arrays.
 
 ## Details

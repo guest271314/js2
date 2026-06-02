@@ -2,18 +2,19 @@
 id: 1710
 title: "acorn dogfood harness: compile + validate + differential-AST vs node-acorn"
 status: done
-completed: 2026-05-29
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-06-02
+completed: 2026-05-29
 priority: high
 feasibility: medium
 reasoning_effort: medium
 task_type: test
 area: tooling, test-infrastructure
 language_feature: n/a
-es_edition: multi
 goal: self-hosting-dogfood
-sprint: 57
+sprint: 58
+required_by: [1711, 1712]
+es_edition: multi
 related: [1679, 1690, 1690b, 1584, 1058]
 ---
 # #1710 — acorn dogfood harness: compile + validate + differential-AST vs node-acorn

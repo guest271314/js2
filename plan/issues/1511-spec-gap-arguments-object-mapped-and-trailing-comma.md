@@ -2,9 +2,9 @@
 id: 1511
 title: "spec gap: arguments object — mapped semantics, descriptors, trailing-comma length"
 status: done
-completed: 2026-05-29
 created: 2026-05-20
 updated: 2026-05-29
+completed: 2026-05-29
 priority: high
 feasibility: medium
 reasoning_effort: high

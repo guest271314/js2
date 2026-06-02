@@ -31,7 +31,7 @@ trailing newline. The two stdout gaps that previously blocked this are closed
 
 | Capability                                            | Status | Detail                                                                                                                                                                                                                                      |
 | ----------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); read-until loops assemble each frame and can concatenate successive <=1 MiB request frames up to 64 MiB |
+| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); read-until loops assemble each frame and continuation handling streams successive <=1 MiB request frames up to 64 MiB |
 | Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                                    |
 | Route debug to stderr (fd=2)                          | works  | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean                                                                                                                                                           |
 | Print a **string literal** to stdout                  | works  | `console.log("…")` emits UTF-8 + `\n` (#1480)                                                                                                                                                                                               |
@@ -71,9 +71,10 @@ across runtimes:
 - **`main()`** — the continuous port loop:
   `const m = getMessage(); sendMessageWithContinuations(m);`, looping until
   `getMessage()` returns an empty body. If the first frame is exactly 1 MiB, the
-  continuation helper reads successive <=1 MiB frames, concatenates the logical
-  request into ArrayBuffer storage up to the 64 MiB ceiling, and then emits <=1
-  MiB response frames.
+  continuation helper reads successive <=1 MiB frames up to the 64 MiB ceiling.
+  Raw byte continuations are echoed one response frame at a time; the reported
+  Chrome `Array(...nulls...)` workload is counted with a streaming parser and
+  then emitted as valid <=1 MiB JSON array response frames.
 
 Diagnostics go to **stderr** (so they never corrupt the stdout protocol
 stream). The application logic — here, an echo for normal-size messages plus a

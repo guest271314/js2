@@ -1,7 +1,7 @@
 ---
 id: 1510
 title: "spec gap: for-await-of destructuring — await on IteratorStep + binding initialization"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

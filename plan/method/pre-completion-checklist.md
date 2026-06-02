@@ -24,15 +24,16 @@ Local validation happens AFTER merging main into your branch, but **full test262
 
 5. [ ] Issue file updated with implementation notes
 6. [ ] Issue status set to `in-review` in frontmatter
-7. [ ] File locks removed from `plan/method/file-locks.md`
-8. [ ] Branch pushed to `origin`
-9. [ ] PR opened against `main`
-10. [ ] PR is the canonical place for full validation — wait for GitHub Actions `test262` results there
+7. [ ] Issue frontmatter records the PR number as `pr: <N>` so `scripts/poll-merged-pr-issues.mjs` can mark it done after merge
+8. [ ] File locks removed from `plan/method/file-locks.md`
+9. [ ] Branch pushed to `origin`
+10. [ ] PR opened against `main`
+11. [ ] PR is the canonical place for full validation — wait for GitHub Actions `test262` results there
 
 ## Terminate after PR open
 
-11. [ ] Write agent-status file with `state: ci-wait, pr: N` so the dispatch loop sees you as in-flight
-12. [ ] **Terminate** — the monitor watches CI and auto-merges when green. You do not need to wait.
+12. [ ] Write agent-status file with `state: ci-wait, pr: N` so the dispatch loop sees you as in-flight
+13. [ ] **Terminate** — the monitor watches CI and auto-merges when green. You do not need to wait.
     - If CI comes back red and needs a fix, the tech lead will respawn you with context from the issue file
     - Do NOT poll ci-status yourself — the monitor owns that
 

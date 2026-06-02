@@ -3,7 +3,7 @@ id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
 status: blocked
 created: 2026-05-24
-updated: 2026-05-27
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -30,6 +30,31 @@ test262_category: language/statements/class/elements, language/expressions/class
 > failures are runtime-semantics gaps** in how a WasmGC struct instance is
 > reconciled with the host's prototype / own-property model. The sections below
 > are rewritten to describe the real problem.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **1,660** rows primarily to the
+class elements / prototype / private-name reconciliation family: 1,649
+`fail` rows and 11 `compile_error` rows. The standalone evidence is broader
+than the older 294-row `class/elements` host-mode count because it includes
+both `language/statements/class/elements` and
+`language/expressions/class/elements` permutations plus class-subsystem
+failures exposed after earlier standalone gates.
+
+The failure modes still match the corrected scope in this issue:
+
+- own-property and descriptor checks on WasmGC-backed instances/prototypes
+- stable method identity and prototype method visibility
+- private method/accessor and static private brand behavior
+- computed, symbol, and string-literal member descriptors
+
+Keep this issue blocked on the representation/design decision, but treat it as
+a high-volume standalone conformance owner when planning pass-rate work.
 
 ## Problem
 

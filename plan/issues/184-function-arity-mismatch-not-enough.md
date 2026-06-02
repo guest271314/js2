@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #184 -- Function arity mismatch: "not enough arguments on the stack"
 
-## Status: review
-
+## Status: in-review
 ## Summary
 15+ tests fail at wasm validation with "not enough arguments on the stack for struct.new" or "not enough arguments on the stack for call". The codegen emits incorrect argument counts for function calls or struct construction.
 

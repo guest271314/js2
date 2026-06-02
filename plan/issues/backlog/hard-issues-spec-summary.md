@@ -30,7 +30,7 @@ authored it, and which were intentionally skipped.
 | 1130  | Array methods getter-observing | Implementation Plan | ready | full |
 | 1199  | Linear-memory backing for typed numeric arrays | Architect refinement | ready | refinement |
 | 1257  | async-gen funcIdx shift detached arrays | Implementation Plan | backlog | full |
-| 682   | RegExp standalone engine (libregexp) | Implementation Plan | ready | full |
+| 682   | RegExp standalone engine (libregexp) | Implementation Plan | done | full |
 | 1539  | Opt-in Wasm-native RegExp (regress port) | Implementation Plan | backlog | full |
 | 1555  | Streaming iterator destructuring | Implementation Plan | ready | full |
 | 680   | Wasm-native generators | Implementation Plan | ready | full |

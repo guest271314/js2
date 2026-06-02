@@ -28,8 +28,7 @@ files:
 ---
 # #600 — Component Model output: WIT interfaces from TypeScript types
 
-## Status: review
-
+## Status: in-review
 ts2wasm outputs core Wasm modules with ad-hoc imports. The serverless ecosystem (Fastly, Fermyon, Cosmonic) requires Component Model modules with WIT interfaces.
 
 ## Approach

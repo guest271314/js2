@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #208: Computed property names with complex expressions
 
-**Status**: review
-
+**Status**: in-review
 ## Problem
 
 15 test262 tests fail where computed property names use expressions (addition,

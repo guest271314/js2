@@ -19,8 +19,7 @@ files:
 ---
 # #587 — Deduplicate destructuring code (~1,300 lines)
 
-## Status: review
-
+## Status: in-review
 Object destructuring (statements.ts:614-901), array destructuring (1024-1414), and for-of destructuring (2266-2878) have nearly identical logic for:
 
 - Null guards (ref.is_null check → throw or default)

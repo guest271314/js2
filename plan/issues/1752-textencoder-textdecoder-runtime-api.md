@@ -1,20 +1,19 @@
 ---
 id: 1752
 title: "TextEncoder / TextDecoder runtime API (standalone + WASI)"
-status: in-review
+status: done
 created: 2026-05-30
 updated: 2026-06-02
+completed: 2026-06-02
 priority: medium
 feasibility: medium
 task_type: feature
 area: runtime
 language_feature: web-api
 goal: platform
-related: [389, 1588, 1655]
-depends_on: []
 sprint: 58
+related: [389, 1588, 1655]
 ---
-
 # #1752 — TextEncoder / TextDecoder runtime API
 
 ## Context
@@ -59,6 +58,8 @@ is its inverse. Pairs with #1655 (WASI `process.stdout.write(Uint8Array|ArrayBuf
   ideally compiles the #389 `encodeMessage` shape.
 
 ## Implementation Notes
+
+Status: done on main via commit `aadb8b2e2`.
 
 - Added WasmGC-native UTF-8 helpers for the standard `TextEncoder.encode` and
   `TextDecoder.decode` APIs under standalone/WASI no-host targets.

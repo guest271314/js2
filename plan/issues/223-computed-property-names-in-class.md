@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #223: Computed property names in class declarations
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 88 compile errors from computed property names in class body declarations. TypeScript's checker rejects computed property names with non-simple-literal types, and our codegen skipped all computed property names in class members (property declarations, methods, getters/setters, static properties).

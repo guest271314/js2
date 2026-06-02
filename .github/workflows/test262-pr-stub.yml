@@ -24,7 +24,7 @@ name: Test262 PR stub
 #   in the run). For bot synchronizes, only this stub produces it → PR stays
 #   mergeable.
 #
-#   The merge_group event still runs the full 32-shard test262 on the temp
+#   The merge_group event still runs the full 57-shard per-target test262 on the temp
 #   merge-with-main branch, so regressions are gated at queue time.
 
 on:
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [gate]
     steps:
-      - name: Stub-pass (real 32-shard test262 runs in merge_group)
+      - name: Stub-pass (real 57-shard per-target test262 runs in merge_group)
         run: |
           echo "→ PR-level stub — does not run test262."
           echo "→ For dev synchronizes, test262-sharded.yml's merge-report job"

@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #200 — JSON.parse/JSON.stringify: 24 compile errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 24 test262 compile errors in JSON.parse (4) and JSON.stringify (20). While these built-ins are imported from the host, type coercion between wasm and host types fails.
 

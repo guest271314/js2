@@ -22,8 +22,7 @@ files:
 ---
 # #408 — Compiler hangs on for-of with Set mutation during iteration
 
-## Status: review
-
+## Status: in-review
 The compiler enters an infinite loop when compiling for-of loops that mutate a Set during iteration (delete + re-add entries). This causes the test262 runner to hang indefinitely.
 
 ## Details

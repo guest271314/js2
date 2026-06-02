@@ -18,8 +18,7 @@ files:
 ---
 # #626 — Wasm call/call_ref type mismatch (378 CE)
 
-## Status: review
-
+## Status: in-review
 378 tests fail with Wasm validation: call or call_ref arguments don't match the expected function signature. Arguments are the wrong type (externref vs f64, i32 vs ref).
 
 ### Fix

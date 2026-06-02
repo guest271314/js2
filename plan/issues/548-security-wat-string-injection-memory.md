@@ -21,8 +21,7 @@ files:
 ---
 # #548 — Security: WAT string injection + memory bounds validation
 
-## Status: review
-
+## Status: in-review
 ### WAT string injection (wat.ts:141, 210)
 
 Import/export names are interpolated directly into WAT output without escaping:

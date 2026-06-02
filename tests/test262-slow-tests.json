@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-test execution duration in ms (compile+exec wall time) from the most-recent main baseline. Used by tests/test262-shared.ts to sort tests within each shard, slowest first. Keeps shard wall-time tight (slow tests run first so they overlap with parallel forks) and surfaces slow-test failures early in CI logs. Tests not in this map sort to 0 (run after the timed ones, in their natural order). Refresh with: node scripts/refresh-slow-tests.mjs",
+  "_comment": "Per-test execution duration in ms (compile+exec wall time) from a recent baseline JSONL. Used by tests/test262-shared.ts to assign weighted shards and sort tests within each shard, slowest first. Keeps shard wall-time tight (slow tests run first so they overlap with parallel forks) and surfaces slow-test failures early in CI logs. Tests not in this map use the runner's default weight for assignment and run after the timed ones in natural order. Refresh with: node scripts/refresh-slow-tests.mjs",
   "_threshold_ms": 1000,
   "_count": 189,
   "_source": "benchmarks/results/test262-current.jsonl (regenerated 2026-05-23T01:19:21.030Z)",

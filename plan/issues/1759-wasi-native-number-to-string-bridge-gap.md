@@ -4,17 +4,16 @@ title: "native number→string missing on the WASI/standalone string-concat path
 status: done
 created: 2026-05-31
 updated: 2026-06-02
+completed: 2026-06-02
 priority: medium
 feasibility: hard
-task_type: bug
+task_type: bugfix
 area: codegen
 language_feature: template-literals
 goal: platform
-related: [389, 985]
-depends_on: []
 sprint: 58
+related: [389, 985]
 ---
-
 # #1759 — WASI native number→string bridge gap
 
 ## Symptom

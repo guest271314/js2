@@ -4,6 +4,7 @@ title: "codegen: Array.prototype reduce/reduceRight/map/filter callback paths em
 status: done
 created: 2026-05-24
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 task_type: bugfix

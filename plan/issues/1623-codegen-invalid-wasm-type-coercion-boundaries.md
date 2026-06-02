@@ -3,7 +3,7 @@ id: 1623
 title: "codegen: invalid Wasm binary at type-boundary coercion (extern/anyref + struct ref types)"
 status: in-review
 created: 2026-05-20
-updated: 2026-05-28
+updated: 2026-06-02
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -150,3 +150,22 @@ Wasm (the remaining 7 are unrelated TS compile errors or different
 codegen shapes). Regression test in
 `tests/issue-1623-extern-doublewrap.test.ts`.
 
+## Refreshed standalone evidence - 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **2,351** rows primarily to the
+invalid-Wasm/type-boundary family owned by #1623 and adjacent issues
+#1666/#1525b. Most of these are `compile_error` rows with `wasm_compile`
+diagnostics; two are Promise-path rows sharing the same late-boundary shape.
+
+This means the #1623 umbrella remains active even though the earlier
+`extern.convert_any` imported-global sub-cluster was fixed. The latest
+standalone artifact exposes broader validation failures at dynamic equality,
+ToPrimitive/trampoline, late global, struct-ref, and boxed-value joins. Treat
+the 2,351-row bucket as the current standalone invalid-Wasm budget to reduce,
+while continuing to carve tightly-scoped sub-clusters when a validator message
+has a single codegen site.

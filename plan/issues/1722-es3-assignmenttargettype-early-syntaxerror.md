@@ -17,7 +17,6 @@ test262_fail: 4
 test262_category: language/expressions/assignmenttargettype
 related: [1091, 402]
 ---
-
 # #1722 — ES3: AssignmentTargetType static semantics — missing early SyntaxError
 
 ## Problem (edition ≤ ES3, negative parse tests)

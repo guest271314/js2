@@ -17,7 +17,6 @@ test262_fail: 4
 test262_category: language/expressions/class/subclass-builtins, language/statements/class/subclass-builtins
 related: [1455, 1366]
 ---
-
 # #1721 — ES3: subclassing Function / Object — instanceof on the subclass fails
 
 ## Problem (edition ≤ ES3, residual of #1455)

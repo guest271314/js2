@@ -2,11 +2,11 @@
 id: 1732
 title: "spec gap: builtin method values lack [[Construct]]-absent brand + own length/name descriptors (~40 String.prototype A7/A8 fails)"
 status: ready
-feasibility: hard
-reasoning_effort: high
 created: 2026-05-29
 updated: 2026-05-29
 priority: medium
+feasibility: hard
+reasoning_effort: high
 task_type: feature
 area: codegen, runtime
 language_feature: function, builtin-methods, string
@@ -15,7 +15,6 @@ sprint: Backlog
 depends_on: [1632, 1665]
 test262_fail: 40
 ---
-
 # #1732 — builtin method values: unified function-object representation ([[Construct]]-absent brand + own length/name descriptors)
 
 ## Problem

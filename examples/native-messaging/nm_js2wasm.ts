@@ -32,13 +32,12 @@
 //
 // <=1 MiB bodies are carried as a raw `Uint8Array` end-to-end and echoed back
 // verbatim (the strict #930 round-trip echo). Larger request bodies can arrive
-// as successive <=1 MiB frames and are reassembled up to a 64 MiB ceiling.
-// Larger responses are written as a sequence of <=1 MiB response frames so the
-// host never stages one oversized stdout payload. The reported Chrome workload
-// is a JSON `Array(...nulls...)`; for that shape, large responses are emitted
-// as valid JSON array chunks so the browser can deliver each frame to
-// `port.onMessage`. Other large byte bodies are split as raw byte chunks for
-// the harness / future Uint8Array Native Messaging consumers.
+// as successive <=1 MiB frames up to a 64 MiB ceiling. Continuation handling is
+// streamed: raw byte continuations are echoed one frame at a time, and the
+// reported Chrome `Array(...nulls...)` workload is counted with a streaming
+// parser before valid JSON array response chunks are emitted. The host never
+// stages one oversized stdout payload or the full 64 MiB request in WasmGC
+// arrays.
 
 declare const process: {
   stdin: { read(buf: Uint8Array | ArrayBuffer, offset?: number): number };
@@ -96,37 +95,6 @@ function copyBytes(
   }
 }
 
-function copyBytesToBuffer(
-  source: Uint8Array,
-  sourceOffset: number,
-  target: ArrayBuffer,
-  targetOffset: number,
-  count: number,
-): void {
-  const targetView = new DataView(target);
-  let i = 0;
-  while (i < count) {
-    targetView.setUint8(targetOffset + i, source[sourceOffset + i]);
-    i = i + 1;
-  }
-}
-
-function copyBufferToBuffer(
-  source: ArrayBuffer,
-  sourceOffset: number,
-  target: ArrayBuffer,
-  targetOffset: number,
-  count: number,
-): void {
-  const sourceView = new DataView(source);
-  const targetView = new DataView(target);
-  let i = 0;
-  while (i < count) {
-    targetView.setUint8(targetOffset + i, sourceView.getUint8(sourceOffset + i));
-    i = i + 1;
-  }
-}
-
 function writeLength(len: number): void {
   process.stdout.write(new Uint8Array([len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >> 24) & 0xff]));
 }
@@ -135,19 +103,29 @@ function readFrameBody(declaredLen: number): Uint8Array {
   const body = new Uint8Array(declaredLen);
   if (!readExact(body, declaredLen)) return new Uint8Array(0);
 
+  logFrameBodyRead(declaredLen);
+  return body;
+}
+
+function logFrameBodyRead(declaredLen: number): void {
   // Debug telemetry goes to stderr (fd=2) so it never pollutes the stdout
   // protocol stream. Chrome ignores the host's stderr. The frame is the 4-byte
   // LE prefix plus the declared body, so total bytes consumed is 4 + declaredLen.
   process.stderr.write(`[host] received ${4 + declaredLen} chars, declared body length ${declaredLen}\n`);
-  return body;
+}
+
+function readFrameBodyInto(body: Uint8Array, declaredLen: number): boolean {
+  if (!readExact(body, declaredLen)) return false;
+  logFrameBodyRead(declaredLen);
+  return true;
 }
 
 // getMessage() — read one Native Messaging request frame: the 4-byte LE length
 // header plus exactly that many body bytes. Full-size frames may be followed by
 // continuation frames; `sendMessageWithContinuations` handles that large
-// logical-message path with ArrayBuffer storage so a 64 MiB request does not
-// become an 8x f64 Uint8Array allocation. Returns a zero-length buffer on EOF /
-// truncation / oversize so the port loop can stop.
+// logical-message path by streaming the continuation frames so the host never
+// stores the whole 64 MiB request body in WasmGC-managed arrays. Returns a
+// zero-length buffer on EOF / truncation / oversize so the port loop can stop.
 function getMessage(): Uint8Array {
   const header = new Uint8Array(4);
   // 4-byte LE length prefix. EOF here = clean shutdown → empty body.
@@ -182,45 +160,83 @@ function isNullArrayMessage(message: Uint8Array): boolean {
   return false;
 }
 
+function scanNullArrayBytes(message: Uint8Array, len: number, initialState: number, initialCount: number): number {
+  let state = initialState;
+  let count = initialCount;
+  let cursor = 0;
+
+  while (cursor < len) {
+    const byte = message[cursor];
+
+    if (state === 0) {
+      if (byte === BYTE_OPEN_BRACKET) {
+        state = 1;
+      } else {
+        return -1;
+      }
+    } else if (state === 1) {
+      if (byte === BYTE_CLOSE_BRACKET) {
+        state = 7;
+      } else if (byte === BYTE_N) {
+        state = 2;
+      } else {
+        return -1;
+      }
+    } else if (state === 2) {
+      if (byte === BYTE_U) {
+        state = 3;
+      } else {
+        return -1;
+      }
+    } else if (state === 3) {
+      if (byte === BYTE_L) {
+        state = 4;
+      } else {
+        return -1;
+      }
+    } else if (state === 4) {
+      if (byte === BYTE_L) {
+        count = count + 1;
+        state = 5;
+      } else {
+        return -1;
+      }
+    } else if (state === 5) {
+      if (byte === BYTE_COMMA) {
+        state = 1;
+      } else if (byte === BYTE_CLOSE_BRACKET) {
+        state = 7;
+      } else {
+        return -1;
+      }
+    } else {
+      return -1;
+    }
+
+    cursor = cursor + 1;
+  }
+
+  return count * 8 + state;
+}
+
+function nullArrayScanState(encoded: number): number {
+  return encoded & 7;
+}
+
+function nullArrayScanCount(encoded: number): number {
+  return (encoded - (encoded & 7)) / 8;
+}
+
+function canStreamNullArrayContinuation(first: Uint8Array): boolean {
+  const encoded = scanNullArrayBytes(first, first.length, 0, 0);
+  return encoded >= 0 && nullArrayScanState(encoded) !== 7;
+}
+
 function countNullArrayElements(message: Uint8Array): number {
   if (message.length === 2) return 0;
   let count = 0;
   let cursor = 1;
   while (cursor < message.length - 1) {
-    count = count + 1;
-    cursor = cursor + 5;
-  }
-  return count;
-}
-
-function isNullArrayBufferMessage(message: ArrayBuffer, len: number): boolean {
-  if (len < 2) return false;
-  const view = new DataView(message);
-  if (view.getUint8(0) !== BYTE_OPEN_BRACKET) return false;
-  if (view.getUint8(len - 1) !== BYTE_CLOSE_BRACKET) return false;
-  if (len === 2) return true;
-
-  let cursor = 1;
-  while (cursor < len - 1) {
-    if (view.getUint8(cursor) !== BYTE_N) return false;
-    if (view.getUint8(cursor + 1) !== BYTE_U) return false;
-    if (view.getUint8(cursor + 2) !== BYTE_L) return false;
-    if (view.getUint8(cursor + 3) !== BYTE_L) return false;
-    cursor = cursor + 4;
-
-    if (cursor === len - 1) return true;
-    if (view.getUint8(cursor) !== BYTE_COMMA) return false;
-    cursor = cursor + 1;
-  }
-
-  return false;
-}
-
-function countNullArrayBufferElements(message: ArrayBuffer, len: number): number {
-  if (len === 2) return 0;
-  let count = 0;
-  let cursor = 1;
-  while (cursor < len - 1) {
     count = count + 1;
     cursor = cursor + 5;
   }
@@ -293,35 +309,6 @@ function sendRawByteChunks(message: Uint8Array): void {
   }
 }
 
-function sendRawBufferChunks(message: ArrayBuffer, totalLen: number): void {
-  let offset = 0;
-
-  while (offset < totalLen) {
-    const len = minI32(MAX_RESPONSE_FRAME_BYTES, totalLen - offset);
-    const chunk = new ArrayBuffer(len);
-    copyBufferToBuffer(message, offset, chunk, 0, len);
-    writeLength(len);
-    process.stdout.write(chunk);
-    offset = offset + len;
-  }
-}
-
-function sendBufferMessage(message: ArrayBuffer, totalLen: number): void {
-  if (totalLen > MAX_RESPONSE_FRAME_BYTES) {
-    if (isNullArrayBufferMessage(message, totalLen)) {
-      sendNullArrayElementChunks(countNullArrayBufferElements(message, totalLen));
-    } else {
-      sendRawBufferChunks(message, totalLen);
-    }
-    return;
-  }
-
-  writeLength(totalLen);
-  const body = new ArrayBuffer(totalLen);
-  copyBufferToBuffer(message, 0, body, 0, totalLen);
-  process.stdout.write(body);
-}
-
 // sendMessage(message) — write a framed Native Messaging response: the 4-byte
 // little-endian length prefix followed by the body bytes, both on stdout
 // (fd=1), no trailing newline. Large responses are split into <=1 MiB frames
@@ -345,6 +332,56 @@ function sendMessage(message: Uint8Array): void {
   process.stdout.write(message);
 }
 
+function sendRawContinuationChunks(first: Uint8Array, header: Uint8Array, initialDeclaredLen: number): void {
+  sendMessage(first);
+
+  let declaredLen = initialDeclaredLen;
+  let totalLen = first.length;
+  const chunk = new Uint8Array(MAX_REQUEST_FRAME_BYTES);
+
+  while (true) {
+    if (!readFrameBodyInto(chunk, declaredLen)) return;
+    writeFrameFromScratch(chunk, declaredLen);
+    totalLen = totalLen + declaredLen;
+
+    if (declaredLen < MAX_REQUEST_FRAME_BYTES || totalLen >= MAX_MESSAGE_BYTES) break;
+    if (!readExact(header, 4)) break;
+    declaredLen = decodeLength(header);
+    if (declaredLen === 0) break;
+    if (declaredLen > MAX_REQUEST_FRAME_BYTES) return;
+    if (totalLen + declaredLen > MAX_MESSAGE_BYTES) return;
+  }
+}
+
+function sendNullArrayContinuationChunks(first: Uint8Array, header: Uint8Array, initialDeclaredLen: number): void {
+  let encoded = scanNullArrayBytes(first, first.length, 0, 0);
+  if (encoded < 0) return;
+
+  let state = nullArrayScanState(encoded);
+  let elements = nullArrayScanCount(encoded);
+  let declaredLen = initialDeclaredLen;
+  let totalLen = first.length;
+  const chunk = new Uint8Array(MAX_REQUEST_FRAME_BYTES);
+
+  while (true) {
+    if (!readFrameBodyInto(chunk, declaredLen)) return;
+    encoded = scanNullArrayBytes(chunk, declaredLen, state, elements);
+    if (encoded < 0) return;
+    state = nullArrayScanState(encoded);
+    elements = nullArrayScanCount(encoded);
+    totalLen = totalLen + declaredLen;
+
+    if (declaredLen < MAX_REQUEST_FRAME_BYTES || totalLen >= MAX_MESSAGE_BYTES) break;
+    if (!readExact(header, 4)) break;
+    declaredLen = decodeLength(header);
+    if (declaredLen === 0) break;
+    if (declaredLen > MAX_REQUEST_FRAME_BYTES) return;
+    if (totalLen + declaredLen > MAX_MESSAGE_BYTES) return;
+  }
+
+  if (state === 7) sendNullArrayElementChunks(elements);
+}
+
 function sendMessageWithContinuations(first: Uint8Array): void {
   if (first.length !== MAX_REQUEST_FRAME_BYTES) {
     sendMessage(first);
@@ -364,38 +401,11 @@ function sendMessageWithContinuations(first: Uint8Array): void {
   }
   if (declaredLen > MAX_REQUEST_FRAME_BYTES || MAX_REQUEST_FRAME_BYTES + declaredLen > MAX_MESSAGE_BYTES) return;
 
-  let capacity = MAX_REQUEST_FRAME_BYTES + declaredLen;
-  let message = new ArrayBuffer(capacity);
-  copyBytesToBuffer(first, 0, message, 0, first.length);
-  let totalLen = first.length;
-
-  while (true) {
-    const chunk = readFrameBody(declaredLen);
-    if (chunk.length !== declaredLen) return;
-
-    const neededLen = totalLen + declaredLen;
-    if (neededLen > capacity) {
-      let nextCapacity = capacity * 2;
-      if (nextCapacity < neededLen) nextCapacity = neededLen;
-      if (nextCapacity > MAX_MESSAGE_BYTES) nextCapacity = MAX_MESSAGE_BYTES;
-      const next = new ArrayBuffer(nextCapacity);
-      copyBufferToBuffer(message, 0, next, 0, totalLen);
-      message = next;
-      capacity = nextCapacity;
-    }
-
-    copyBytesToBuffer(chunk, 0, message, totalLen, declaredLen);
-    totalLen = neededLen;
-
-    if (declaredLen < MAX_REQUEST_FRAME_BYTES || totalLen >= MAX_MESSAGE_BYTES) break;
-    if (!readExact(header, 4)) break;
-    declaredLen = decodeLength(header);
-    if (declaredLen === 0) break;
-    if (declaredLen > MAX_REQUEST_FRAME_BYTES) return;
-    if (totalLen + declaredLen > MAX_MESSAGE_BYTES) return;
+  if (canStreamNullArrayContinuation(first)) {
+    sendNullArrayContinuationChunks(first, header, declaredLen);
+  } else {
+    sendRawContinuationChunks(first, header, declaredLen);
   }
-
-  sendBufferMessage(message, totalLen);
 }
 
 export function main(): void {
