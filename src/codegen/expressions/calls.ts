@@ -22,11 +22,14 @@ import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } f
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
+  emitStandalonePromiseThen,
   isStandalonePromiseActive,
+  type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
+  compileArrowAsClosure,
   compileArrowFunction,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
@@ -1688,6 +1691,92 @@ function flattenStaticArrayElements(arr: ts.ArrayLiteralExpression): ts.Expressi
     }
   }
   return out;
+}
+
+function isNullishPromiseThenCallbackArg(expr: ts.Expression | undefined): boolean {
+  if (expr === undefined) return true;
+  let cur = expr;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isSatisfiesExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = (
+      cur as
+        | ts.ParenthesizedExpression
+        | ts.AsExpression
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+        | ts.TypeAssertion
+    ).expression;
+  }
+  return (
+    cur.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(cur) && cur.text === "undefined") ||
+    (ts.isVoidExpression(cur) && cur.expression.kind === ts.SyntaxKind.NumericLiteral)
+  );
+}
+
+function compilePromiseThenReceiverBuffer(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  liveBuffers: Instr[][],
+): Instr[] {
+  const instrs: Instr[] = [];
+  liveBuffers.push(instrs);
+  ctx.liveBodies.add(instrs);
+  const savedBody = fctx.body;
+  fctx.body = instrs;
+  try {
+    const type = compileExpression(ctx, fctx, expr, { kind: "externref" });
+    if (type && type.kind !== "externref") {
+      coerceType(ctx, fctx, type, { kind: "externref" });
+    }
+  } finally {
+    fctx.body = savedBody;
+  }
+  return instrs;
+}
+
+function compileStandalonePromiseThenCallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg: ts.Expression | undefined,
+  liveBuffers: Instr[][],
+): StandalonePromiseThenCallback | null {
+  if (arg === undefined || isNullishPromiseThenCallbackArg(arg)) return null;
+
+  const instrs: Instr[] = [];
+  liveBuffers.push(instrs);
+  ctx.liveBodies.add(instrs);
+  const savedBody = fctx.body;
+  fctx.body = instrs;
+  try {
+    const type =
+      ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)
+        ? compileArrowAsClosure(ctx, fctx, arg)
+        : compileExpression(ctx, fctx, arg);
+    let closureInfo: ClosureInfo | undefined;
+    if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+      closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+    }
+    if (!closureInfo && ts.isIdentifier(arg)) {
+      closureInfo = ctx.closureMap.get(arg.text);
+    }
+    if (!closureInfo) {
+      instrs.length = 0;
+      return null;
+    }
+    if (type && type.kind !== "externref") {
+      coerceType(ctx, fctx, type, { kind: "externref" });
+    }
+    return { instrs, closureInfo };
+  } finally {
+    fctx.body = savedBody;
+  }
 }
 
 function compileCallExpression(
@@ -5484,6 +5573,19 @@ function compileCallExpression(
         const isPromiseReceiver = recvSym === "Promise" || apparentSym === "Promise";
 
         if (isPromiseReceiver) {
+          if (isStandalonePromiseActive(ctx) && method === "then") {
+            const liveBuffers: Instr[][] = [];
+            try {
+              const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
+              const onFulfilled = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
+              const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[1], liveBuffers);
+              emitStandalonePromiseThen(ctx, fctx, promiseInstrs, onFulfilled, onRejected);
+            } finally {
+              for (const b of liveBuffers) ctx.liveBodies.delete(b);
+            }
+            return { kind: "externref" };
+          }
+
           // Determine import name: use Promise_then2 for .then(cb1, cb2)
           const useThen2 = method === "then" && expr.arguments.length >= 2;
           const importName = useThen2 ? "Promise_then2" : `Promise_${method}`;

@@ -9,24 +9,18 @@
 //
 //   1A   (shipped): scaffold + type-registry + stubbed emit helpers
 //   1B   (shipped): $Promise struct registry + Promise.resolve/reject
-//   1C-A (this PR): microtask queue (WasmGC funcref+externref arrays) +
+//   1C-A (shipped): microtask queue (WasmGC funcref+externref arrays) +
 //                   __microtask_enqueue / __drain_microtasks helpers +
 //                   __drain_microtasks export + WASI _start auto-drain
-//   1C-B (future ): Promise.then standalone — synthesised continuation
+//   1C-B (this PR): Promise.then standalone — synthesised continuation
 //                   wrappers, chained-resolution machinery, rejection
-//                   propagation. Deferred because it requires careful
-//                   interaction with the GC closure infrastructure (see
-//                   issue #1326c "Why this is harder than spec estimated").
-//
-// Phase 1C-A is intentionally a no-op from the user's perspective: nothing
-// calls `emitMicrotaskEnqueue` yet. The drain export + _start hook are
-// inert until Phase 1C-B wires `.then` to enqueue continuations. Shipping
-// the infrastructure separately keeps the surface area reviewable and the
-// regression risk near zero.
+//                   propagation.
 
-import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
+import type { Instr, LocalDef, ValType } from "../ir/types.js";
+import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
+import { allocLocal } from "./context/locals.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
+import { addUnionImportsViaRegistry } from "./shared.js";
 
 /**
  * #1326 — Sentinel state values for `$Promise.state`. Match the JS spec
@@ -82,6 +76,20 @@ export interface AsyncSchedulerState {
   drainFuncIdx: number;
   /** Function index of `__microtask_grow(i32)`. -1 until registered. */
   growFuncIdx: number;
+  /** `$PromiseCallback` pending-callback linked-list node type. -1 until registered. */
+  promiseCallbackTypeIdx: number;
+  /** `$__then_caps` task-captures type (`callback`, `chained`). -1 until registered. */
+  thenCapsTypeIdx: number;
+  /** Function index of `__promise_fulfill((ref $Promise), externref) -> externref`. */
+  promiseFulfillFuncIdx: number;
+  /** Function index of `__promise_reject((ref $Promise), externref) -> externref`. */
+  promiseRejectFuncIdx: number;
+  /** Function index of the identity fulfillment task wrapper. */
+  identityFulfillWrapperFuncIdx: number;
+  /** Function index of the identity rejection task wrapper. */
+  identityRejectWrapperFuncIdx: number;
+  /** Counter for generated `__then_fulfill_N` / `__then_reject_N` wrappers. */
+  thenWrapperCounter: number;
   /** Whether `__drain_microtasks` has been added to the module's exports. */
   drainExported: boolean;
 }
@@ -102,6 +110,13 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       enqueueFuncIdx: -1,
       drainFuncIdx: -1,
       growFuncIdx: -1,
+      promiseCallbackTypeIdx: -1,
+      thenCapsTypeIdx: -1,
+      promiseFulfillFuncIdx: -1,
+      promiseRejectFuncIdx: -1,
+      identityFulfillWrapperFuncIdx: -1,
+      identityRejectWrapperFuncIdx: -1,
+      thenWrapperCounter: 0,
       drainExported: false,
     };
   }
@@ -121,9 +136,8 @@ type CodegenContextWithScheduler = CodegenContext & { asyncScheduler?: AsyncSche
  * has three fields:
  *   - state: i32 (0=pending, 1=fulfilled, 2=rejected)
  *   - value: externref (fulfilled value or rejection reason)
- *   - callbacks: externref (Phase 1C-A placeholder; Phase 1C-B will upgrade
- *     to a typed pending-continuation linked list once .then chaining
- *     against PENDING promises is implemented)
+ *   - callbacks: externref (nullable `$PromiseCallback` linked list for
+ *     pending `.then` continuations)
  *
  * Returns the registered struct's typeIdx, cached for re-use.
  */
@@ -137,9 +151,6 @@ export function getOrRegisterPromiseType(ctx: CodegenContext): number {
     fields: [
       { name: "state", type: { kind: "i32" }, mutable: true },
       { name: "value", type: { kind: "externref" }, mutable: true },
-      // Phase 1A placeholder. Phase 1C-B replaces with a typed pending-
-      // continuation linked list once `.then` against a still-PENDING
-      // promise needs to defer its continuation until resolve fires.
       { name: "callbacks", type: { kind: "externref" }, mutable: true },
     ],
   });
@@ -167,6 +178,42 @@ export function getOrRegisterMicrotaskQueueType(ctx: CodegenContext): number {
   const arrTypeIdx = getOrRegisterArrayType(ctx, "externref", { kind: "externref" });
   state.microtaskArgsArrTypeIdx = arrTypeIdx;
   return arrTypeIdx;
+}
+
+function getOrRegisterPromiseCallbackType(ctx: CodegenContext): number {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.promiseCallbackTypeIdx !== -1) return state.promiseCallbackTypeIdx;
+  const typeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$PromiseCallback",
+    fields: [
+      { name: "onFulfilledFn", type: { kind: "funcref" }, mutable: false },
+      { name: "onFulfilledCaps", type: { kind: "externref" }, mutable: false },
+      { name: "onRejectedFn", type: { kind: "funcref" }, mutable: false },
+      { name: "onRejectedCaps", type: { kind: "externref" }, mutable: false },
+      { name: "next", type: { kind: "externref" }, mutable: false },
+    ],
+  });
+  state.promiseCallbackTypeIdx = typeIdx;
+  return typeIdx;
+}
+
+function getOrRegisterThenCapsType(ctx: CodegenContext): number {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.thenCapsTypeIdx !== -1) return state.thenCapsTypeIdx;
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const typeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$__then_caps",
+    fields: [
+      { name: "callback", type: { kind: "externref" }, mutable: false },
+      { name: "chained", type: { kind: "ref", typeIdx: promiseTypeIdx }, mutable: false },
+    ],
+  });
+  state.thenCapsTypeIdx = typeIdx;
+  return typeIdx;
 }
 
 /**
@@ -338,7 +385,7 @@ function buildGrowBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrId
 
     // Allocate the new arrays with init = ref.null.
     // funcs: array.new (default=null funcref) of $newCap.
-    { op: "ref.null", typeIdx: 0 } as unknown as Instr, // ref.null func — placeholder; emitted as `ref.null func` by the binary writer when elem is funcref
+    { op: "ref.null.func" } as Instr,
     { op: "local.get", index: newCapLocal },
     { op: "array.new", typeIdx: funcArrIdx },
     { op: "global.set", index: state.microtaskFuncsGlobalIdx } as Instr,
@@ -587,6 +634,376 @@ function buildDrainBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrI
   ];
 }
 
+function ensurePromiseSettleFunctions(ctx: CodegenContext): void {
+  ensureMicrotaskQueue(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.promiseFulfillFuncIdx !== -1) return;
+
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const callbackTypeIdx = getOrRegisterPromiseCallbackType(ctx);
+  const capsTypeIdx = getOrRegisterThenCapsType(ctx);
+  const settleTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "ref", typeIdx: promiseTypeIdx }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$__promise_settle_type",
+  );
+
+  const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  state.promiseFulfillFuncIdx = baseFuncIdx;
+  state.promiseRejectFuncIdx = baseFuncIdx + 1;
+  state.identityFulfillWrapperFuncIdx = baseFuncIdx + 2;
+  state.identityRejectWrapperFuncIdx = baseFuncIdx + 3;
+
+  ctx.mod.functions.push({
+    name: "__promise_fulfill",
+    typeIdx: settleTypeIdx,
+    locals: buildPromiseSettleLocals(callbackTypeIdx),
+    body: buildPromiseSettleBody(state, promiseTypeIdx, callbackTypeIdx, PROMISE_STATE_FULFILLED),
+    exported: false,
+  });
+  ctx.funcMap.set("__promise_fulfill", state.promiseFulfillFuncIdx);
+
+  ctx.mod.functions.push({
+    name: "__promise_reject",
+    typeIdx: settleTypeIdx,
+    locals: buildPromiseSettleLocals(callbackTypeIdx),
+    body: buildPromiseSettleBody(state, promiseTypeIdx, callbackTypeIdx, PROMISE_STATE_REJECTED),
+    exported: false,
+  });
+  ctx.funcMap.set("__promise_reject", state.promiseRejectFuncIdx);
+
+  ctx.mod.functions.push({
+    name: "__then_identity_fulfill",
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals: buildIdentityWrapperLocals(capsTypeIdx),
+    body: buildIdentityWrapperBody(capsTypeIdx, state.promiseFulfillFuncIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__then_identity_fulfill", state.identityFulfillWrapperFuncIdx);
+
+  ctx.mod.functions.push({
+    name: "__then_identity_reject",
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals: buildIdentityWrapperLocals(capsTypeIdx),
+    body: buildIdentityWrapperBody(capsTypeIdx, state.promiseRejectFuncIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__then_identity_reject", state.identityRejectWrapperFuncIdx);
+}
+
+function buildPromiseSettleLocals(callbackTypeIdx: number): LocalDef[] {
+  // Params 0/1: (promise, value). Locals start at 2.
+  return [
+    { name: "$callbacks", type: { kind: "externref" } },
+    { name: "$callback", type: { kind: "ref", typeIdx: callbackTypeIdx } },
+  ];
+}
+
+function buildPromiseSettleBody(
+  state: AsyncSchedulerState,
+  promiseTypeIdx: number,
+  callbackTypeIdx: number,
+  settledState: typeof PROMISE_STATE_FULFILLED | typeof PROMISE_STATE_REJECTED,
+): Instr[] {
+  const promiseLocal = 0;
+  const valueLocal = 1;
+  const callbacksLocal = 2;
+  const callbackLocal = 3;
+  const fnFieldIdx = settledState === PROMISE_STATE_FULFILLED ? 0 : 2;
+  const capsFieldIdx = settledState === PROMISE_STATE_FULFILLED ? 1 : 3;
+
+  return [
+    // Promise settlement is one-shot. If a user callback tries to resolve the
+    // same chained promise again, return the attempted value and leave the
+    // original state/value intact.
+    { op: "local.get", index: promiseLocal },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: PROMISE_STATE_PENDING },
+    { op: "i32.ne" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: valueLocal }, { op: "return" }],
+    } as Instr,
+
+    // promise.state = fulfilled/rejected; promise.value = value
+    { op: "local.get", index: promiseLocal },
+    { op: "i32.const", value: settledState },
+    { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+    { op: "local.get", index: promiseLocal },
+    { op: "local.get", index: valueLocal },
+    { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+
+    // Detach callbacks before enqueueing so re-entrant `.then` calls append to
+    // the settled promise's normal immediate-enqueue path.
+    { op: "local.get", index: promiseLocal },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 },
+    { op: "local.set", index: callbacksLocal },
+    { op: "local.get", index: promiseLocal },
+    { op: "ref.null.extern" },
+    { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 },
+
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: callbacksLocal },
+            { op: "ref.is_null" },
+            { op: "br_if", depth: 1 },
+
+            { op: "local.get", index: callbacksLocal },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: callbackTypeIdx },
+            { op: "local.set", index: callbackLocal },
+
+            { op: "local.get", index: callbackLocal },
+            { op: "struct.get", typeIdx: callbackTypeIdx, fieldIdx: fnFieldIdx },
+            { op: "local.get", index: callbackLocal },
+            { op: "struct.get", typeIdx: callbackTypeIdx, fieldIdx: capsFieldIdx },
+            { op: "local.get", index: valueLocal },
+            { op: "call", funcIdx: state.enqueueFuncIdx },
+
+            { op: "local.get", index: callbackLocal },
+            { op: "struct.get", typeIdx: callbackTypeIdx, fieldIdx: 4 },
+            { op: "local.set", index: callbacksLocal },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    } as Instr,
+
+    { op: "local.get", index: valueLocal },
+  ];
+}
+
+function buildIdentityWrapperLocals(capsTypeIdx: number): LocalDef[] {
+  // Params 0/1: (caps, value). Local 2 is the decoded caps struct.
+  return [{ name: "$caps", type: { kind: "ref", typeIdx: capsTypeIdx } }];
+}
+
+function buildIdentityWrapperBody(capsTypeIdx: number, settleFuncIdx: number): Instr[] {
+  const rawCapsLocal = 0;
+  const valueLocal = 1;
+  const capsLocal = 2;
+  return [
+    { op: "local.get", index: rawCapsLocal },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: capsTypeIdx },
+    { op: "local.set", index: capsLocal },
+    { op: "local.get", index: capsLocal },
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
+    { op: "local.get", index: valueLocal },
+    { op: "call", funcIdx: settleFuncIdx },
+  ];
+}
+
+function ensureUnionHelpersForThenWrapper(ctx: CodegenContext, info: ClosureInfo): void {
+  const needsNumberBridge =
+    info.paramTypes.some((t) => t.kind === "f64" || t.kind === "i32" || t.kind === "i64") ||
+    info.returnType?.kind === "f64" ||
+    info.returnType?.kind === "i32" ||
+    info.returnType?.kind === "i64";
+  if (needsNumberBridge) addUnionImportsViaRegistry(ctx);
+}
+
+function pushDefaultForType(body: Instr[], type: ValType): void {
+  switch (type.kind) {
+    case "i32":
+      body.push({ op: "i32.const", value: 0 });
+      return;
+    case "i64":
+      body.push({ op: "i64.const", value: 0n });
+      return;
+    case "f64":
+      body.push({ op: "f64.const", value: 0 });
+      return;
+    case "externref":
+    case "ref_extern":
+      body.push({ op: "ref.null.extern" });
+      return;
+    case "ref":
+      body.push({ op: "ref.null", typeIdx: type.typeIdx }, { op: "ref.as_non_null" } as Instr);
+      return;
+    case "ref_null":
+      body.push({ op: "ref.null", typeIdx: type.typeIdx });
+      return;
+    case "funcref":
+      body.push({ op: "ref.null.func" } as Instr);
+      return;
+    default:
+      body.push({ op: "ref.null.extern" });
+      return;
+  }
+}
+
+function pushExternrefLocalAsType(ctx: CodegenContext, body: Instr[], valueLocal: number, type: ValType): void {
+  body.push({ op: "local.get", index: valueLocal });
+  switch (type.kind) {
+    case "externref":
+    case "ref_extern":
+      return;
+    case "f64": {
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxIdx !== undefined) {
+        body.push({ op: "call", funcIdx: unboxIdx });
+      } else {
+        body.push({ op: "drop" }, { op: "f64.const", value: 0 });
+      }
+      return;
+    }
+    case "i32": {
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxIdx !== undefined) {
+        body.push({ op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" });
+      } else {
+        body.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+      }
+      return;
+    }
+    case "i64": {
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxIdx !== undefined) {
+        body.push({ op: "call", funcIdx: unboxIdx }, { op: "i64.trunc_sat_f64_s" });
+      } else {
+        body.push({ op: "drop" }, { op: "i64.const", value: 0n });
+      }
+      return;
+    }
+    case "ref":
+      body.push({ op: "any.convert_extern" }, { op: "ref.cast", typeIdx: type.typeIdx } as Instr);
+      return;
+    case "ref_null":
+      body.push({ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: type.typeIdx } as Instr);
+      return;
+    default:
+      body.push({ op: "drop" });
+      pushDefaultForType(body, type);
+      return;
+  }
+}
+
+function coerceStackValueToExternref(ctx: CodegenContext, body: Instr[], from: ValType | null): void {
+  if (from === null) {
+    body.push({ op: "ref.null.extern" });
+    return;
+  }
+  switch (from.kind) {
+    case "externref":
+    case "ref_extern":
+      return;
+    case "f64": {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        body.push({ op: "call", funcIdx: boxIdx });
+      } else {
+        body.push({ op: "drop" }, { op: "ref.null.extern" });
+      }
+      return;
+    }
+    case "i32": {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        body.push({ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxIdx });
+      } else {
+        body.push({ op: "drop" }, { op: "ref.null.extern" });
+      }
+      return;
+    }
+    case "i64": {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        body.push({ op: "f64.convert_i64_s" }, { op: "call", funcIdx: boxIdx });
+      } else {
+        body.push({ op: "drop" }, { op: "ref.null.extern" });
+      }
+      return;
+    }
+    case "ref":
+    case "ref_null":
+      body.push({ op: "extern.convert_any" });
+      return;
+    default:
+      body.push({ op: "drop" }, { op: "ref.null.extern" });
+      return;
+  }
+}
+
+function emitThenWrapperFunction(
+  ctx: CodegenContext,
+  info: ClosureInfo,
+  settleFuncIdx: number,
+  namePrefix: string,
+): number {
+  ensurePromiseSettleFunctions(ctx);
+  ensureUnionHelpersForThenWrapper(ctx, info);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  const capsTypeIdx = getOrRegisterThenCapsType(ctx);
+  const wrapperId = state.thenWrapperCounter++;
+  const wrapperName = `${namePrefix}_${wrapperId}`;
+  const capLocal = 2;
+  const callbackLocal = 3;
+  const resultLocal = 4;
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+
+  const locals: LocalDef[] = [
+    { name: "$caps", type: { kind: "ref", typeIdx: capsTypeIdx } },
+    { name: "$callback", type: { kind: "ref", typeIdx: info.structTypeIdx } },
+    { name: "$result", type: { kind: "externref" } },
+  ];
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: capsTypeIdx },
+    { op: "local.set", index: capLocal },
+    { op: "local.get", index: capLocal },
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.structTypeIdx },
+    { op: "local.set", index: callbackLocal },
+
+    // call_ref stack shape: [closure_self, ...user_args, typed_funcref]
+    { op: "local.get", index: callbackLocal },
+  ];
+
+  for (let i = 0; i < info.paramTypes.length; i++) {
+    if (i === 0) {
+      pushExternrefLocalAsType(ctx, body, 1, info.paramTypes[i]!);
+    } else {
+      pushDefaultForType(body, info.paramTypes[i]!);
+    }
+  }
+
+  body.push(
+    { op: "local.get", index: callbackLocal },
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "call_ref", typeIdx: info.funcTypeIdx },
+  );
+  coerceStackValueToExternref(ctx, body, info.returnType);
+  body.push(
+    { op: "local.set", index: resultLocal },
+    { op: "local.get", index: capLocal },
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: resultLocal },
+    { op: "call", funcIdx: settleFuncIdx },
+  );
+
+  ctx.mod.functions.push({
+    name: wrapperName,
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals,
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set(wrapperName, funcIdx);
+  return funcIdx;
+}
+
 /**
  * #1326 Phase 1C-A — Compile a call to `__microtask_enqueue(fn, caps, arg)`
  * into the caller's body. Caller-supplied `funcRefInstrs` push a funcref;
@@ -594,9 +1011,8 @@ function buildDrainBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrI
  * drain-time callback will need; `argInstrs` push the externref value to
  * pass to the callback.
  *
- * Phase 1C-A has no in-tree caller yet — `.then` integration is Phase 1C-B.
- * Exposed so callers can wire microtask scheduling once the wrapper-
- * synthesis pipeline is in place.
+ * Used by the standalone `.then` integration to schedule drain-time
+ * continuations.
  */
 export function emitMicrotaskEnqueue(
   ctx: CodegenContext,
@@ -693,24 +1109,144 @@ export function emitStandalonePromiseReject(ctx: CodegenContext, fctx: FunctionC
   fctx.body.push({ op: "extern.convert_any" });
 }
 
+export interface StandalonePromiseThenCallback {
+  instrs: Instr[];
+  closureInfo: ClosureInfo;
+}
+
 /**
- * #1326 Phase 1C-B stub — emit standalone-mode `promise.then(fn)`.
+ * #1326 Phase 1C-B — emit standalone-mode `promise.then(onFulfilled,
+ * onRejected?)`.
  *
- * Not implemented in 1C-A (this PR). The chained-resolution machinery
- * requires synthesised continuation wrappers that close over both the user
- * closure struct AND a new pending `$Promise`, which interacts in non-
- * trivial ways with the existing GC closure pipeline. Phase 1C-A ships
- * the queue infrastructure + drain export so 1C-B can plug `.then` in
- * incrementally on top of a known-stable foundation.
+ * The emitted code constructs a new pending chained `$Promise`, captures the
+ * user closure (if callable) plus that chained promise in `$__then_caps`, then:
+ *   - already-fulfilled receiver: enqueue fulfillment wrapper immediately
+ *   - already-rejected receiver: enqueue rejection wrapper immediately
+ *   - pending receiver: prepend a `$PromiseCallback` node to receiver.callbacks
+ *
+ * Drain-time wrappers invoke the closure through WasmGC `call_ref`, settle the
+ * chained promise, and enqueue any callbacks that were attached to the chained
+ * promise while it was pending. Missing/non-callable handlers use identity
+ * fulfill / pass-through reject wrappers.
  */
 export function emitStandalonePromiseThen(
-  _ctx: CodegenContext,
-  _fctx: FunctionContext,
-  _promiseInstrs: Instr[],
-  _fnInstrs: Instr[],
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  promiseInstrs: Instr[],
+  onFulfilled: StandalonePromiseThenCallback | null,
+  onRejected?: StandalonePromiseThenCallback | null,
 ): void {
-  throw new Error(
-    "#1326 Phase 1C-B: emitStandalonePromiseThen not yet implemented — Phase 1C-A shipped the queue + drain infrastructure; .then standalone wiring follows in a separate PR",
+  ensurePromiseSettleFunctions(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const callbackTypeIdx = getOrRegisterPromiseCallbackType(ctx);
+  const capsTypeIdx = getOrRegisterThenCapsType(ctx);
+
+  const fulfillWrapperFuncIdx = onFulfilled
+    ? emitThenWrapperFunction(ctx, onFulfilled.closureInfo, state.promiseFulfillFuncIdx, "__then_fulfill")
+    : state.identityFulfillWrapperFuncIdx;
+  const rejectWrapperFuncIdx = onRejected
+    ? emitThenWrapperFunction(ctx, onRejected.closureInfo, state.promiseFulfillFuncIdx, "__then_reject")
+    : state.identityRejectWrapperFuncIdx;
+
+  const promiseLocal = allocLocal(fctx, `__then_promise_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: promiseTypeIdx,
+  });
+  const chainedLocal = allocLocal(fctx, `__then_chained_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: promiseTypeIdx,
+  });
+  const fulfilledCapsLocal = allocLocal(fctx, `__then_fulfilled_caps_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  const rejectedCapsLocal = allocLocal(fctx, `__then_rejected_caps_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+
+  for (const instr of promiseInstrs) fctx.body.push(instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "local.set", index: promiseLocal });
+
+  // Chained promise starts pending with no callbacks.
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "local.set", index: chainedLocal });
+
+  if (onFulfilled) {
+    for (const instr of onFulfilled.instrs) fctx.body.push(instr);
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  fctx.body.push({ op: "local.get", index: chainedLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: capsTypeIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.set", index: fulfilledCapsLocal });
+
+  if (onRejected) {
+    for (const instr of onRejected.instrs) fctx.body.push(instr);
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  fctx.body.push({ op: "local.get", index: chainedLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: capsTypeIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.set", index: rejectedCapsLocal });
+
+  fctx.body.push(
+    { op: "local.get", index: promiseLocal },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
+        { op: "local.get", index: fulfilledCapsLocal },
+        { op: "local.get", index: promiseLocal },
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "call", funcIdx: state.enqueueFuncIdx },
+      ],
+      else: [
+        { op: "local.get", index: promiseLocal },
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "i32.const", value: PROMISE_STATE_REJECTED },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
+            { op: "local.get", index: rejectedCapsLocal },
+            { op: "local.get", index: promiseLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "call", funcIdx: state.enqueueFuncIdx },
+          ],
+          else: [
+            // Pending receiver: push a callback node in front of the current
+            // callback list. This preserves every continuation needed for
+            // chaining. FIFO append can be added later without changing the
+            // node shape; simple chains have one pending callback per promise.
+            { op: "local.get", index: promiseLocal },
+            { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
+            { op: "local.get", index: fulfilledCapsLocal },
+            { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
+            { op: "local.get", index: rejectedCapsLocal },
+            { op: "local.get", index: promiseLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    { op: "local.get", index: chainedLocal },
+    { op: "extern.convert_any" } as Instr,
   );
 }
 
