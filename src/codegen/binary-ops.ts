@@ -1228,31 +1228,6 @@ export function compileBinaryExpression(
   const isI32MulSafe = (l: ts.Expression, r: ts.Expression): boolean => {
     return isSmallIntLit(l) || isSmallIntLit(r);
   };
-  // #1746: a call expression that provably lowers to a native i32 result is an
-  // i32-pure *leaf*. The only such call today is `<str>.charCodeAt(idx)`: in
-  // both nativeStrings mode (inline `array.get_u` → i32) and JS-host mode
-  // (`wasm:js-string.charCodeAt` import → i32) it returns a u16 code unit in
-  // [0, 65535] when the receiver is a string — always non-negative, always
-  // i32-range, always f64-exact. Crucially, `compileExpression` returns i32 for
-  // it *unconditionally* (not hint-driven), so treating the enclosing
-  // arithmetic as i32 does not change charCodeAt's own observable value: the
-  // f64 path already produces the same i32 then `f64.convert_i32_s`'s it. The
-  // index arg is left to `compileExpression`'s own ToInteger handling — we
-  // don't re-derive it, so its semantics are unchanged. This is what lets the
-  // string-hash hot loop `(hash*31 + text.charCodeAt(i)) | 0` collapse to a
-  // pure i32 chain instead of the f64 multiply/add + expensive ToInt32 dance.
-  const isI32PureStringCall = (e: ts.Expression): boolean => {
-    const inner = peel(e);
-    if (!ts.isCallExpression(inner)) return false;
-    const callee = inner.expression;
-    if (!ts.isPropertyAccessExpression(callee)) return false;
-    if (callee.name.text !== "charCodeAt") return false;
-    // Receiver must be statically a string (primitive or wrapper) so the
-    // string method dispatch fires and returns i32 — guards against a
-    // user object with a `charCodeAt` method of arbitrary return type.
-    const recvType = ctx.checker.getTypeAtLocation(callee.expression);
-    return isStringType(recvType);
-  };
   // #1179: predicate for "this expression compiles to i32 cheaply with
   // an i32 hint" — leaves are i32 locals or i32-range integer literals,
   // and internal nodes are bitwise / `| 0` (always i32) or arithmetic
@@ -1268,8 +1243,11 @@ export function compileBinaryExpression(
       const n = Number(inner.text.replace(/_/g, ""));
       return Number.isInteger(n) && n >= -2147483648 && n <= 2147483647;
     }
-    // #1746: i32-returning string call (charCodeAt) is an i32-pure leaf.
-    if (isI32PureStringCall(inner)) return true;
+    // #1105: `String.prototype.charCodeAt` is not an i32-pure leaf.
+    // ECMA-262 §22.1.3.3 returns NaN when the position is out of range, and
+    // §7.1.7 ToInt32 maps that NaN to 0 only after the surrounding expression
+    // has evaluated. Treating `x.charCodeAt(i)` as a direct i32 leaf inside
+    // `(a + x.charCodeAt(i)) | 0` would incorrectly preserve `a` for OOB reads.
     if (ts.isBinaryExpression(inner)) {
       const k = inner.operatorToken.kind;
       // `expr | 0` always produces i32 cleanly when its operand does.
@@ -1318,11 +1296,6 @@ export function compileBinaryExpression(
     }
     if (ts.isNumericLiteral(inner)) {
       fctx.body.push({ op: "i32.const", value: Number(inner.text.replace(/_/g, "")) | 0 });
-      return;
-    }
-    if (isI32PureStringCall(inner)) {
-      // charCodeAt already returns i32 unconditionally; emit it as-is.
-      compileExpression(ctx, fctx, inner);
       return;
     }
     if (ts.isBinaryExpression(inner)) {
