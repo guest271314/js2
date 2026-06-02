@@ -15,6 +15,7 @@ goal: test262-conformance
 sprint: 50
 related: [1160]
 ---
+
 # #1310 — vm.createContext sandbox isolation for test262 global contamination
 
 ## Background
@@ -71,6 +72,7 @@ real host `globalThis`.
 ## Test Results
 
 `tests/issue-1310.test.ts` — 6/6 PASS:
+
 - sandbox-resolved `Array` is the sandbox's `Array`, not host's.
 - without `globalSandbox`, falls through to host `globalThis`.
 - `globalThis` intent resolves to the sandbox object.
@@ -102,31 +104,37 @@ landed, the test262 runner becomes deterministic with respect to
 prototype mutation tests, and the existing `__extern_set`-related
 "#1160 follow-up" gap noted in `runtime.ts` is closed.
 
-## Follow-up: sharded worker + standalone lane coverage (2026-06-02)
+## Follow-up: sharded worker symbol-prototype restoration (2026-06-02)
 
-The original implementation only covered the `runTest262File` path in
-`tests/test262-runner.ts`. The 57-shard host+standalone CI rollout exposed
-that the full sharded path uses `scripts/test262-worker.mjs` directly, so its
-`buildImports(...)` calls were still unsandboxed. Both matrix targets share
-that worker; standalone usually has no host imports, but any import-backed
-standalone execution should use the same dirty-check guard as JS-host.
+The 57-shard host+standalone CI rollout exposed another shared-worker
+prototype-poisoning gap. The full sharded path uses
+`scripts/test262-worker.mjs`, and both matrix targets share that worker.
+`restoreBuiltins()` already restored many string-named methods, but it did not
+restore symbol-named prototype properties such as
+`RegExp.prototype[Symbol.match]`. A prior test can replace those protocol
+methods with a non-callable value; later tests then fail with messages like
+`'1' returned for property 'Symbol(Symbol.match)' of object '[object RegExp]'`.
 
-Follow-up changes:
+Follow-up change:
 
-- Added the VM sandbox manager to `scripts/test262-worker.mjs` and threaded it
-  through all worker `buildImports(...)` calls.
-- Applied the same sandbox to the rare in-process fixture branch in
-  `tests/test262-shared.ts`.
-- Applied the same guard to the legacy `scripts/wasm-exec-worker.mjs` executor.
-- Expanded sentinels beyond the original minimal set to cover Array iterator
-  methods, RegExp methods, and `Uint8Array` methods seen in the catastrophic
-  prototype-poisoning cluster.
+- Extended `scripts/test262-worker.mjs` method snapshots to include symbol-named
+  prototype properties on Array, String, RegExp, Map, Set, and
+  `%TypedArray%.prototype`. Because this is in the shared worker cleanup path,
+  the check applies to both JS-host and standalone test262 matrix targets
+  without changing host-import realm identity.
+
+Rejected approach:
+
+- Threading the `#1310` VM sandbox through sharded `buildImports(...)` changed
+  observable built-in/prototype identity for many JS-host test262 cases and
+  worsened the catastrophic diff. The sharded CI path keeps host-import
+  resolution baseline-compatible and relies on post-test restoration/restart
+  instead.
 
 Verification:
 
 - `node --check scripts/test262-worker.mjs`
-- `node --check scripts/wasm-exec-worker.mjs`
-- `pnpm exec prettier --check scripts/test262-worker.mjs scripts/wasm-exec-worker.mjs tests/test262-runner.ts tests/test262-shared.ts`
+- `pnpm exec prettier --check scripts/test262-worker.mjs`
 - `pnpm exec tsc --noEmit --pretty false`
 - `pnpm exec vitest run tests/issue-1310.test.ts --reporter=dot`
 - `TEST262_TARGET=standalone ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass

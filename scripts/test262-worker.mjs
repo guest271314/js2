@@ -13,7 +13,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
 import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 
@@ -41,98 +40,6 @@ function computeBundleHash() {
   }
 }
 const BUNDLE_HASH = computeBundleHash();
-
-// #1310: keep test262 host-import global mutations inside a replaceable VM
-// realm. This worker is shared by the JS-host and standalone matrix targets;
-// standalone usually has no host imports, but any import-backed execution path
-// should get the same dirty-check guard as the JS-host lane.
-const SANDBOX_GLOBAL_NAMES = [
-  "Array",
-  "Object",
-  "Function",
-  "String",
-  "Number",
-  "Boolean",
-  "Symbol",
-  "Promise",
-  "Map",
-  "Set",
-  "WeakMap",
-  "WeakSet",
-  "Date",
-  "RegExp",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "SyntaxError",
-  "ReferenceError",
-  "Math",
-  "JSON",
-  "Reflect",
-  "Uint8Array",
-];
-
-const SANDBOX_SENTINEL_KEYS = [
-  ["Array", "prototype", "push"],
-  ["Array", "prototype", "map"],
-  ["Array", "prototype", "values"],
-  ["Object", "prototype", "hasOwnProperty"],
-  ["Function", "prototype", "call"],
-  ["String", "prototype", "slice"],
-  ["RegExp", "prototype", "exec"],
-  ["RegExp", "prototype", "test"],
-  ["Promise", "prototype", "then"],
-  ["Set", "prototype", "add"],
-  ["Map", "prototype", "set"],
-  ["WeakMap", "prototype", "set"],
-  ["WeakSet", "prototype", "add"],
-  ["Uint8Array", "prototype", "set"],
-  ["Uint8Array", "prototype", "slice"],
-];
-
-function buildFreshSandbox() {
-  const sandbox = Object.create(null);
-  const ctx = createContext(sandbox);
-  for (const name of SANDBOX_GLOBAL_NAMES) {
-    try {
-      sandbox[name] = runInContext(name, ctx);
-    } catch {}
-  }
-  sandbox.globalThis = sandbox;
-  return sandbox;
-}
-
-function readSandboxSentinels(sandbox) {
-  return SANDBOX_SENTINEL_KEYS.map((path) => {
-    let cur = sandbox;
-    for (const key of path) cur = cur?.[key];
-    return cur;
-  });
-}
-
-let globalSandbox = buildFreshSandbox();
-let globalSandboxSentinels = readSandboxSentinels(globalSandbox);
-
-function getWorkerTestSandbox() {
-  let dirty = false;
-  for (let i = 0; i < SANDBOX_SENTINEL_KEYS.length; i++) {
-    let cur = globalSandbox;
-    for (const key of SANDBOX_SENTINEL_KEYS[i]) cur = cur?.[key];
-    if (cur !== globalSandboxSentinels[i]) {
-      dirty = true;
-      break;
-    }
-  }
-  if (dirty) {
-    globalSandbox = buildFreshSandbox();
-    globalSandboxSentinels = readSandboxSentinels(globalSandbox);
-  }
-  return globalSandbox;
-}
-
-function buildTestImports(imports, stringPool) {
-  return buildImports(imports, undefined, stringPool, { globalSandbox: getWorkerTestSandbox() });
-}
 
 let compileCount = 0;
 const GC_INTERVAL = 25;
@@ -309,6 +216,7 @@ const _METHOD_SNAPSHOTS = [
       "fill",
       "copyWithin",
       "at",
+      Symbol.unscopables,
       "entries",
       "keys",
       "values",
@@ -347,6 +255,7 @@ const _METHOD_SNAPSHOTS = [
       "trim",
       "trimStart",
       "trimEnd",
+      Symbol.iterator,
       "toString",
       "valueOf",
       "at",
@@ -358,11 +267,33 @@ const _METHOD_SNAPSHOTS = [
     ["toString", "toFixed", "toPrecision", "toExponential", "valueOf", "toLocaleString"],
   ],
   ["Boolean.prototype", Boolean.prototype, ["toString", "valueOf"]],
-  ["RegExp.prototype", RegExp.prototype, ["exec", "test", "toString"]],
-  ["Map.prototype", Map.prototype, ["get", "set", "has", "delete", "clear", "forEach", "entries", "keys", "values"]],
-  ["Set.prototype", Set.prototype, ["add", "has", "delete", "clear", "forEach", "entries", "keys", "values"]],
+  [
+    "RegExp.prototype",
+    RegExp.prototype,
+    [
+      "exec",
+      "test",
+      "toString",
+      Symbol.match,
+      Symbol.matchAll,
+      Symbol.replace,
+      Symbol.search,
+      Symbol.split,
+    ],
+  ],
+  [
+    "Map.prototype",
+    Map.prototype,
+    ["get", "set", "has", "delete", "clear", "forEach", "entries", "keys", "values", Symbol.iterator],
+  ],
+  [
+    "Set.prototype",
+    Set.prototype,
+    ["add", "has", "delete", "clear", "forEach", "entries", "keys", "values", Symbol.iterator],
+  ],
   ["WeakMap.prototype", WeakMap.prototype, ["get", "set", "has", "delete"]],
   ["WeakSet.prototype", WeakSet.prototype, ["add", "has", "delete"]],
+  ["%TypedArray%.prototype", _typedArrayProto, ["entries", "keys", "values", Symbol.iterator]],
   ["Error.prototype", Error.prototype, ["toString"]],
   ["Function.prototype", Function.prototype, ["call", "apply", "bind", "toString"]],
   [
@@ -982,7 +913,7 @@ function extractWatFunctionSnippet(wat, funcName) {
 async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
   let detailErr;
   try {
-    const imports = buildTestImports(result.imports, result.stringPool);
+    const imports = buildImports(result.imports, undefined, result.stringPool);
     await WebAssembly.instantiate(result.binary, imports);
   } catch (err) {
     detailErr = err;
@@ -1160,7 +1091,7 @@ process.on("message", async (msg) => {
   // Negative parse/early test that compiled successfully — need to check instantiation
   if (isNegative) {
     try {
-      const importObj = buildTestImports(result.imports, result.stringPool);
+      const importObj = buildImports(result.imports, undefined, result.stringPool);
       await WebAssembly.instantiate(result.binary, importObj);
       // Instantiation succeeded — this is a failure (expected parse/early error)
       process.send({
@@ -1180,7 +1111,7 @@ process.on("message", async (msg) => {
   const execStart = performance.now();
   let instance;
   try {
-    const importObj = buildTestImports(result.imports, result.stringPool);
+    const importObj = buildImports(result.imports, undefined, result.stringPool);
 
     try {
       const wasmResult = await WebAssembly.instantiate(result.binary, importObj);

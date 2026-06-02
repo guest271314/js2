@@ -59,25 +59,18 @@ const SANDBOX_GLOBAL_NAMES: ReadonlyArray<string> = [
   "Math",
   "JSON",
   "Reflect",
-  "Uint8Array",
 ];
 
 const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
   ["Array", "prototype", "push"],
-  ["Array", "prototype", "map"],
-  ["Array", "prototype", "values"],
   ["Object", "prototype", "hasOwnProperty"],
   ["Function", "prototype", "call"],
   ["String", "prototype", "slice"],
-  ["RegExp", "prototype", "exec"],
-  ["RegExp", "prototype", "test"],
   ["Promise", "prototype", "then"],
   ["Set", "prototype", "add"],
   ["Map", "prototype", "set"],
   ["WeakMap", "prototype", "set"],
   ["WeakSet", "prototype", "add"],
-  ["Uint8Array", "prototype", "set"],
-  ["Uint8Array", "prototype", "slice"],
 ];
 
 function _buildFreshSandbox(): Record<string, any> {
