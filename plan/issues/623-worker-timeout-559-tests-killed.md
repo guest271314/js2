@@ -17,8 +17,7 @@ files:
 ---
 # #623 — Worker timeout: 559 tests killed after 60s
 
-## Status: review
-
+## Status: in-review
 559 tests fail with "timeout: worker hung > 60s" even after #610 increased timeout to 60s with retry at 120s. These are genuinely slow tests (complex class hierarchies, large generated code).
 
 ### Fix

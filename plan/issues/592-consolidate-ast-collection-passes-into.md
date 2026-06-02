@@ -18,8 +18,7 @@ files:
 ---
 # #592 — Consolidate AST collection passes into single visitor
 
-## Status: review
-
+## Status: in-review
 The compilation pipeline (index.ts) walked the AST 19+ times for separate collection functions: `collectConsoleImports`, `collectPrimitiveMethodImports`, `collectStringLiterals`, `collectMathImports`, etc.
 
 Each is O(n) for n AST nodes -> O(19n) total. A single visitor collecting all metadata is O(n).

@@ -3,14 +3,14 @@ id: 1105
 title: "Wasm-native String method implementations for standalone mode"
 status: ready
 created: 2026-04-12
-updated: 2026-04-12
+updated: 2026-06-02
 priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: string-methods
 goal: standalone-mode
-sprint: Backlog
+sprint: 58
 es_edition: multi
 ---
 # #1105 — Wasm-native String method implementations for standalone mode

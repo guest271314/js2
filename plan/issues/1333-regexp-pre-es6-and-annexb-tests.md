@@ -2,9 +2,9 @@
 id: 1333
 title: "RegExp host-mode: Pre-ES6 (S15.10) tests + annexB legacy accessors"
 status: done
-completed: 2026-05-28
 created: 2026-05-08
 updated: 2026-05-28
+completed: 2026-05-28
 priority: low
 feasibility: easy
 reasoning_effort: medium

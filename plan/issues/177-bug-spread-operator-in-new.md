@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #177 -- Bug: Spread operator in new expressions
 
-## Status: review
-
+## Status: in-review
 ## Summary
 new Ctor(...args) with spread operator fails at runtime. The spread elements are not correctly expanded into constructor arguments.
 

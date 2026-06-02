@@ -1,8 +1,7 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: ready
-owner: Hooke
+status: in-progress
 created: 2026-05-08
 updated: 2026-06-02
 priority: high
@@ -13,6 +12,9 @@ area: codegen, ir
 language_feature: with
 goal: spec-completeness
 sprint: 58
+owner: Hooke
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:02:41.007Z
 ---
 # #1387 — `with` statement: architect exploration
 
@@ -36,6 +38,22 @@ Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
 baseline of 30,480 / 43,106 (70.7%). `WithStatement` unsupported appears in
 294 non-exclusive standalone failures, matching this issue's static
 prove-or-demote plan and the older #671 umbrella count.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The ordered root-cause classifier assigns **62** rows primarily to #1387:
+59 `compile_error` rows and 3 runtime/assertion rows. Unlike the June 1
+non-exclusive evidence, the latest artifact does not have a large direct
+`Unsupported statement: WithStatement` diagnostic cluster; many `with`-path
+tests now hit earlier standalone blockers first, especially #1472 dynamic
+object/property dispatch and #1665/#681 iterator protocol refusal. The 62-row
+primary bucket is therefore the currently visible `with` owner, not the full
+latent pass-rate impact of implementing the Tier-1/Tier-2 design below.
 
 ## What `with` does (spec §14.11)
 

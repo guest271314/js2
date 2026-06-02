@@ -68,30 +68,45 @@ function resolveFixtures(source: string, testFilePath: string): string[] {
 
 // ── Slow-test priority map ─────────────────────────────────────────
 // Maps test path (relative to test262/, e.g. "test/built-ins/Array/.../foo.js")
-// to its measured compile+exec wall time in ms. Used inside `runTest262Chunk`
-// to sort each shard's test list by descending duration so the slow tests run
-// FIRST. This evens out wall time across the 115 shards: a slow test in
-// position 0 finishes while the shard cruises through the fast tests behind
-// it; in position N it pushes the shard's tail past everyone else. Tests
-// absent from the map sort to 0 (they keep their natural order behind the
-// timed ones, since the sort is stable).
+// to its measured compile+exec wall time in ms for the active target. Used
+// inside `runTest262Chunk` to assign tests to weighted shards and then sort
+// each shard's test list by descending duration so the slow tests run FIRST.
+// Tests absent from the map get `DEFAULT_TEST_WEIGHT_MS` for shard assignment
+// and sort behind the timed ones.
 //
-// Source: benchmarks/results/test262-current.jsonl (committed baseline).
-// Refresh by regenerating from a fresh baseline run.
-const SLOW_TESTS_PATH = join(import.meta.dirname ?? ".", "test262-slow-tests.json");
+// Sources: tests/test262-slow-tests.json for JS-host, with target-specific
+// overrides such as tests/test262-slow-tests-standalone.json when available.
+function slowTestPathCandidates(): string[] {
+  const target = process.env.TEST262_TARGET;
+  const dir = import.meta.dirname ?? ".";
+  const candidates: string[] = [];
+  if (target && target !== "gc") candidates.push(join(dir, `test262-slow-tests-${target}.json`));
+  candidates.push(join(dir, "test262-slow-tests.json"));
+  return candidates;
+}
+
 const slowTestDurationMs: Map<string, number> = (() => {
-  try {
-    const raw = readFileSync(SLOW_TESTS_PATH, "utf-8");
-    const doc = JSON.parse(raw) as { tests?: Record<string, number> };
-    const map = new Map<string, number>();
-    for (const [k, v] of Object.entries(doc.tests ?? {})) {
-      if (typeof v === "number" && v > 0) map.set(k, v);
+  for (const path of slowTestPathCandidates()) {
+    if (!existsSync(path)) continue;
+    try {
+      const raw = readFileSync(path, "utf-8");
+      const doc = JSON.parse(raw) as { tests?: Record<string, number> };
+      const map = new Map<string, number>();
+      for (const [k, v] of Object.entries(doc.tests ?? {})) {
+        if (typeof v === "number" && v > 0) map.set(k, v);
+      }
+      return map;
+    } catch {
+      // Try the next candidate; a broken target-specific file should not keep
+      // the runner from falling back to the host timing map.
     }
-    return map;
-  } catch {
-    return new Map();
   }
+  return new Map();
 })();
+const parsedDefaultTestWeightMs = parseInt(process.env.TEST262_DEFAULT_TEST_WEIGHT_MS || "250", 10);
+const DEFAULT_TEST_WEIGHT_MS = Number.isFinite(parsedDefaultTestWeightMs)
+  ? Math.max(1, parsedDefaultTestWeightMs)
+  : 250;
 
 // ── Cache setup (for disk cache side-effect) ───────────────────────
 
@@ -121,8 +136,22 @@ function buildCompilerHash(): string {
 
 const compilerHash = buildCompilerHash();
 
+type Test262CompileTarget = "gc" | "linear" | "wasi" | "standalone";
+
+function parseTest262Target(): Test262CompileTarget | undefined {
+  const raw = process.env.TEST262_TARGET;
+  if (raw === "linear" || raw === "wasi" || raw === "standalone") return raw;
+  return undefined;
+}
+
+const TEST262_TARGET = parseTest262Target();
+
 function getCachePaths(wrappedSource: string): { wasmPath: string; metaPath: string } {
-  const hash = createHash("md5").update(wrappedSource).update(compilerHash).digest("hex");
+  const hash = createHash("md5")
+    .update(wrappedSource)
+    .update(compilerHash)
+    .update(TEST262_TARGET ?? "gc")
+    .digest("hex");
   return {
     wasmPath: join(CACHE_DIR, `${hash}.wasm`),
     metaPath: join(CACHE_DIR, `${hash}.json`),
@@ -167,7 +196,8 @@ mkdirSync(RESULTS_DIR, { recursive: true });
 // Timestamped filename — env var from run-test262-vitest.sh, or generate one
 const RUN_TIMESTAMP =
   process.env.RUN_TIMESTAMP || new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "").slice(0, 15);
-const JSONL_PATH = join(RESULTS_DIR, `test262-results-${RUN_TIMESTAMP}.jsonl`);
+const RESULT_PREFIX = process.env.TEST262_RESULT_PREFIX || (TEST262_TARGET ? `test262-${TEST262_TARGET}` : "test262");
+const JSONL_PATH = join(RESULTS_DIR, `${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl`);
 
 // Open results JSONL — each chunk appends independently
 const jsonlFd = openSync(JSONL_PATH, "a");
@@ -284,6 +314,53 @@ function adjustErrorLines(msg: string, offset: number): string {
 
 const TEST262_ROOT = join(import.meta.dirname ?? ".", "..", "test262");
 
+type Test262ChunkTest = {
+  category: string;
+  durationMs: number;
+  filePath: string;
+  ordinal: number;
+  relPath: string;
+};
+
+type Test262ChunkBin = {
+  tests: Test262ChunkTest[];
+  weightMs: number;
+};
+
+function durationOf(relPath: string): number {
+  return slowTestDurationMs.get(relPath) ?? DEFAULT_TEST_WEIGHT_MS;
+}
+
+function chooseLightestBin(bins: Test262ChunkBin[]): Test262ChunkBin {
+  let best = bins[0]!;
+  for (let i = 1; i < bins.length; i++) {
+    const candidate = bins[i]!;
+    if (
+      candidate.weightMs < best.weightMs ||
+      (candidate.weightMs === best.weightMs && candidate.tests.length < best.tests.length)
+    ) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function assignBalancedChunk(tests: Test262ChunkTest[], chunkIndex: number, totalChunks: number) {
+  const bins = Array.from({ length: totalChunks }, () => ({
+    tests: [] as Test262ChunkTest[],
+    weightMs: 0,
+  }));
+  const weighted = [...tests].sort((a, b) => b.durationMs - a.durationMs || a.ordinal - b.ordinal);
+
+  for (const test of weighted) {
+    const bin = chooseLightestBin(bins);
+    bin.tests.push(test);
+    bin.weightMs += test.durationMs;
+  }
+
+  return bins[chunkIndex]!;
+}
+
 /**
  * Register vitest describe/it blocks for this chunk's share of tests.
  *
@@ -295,29 +372,33 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   // This avoids registering ~5,200 proposal tests that would be skipped anyway,
   // saving ~10% of run time and keeping the statusline total accurate.
   const includeProposals = process.env.TEST262_INCLUDE_PROPOSALS === "1";
-  const allTests: { category: string; filePath: string }[] = [];
+  const allTests: Test262ChunkTest[] = [];
   for (const category of TEST_CATEGORIES) {
     for (const filePath of findTestFiles(category)) {
-      // Skip staging/ and proposal-tagged tests at the file level
-      const relPath = filePath.replace(/.*test262\//, "");
+      // Skip staging/ proposal tests at the file level.
+      const relPath = relative(TEST262_ROOT, filePath);
+      if (!matchesPathFilter(relPath)) continue;
       if (!includeProposals && (relPath.startsWith("test/staging/") || relPath.startsWith("staging/"))) continue;
-      allTests.push({ category, filePath });
+      allTests.push({
+        category,
+        durationMs: durationOf(relPath),
+        filePath,
+        ordinal: allTests.length,
+        relPath,
+      });
     }
   }
 
-  const myTests = allTests.filter((_, i) => i % totalChunks === chunkIndex);
+  const chunk = assignBalancedChunk(allTests, chunkIndex, totalChunks);
+  const myTests = chunk.tests;
 
   // Sort within the shard by descending known duration (slow tests first).
-  // Tests absent from `slowTestDurationMs` get 0 and keep their natural order
-  // behind the timed ones (Array.prototype.sort is stable on Node ≥ 12).
+  // Tests absent from `slowTestDurationMs` keep their natural order behind the
+  // timed ones (Array.prototype.sort is stable on Node ≥ 12).
   // Effect: a shard's worst-case wall time is dominated by max(timed test)
   // rather than max + sum-of-tail. See tests/test262-slow-tests.json for the
   // source of truth and how to refresh.
-  const durationOf = (filePath: string): number => {
-    const relPath = filePath.replace(/.*test262\//, "");
-    return slowTestDurationMs.get(relPath) ?? 0;
-  };
-  myTests.sort((a, b) => durationOf(b.filePath) - durationOf(a.filePath));
+  myTests.sort((a, b) => b.durationMs - a.durationMs || a.ordinal - b.ordinal);
 
   const byCategory = new Map<string, string[]>();
   for (const { category, filePath } of myTests) {
@@ -331,7 +412,9 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
   beforeAll(() => {
     pool = new CompilerPool(POOL_SIZE, "unified");
-    console.log(`Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, ${POOL_SIZE} unified fork workers`);
+    console.log(
+      `Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, est ${Math.round(chunk.weightMs / 1000)}s, ${POOL_SIZE} unified fork workers`,
+    );
   }, 30_000);
 
   afterAll(() => {
@@ -419,8 +502,9 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   vfiles["./" + relative(dirname(filePath), fixPath)] = readFileSync(fixPath, "utf-8");
                 }
                 const multiCompile = await getCompileMulti();
-                const result = multiCompile(vfiles, "./test.ts", {
+                const result = await multiCompile(vfiles, "./test.ts", {
                   skipSemanticDiagnostics: true,
+                  target: TEST262_TARGET,
                 });
                 if (!result.success || result.binary.length === 0) {
                   if (isNegative) {
@@ -523,6 +607,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 wasmPath,
                 metaPath,
                 label: relPath,
+                target: TEST262_TARGET,
               },
               30_000,
             );
@@ -554,6 +639,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       wasmPath,
                       metaPath,
                       label: relPath + " [retry]",
+                      target: TEST262_TARGET,
                     },
                     RETRY_TIMEOUT_MS,
                   ),

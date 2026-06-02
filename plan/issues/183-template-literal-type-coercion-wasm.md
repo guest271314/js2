@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #183 — Template literal type coercion wasm errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 4 template literal tests fail at wasm validation with type mismatch errors. Template expressions that produce non-string types are not correctly coerced before string concatenation.
 

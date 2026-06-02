@@ -18,8 +18,7 @@ files:
 ---
 # #537 — TypeScript diagnostic suppressions for test262 (62 CE)
 
-## Status: review
-
+## Status: in-review
 62 tests fail due to TypeScript diagnostics that should be suppressed in test262/allowJs mode:
 
 | Pattern | Count |

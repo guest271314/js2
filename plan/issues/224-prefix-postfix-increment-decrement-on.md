@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #224: Prefix/postfix increment/decrement on member expressions
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 ~50 compile errors from prefix/postfix increment/decrement on member expressions like `++obj.x`, `arr[i]++`, `--obj.prop`, `obj.x--`. Previously only identifier operands were supported.

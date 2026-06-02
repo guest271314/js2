@@ -16,8 +16,7 @@ files:
 ---
 # #686 — Closure capture type preservation
 
-## Status: review
-
+## Status: in-review
 ### Implementation summary
 
 All three objectives from the original issue are already implemented:

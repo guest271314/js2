@@ -4,6 +4,7 @@ title: "for-of / for-await-of destructuring of iterator results throws illegal c
 status: done
 created: 2026-05-20
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: medium
 goal: test262-conformance

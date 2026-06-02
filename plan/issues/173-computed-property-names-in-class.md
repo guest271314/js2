@@ -17,8 +17,7 @@ files:
 ---
 # #173 — Computed property names in class declarations
 
-## Status: review
-
+## Status: in-review
 ## Problem
 44 test262 compile errors: "A computed property name in a class property declaration must have a simple literal type or a 'unique symbol' type." Classes with computed property names (e.g., `class { [expr]() {} }`) are not supported.
 

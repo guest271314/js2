@@ -18,8 +18,7 @@ files:
 ---
 # #364 -- call/apply on arrow functions
 
-## Status: review
-
+## Status: in-review
 15 tests use `.call()` / `.apply()` on arrow functions. Arrow functions have lexical `this` binding, so `.call()` and `.apply()` should not override `this`.
 
 ## Details

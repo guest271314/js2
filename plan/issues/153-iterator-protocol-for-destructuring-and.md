@@ -45,8 +45,7 @@ test262_refs:
 ---
 # #153 -- Iterator protocol for destructuring and for-of
 
-## Status: review
-
+## Status: in-review
 ## Problem
 The `savedBody` swap pattern (used throughout the codegen for compiling inner blocks like loop bodies, if/else branches, etc.) caused stale function indices when late imports (especially `addUnionImports`) shifted function indices. The outer saved body was not reachable by the shifting code, leading to Wasm validation failures like "not enough arguments on the stack for call".
 

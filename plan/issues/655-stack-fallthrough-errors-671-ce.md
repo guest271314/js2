@@ -20,8 +20,7 @@ files:
 ---
 # #655 -- Stack fallthrough errors (671 CE)
 
-## Status: review
-
+## Status: in-review
 671 tests fail with "expected N elements on the stack for fallthru". Up from 300 pre-session (more tests attempted with SKIP_DISABLED). Wasm validation requires all branches to leave the stack in the same state.
 
 ### Root cause

@@ -12,12 +12,11 @@ task_type: bugfix
 area: landing-page
 language_feature: n/a
 goal: developer-experience
+sprint: 58
 es_edition: n/a
 related: [925, 959, 1201, 1583, 1662, 1777]
-sprint: 58
 origin: "Project lead report on 2026-06-02: when the JS host checkbox is unchecked on the landing page, the pass-rate stat should show the real standalone-mode test262 number instead of an estimate."
 ---
-
 # #1778 - landing page JS-host toggle should show real standalone test262 pass rate
 
 ## Problem
@@ -91,8 +90,11 @@ Fix:
   `test262-standalone-report-20260601-213702.json`.
 - Marked that summary artifact as `summary_only` because the full generated
   standalone report/JSONL is not committed and the sprint notes preserved only
-  the measured pass/total summary. The donut maps the non-pass remainder into
-  the fail segment for geometry rather than inventing CE/skip buckets.
+  the measured pass/total summary. Follow-up #1781 now records the 2026-06-02
+  published standalone rerun in `loopdive/js2wasm-baselines`
+  (`test262-standalone-current.jsonl` / `test262-standalone-current.json`) and
+  still tracks the root-cause issue map. The donut maps the non-pass remainder
+  into the fail segment for geometry rather than inventing CE/skip buckets.
 - Added an explicit unavailable state for standalone strict/proposal/edition
   scopes when no measured standalone summary exists for that selected scope.
 - Updated `scripts/build-pages.js` so the standalone report is copied into the

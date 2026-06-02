@@ -8,17 +8,15 @@ completed: 2026-06-02
 priority: medium
 feasibility: hard
 reasoning_effort: high
-es_edition: n/a
-language_feature: type-narrowing
 task_type: architecture
 area: type-system
+language_feature: type-narrowing
 goal: platform
-related: [389, 1765]
-depends_on: []
 sprint: 58
+es_edition: n/a
+related: [389, 1765]
 origin: "Follow-up to narrow #1765 nullable number typed-array byte-write fix"
 ---
-
 # #1769 - generalize nullable primitive union lowering and narrowing
 
 ## Problem

@@ -11,11 +11,9 @@ reasoning_effort: low
 task_type: refactor
 area: compiler-api
 goal: platform
-related: [992, 986, 1756, 1757]
-depends_on: []
 sprint: Backlog
+related: [992, 986, 1756, 1757]
 ---
-
 # #1763 — Clean up residual `require()` cruft in `src/optimize.ts`
 
 Follow-up to **#992** (`require()` cruft), in the wake of the **#1757**

@@ -24,8 +24,7 @@ files:
 ---
 # #359 -- Object mutability methods (Object.freeze/seal/preventExtensions)
 
-## Status: review
-
+## Status: in-review
 31 tests need Object.freeze, Object.seal, Object.preventExtensions, Object.isFrozen, Object.isSealed, and Object.isExtensible.
 
 ## Details

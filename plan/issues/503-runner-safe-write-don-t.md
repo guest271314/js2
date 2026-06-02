@@ -18,8 +18,7 @@ files:
 ---
 # #503 — Runner safe-write: don't corrupt report on crash
 
-## Status: review
-
+## Status: in-review
 When the test262 runner is killed mid-run (SIGTERM, container rebuild, etc.), it overwrites `test262-results.jsonl` and `test262-report.json` with partial/empty data, destroying the previous baseline.
 
 ## Approach

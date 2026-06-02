@@ -322,6 +322,28 @@ function parseFrontmatter(text) {
   return { data: parseYaml(match[1]), body: text.slice(match[0].length) };
 }
 
+function updateFrontmatterScalar(text, fields) {
+  const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!match) throw new Error("missing_frontmatter");
+  const frontmatter = match[1].split("\n");
+  const remaining = new Map(Object.entries(fields).map(([key, value]) => [key, String(value)]));
+  const lines = frontmatter.map((line) => {
+    const idx = line.indexOf(":");
+    if (idx < 0) return line;
+    const key = line.slice(0, idx).trim();
+    if (!remaining.has(key)) return line;
+    const value = remaining.get(key);
+    remaining.delete(key);
+    return `${key}: ${value}`;
+  });
+  for (const [key, value] of remaining) lines.push(`${key}: ${value}`);
+  return `---\n${lines.join("\n")}\n---\n${text.slice(match[0].length)}`;
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function readScalarField(fm, key, fallback = "") {
   const value = fm[key];
   if (Array.isArray(value)) return value.join(", ");
@@ -418,6 +440,9 @@ class MarkdownTracker {
   constructor(config) {
     this.config = config;
     this.activeStates = new Set(asArray(get(config, "tracker.active_states"), ACTIVE_DEFAULT).map(normalizeState));
+    this.claimableStates = new Set(
+      asArray(get(config, "tracker.claimable_states"), ACTIVE_DEFAULT).map(normalizeState),
+    );
     this.terminalStates = new Set(
       asArray(get(config, "tracker.terminal_states"), TERMINAL_DEFAULT).map(normalizeState),
     );
@@ -435,7 +460,7 @@ class MarkdownTracker {
     const sprint = issues[0]?.selected_sprint ?? "latest";
     return issues
       .filter((issue) => String(issue.sprint) === String(sprint))
-      .filter((issue) => this.activeStates.has(issue.state))
+      .filter((issue) => this.claimableStates.has(issue.state))
       .filter((issue) => !activeDispatchClaim(issue.id))
       .filter((issue) => !this.isBlocked(issue, issues))
       .sort(compareIssues);
@@ -449,6 +474,55 @@ class MarkdownTracker {
   fetchIssuesByStates(states) {
     const wanted = new Set(states.map(normalizeState));
     return this.allIssues().filter((issue) => wanted.has(issue.state));
+  }
+
+  claimIssue(issue, lane) {
+    const claimState = normalizeState(get(this.config, "tracker.claim_state", "in-progress"));
+    return this.updateIssueStatusFile(issue, issue.file, claimState, {
+      claimed_by: lane.name,
+      claimed_at: new Date().toISOString(),
+    });
+  }
+
+  claimIssueInWorkspace(issue, workspace, lane) {
+    if (!issue.file || !workspace?.path) return null;
+    const relativeIssuePath = path.relative(ROOT, issue.file);
+    if (relativeIssuePath.startsWith("..") || path.isAbsolute(relativeIssuePath)) return null;
+    const workspaceIssueFile = path.join(workspace.path, relativeIssuePath);
+    if (!existsSync(workspaceIssueFile)) return null;
+    const claimState = normalizeState(get(this.config, "tracker.claim_state", "in-progress"));
+    return this.updateIssueStatusFile(issue, workspaceIssueFile, claimState, {
+      claimed_by: lane.name,
+      claimed_at: new Date().toISOString(),
+    });
+  }
+
+  updateIssueStatusFile(issue, file, state, extraFields = {}) {
+    if (!file) return null;
+    const current = normalizeState(issue.state);
+    const next = normalizeState(state);
+    const text = readFileSync(file, "utf8");
+    const parsed = parseFrontmatter(text);
+    const fileState = normalizeState(readScalarField(parsed.data, "status", current));
+    const pendingFields = { status: next, ...extraFields };
+    const changed = Object.entries(pendingFields).some(
+      ([key, value]) => String(readScalarField(parsed.data, key, "")) !== String(value),
+    );
+    if (!changed && fileState === next) {
+      issue.state = next;
+      return { file, state: next, changed: false };
+    }
+    const updated = todayIsoDate();
+    writeFileSync(
+      file,
+      updateFrontmatterScalar(text, {
+        ...pendingFields,
+        updated,
+      }),
+    );
+    issue.state = next;
+    issue.updated_at = updated;
+    return { file, state: next, changed: true };
   }
 
   isBlocked(issue, issues) {
@@ -750,6 +824,11 @@ class AgentRunner {
       appendFileSync(logFile, buf);
       this.ingestAgentOutput(buf, session, onEvent);
     });
+    child.on("error", (err) => {
+      session.last_codex_event = "process_error";
+      session.last_codex_timestamp = new Date().toISOString();
+      onDone({ status: "failed", code: null, signal: null, session, logFile, error: err.message });
+    });
     child.on("exit", (code, signal) => {
       const status = code === 0 ? "succeeded" : signal ? "cancelled" : "failed";
       session.last_codex_event = status;
@@ -1007,31 +1086,70 @@ class Orchestrator {
   }
 
   dispatch(issue, lane, attempt = null) {
-    this.claimed.add(String(issue.id));
-    if (lane.kind === "claude-channel") {
-      this.dispatchClaudeChannel(issue, lane, attempt);
-      return;
+    const id = String(issue.id);
+    this.claimed.add(id);
+    let workspace = null;
+    try {
+      const claim = this.tracker.claimIssue(issue, lane);
+      if (claim?.changed) {
+        this.logger.event("issue_claimed", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          lane: lane.name,
+          state: claim.state,
+          file: path.relative(ROOT, claim.file),
+        });
+      }
+      if (lane.kind === "claude-channel") {
+        this.dispatchClaudeChannel(issue, lane, attempt);
+        return;
+      }
+      workspace = this.workspaceManager.ensure(issue);
+      const workspaceClaim = this.tracker.claimIssueInWorkspace(issue, workspace, lane);
+      if (workspaceClaim?.changed) {
+        this.logger.event("workspace_issue_claimed", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          lane: lane.name,
+          state: workspaceClaim.state,
+          file: path.relative(workspace.path, workspaceClaim.file),
+        });
+      }
+      this.workspaceManager.runHook("before_run", workspace.path, issue);
+      const promptIssue = issueForWorkspacePrompt(issue, workspace);
+      const prompt = renderTemplate(this.workflow.promptTemplate, {
+        issue: promptIssue,
+        workspace,
+        agent: lane,
+        attempt: attempt ?? "",
+      });
+      const run = this.runner.run({
+        issue,
+        workspace,
+        lane,
+        prompt,
+        attempt,
+        onEvent: (event, session) => this.onAgentEvent(issue, event, session),
+        onDone: (result) => this.onRunDone(issue, lane, workspace, result, attempt),
+      });
+      this.running.set(id, { issue, lane, workspace, ...run, attempt: attempt ?? 0 });
+      this.writeState();
+    } catch (err) {
+      const message = err?.message || String(err);
+      this.running.delete(id);
+      if (workspace?.path) this.workspaceManager.runHook("after_run", workspace.path, issue, { ignoreFailure: true });
+      this.logger.event("dispatch_failed", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        lane: lane.name,
+        error: message,
+      });
+      const nextAttempt = (attempt ?? 0) + 1;
+      const maxDelay = Number(get(this.config, "agent.max_retry_backoff_ms", 300000)) || 300000;
+      const delay = Math.min(10000 * 2 ** Math.max(nextAttempt - 1, 0), maxDelay);
+      this.scheduleRetry(issue, lane, "dispatch_failed", delay, nextAttempt);
+      this.writeState();
     }
-    const workspace = this.workspaceManager.ensure(issue);
-    this.workspaceManager.runHook("before_run", workspace.path, issue);
-    const promptIssue = issueForWorkspacePrompt(issue, workspace);
-    const prompt = renderTemplate(this.workflow.promptTemplate, {
-      issue: promptIssue,
-      workspace,
-      agent: lane,
-      attempt: attempt ?? "",
-    });
-    const run = this.runner.run({
-      issue,
-      workspace,
-      lane,
-      prompt,
-      attempt,
-      onEvent: (event, session) => this.onAgentEvent(issue, event, session),
-      onDone: (result) => this.onRunDone(issue, lane, workspace, result, attempt),
-    });
-    this.running.set(String(issue.id), { issue, lane, workspace, ...run, attempt: attempt ?? 0 });
-    this.writeState();
   }
 
   dispatchClaudeChannel(issue, lane, attempt = null) {
@@ -1094,7 +1212,17 @@ class Orchestrator {
   }
   onAgentEvent(issue, event, session) {
     if (event.rate_limits || event.rateLimits) this.rateLimits = event.rate_limits || event.rateLimits;
-    this.running.get(String(issue.id)).session = session;
+    const running = this.running.get(String(issue.id));
+    if (!running) {
+      this.logger.event("agent_event_untracked", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        event: event.type || event.event || "unknown",
+        quiet: true,
+      });
+      return;
+    }
+    running.session = session;
     this.writeState();
   }
 

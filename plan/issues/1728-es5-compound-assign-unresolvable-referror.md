@@ -15,7 +15,6 @@ es_edition: 5
 test262_category: language/expressions/compound-assignment
 related: [1607]
 ---
-
 # #1728 — ES5: compound assignment to unresolvable reference
 
 ## Problem

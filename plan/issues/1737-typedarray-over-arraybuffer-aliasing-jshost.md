@@ -3,6 +3,7 @@ id: 1737
 title: "Uint8Array(arrayBuffer) does not alias the ArrayBuffer's backing store (JS-host)"
 status: backlog
 created: 2026-05-29
+updated: 2026-05-29
 priority: medium
 feasibility: hard
 task_type: bugfix

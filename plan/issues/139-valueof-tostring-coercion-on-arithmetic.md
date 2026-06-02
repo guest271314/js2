@@ -18,7 +18,7 @@ files:
 ---
 # Issue #139: valueOf/toString coercion on arithmetic operators
 
-**Status: review**
+**Status: in-review**
 **Completed: 2026-03-13**
 
 ## Problem

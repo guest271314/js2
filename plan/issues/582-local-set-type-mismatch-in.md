@@ -17,8 +17,7 @@ files:
 ---
 # #582 — local.set type mismatch in C_method (84 CE)
 
-## Status: review
-
+## Status: in-review
 84 tests fail with `C_method local.set[0] expected type (ref null N), found struct.new of type (ref M)` — the class method's `this` local has the wrong struct type.
 
 ### Root cause

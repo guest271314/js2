@@ -17,8 +17,7 @@ files:
 ---
 # #174 — Bug: BigInt cross-type comparison and arithmetic failures
 
-## Status: review
-
+## Status: in-review
 ## Summary
 BigInt comparison with Number and Boolean types produces wrong results or traps. 15 test262 failures across equality, relational, and unary operators when BigInt operands are compared against other types.
 

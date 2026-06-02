@@ -3,21 +3,20 @@ id: 1766
 title: "process.stdout.write backpressure / once('drain') pattern not supported"
 status: blocked
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 reasoning_effort: high
-es_edition: n/a
-language_feature: node-streams
-task_type: bug
+task_type: bugfix
 area: host-interop
+language_feature: node-streams
 goal: platform
-related: [389, 1042, 1326, 1575, 1753]
-depends_on: [1042, 1326, 1575]
 sprint: 58
+depends_on: [1042, 1326, 1575]
+es_edition: n/a
+related: [389, 1042, 1326, 1575, 1753]
 origin: "GitHub #389 guest271314 comment 2026-06-01T00:17:59Z"
 ---
-
 # #1766 — `process.stdout.write` backpressure / `once("drain")` pattern
 
 ## Problem
@@ -96,3 +95,6 @@ Preview-1 direct-call WASI compatibility landed locally:
 Remaining blocked scope: the fully idiomatic async helper
 `await new Promise((resolve) => process.stdout.once("drain", resolve))` still
 depends on the broader async/EventEmitter work tracked by #1042/#1326/#1575.
+Future implementation work should stay in the Node process API lowering module
+(`src/codegen/node-process-api.ts`) rather than drifting back into generic call
+expression lowering.

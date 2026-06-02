@@ -3,6 +3,7 @@ id: 1736
 title: "ArrayBuffer.prototype.byteLength returns NaN in JS-host mode"
 status: backlog
 created: 2026-05-29
+updated: 2026-05-29
 priority: medium
 feasibility: medium
 task_type: bugfix

@@ -18,8 +18,7 @@ files:
 ---
 # #559 — Addition/subtraction result not coerced to externref before call (10 CE)
 
-## Status: review
-
+## Status: in-review
 10 tests fail with "call[0] expected type externref, found f64.add/f64.const/i32.const". The root cause is in `compileStringBinaryOp`'s arithmetic path.
 
 ### Root cause

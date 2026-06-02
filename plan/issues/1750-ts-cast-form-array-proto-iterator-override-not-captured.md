@@ -11,10 +11,9 @@ area: codegen, runtime
 language_feature: array-object-identity, iterator-protocol, type-assertion
 goal: object-representation
 sprint: Backlog
-related: [1719]
 parent: 1719
+related: [1719]
 ---
-
 # #1750 — CPR write-arm must capture the TS-cast assignment form
 
 ## Problem

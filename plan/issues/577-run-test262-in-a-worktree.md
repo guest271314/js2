@@ -17,8 +17,7 @@ files:
 ---
 # #577 -- Run test262 in a worktree to avoid mid-run code changes
 
-## Status: review
-
+## Status: in-review
 When the tech lead edits `src/codegen/*.ts` while a test262 run is in progress, the runner picks up the half-edited file and crashes (e.g., syntax error at `expressions.ts:166`). The compilation cache also becomes invalid mid-run.
 
 ## Approach

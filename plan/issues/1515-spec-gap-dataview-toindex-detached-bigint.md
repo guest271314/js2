@@ -1,7 +1,7 @@
 ---
 id: 1515
 title: "spec gap: DataView — ToIndex(byteOffset), detached-buffer TypeError, BigInt setter coercion"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

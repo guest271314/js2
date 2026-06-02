@@ -1,7 +1,7 @@
 ---
 id: 1442
 title: "spec gap: String.prototype methods — RequireObjectCoercible + ToString on this value"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

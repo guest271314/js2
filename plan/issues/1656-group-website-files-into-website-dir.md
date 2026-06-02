@@ -2,7 +2,6 @@
 id: 1656
 title: "Consolidate all website/frontend files under website/"
 status: done
-sprint: 55
 created: 2026-05-24
 updated: 2026-05-27
 completed: 2026-05-27
@@ -11,9 +10,9 @@ feasibility: medium
 reasoning_effort: medium
 task_type: refactor
 area: website, build, ci
+sprint: 55
 related: [1583, 1590]
 ---
-
 # Consolidate all website/frontend files under website/
 
 ## Problem / goal

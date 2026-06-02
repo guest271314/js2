@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #187 — String prototype methods: heavy test skipping due to include filters
 
-## Status: review
-
+## Status: in-review
 ## Summary
 Most String prototype method test262 categories show 0 pass / 0 fail because nearly all tests are skipped. The skip reasons are primarily "unsupported include: propertyHelper.js" and "prototype chain not supported".
 

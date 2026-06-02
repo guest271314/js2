@@ -2,14 +2,15 @@
 id: 682
 title: "RegExp standalone mode: native engine or embedded library for non-JS targets"
 status: in-review
-owner: Raman
 created: 2026-03-20
 updated: 2026-06-02
+pr: 1038
 priority: high
 feasibility: hard
 reasoning_effort: max
 goal: standalone-mode
 sprint: 58
+owner: Raman
 files:
   src/codegen/regexp-standalone.ts:
     new:
@@ -85,6 +86,30 @@ Standalone result: 4,368 / 43,106 passing (10.1%) versus the canonical JS-host
 baseline of 30,480 / 43,106 (70.7%). RegExp unsupported appears in 1,882
 non-exclusive failures, confirming that a native RegExp backend is now a
 material standalone test262 root cause rather than only a portability gap.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The ordered root-cause classifier assigns **1,513** rows primarily to the
+standalone RegExp bucket: 1,502 `compile_error` rows and 11 assertion-failure
+rows. The decline from the June 1 non-exclusive 1,882 count is mostly because
+earlier buckets (#1472 object dispatch and #1776 harness validation) now claim
+some RegExp-path rows first; it does not mean native RegExp semantics have
+landed.
+
+Representative diagnostic:
+
+```text
+Codegen error: RegExp literals are not supported in --target standalone (#1474).
+```
+
+Example file:
+`test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js`.
+This keeps #1474 as the refusal gate and this issue as the native-engine owner.
 
 ## Goal
 

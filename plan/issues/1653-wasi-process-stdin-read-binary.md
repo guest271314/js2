@@ -14,9 +14,9 @@ language_feature: stdin, process, arraybuffer
 goal: wasi-completeness
 sprint: Backlog
 depends_on: [1654]
+required_by: [1530]
 related: [1530, 1481, 1651, 1654]
 ---
-
 ## Problem
 
 The AssemblyScript reference host

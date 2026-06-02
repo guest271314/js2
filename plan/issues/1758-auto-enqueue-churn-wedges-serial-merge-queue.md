@@ -2,19 +2,17 @@
 id: 1758
 title: "auto-enqueue churn wedges the serial merge queue — make the sweep surgical"
 status: done
-completed: 2026-05-31
 created: 2026-05-31
 updated: 2026-05-31
+completed: 2026-05-31
 priority: high
 feasibility: medium
-task_type: bug
+task_type: bugfix
 area: ci-infra
 goal: platform
-related: [1756]
-depends_on: []
 sprint: Backlog
+related: [1756]
 ---
-
 # #1758 — auto-enqueue churn wedges the serial merge queue
 
 ## Symptom

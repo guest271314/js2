@@ -21,8 +21,7 @@ files:
 ---
 # #338 -- Negative test support in test262 runner
 
-## Status: review
-
+## Status: in-review
 The test262 runner skips all "negative" tests (tests expected to throw SyntaxError, ReferenceError, etc. during parse/compile). These 3,247 tests should be runnable by checking if compilation fails with the expected error type.
 
 ## Details

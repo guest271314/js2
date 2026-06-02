@@ -17,8 +17,7 @@ files:
 ---
 # #189 — `new.target` meta-property: 7 compile errors
 
-## Status: review
-
+## Status: in-review
 ## Summary
 All 7 non-skipped `new.target` tests fail to compile. The `new.target` meta-property is not implemented.
 

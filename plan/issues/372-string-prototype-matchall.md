@@ -18,8 +18,7 @@ files:
 ---
 # #372 -- String.prototype.matchAll
 
-## Status: review
-
+## Status: in-review
 7 tests need String.prototype.matchAll. Previously skipped by feature filter.
 
 ## Details

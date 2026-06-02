@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #175 — Bug: Negative zero not preserved in arithmetic operations
 
-## Status: review
-
+## Status: in-review
 ## Summary
 Arithmetic operations that should produce negative zero (-0) instead produce positive zero (+0). This affects modulus, subtraction, and multiplication edge cases.
 

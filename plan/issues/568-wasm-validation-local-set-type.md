@@ -19,8 +19,7 @@ files:
 ---
 # #568 -- Wasm validation: local.set type mismatch (198 CE)
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 435 tests in the older test262 run failed with Wasm validation errors like:
