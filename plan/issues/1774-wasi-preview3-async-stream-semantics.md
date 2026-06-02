@@ -3,7 +3,7 @@ id: 1774
 title: "wasi preview3 async stream semantics for Node stdout/stderr"
 status: ready
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -14,7 +14,7 @@ area: wasi
 goal: platform
 related: [389, 1651, 1484]
 depends_on: [1042, 1326, 1575]
-sprint: 58
+sprint: Backlog
 origin: "Follow-up from guest271314's PR #1016 comment on fd_write synchrony wording."
 ---
 

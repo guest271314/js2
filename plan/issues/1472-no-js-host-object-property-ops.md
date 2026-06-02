@@ -1,7 +1,7 @@
 ---
 id: 1472
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
 updated: 2026-06-02
 priority: high
@@ -13,6 +13,8 @@ language_feature: objects, property access, prototype chain
 goal: host-independence
 sprint: 58
 related: []
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:02:41.042Z
 ---
 # #1472 — Eliminate JS host object/property ops for standalone Wasm
 

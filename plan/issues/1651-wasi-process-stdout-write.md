@@ -1,9 +1,10 @@
 ---
 id: 1651
 title: "wasi: process.stdout.write(str|Uint8Array) → fd_write (no newline, raw bytes)"
-status: in-review
+status: done
 created: 2026-05-24
 updated: 2026-05-24
+completed: 2026-05-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -76,3 +77,5 @@ The host (`examples/native-messaging/host.ts`) now frames its response with
 mirroring the Node.js API of the AssemblyScript reference. Byte-exact round-trip
 covered by `tests/issue-1530.test.ts`; per-API behaviour by
 `tests/issue-1618-1651-wasi-stdout.test.ts`.
+
+Landed on main in PR #573 / commit `17fee538b`.

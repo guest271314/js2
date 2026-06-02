@@ -1,7 +1,7 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: ready
+status: in-progress
 owner: Copernicus
 created: 2026-05-24
 updated: 2026-06-02
@@ -14,6 +14,8 @@ language_feature: json
 goal: standalone-wasm
 sprint: 58
 related: [1474, 1539]
+claimed_by: codex-developer
+claimed_at: 2026-06-02T11:02:41.061Z
 ---
 
 # #1599 — JSON standalone: refuse-and-document then pure-Wasm implementation
