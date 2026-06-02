@@ -688,7 +688,7 @@ Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. No blockers were found in this final developer validation
 pass.
 
-### Codex validation handoff — 2026-06-02
+### Codex current validation handoff — 2026-06-02
 
 Re-reviewed the assigned #682 implementation, focused tests, and #1474 refusal
 coverage in the `symphony/682` worktree. No additional code change was needed in
@@ -709,9 +709,9 @@ Scoped validation rerun:
 
 Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. PR #1038 remains open as a draft from `symphony/682` to `main`
-and is mergeable. The local handoff update was pushed to the PR branch; GitHub
-checks may rerun after that docs-only branch update. No local implementation
-blockers were found in this handoff pass.
+and is mergeable. The GitHub check rollup observed during this verification had
+completed checks green while some long test262 shards were still in progress.
+No local implementation blockers were found in this handoff pass.
 
 ### Phase 0 — Decision and ABI
 
