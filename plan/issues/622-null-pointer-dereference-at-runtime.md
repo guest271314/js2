@@ -21,7 +21,7 @@ files:
 ---
 # #622 — Null pointer dereference at runtime (707 FAIL)
 
-## Status: in-review
+## Status: done
 707 tests fail with "RuntimeError: dereferencing a null pointer" — struct.get/struct.set on a null reference at runtime.
 
 ### Root cause
