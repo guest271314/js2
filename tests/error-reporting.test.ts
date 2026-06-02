@@ -4,8 +4,8 @@ import { compile } from "../src/index.js";
 describe("error reporting with source locations", () => {
   it("reports line and column for unsupported statement", async () => {
     // 'with' has a dedicated #1387 diagnostic with source location.
-    const source = `function test() {
-  with ({}) {}
+    const source = `function test(scope) {
+  with (scope) {}
 }`;
     const result = await compile(source, { allowJs: true, fileName: "input.js" });
     // The compiler may or may not succeed overall, but it should collect errors
@@ -55,8 +55,8 @@ describe("error reporting with source locations", () => {
   it("propagates codegen errors to CompileResult", async () => {
     // This source triggers a codegen diagnostic because 'with' cannot be
     // lowered without a proven closed shape.
-    const source = `function run() {
-  with ({}) {
+    const source = `function run(scope) {
+  with (scope) {
     const x = 1;
   }
 }`;
@@ -67,8 +67,8 @@ describe("error reporting with source locations", () => {
   });
 
   it("error severity is set correctly", async () => {
-    const source = `function run() {
-  with ({}) {}
+    const source = `function run(scope) {
+  with (scope) {}
 }`;
     const result = await compile(source, { allowJs: true, fileName: "input.js" });
     for (const err of result.errors) {
@@ -89,9 +89,9 @@ describe("error reporting with source locations", () => {
 
   it("error line numbers are 1-based", async () => {
     // Put the problematic statement on line 3
-    const source = `function test() {
+    const source = `function test(scope) {
   const x = 1;
-  with ({}) {}
+  with (scope) {}
 }`;
     const result = await compile(source, { allowJs: true, fileName: "input.js" });
     const err = result.errors.find((e) => e.message.includes("#1387"));

@@ -35,6 +35,7 @@ import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../built
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
+import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
 
 /**
  * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
@@ -443,6 +444,11 @@ export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, n
 
 function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
   const name = id.text;
+
+  const withBinding = findWithBinding(fctx, name);
+  if (withBinding) {
+    return emitWithBindingGet(fctx, withBinding);
+  }
 
   // #1210: string-builder bindings are stored as a (buf, len, cap, mat)
   // tuple of synthetic locals. The binding name is intentionally NOT in

@@ -249,6 +249,18 @@ export interface FunctionContext {
    * Used by allocTempLocal/releaseTempLocal to reuse locals of the same type.
    */
   tempFreeList?: Map<string, number[]>;
+  /**
+   * Stack of statically-proven `with` scopes (#1387). Each entry is a closed
+   * object-literal target compiled into a local. Identifier lowering consults
+   * this stack innermost-first and rewrites proven own-property bindings to
+   * direct struct field access.
+   */
+  withScopes?: {
+    localIdx: number;
+    structTypeIdx: number;
+    fields: FieldDef[];
+    blockedNames: Set<string>;
+  }[];
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**
