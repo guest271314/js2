@@ -1,9 +1,10 @@
 ---
 id: 682
 title: "RegExp standalone mode: native engine or embedded library for non-JS targets"
-status: in-review
+status: done
 created: 2026-03-20
 updated: 2026-06-02
+completed: 2026-06-02
 pr: 1038
 priority: high
 feasibility: hard
@@ -63,7 +64,7 @@ files:
 
 # #682 — RegExp standalone mode: native engine or embedded library for non-JS targets
 
-## Status: in review
+## Status: done
 
 #676 proposed host imports for RegExp. That path is now partially implemented and
 was pushed forward further by [#763](../done/763.md), which completed major
@@ -790,8 +791,25 @@ Scoped validation rerun:
 - `git diff --check`
   - result: passed
 
-Status remains **in review**. Full local test262 was not run per the scoped
-validation rule.
+Status remains **in review** for this validation note. Full local test262 was
+not run per the scoped validation rule.
+
+### Completion note — 2026-06-02
+
+PR #1038 merged through the GitHub merge queue at
+`116723fc5da1e3b1c2ce34401dd1b1105e21a689`. The landed slice is the reduced
+`native-literal-substring` standalone backend for static plain patterns with no
+flags and `RegExp.prototype.test`, including the prototype-call bridge and
+mutable receiver provenance guard follow-ups documented above.
+
+Post-merge rescue validation passed:
+
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 35 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
 
 ### Phase 0 — Decision and ABI
 

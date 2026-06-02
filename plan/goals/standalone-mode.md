@@ -47,7 +47,7 @@ and any environment without a JS runtime. This follows the pattern of
 | **644** | Integrate conformance report as playground panel | Backlog | ready | critical |
 | **652** | Compile-time ARC: static lifetime analysis for linear memory mode | Backlog | ready | low |
 | **680** | Wasm-native generators (state machines) with optional JS host fallback | Backlog | ready | high |
-| **682** | RegExp standalone mode: native engine or embedded library for non-JS targets | 58 | in-review | high |
+| **682** | RegExp standalone mode: native engine or embedded library for non-JS targets | 58 | done | high |
 | **788** | Architecture: modularize src/ into focused subfolder structure | 39 | done | medium |
 | **809** | Extract native string helpers from index.ts → native-strings.ts | Backlog | ready | medium |
 | **814** | - ArrayBuffer 'no dependency provided for extern class' (413 tests) | 0 | done | high |
