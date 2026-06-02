@@ -44,6 +44,7 @@ const BUNDLE_HASH = computeBundleHash();
 let compileCount = 0;
 const GC_INTERVAL = 25;
 const RECREATE_INTERVAL = 100;
+const WORKER_RECYCLE_INTERVAL = Math.max(0, parseInt(process.env.TEST262_WORKER_RECYCLE_INTERVAL || "0", 10) || 0);
 
 let incrementalCompiler = null;
 function createFreshCompiler() {
@@ -481,6 +482,45 @@ const _accessorOrig = _ACCESSOR_SNAPSHOTS.map(([name, obj, keys]) => ({
     .filter(([, d]) => d !== undefined && typeof d.get === "function"),
 }));
 
+// Same sentinel-style dirty check as the JS-host test262 runner (#1310),
+// applied in the unified sharded worker so both js-host and standalone matrix
+// targets recycle a fork after a test mutates core host prototypes.
+const _RECYCLE_SENTINELS = [
+  ["Array.prototype.push", Array.prototype, "push"],
+  ["Array.prototype[Symbol.iterator]", Array.prototype, Symbol.iterator],
+  ["Object.prototype.hasOwnProperty", Object.prototype, "hasOwnProperty"],
+  ["Function.prototype.call", Function.prototype, "call"],
+  ["String.prototype.slice", String.prototype, "slice"],
+  ["Promise.prototype.then", Promise.prototype, "then"],
+  ["Set.prototype.add", Set.prototype, "add"],
+  ["Map.prototype.set", Map.prototype, "set"],
+  ["WeakMap.prototype.set", WeakMap.prototype, "set"],
+  ["WeakSet.prototype.add", WeakSet.prototype, "add"],
+];
+const _recycleSentinelOrig = _RECYCLE_SENTINELS.map(([label, obj, key]) => [label, obj, key, _snapshotValue(obj, key)]);
+
+function detectRecycleSentinelMutation() {
+  for (let i = 0; i < _recycleSentinelOrig.length; i++) {
+    const [label, obj, key, orig] = _recycleSentinelOrig[i];
+    let cur;
+    try {
+      cur = obj[key];
+    } catch {
+      return label;
+    }
+    if (cur !== orig) return label;
+  }
+  return undefined;
+}
+
+function recycleCleanup(reason) {
+  return { recycle: true, reason };
+}
+
+function cleanCleanup() {
+  return { recycle: false, reason: undefined };
+}
+
 // Restore a (prototype-or-constructor) method property. Value-assignment is
 // the hot path — cheap and does not disturb V8 IC caches. When that silently
 // fails (e.g. because a test poisoned the property via Object.defineProperty
@@ -552,10 +592,9 @@ function restoreBuiltins() {
   {
     const cur = Array.prototype[Symbol.iterator];
     if (typeof cur !== "function") {
-      console.error(
-        `[unified-worker pid=${process.pid}] FATAL: Array.prototype[Symbol.iterator] is non-configurable ${typeof cur} — exiting for restart (#1160)`,
-      );
-      process.exit(1);
+      const reason = `Array.prototype[Symbol.iterator] is non-configurable ${typeof cur} (#1160)`;
+      console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+      return recycleCleanup(reason);
     }
     // #1221: callability probe. The typeof check above only catches
     // non-callable poison. A test that assigns a Wasm-throwing function
@@ -578,10 +617,9 @@ function restoreBuiltins() {
       if (probeIter && typeof probeIter.next === "function") probeIter.next();
     } catch (probeErr) {
       const kind = probeErr?.constructor?.name ?? typeof probeErr;
-      console.error(
-        `[unified-worker pid=${process.pid}] FATAL: Array.prototype[Symbol.iterator] throws when called (${kind}) — exiting for restart (#1221)`,
-      );
-      process.exit(1);
+      const reason = `Array.prototype[Symbol.iterator] throws when called (${kind}) (#1221)`;
+      console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+      return recycleCleanup(reason);
     }
   }
 
@@ -671,10 +709,9 @@ function restoreBuiltins() {
   for (const { obj, values } of _methodOrig) {
     for (const [key, orig] of values) {
       if (obj[key] !== orig) {
-        console.error(
-          `[unified-worker pid=${process.pid}] FATAL: prototype method ${String(key)} not restored (non-configurable poison) — exiting for restart (#1295)`,
-        );
-        process.exit(1);
+        const reason = `prototype method ${String(key)} not restored (non-configurable poison) (#1295)`;
+        console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+        return recycleCleanup(reason);
       }
     }
   }
@@ -707,10 +744,9 @@ function restoreBuiltins() {
     if (/^\d+$/.test(key)) {
       const desc = Object.getOwnPropertyDescriptor(Array.prototype, key);
       if (desc && !desc.configurable) {
-        console.error(
-          `[unified-worker pid=${process.pid}] FATAL: non-configurable Array.prototype[${key}] — exiting for restart`,
-        );
-        process.exit(1);
+        const reason = `non-configurable Array.prototype[${key}]`;
+        console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+        return recycleCleanup(reason);
       }
     }
   }
@@ -720,10 +756,9 @@ function restoreBuiltins() {
     if (!_origObjectProtoKeys.has(key)) {
       const desc = Object.getOwnPropertyDescriptor(Object.prototype, key);
       if (desc && !desc.configurable) {
-        console.error(
-          `[unified-worker pid=${process.pid}] FATAL: non-configurable Object.prototype[${key}] — exiting for restart`,
-        );
-        process.exit(1);
+        const reason = `non-configurable Object.prototype[${key}]`;
+        console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+        return recycleCleanup(reason);
       }
     }
   }
@@ -739,16 +774,22 @@ function restoreBuiltins() {
     const isHarmful =
       dataVal != null && typeof dataVal !== "function" && (desc.get == null || typeof dataVal !== "function");
     if (!desc.configurable && isHarmful) {
-      console.error(
-        `[unified-worker pid=${process.pid}] FATAL: non-configurable Object.prototype[${String(sym)}] = ${typeof dataVal} — exiting for restart (#1160)`,
-      );
-      process.exit(1);
+      const reason = `non-configurable Object.prototype[${String(sym)}] = ${typeof dataVal} (#1160)`;
+      console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
+      return recycleCleanup(reason);
     }
   }
+  return cleanCleanup();
 }
 
 function compileTargetFromMessage(target) {
   return target === "linear" || target === "wasi" || target === "standalone" ? target : undefined;
+}
+
+function makeWorkerRecycleError(reason) {
+  const err = new Error(reason);
+  err.workerRecycleReason = reason;
+  return err;
 }
 
 async function doCompile(source, sourceMapUrl, target) {
@@ -757,7 +798,16 @@ async function doCompile(source, sourceMapUrl, target) {
   // interruption scenarios it may not have completed. Doing a cheap pre-
   // compile restore guarantees the compiler always starts with a clean
   // Array.prototype[Symbol.iterator] et al. (#1160)
-  restoreBuiltins();
+  let preCleanup;
+  try {
+    preCleanup = restoreBuiltins();
+  } catch (err) {
+    const kind = err?.constructor?.name ?? typeof err;
+    throw makeWorkerRecycleError(`restoreBuiltins before compile threw (${kind})`);
+  }
+  if (preCleanup.recycle) {
+    throw makeWorkerRecycleError(`worker built-ins poisoned before compile: ${preCleanup.reason}`);
+  }
   const compileFn = incrementalCompiler ? incrementalCompiler.compile : compile;
   return incrementalCompiler
     ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map", target })
@@ -963,26 +1013,27 @@ process.on("message", async (msg) => {
       // Poisoned String.prototype (or similar built-in) — Wasm throw escaped
       // from the TS compiler internals. Send fail (not compile_error) and
       // restart the fork so subsequent tests get a clean environment.
-      process.send({
-        id,
-        status: "fail",
-        error: "wasm exception during compile (poisoned built-in)",
-        isException: true,
-        compileMs: performance.now() - compileStart,
-      });
-      postCompileCleanup();
-      // Flush process.send before exiting so the pool's exit handler can
-      // respawn a clean fork for subsequent tests.
-      process.nextTick(() => process.exit(1));
+      sendResult(
+        {
+          id,
+          status: "fail",
+          error: "wasm exception during compile (poisoned built-in)",
+          isException: true,
+          compileMs: performance.now() - compileStart,
+        },
+        "wasm exception during compile (poisoned built-in)",
+      );
       return;
     }
-    process.send({
-      id,
-      status: "compile_error",
-      error: err.message || String(err),
-      compileMs: performance.now() - compileStart,
-    });
-    postCompileCleanup();
+    sendResult(
+      {
+        id,
+        status: "compile_error",
+        error: err.message || String(err),
+        compileMs: performance.now() - compileStart,
+      },
+      err.workerRecycleReason,
+    );
     return;
   }
   const compileMs = performance.now() - compileStart;
@@ -1017,14 +1068,14 @@ process.on("message", async (msg) => {
     if (execute && isNegative) {
       const ES_EARLY_ERRORS = new Set([1102, 1103, 1210, 1213, 1214, 1359, 1360, 2300, 18050]);
       const hasEarlyError = errorCodes.some((c) => ES_EARLY_ERRORS.has(c));
-      process.send({
+      sendResult({
         id,
         status: hasEarlyError ? "pass" : "pass",
         compileMs,
         errorCodes,
       });
     } else {
-      process.send({
+      sendResult({
         id,
         status: "compile_error",
         error: errMsg || "unknown",
@@ -1032,18 +1083,16 @@ process.on("message", async (msg) => {
         compileMs,
       });
     }
-    postCompileCleanup();
     return;
   }
 
   if (execute && isNegative && result.errors.length > 0) {
-    process.send({
+    sendResult({
       id,
       status: "pass",
       compileMs,
       errorCodes: result.errors.filter((e) => e.code).map((e) => e.code),
     });
-    postCompileCleanup();
     return;
   }
 
@@ -1056,8 +1105,7 @@ process.on("message", async (msg) => {
         writeFileSync(msg.metaPath, JSON.stringify({ ok: false, error: errMsg, compileMs, bundle_hash: BUNDLE_HASH }));
       } catch {}
     }
-    process.send({ id, status: "compile_error", error: errMsg, compileMs });
-    postCompileCleanup();
+    sendResult({ id, status: "compile_error", error: errMsg, compileMs });
     return;
   }
 
@@ -1081,8 +1129,7 @@ process.on("message", async (msg) => {
 
   // Compile-only mode: done
   if (!execute) {
-    process.send({ id, status: "compiled", compileMs });
-    postCompileCleanup();
+    sendResult({ id, status: "compiled", compileMs });
     return;
   }
 
@@ -1094,7 +1141,7 @@ process.on("message", async (msg) => {
       const importObj = buildImports(result.imports, undefined, result.stringPool);
       await WebAssembly.instantiate(result.binary, importObj);
       // Instantiation succeeded — this is a failure (expected parse/early error)
-      process.send({
+      sendResult({
         id,
         status: "fail",
         error: `expected parse/early ${expectedErrorType || "error"} but compiled and instantiated successfully`,
@@ -1102,9 +1149,8 @@ process.on("message", async (msg) => {
       });
     } catch {
       // Instantiation failed — pass (Wasm validation caught the error)
-      process.send({ id, status: "pass", compileMs });
+      sendResult({ id, status: "pass", compileMs });
     }
-    postCompileCleanup();
     return;
   }
 
@@ -1122,7 +1168,7 @@ process.on("message", async (msg) => {
       // the module's start function — which surfaces as WebAssembly.Exception
       // or a plain Error — is a runtime throw, not a compile failure.
       if (err instanceof WebAssembly.CompileError || err instanceof WebAssembly.LinkError) {
-        process.send({
+        sendResult({
           id,
           status: "compile_error",
           error: err.message ?? String(err),
@@ -1130,17 +1176,15 @@ process.on("message", async (msg) => {
           compileMs,
           execMs,
         });
-        postCompileCleanup();
         return;
       }
 
       if (isRuntimeNegative) {
-        process.send({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
-        postCompileCleanup();
+        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
         return;
       }
 
-      process.send({
+      sendResult({
         id,
         status: "fail",
         error: extractWasmExceptionMessage(err, null),
@@ -1149,7 +1193,6 @@ process.on("message", async (msg) => {
         compileMs,
         execMs,
       });
-      postCompileCleanup();
       return;
     }
 
@@ -1160,14 +1203,13 @@ process.on("message", async (msg) => {
 
     const testFn = instance.exports.test;
     if (typeof testFn !== "function") {
-      process.send({
+      sendResult({
         id,
         status: "compile_error",
         error: "no test export",
         compileMs,
         execMs: performance.now() - execStart,
       });
-      postCompileCleanup();
       return;
     }
 
@@ -1177,7 +1219,7 @@ process.on("message", async (msg) => {
       const execMs = performance.now() - execStart;
 
       if (isRuntimeNegative) {
-        process.send({
+        sendResult({
           id,
           status: "fail",
           error: "expected runtime error but succeeded",
@@ -1187,14 +1229,14 @@ process.on("message", async (msg) => {
           runtimeNegativeNoThrow: true,
         });
       } else {
-        process.send({ id, status: ret === 1 ? "pass" : "fail", ret, compileMs, execMs });
+        sendResult({ id, status: ret === 1 ? "pass" : "fail", ret, compileMs, execMs });
       }
+      return;
     } catch (execErr) {
       const execMs = performance.now() - execStart;
 
       if (isRuntimeNegative) {
-        process.send({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
-        postCompileCleanup();
+        sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true });
         return;
       }
 
@@ -1208,7 +1250,7 @@ process.on("message", async (msg) => {
         errInfo = `L${mapped.line}:${mapped.column} ${errInfo}`;
       }
 
-      process.send({
+      sendResult({
         id,
         status: "fail",
         error: errInfo,
@@ -1216,6 +1258,7 @@ process.on("message", async (msg) => {
         compileMs,
         execMs,
       });
+      return;
     }
   } catch (outerErr) {
     // #1221: A WebAssembly.Exception that escapes the inner try (e.g. thrown
@@ -1228,7 +1271,7 @@ process.on("message", async (msg) => {
     // (#1155) — this closes the remaining outer-catch leak that produced up
     // to ~1,176 misclassified rows in the test262 baseline.
     if (outerErr instanceof WebAssembly.Exception) {
-      process.send({
+      sendResult({
         id,
         status: "fail",
         error: extractWasmExceptionMessage(outerErr, instance ?? null),
@@ -1237,7 +1280,7 @@ process.on("message", async (msg) => {
         execMs: performance.now() - execStart,
       });
     } else {
-      process.send({
+      sendResult({
         id,
         status: "compile_error",
         error: outerErr.message ?? String(outerErr),
@@ -1245,19 +1288,36 @@ process.on("message", async (msg) => {
         execMs: performance.now() - execStart,
       });
     }
+    return;
   }
-
-  // Drop Wasm references
-  instance = null;
-  postCompileCleanup();
 });
 
 function postCompileCleanup() {
+  const dirtySentinel = detectRecycleSentinelMutation();
+
   // Restore any built-in prototypes mutated by the test (must happen BEFORE
   // the next compile — the TS parser uses for...of on Arrays internally).
-  restoreBuiltins();
+  let cleanup;
+  try {
+    cleanup = restoreBuiltins();
+  } catch (err) {
+    const kind = err?.constructor?.name ?? typeof err;
+    cleanup = recycleCleanup(`restoreBuiltins threw (${kind})`);
+  }
+
+  if (dirtySentinel && !cleanup.recycle) {
+    cleanup = recycleCleanup(`prototype sentinel changed: ${dirtySentinel}`);
+  }
 
   compileCount++;
+  if (WORKER_RECYCLE_INTERVAL > 0 && compileCount % WORKER_RECYCLE_INTERVAL === 0 && !cleanup.recycle) {
+    cleanup = recycleCleanup(`worker recycle interval ${WORKER_RECYCLE_INTERVAL}`);
+  }
+
+  if (cleanup.recycle) {
+    return cleanup;
+  }
+
   if (compileCount % RECREATE_INTERVAL === 0) {
     try {
       incrementalCompiler?.dispose?.();
@@ -1272,6 +1332,22 @@ function postCompileCleanup() {
   } else if (compileCount % GC_INTERVAL === 0 && typeof globalThis.gc === "function") {
     globalThis.gc();
   }
+
+  return cleanup;
+}
+
+function sendResult(payload, forceRecycleReason) {
+  const cleanup = postCompileCleanup();
+  const recycle = Boolean(forceRecycleReason || cleanup.recycle);
+  process.send(
+    recycle
+      ? {
+          ...payload,
+          recycle: true,
+          recycleReason: forceRecycleReason || cleanup.reason,
+        }
+      : payload,
+  );
 }
 
 process.send({ type: "ready", pid: process.pid });

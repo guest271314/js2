@@ -139,3 +139,54 @@ Verification:
 - `pnpm exec vitest run tests/issue-1310.test.ts --reporter=dot`
 - `TEST262_TARGET=standalone ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
 - `TEST262_TARGET=gc ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
+
+## Follow-up: sharded worker dirty-recycle handshake (2026-06-02)
+
+The symbol restoration patch improved the 57-shard PR run but did not clear the
+catastrophic host diff:
+
+- PR run `26821145127`, merge job `79076525771`: host had 318
+  pass-to-other regressions vs the current host baseline; standalone had 0
+  regressions vs `test262-standalone-current.jsonl`.
+- The remaining host failures still had prototype-state signatures:
+  `wasm exception during compile (poisoned built-in)` and
+  `Binary emit error: offset is out of bounds`.
+
+Root cause: the unified sharded worker could detect unrecoverable poison only
+by sending the current test result and then exiting. `CompilerPool` marked the
+fork free as soon as the result message arrived, so it could dispatch another
+test to the same poisoned process before the exit event was observed. The 57
+shard topology roughly doubled per-worker test lifetime compared with the old
+115-shard layout, making that result/exit race much more visible.
+
+Follow-up change:
+
+- Added the same sentinel-style dirty check used by the JS-host runner to
+  `scripts/test262-worker.mjs`: `Array.prototype.push`,
+  `Array.prototype[Symbol.iterator]`, `Object.prototype.hasOwnProperty`,
+  `Function.prototype.call`, `String.prototype.slice`, `Promise.prototype.then`,
+  `Set.prototype.add`, `Map.prototype.set`, `WeakMap.prototype.set`, and
+  `WeakSet.prototype.add`.
+- `sendResult()` now runs cleanup first and attaches `recycle: true` plus a
+  reason when a sentinel changed, cleanup found non-restorable poison, or a
+  compile-time `WebAssembly.Exception` indicates a poisoned built-in.
+- `CompilerPool` consumes the in-band recycle flag by resolving the current
+  job, respawning that fork, and only dispatching more work after the
+  replacement worker is ready.
+- `CompilerPool.shutdown()` now suppresses the normal unexpected-exit respawn
+  path so targeted pool smokes and test teardown do not leave replacement
+  workers alive.
+
+Because the sharded worker is shared by the matrix target, this applies to
+both `TEST262_TARGET=gc` (JS host) and `TEST262_TARGET=standalone` without
+threading the VM sandbox through sharded `buildImports(...)`.
+
+Verification:
+
+- `node --check scripts/test262-worker.mjs`
+- `pnpm exec tsc --noEmit --pretty false`
+- Direct pool smoke: mutating `Array.prototype.push` returned `first: "pass"`,
+  `firstRecycle: true`, reason
+  `prototype sentinel changed: Array.prototype.push`, and `second: "pass"`.
+- `TEST262_TARGET=gc ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
+- `TEST262_TARGET=standalone ... TEST262_PATH_FILTER='language/comments/hashbang/statement-block.js' ... tests/test262-chunk1.test.ts` — 1/1 pass
