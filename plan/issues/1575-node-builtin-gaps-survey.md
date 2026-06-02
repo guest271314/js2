@@ -1,7 +1,7 @@
 ---
 id: 1575
 title: "Node.js built-in module support — gap survey (js2wasm → npm)"
-status: in-progress
+status: in-review
 created: 2026-05-20
 updated: 2026-06-02
 priority: high
@@ -13,6 +13,7 @@ owner: tech-lead
 related: [1032, 1033, 1044, 1287, 1289, 1400, 1471, 1472, 1473, 1474, 1480, 1481, 1482, 1483, 1484, 1490, 1491, 1492, 1493, 1494, 1535, 640]
 claimed_by: codex-developer
 claimed_at: 2026-06-02T20:53:04.188Z
+pr: 1043
 ---
 # Node.js built-in module support — gap survey
 
