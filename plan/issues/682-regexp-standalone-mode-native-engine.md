@@ -735,6 +735,39 @@ Scoped validation rerun:
 Status remains **in review**. Full local test262 was not run per the scoped
 validation rule. No local implementation blockers were found in this refresh.
 
+### Codex implementation refresh — 2026-06-02
+
+Found and fixed one provenance hole in the reduced
+`native-literal-substring` backend. A mutable binding initialized from a static
+standalone RegExp could later be overwritten with an opaque `RegExp` value, but
+the `.test` lowering still trusted the original initializer and cast the current
+value to `$__StandaloneRegExp`. The provenance guard now trusts `const` backend
+receivers and never-written `let`/`var` backend receivers, but refuses mutable
+bindings once the compiler sees writes to that binding.
+
+Added focused coverage in `tests/issue-682.test.ts` for both sides:
+
+- never-overwritten `let re = /abc/` still executes through the backend
+- `let re = /abc/; re = otherRegExp; re.test(...)` refuses with the
+  existing `#682/#1474` opaque-receiver diagnostic and emits no JS-host RegExp
+  imports
+
+Scoped validation rerun:
+
+- `pnpm exec prettier --write src/codegen/regexp-standalone.ts tests/issue-682.test.ts`
+  - result: passed
+- `pnpm exec vitest run tests/issue-682.test.ts`
+  - result: passed, 1 file / 17 tests
+- `pnpm exec vitest run tests/issue-682.test.ts tests/issue-682-regexp-standalone-abi.test.ts tests/issue-1474-standalone-regex-refuse.test.ts`
+  - result: passed, 3 files / 35 tests
+- `pnpm run typecheck`
+  - result: passed
+- `git diff --check`
+  - result: passed
+
+Status remains **in review**. Full local test262 was not run per the scoped
+validation rule.
+
 ### Phase 0 — Decision and ABI
 
 Pick QuickJS libregexp. Rationale:

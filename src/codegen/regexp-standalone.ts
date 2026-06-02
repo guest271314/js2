@@ -153,17 +153,112 @@ function isStaticStandaloneRegExpCreation(ctx: CodegenContext, expr: ts.Expressi
   return false;
 }
 
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    kind === ts.SyntaxKind.PlusEqualsToken ||
+    kind === ts.SyntaxKind.MinusEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken ||
+    kind === ts.SyntaxKind.SlashEqualsToken ||
+    kind === ts.SyntaxKind.PercentEqualsToken ||
+    kind === ts.SyntaxKind.LessThanLessThanEqualsToken ||
+    kind === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken ||
+    kind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandEqualsToken ||
+    kind === ts.SyntaxKind.BarEqualsToken ||
+    kind === ts.SyntaxKind.CaretEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken ||
+    kind === ts.SyntaxKind.BarBarEqualsToken ||
+    kind === ts.SyntaxKind.QuestionQuestionEqualsToken
+  );
+}
+
+function isSameSymbolIdentifier(ctx: CodegenContext, expr: ts.Expression, sym: ts.Symbol): boolean {
+  const unwrapped = stripStaticWrapper(expr);
+  return ts.isIdentifier(unwrapped) && ctx.checker.getSymbolAtLocation(unwrapped) === sym;
+}
+
+function assignmentTargetContainsSymbol(ctx: CodegenContext, target: ts.Expression, sym: ts.Symbol): boolean {
+  const unwrapped = stripStaticWrapper(target);
+  if (ts.isIdentifier(unwrapped)) return ctx.checker.getSymbolAtLocation(unwrapped) === sym;
+  if (ts.isArrayLiteralExpression(unwrapped)) {
+    return unwrapped.elements.some((element) => {
+      if (ts.isOmittedExpression(element)) return false;
+      if (ts.isSpreadElement(element)) return assignmentTargetContainsSymbol(ctx, element.expression, sym);
+      return assignmentTargetContainsSymbol(ctx, element, sym);
+    });
+  }
+  if (ts.isObjectLiteralExpression(unwrapped)) {
+    return unwrapped.properties.some((prop) => {
+      if (ts.isShorthandPropertyAssignment(prop)) return ctx.checker.getSymbolAtLocation(prop.name) === sym;
+      if (ts.isPropertyAssignment(prop)) return assignmentTargetContainsSymbol(ctx, prop.initializer, sym);
+      if (ts.isSpreadAssignment(prop)) return assignmentTargetContainsSymbol(ctx, prop.expression, sym);
+      return false;
+    });
+  }
+  return false;
+}
+
+function bindingHasWrites(ctx: CodegenContext, decl: ts.VariableDeclaration, sym: ts.Symbol): boolean {
+  let hasWrite = false;
+  const visit = (node: ts.Node): void => {
+    if (hasWrite) return;
+
+    if (
+      ts.isBinaryExpression(node) &&
+      isAssignmentOperator(node.operatorToken.kind) &&
+      assignmentTargetContainsSymbol(ctx, node.left, sym)
+    ) {
+      hasWrite = true;
+      return;
+    }
+
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      isSameSymbolIdentifier(ctx, node.operand, sym)
+    ) {
+      hasWrite = true;
+      return;
+    }
+
+    if (
+      (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer) &&
+      assignmentTargetContainsSymbol(ctx, node.initializer, sym)
+    ) {
+      hasWrite = true;
+      return;
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  ts.forEachChild(decl.getSourceFile(), visit);
+  return hasWrite;
+}
+
+function isTrustedBackendCreatedRegExpBinding(
+  ctx: CodegenContext,
+  decl: ts.VariableDeclaration,
+  sym: ts.Symbol,
+): boolean {
+  if (!decl.initializer || !isStaticStandaloneRegExpCreation(ctx, decl.initializer)) return false;
+  if (!ts.isVariableDeclarationList(decl.parent)) return false;
+  if ((decl.parent.flags & ts.NodeFlags.Const) !== 0) return true;
+  return !bindingHasWrites(ctx, decl, sym);
+}
+
 function isKnownBackendCreatedRegExpReceiver(ctx: CodegenContext, expr: ts.Expression): boolean {
   const unwrapped = stripStaticWrapper(expr);
   if (isStaticStandaloneRegExpCreation(ctx, unwrapped)) return true;
   if (!ts.isIdentifier(unwrapped)) return false;
 
   const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+  if (!sym) return false;
   const decls = sym?.getDeclarations() ?? [];
-  return decls.some(
-    (decl) =>
-      ts.isVariableDeclaration(decl) && !!decl.initializer && isStaticStandaloneRegExpCreation(ctx, decl.initializer),
-  );
+  return decls.some((decl) => ts.isVariableDeclaration(decl) && isTrustedBackendCreatedRegExpBinding(ctx, decl, sym));
 }
 
 export function isGlobalRegExpIdentifier(ctx: CodegenContext, ident: ts.Identifier): boolean {

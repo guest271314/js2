@@ -41,6 +41,17 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(value).toBe(0);
   });
 
+  it("runs a never-overwritten let-bound static receiver", async () => {
+    const value = await runStandaloneNumber(`
+      export function test(): number {
+        let re = /abc/;
+        return re.test("zzabc") ? 1 : 0;
+      }
+    `);
+
+    expect(value).toBe(1);
+  });
+
   it("runs new RegExp with a static literal pattern", async () => {
     const value = await runStandaloneNumber(`
       export function test(): number {
@@ -168,6 +179,30 @@ describe("#682 standalone RegExp literal-substring backend", () => {
       fileName: "issue-682.ts",
       target: "standalone",
     });
+
+    expect(r.success).toBe(false);
+    expect(
+      r.errors.some(
+        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#682\/#1474/.test(e.message),
+      ),
+    ).toBe(true);
+    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+  });
+
+  it("refuses mutable RegExp receivers after an opaque overwrite", async () => {
+    const r = await compile(
+      `
+        export function test(other: RegExp): boolean {
+          let re = /abc/;
+          re = other;
+          return re.test("abc");
+        }
+      `,
+      {
+        fileName: "issue-682.ts",
+        target: "standalone",
+      },
+    );
 
     expect(r.success).toBe(false);
     expect(
