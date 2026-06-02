@@ -51,8 +51,10 @@ Current Test262 conformance and benchmark numbers are tracked in one place and
 change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
 [Playground](https://loopdive.github.io/js2wasm/playground/), and the
 [Roadmap](./ROADMAP.md). The single auto-updated conformance figure (refreshed
-by CI on every merge) is below; everything else links to STATUS.md rather than
-duplicating numbers that go stale.
+by CI on every merge) is for the JS-host path; everything else links to
+STATUS.md rather than duplicating numbers that go stale. Standalone
+(no-JS-host) pass-rate and benchmark figures are intentionally omitted from the
+README until the current standalone regression is fixed.
 
 <!-- AUTO:conformance-start -->
 **test262 conformance**: 30,214 / 43,135 (70.0 %) — baseline 9ee8e921, 2026-05-29T00:58:42Z
@@ -69,8 +71,8 @@ standalone path are all still hardening. What exists today:
   [STATUS.md](./STATUS.md) for the current figure)
 - a public browser playground
 - continuous conformance and benchmark reporting on every change
-- a standalone (no-JS-host) path that is in progress and not yet the primary
-  conformance target
+- a standalone (no-JS-host) path that is in progress; its public numeric
+  baselines are paused here until the current regression is fixed
 
 Treat it as a tech demo to evaluate the approach, not as something to deploy.
 
@@ -299,8 +301,8 @@ arbitrary real-world npm package runs unchanged.
 - standard-library built-ins — many are implemented, but not the full surface;
   some methods are missing or only handle the common overloads
 - `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
-- standalone (no-JS-host) mode — actively in progress; conformance there is
-  lower than the JS-host figure and it is not yet the primary path
+- standalone (no-JS-host) mode — actively in progress; standalone numeric
+  baselines are temporarily omitted here while the current regression is fixed
 - getters/setters and other highly dynamic patterns — limited
 
 **Not yet** (intentionally unsupported or out of scope today):
@@ -331,9 +333,9 @@ Yes, and the live figure is in [STATUS.md](./STATUS.md) and the
 [Test262 report](./benchmarks/results/report.html) rather than rounded up here.
 Two caveats matter more than the number: Test262 measures the ECMAScript
 *language* spec, **not** Web APIs, host/Node.js behavior, or whether an arbitrary
-npm package runs unchanged; and the standalone (no-JS-host) path is less complete
-than the JS-host path. A high pass rate is necessary but not sufficient for "runs
-real JavaScript."
+npm package runs unchanged; and standalone (no-JS-host) figures are omitted here
+until the current regression is fixed. A high pass rate is necessary but not
+sufficient for "runs real JavaScript."
 
 **Won't you eventually re-implement a JavaScript engine?**
 That is the real risk, treated as an empirical question, not a solved one. The

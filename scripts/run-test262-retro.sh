@@ -63,9 +63,7 @@ run_one() {
   git -C "$ROOT_DIR" worktree add "$wt" "$commit" --detach --quiet
   trap 'git -C "$ROOT_DIR" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"' RETURN
 
-  rm -rf "$wt/node_modules" "$wt/test262"
-  ln -s "$ROOT_DIR/node_modules" "$wt/node_modules"
-  ln -s "$ROOT_DIR/test262" "$wt/test262"
+  bash "$ROOT_DIR/scripts/provision-worktree-deps.sh" "$wt"
 
   mkdir -p "$wt/benchmarks"
   rm -rf "$wt/benchmarks/results"

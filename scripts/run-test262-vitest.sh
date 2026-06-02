@@ -146,9 +146,7 @@ fi
 
 # Symlink heavy directories to avoid duplication
 if [ "$USE_WORKTREE" = "1" ]; then
-  rm -rf "$WT_DIR/node_modules" "$WT_DIR/test262"
-  ln -s "$MAIN_DIR/node_modules" "$WT_DIR/node_modules"
-  ln -s "$MAIN_DIR/test262" "$WT_DIR/test262"
+  bash "$MAIN_DIR/scripts/provision-worktree-deps.sh" "$WT_DIR"
 fi
 
 # Verify symlinks

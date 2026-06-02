@@ -76,6 +76,7 @@
   },
   "scripts": {
     "new:issue-id": "node scripts/next-issue-id.mjs",
+    "worktree:provision": "bash scripts/provision-worktree-deps.sh",
     "build": "vite build --config vite.config.lib.ts",
     "build:playground": "vite build --config website/playground/vite.config.ts",
     "dev": "pnpm run build:compiler-bundle && (pnpm run dashboard:watch &) && vite serve --config website/playground/vite.config.ts",

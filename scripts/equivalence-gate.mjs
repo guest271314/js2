@@ -35,6 +35,9 @@ const UPDATE = args.includes("--update");
 const SHARD = process.env.SHARD || ""; // e.g. "1/8"
 // When merging shard partials instead of running vitest directly.
 const MERGE_DIR = process.env.MERGE_PARTIALS_DIR || "";
+// Equivalence shards can peak around 1 GB; regular vitest runs keep the
+// repository default 512 MB fork heap unless they opt in through this env var.
+const EQUIVALENCE_FORK_HEAP_MB = process.env.EQUIVALENCE_FORK_HEAP_MB || "1024";
 
 /** Stable id for a test: "<relative file> :: <full test name>". */
 function testId(fileRelPath, fullName) {
@@ -65,7 +68,11 @@ function runVitest() {
     cwd: REPO_ROOT,
     encoding: "utf8",
     stdio: ["ignore", "inherit", "inherit"],
-    env: { ...process.env, CI: "1" },
+    env: {
+      ...process.env,
+      CI: "1",
+      VITEST_FORK_MAX_OLD_SPACE_SIZE: process.env.VITEST_FORK_MAX_OLD_SPACE_SIZE || EQUIVALENCE_FORK_HEAP_MB,
+    },
     maxBuffer: 256 * 1024 * 1024,
   });
   // vitest exits non-zero on test failures — that's expected; we parse the report.

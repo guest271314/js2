@@ -12,6 +12,7 @@
 - **NEVER force-push or rewrite published history on public `main`** — append-only; fix forward via revert PRs (it already broke guest271314's pull). See [feedback_public_main_append_only.md](feedback_public_main_append_only.md).
 - **NEVER merge an external-contributor PR without a recorded affirmative CLA acceptance** — `cla-check.yml` is a placeholder stub; hold guest271314's #589 until a real CLA accept. See [feedback_cla_gate.md](feedback_cla_gate.md).
 - **Mimic standard Node.js / Web Worker APIs; never invent bespoke compiler builtins** (no `readStdin`/`writeStdout`). See [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md).
+- **PR titles and Codex commits use repo convention** — PR titles are `type(scope): concise summary` without `[codex]`; Codex-authored commits include `Co-authored-by: Codex <codex@openai.com>`. See [feedback_pr_title_coauthor_conventions.md](feedback_pr_title_coauthor_conventions.md).
 
 ## Single source of truth
 - Team setup, memory budget, spawn config, communication protocol: **`plan/method/team-setup.md`**
@@ -70,6 +71,7 @@
 ### Testing
 - [feedback_trigger_deploy_pages.md](feedback_trigger_deploy_pages.md) — After any [skip ci] baseline refresh, manually trigger deploy-pages.yml so GitHub Pages shows the new pass rate
 - [feedback_test262_worktree.md](feedback_test262_worktree.md) — Test262 in worktree, not main wc
+- [feedback_worktree_symlink_dependencies.md](feedback_worktree_symlink_dependencies.md) — Symlink `test262` and `node_modules` into new worktrees
 - [feedback_test262_recheck.md](feedback_test262_recheck.md) — Default --recheck for test262, npm test for vitest
 - [feedback_test262_skip_issues.md](feedback_test262_skip_issues.md) — Every skip filter must have an issue
 - [feedback_never_delete_test_data.md](feedback_never_delete_test_data.md) — Never delete test data/cache/runs without asking
