@@ -1,7 +1,8 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: in-progress
+status: in-review
+pr: 1048
 created: 2026-05-24
 updated: 2026-06-03
 priority: high
