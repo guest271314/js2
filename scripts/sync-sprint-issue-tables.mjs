@@ -14,7 +14,7 @@ const STATUS_PRIORITY = {
   done: 0,
   "wont-fix": 1,
   blocked: 2,
-  review: 3,
+  "in-review": 3,
   "in-progress": 4,
   ready: 5,
   deferred: 6,
@@ -105,7 +105,7 @@ function normalizeStatus(dirName, fmStatus) {
   if (normalized === "wont-fix") return "wont-fix";
   if (normalized === "done") return "done";
   if (normalized === "blocked") return "blocked";
-  if (normalized === "review" || normalized === "in-review" || normalized === "in_review") return "review";
+  if (normalized === "review" || normalized === "in-review" || normalized === "in_review") return "in-review";
   if (normalized === "in-progress" || normalized === "in_progress") return "in-progress";
   if (normalized === "ready") return "ready";
   if (normalized === "deferred") return "deferred";
@@ -120,7 +120,7 @@ function issueLane(status) {
     status === "blocked" ||
     status === "ready" ||
     status === "in-progress" ||
-    status === "review" ||
+    status === "in-review" ||
     status === "done" ||
     status === "wont-fix"
   ) {
@@ -175,7 +175,7 @@ function renderSprintSection(sprintNumber, issues) {
     ["blocked", "Blocked"],
     ["ready", "Ready"],
     ["in-progress", "In Progress"],
-    ["review", "Review"],
+    ["in-review", "In Review"],
     ["done", "Done"],
     ["wont-fix", "Won't Fix"],
   ];
