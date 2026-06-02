@@ -7,7 +7,7 @@ import { isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
-import type { CodegenContext, FunctionContext } from "../context/types.js";
+import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
 import { emitThrowString } from "../expressions/helpers.js";
 import { addStringImports, ensureI32Condition, ensureNativeStringHelpers, resolveWasmType } from "../index.js";
 import {
@@ -226,33 +226,62 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
  *   - `x === null` / `x == null` / `null === x` / `null == x` → narrowed in ELSE
  * Returns null if the condition is not a null comparison on a simple identifier.
  */
-function detectNullNarrowing(expr: ts.Expression): { varName: string; narrowedBranch: "then" | "else" } | null {
+function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) return "undefined";
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return "undefined";
+  return null;
+}
+
+function nullishPresenceOfType(type: ts.Type): { hasNull: boolean; hasUndefined: boolean } {
+  let hasNull = false;
+  let hasUndefined = false;
+  const parts = type.isUnion() ? type.types : [type];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.Null) hasNull = true;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) hasUndefined = true;
+  }
+  return { hasNull, hasUndefined };
+}
+
+function excludesAllNullish(type: ts.Type, excludes: NullishExclusion): boolean {
+  const presence = nullishPresenceOfType(type);
+  if (!presence.hasNull && !presence.hasUndefined) return false;
+  if (presence.hasNull && excludes === "undefined") return false;
+  if (presence.hasUndefined && excludes === "null") return false;
+  return true;
+}
+
+function detectNullNarrowing(ctx: CodegenContext, expr: ts.Expression): NullGuardFact | null {
   if (!ts.isBinaryExpression(expr)) return null;
   const op = expr.operatorToken.kind;
-  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
-  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
+  const isNeq = isStrictNeq || isLooseNeq;
+  const isEq = isStrictEq || isLooseEq;
   if (!isNeq && !isEq) return null;
 
-  const rightIsNull =
-    expr.right.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(expr.right) && expr.right.text === "undefined");
-  const leftIsNull =
-    expr.left.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(expr.left) && expr.left.text === "undefined");
+  const rightNullish = nullishLiteralKind(expr.right);
+  const leftNullish = nullishLiteralKind(expr.left);
 
-  if (!rightIsNull && !leftIsNull) return null;
+  if (!rightNullish && !leftNullish) return null;
 
-  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  const comparedNullish = rightNullish ?? leftNullish;
+  const nonNullSide = rightNullish ? expr.left : expr.right;
   if (!ts.isIdentifier(nonNullSide)) return null;
+  const excludes: NullishExclusion = isLooseEq || isLooseNeq ? "nullish" : comparedNullish!;
 
   return {
     varName: nonNullSide.text,
     narrowedBranch: isNeq ? "then" : "else",
+    excludes,
+    provesNonNull: excludesAllNullish(ctx.checker.getTypeAtLocation(nonNullSide), excludes),
   };
 }
 
-function detectAliasedNullNarrowing(
-  fctx: FunctionContext,
-  expr: ts.Expression,
-): { varName: string; narrowedBranch: "then" | "else" } | null {
+function detectAliasedNullNarrowing(fctx: FunctionContext, expr: ts.Expression): NullGuardFact | null {
   if (ts.isIdentifier(expr)) {
     return fctx.nullGuardAliases?.get(expr.text) ?? null;
   }
@@ -264,7 +293,7 @@ function detectAliasedNullNarrowing(
     const alias = fctx.nullGuardAliases?.get(expr.operand.text);
     if (!alias) return null;
     return {
-      varName: alias.varName,
+      ...alias,
       narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then",
     };
   }
@@ -388,7 +417,7 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   }
 
   // Detect null-narrowing pattern before compiling the condition
-  const directNarrowing = detectNullNarrowing(stmt.expression);
+  const directNarrowing = detectNullNarrowing(ctx, stmt.expression);
   const aliasNarrowing = directNarrowing ? null : detectAliasedNullNarrowing(fctx, stmt.expression);
   const narrowing = directNarrowing ?? aliasNarrowing;
 
@@ -411,7 +440,7 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   const savedAliasedNullGuardNonNull = fctx.aliasedNullGuardNonNull ? new Set(fctx.aliasedNullGuardNonNull) : undefined;
 
   // Apply narrowing for the then branch
-  if (narrowing && narrowing.narrowedBranch === "then") {
+  if (narrowing?.provesNonNull && narrowing.narrowedBranch === "then") {
     if (!fctx.narrowedNonNull) fctx.narrowedNonNull = new Set();
     fctx.narrowedNonNull.add(narrowing.varName);
     if (aliasNarrowing) {
@@ -448,7 +477,7 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   fctx.aliasedNullGuardNonNull = savedAliasedNullGuardNonNull ? new Set(savedAliasedNullGuardNonNull) : undefined;
 
   // Apply narrowing for the else branch
-  if (narrowing && narrowing.narrowedBranch === "else") {
+  if (narrowing?.provesNonNull && narrowing.narrowedBranch === "else") {
     if (!fctx.narrowedNonNull) fctx.narrowedNonNull = new Set();
     fctx.narrowedNonNull.add(narrowing.varName);
     if (aliasNarrowing) {

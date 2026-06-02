@@ -125,6 +125,15 @@ export interface ClosureInfo {
   paramTypes: ValType[];
 }
 
+export type NullishExclusion = "null" | "undefined" | "nullish";
+
+export interface NullGuardFact {
+  varName: string;
+  narrowedBranch: "then" | "else";
+  excludes: NullishExclusion;
+  provesNonNull: boolean;
+}
+
 /** Per-function context. */
 export interface FunctionContext {
   /** Function name */
@@ -211,7 +220,7 @@ export interface FunctionContext {
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
   /** Const boolean aliases for null guards, e.g. `const ok = x !== null`. */
-  nullGuardAliases?: Map<string, { varName: string; narrowedBranch: "then" | "else" }>;
+  nullGuardAliases?: Map<string, NullGuardFact>;
   /** Variables narrowed through a const boolean null-guard alias in the active branch. */
   aliasedNullGuardNonNull?: Set<string>;
   /**

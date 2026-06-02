@@ -7,7 +7,7 @@ import {
   IncrementalLanguageService,
   type TypedAST,
 } from "./checker/index.js";
-import { isNullableNumberType } from "./checker/type-mapper.js";
+import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
@@ -123,31 +123,74 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
-function detectNullGuardForVar(
-  expr: ts.Expression,
-  varName: string,
-): { varName: string; narrowedBranch: "then" | "else" } | null {
+type NullishExclusion = "null" | "undefined" | "nullish";
+
+interface NullGuardFact {
+  varName: string;
+  narrowedBranch: "then" | "else";
+  excludes: NullishExclusion;
+  provesNonNull: boolean;
+}
+
+function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) return "undefined";
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return "undefined";
+  return null;
+}
+
+function nullishPresenceOfType(type: ts.Type): { hasNull: boolean; hasUndefined: boolean } {
+  let hasNull = false;
+  let hasUndefined = false;
+  const parts = type.isUnion() ? type.types : [type];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.Null) hasNull = true;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) hasUndefined = true;
+  }
+  return { hasNull, hasUndefined };
+}
+
+function excludesAllNullish(type: ts.Type, excludes: NullishExclusion): boolean {
+  const presence = nullishPresenceOfType(type);
+  if (!presence.hasNull && !presence.hasUndefined) return false;
+  if (presence.hasNull && excludes === "undefined") return false;
+  if (presence.hasUndefined && excludes === "null") return false;
+  return true;
+}
+
+function detectNullGuardForVar(checker: ts.TypeChecker, expr: ts.Expression, varName: string): NullGuardFact | null {
   if (!ts.isBinaryExpression(expr)) return null;
   const op = expr.operatorToken.kind;
-  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
-  const isEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
+  const isNeq = isStrictNeq || isLooseNeq;
+  const isEq = isStrictEq || isLooseEq;
   if (!isNeq && !isEq) return null;
 
-  const rightIsNull = expr.right.kind === ts.SyntaxKind.NullKeyword;
-  const leftIsNull = expr.left.kind === ts.SyntaxKind.NullKeyword;
-  if (!rightIsNull && !leftIsNull) return null;
+  const rightNullish = nullishLiteralKind(expr.right);
+  const leftNullish = nullishLiteralKind(expr.left);
+  if (!rightNullish && !leftNullish) return null;
 
-  const nonNullSide = rightIsNull ? expr.left : expr.right;
+  const comparedNullish = rightNullish ?? leftNullish;
+  const nonNullSide = rightNullish ? expr.left : expr.right;
   if (!ts.isIdentifier(nonNullSide) || nonNullSide.text !== varName) return null;
-  return { varName, narrowedBranch: isNeq ? "then" : "else" };
+  const excludes: NullishExclusion = isLooseEq || isLooseNeq ? "nullish" : comparedNullish!;
+  return {
+    varName,
+    narrowedBranch: isNeq ? "then" : "else",
+    excludes,
+    provesNonNull: excludesAllNullish(checker.getTypeAtLocation(nonNullSide), excludes),
+  };
 }
 
 function detectConditionNullGuard(
   checker: ts.TypeChecker,
   condition: ts.Expression,
   varName: string,
-): { varName: string; narrowedBranch: "then" | "else" } | null {
-  const direct = detectNullGuardForVar(condition, varName);
+): NullGuardFact | null {
+  const direct = detectNullGuardForVar(checker, condition, varName);
   if (direct) return direct;
   if (ts.isIdentifier(condition)) {
     const symbol = checker.getSymbolAtLocation(condition);
@@ -159,7 +202,7 @@ function detectConditionNullGuard(
       ts.isVariableDeclarationList(decl.parent) &&
       (decl.parent.flags & ts.NodeFlags.Const) !== 0
     ) {
-      return detectNullGuardForVar(decl.initializer, varName);
+      return detectNullGuardForVar(checker, decl.initializer, varName);
     }
   }
   if (
@@ -169,53 +212,125 @@ function detectConditionNullGuard(
   ) {
     const alias = detectConditionNullGuard(checker, condition.operand, varName);
     if (!alias) return null;
-    return { varName, narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then" };
+    return { ...alias, narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then" };
   }
   return null;
 }
 
-function isUint8ArrayType(checker: ts.TypeChecker, expr: ts.Expression): boolean {
-  const type = checker.getTypeAtLocation(expr);
-  const sym = (type as ts.TypeReference).symbol ?? type.symbol;
-  return sym?.name === "Uint8Array";
+function unwrapExpression(expr: ts.Expression): ts.Expression {
+  let inner = expr;
+  while (
+    ts.isParenthesizedExpression(inner) ||
+    ts.isAsExpression(inner) ||
+    ts.isTypeAssertionExpression(inner) ||
+    ts.isNonNullExpression(inner)
+  ) {
+    inner = ts.isParenthesizedExpression(inner)
+      ? inner.expression
+      : ts.isAsExpression(inner)
+        ? inner.expression
+        : ts.isNonNullExpression(inner)
+          ? inner.expression
+          : (inner as ts.TypeAssertion).expression;
+  }
+  return inner;
 }
 
-function isGuardedNullableNumberByteAssignmentDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
-  if (diag.code !== 2322) return false;
-  const file = diag.file;
-  if (!file || diag.start === undefined) return false;
-  let node = findSmallestNodeAtPosition(file, diag.start);
-  if (!node) return false;
-  while (node && !ts.isBinaryExpression(node)) node = node.parent;
-  if (!node || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
-  if (!ts.isElementAccessExpression(node.left)) return false;
+function findNullablePrimitiveIdentifier(node: ts.Node, checker: ts.TypeChecker): ts.Identifier | null {
+  if (ts.isIdentifier(node) && getNullablePrimitiveInfo(checker.getTypeAtLocation(node))) return node;
+  let found: ts.Identifier | null = null;
+  node.forEachChild((child) => {
+    if (!found) found = findNullablePrimitiveIdentifier(child, checker);
+  });
+  return found;
+}
 
-  let rhs = node.right;
-  while (
-    ts.isParenthesizedExpression(rhs) ||
-    ts.isAsExpression(rhs) ||
-    ts.isTypeAssertionExpression(rhs) ||
-    ts.isNonNullExpression(rhs)
-  ) {
-    rhs = ts.isParenthesizedExpression(rhs)
-      ? rhs.expression
-      : ts.isAsExpression(rhs)
-        ? rhs.expression
-        : ts.isNonNullExpression(rhs)
-          ? rhs.expression
-          : (rhs as ts.TypeAssertion).expression;
+function findIdentifierUseAtDiagnostic(
+  file: ts.SourceFile,
+  pos: number,
+  checker: ts.TypeChecker,
+): ts.Identifier | null {
+  let node = findSmallestNodeAtPosition(file, pos);
+  let direct: ts.Node | undefined = node;
+  while (direct && !ts.isIdentifier(direct)) direct = direct.parent;
+  if (direct && ts.isIdentifier(direct) && getNullablePrimitiveInfo(checker.getTypeAtLocation(direct))) return direct;
+
+  while (node) {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const rhs = unwrapExpression(node.right);
+      if (ts.isIdentifier(rhs) && getNullablePrimitiveInfo(checker.getTypeAtLocation(rhs))) return rhs;
+      return findNullablePrimitiveIdentifier(node.right, checker);
+    }
+    if (ts.isReturnStatement(node) && node.expression) {
+      return findNullablePrimitiveIdentifier(node.expression, checker);
+    }
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments) {
+      for (const arg of node.arguments) {
+        const found = findNullablePrimitiveIdentifier(arg, checker);
+        if (found) return found;
+      }
+    }
+    node = node.parent;
   }
-  if (!ts.isIdentifier(rhs)) return false;
-  if (!isNullableNumberType(checker.getTypeAtLocation(rhs))) return false;
-  if (!isUint8ArrayType(checker, node.left.expression)) return false;
+  return null;
+}
 
+function containingFunctionLike(node: ts.Node): ts.SignatureDeclaration | undefined {
   let current: ts.Node | undefined = node.parent;
   while (current) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessorDeclaration(current) ||
+      ts.isSetAccessorDeclaration(current)
+    ) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function targetTypeForIdentifierUse(id: ts.Identifier, checker: ts.TypeChecker): ts.Type | null {
+  let current: ts.Node | undefined = id;
+  while (current) {
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      if (isDescendantOf(id, current.right)) return checker.getTypeAtLocation(current.left);
+    }
+    if (ts.isVariableDeclaration(current) && current.initializer && isDescendantOf(id, current.initializer)) {
+      return checker.getTypeAtLocation(current.name);
+    }
+    if (ts.isReturnStatement(current) && current.expression && isDescendantOf(id, current.expression)) {
+      const fn = containingFunctionLike(current);
+      const sig = fn ? checker.getSignatureFromDeclaration(fn) : undefined;
+      return sig ? checker.getReturnTypeOfSignature(sig) : null;
+    }
+    if ((ts.isCallExpression(current) || ts.isNewExpression(current)) && current.arguments) {
+      const args = current.arguments;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i]!;
+        if (!isDescendantOf(id, arg)) continue;
+        const sig = checker.getResolvedSignature(current);
+        const param = sig?.parameters[i];
+        return param ? checker.getTypeOfSymbol(param) : null;
+      }
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function identifierHasNonNullProofInAncestor(id: ts.Identifier, checker: ts.TypeChecker): boolean {
+  let current: ts.Node | undefined = id.parent;
+  while (current) {
     if (ts.isIfStatement(current)) {
-      const guard = detectConditionNullGuard(checker, current.expression, rhs.text);
-      if (guard) {
-        if (guard.narrowedBranch === "then" && isDescendantOf(node, current.thenStatement)) return true;
-        if (guard.narrowedBranch === "else" && current.elseStatement && isDescendantOf(node, current.elseStatement)) {
+      const guard = detectConditionNullGuard(checker, current.expression, id.text);
+      if (guard?.provesNonNull) {
+        if (guard.narrowedBranch === "then" && isDescendantOf(id, current.thenStatement)) return true;
+        if (guard.narrowedBranch === "else" && current.elseStatement && isDescendantOf(id, current.elseStatement)) {
           return true;
         }
       }
@@ -225,10 +340,28 @@ function isGuardedNullableNumberByteAssignmentDiagnostic(diag: ts.Diagnostic, ch
   return false;
 }
 
+function isGuardedNullablePrimitiveDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
+  if (diag.code !== 2322 && diag.code !== 2345) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  const id = findIdentifierUseAtDiagnostic(file, diag.start, checker);
+  if (!id) return false;
+  const idType = checker.getTypeAtLocation(id);
+  if (!getNullablePrimitiveInfo(idType)) return false;
+  if (!identifierHasNonNullProofInAncestor(id, checker)) return false;
+  const targetType = targetTypeForIdentifierUse(id, checker);
+  if (!targetType) return false;
+  const nonNullType = checker.getNonNullableType(idType);
+  const assignable = (
+    checker as ts.TypeChecker & { isTypeAssignableTo?: (source: ts.Type, target: ts.Type) => boolean }
+  ).isTypeAssignableTo;
+  return assignable ? assignable.call(checker, nonNullType, targetType) : false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
-  if (checker && isGuardedNullableNumberByteAssignmentDiagnostic(diag, checker)) return false;
+  if (checker && isGuardedNullablePrimitiveDiagnostic(diag, checker)) return false;
   return true;
 }
 
@@ -388,7 +521,7 @@ export function compileSourceSync(
       // Error
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
       const severity =
-        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, ast.checker)
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, ast.checker)
           ? "warning"
           : "error";
       errors.push({
@@ -743,7 +876,7 @@ export async function compileMultiSource(
     if (diag.category === 1 && isEntryDiag(diag)) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
       const severity =
-        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, multiAst.checker)
           ? "warning"
           : "error";
       errors.push({
@@ -1008,7 +1141,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     if (diag.category === 1) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
       const severity =
-        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullableNumberByteAssignmentDiagnostic(diag, multiAst.checker)
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, multiAst.checker)
           ? "warning"
           : "error";
       errors.push({
