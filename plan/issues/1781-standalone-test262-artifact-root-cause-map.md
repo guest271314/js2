@@ -1,7 +1,7 @@
 ---
 id: 1781
 title: "standalone test262 run must publish full JSONL and root-cause issue map"
-status: in-progress
+status: in-review
 created: 2026-06-02
 updated: 2026-06-02
 priority: high
@@ -17,6 +17,7 @@ related: [1662, 1776, 1472, 682, 1474, 1599, 1387, 1778, 1782, 1591, 1623, 1665]
 origin: "Investigation of all failing standalone test262 tests found that the June 1 full standalone JSONL/report artifacts were generated but not retained, leaving only summary counts and five manually documented root-cause clusters."
 claimed_by: codex-developer
 claimed_at: 2026-06-02T20:53:11.407Z
+pr: 1045
 ---
 
 # #1781 - Standalone test262 run must publish full JSONL and root-cause issue map
