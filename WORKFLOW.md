@@ -66,6 +66,8 @@ Rules:
 - Push the assigned branch to `origin`.
 - Open a ready, non-draft pull request against `main`; do not mark the issue `done` until the PR
   exists.
+- Record the PR number in the issue frontmatter as `pr: <number>` and leave the issue
+  `status: in-review`; the PR-status poller flips it to `done` after GitHub reports the PR merged.
 - Enqueue the PR in the merge queue when GitHub accepts it. If required checks are still pending,
   enable auto-merge/merge-queue entry so GitHub queues it as soon as checks pass.
 - Report changed files, validation, commit SHA, PR URL, and merge-queue or auto-merge state before

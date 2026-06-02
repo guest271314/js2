@@ -88,7 +88,7 @@ export function countRunsAboveTotal(totals: number[], minTotal: number): number 
 /**
  * Count how many issues have a given encoded status. Encoding (matches the
  * STATUS_PRIORITY map in build-data.js):
- *   0=backlog 1=ready 2=in-progress 3=review 4=blocked 5=done 6=wont-fix
+ *   0=backlog 1=ready 2=in-progress 3=in-review 4=blocked 5=done 6=wont-fix
  */
 export function tallyStatusCount(statuses: number[], target: number): number {
   let n = 0;

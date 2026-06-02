@@ -118,6 +118,8 @@
     "upload": "pnpm run build:playground && node ../file-registry-cli/dist/bin/main.js commit && node ../file-registry-cli/dist/bin/main.js push",
     "prepare": "git config core.hooksPath .husky || true",
     "reconcile:tasks": "node scripts/reconcile-tasklist.mjs",
+    "issues:pr-status": "node scripts/poll-merged-pr-issues.mjs --once --sync-artifacts",
+    "issues:pr-status:watch": "node scripts/poll-merged-pr-issues.mjs --sync-artifacts",
     "symphony": "node scripts/symphony.mjs",
     "symphony:once": "node scripts/symphony.mjs --once",
     "symphony:dry-run": "node scripts/symphony.mjs --once --dry-run",

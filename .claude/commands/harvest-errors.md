@@ -16,7 +16,7 @@ Analyze the latest test262 run results, cross-reference with existing issues, an
 3. Cross-reference with existing issues:
    - Read issue files in `plan/issues/`
    - Match error patterns to existing issue titles/descriptions
-   - Mark each pattern as: ADDRESSED (`status: done`), IN PROGRESS (`status: ready` / `in-progress` / `review`), or NEW
+   - Mark each pattern as: ADDRESSED (`status: done`), IN PROGRESS (`status: ready` / `in-progress` / `in-review`), or NEW
 
 4. For NEW patterns with >50 occurrences:
    - Create issue files in `plan/issues/` with next available number
