@@ -1,10 +1,11 @@
 ---
 id: 1776
 title: "standalone test262 isSameValue emits invalid Wasm for externref operands"
-status: in-progress
+status: done
 owner: Tesla
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
+completed: 2026-06-01
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -143,3 +144,7 @@ pnpm exec vitest run tests/issue-1471.test.ts tests/issue-1157.test.ts
 ```
 
 Both scoped runs passed locally.
+
+## Completion - PR #1025
+
+Closed by merged PR [#1025](https://github.com/loopdive/js2/pull/1025), which refreshed the late-import call indices for externref equality fallbacks and added the focused standalone regression coverage above.

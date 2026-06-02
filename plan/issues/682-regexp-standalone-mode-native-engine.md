@@ -5,7 +5,7 @@ status: in-progress
 owner: Raman
 created: 2026-03-20
 updated: 2026-06-01
-priority: medium
+priority: high
 feasibility: hard
 reasoning_effort: max
 goal: standalone-mode

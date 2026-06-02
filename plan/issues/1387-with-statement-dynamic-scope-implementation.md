@@ -5,7 +5,7 @@ status: in-progress
 owner: Hooke
 created: 2026-05-08
 updated: 2026-06-01
-priority: medium
+priority: high
 feasibility: medium  # Tier 1 (IR-proven static routing) is medium and dispatchable; Tier 2 (dynamic fallback) is hard and overlaps the object-representation ceiling — slice & ship Tier 1 first.
 reasoning_effort: max
 task_type: feature
