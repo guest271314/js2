@@ -35,7 +35,7 @@ agent:
       recipient: claude-lead
       max_concurrent: 3
 codex:
-  command: codex exec --sandbox workspace-write --ask-for-approval never
+  command: codex exec -c approval_policy="never" --sandbox workspace-write --skip-git-repo-check --json
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000

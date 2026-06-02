@@ -728,6 +728,8 @@ class AgentRunner {
     if (lane.promptMode === "stdin") {
       child.stdin.write(prompt);
       child.stdin.end();
+    } else {
+      child.stdin.end();
     }
     child.stdout.on("data", (buf) => {
       appendFileSync(logFile, buf);
