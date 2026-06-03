@@ -3595,13 +3595,17 @@ export function compileElementAccessBody(
     // the existing coerceType(f64→i32) path handles non-i32 results via
     // trunc_sat — same as the legacy explicit cast below.
     compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
+    const valueType: ValType =
+      arrDef.element.kind === "i8" || arrDef.element.kind === "i16" ? { kind: "i32" } : arrDef.element;
     if (isSafeBoundsEliminated(fctx, expr)) {
       // Bounds check elided: loop guard guarantees index < array.length
-      fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
+      const getOp =
+        arrDef.element.kind === "i8" ? "array.get_u" : arrDef.element.kind === "i16" ? "array.get_s" : "array.get";
+      fctx.body.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
     } else {
       emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element);
     }
-    return arrDef.element;
+    return valueType;
   }
 
   if (!typeDef || typeDef.kind !== "array") {
@@ -3613,12 +3617,16 @@ export function compileElementAccessBody(
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
   // already an i32 local or integer literal).
   compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
+  const valueType: ValType =
+    typeDef.element.kind === "i8" || typeDef.element.kind === "i16" ? { kind: "i32" } : typeDef.element;
 
   if (isSafeBoundsEliminated(fctx, expr)) {
     // Bounds check elided: loop guard guarantees index < array.length
-    fctx.body.push({ op: "array.get", typeIdx } as Instr);
+    const getOp =
+      typeDef.element.kind === "i8" ? "array.get_u" : typeDef.element.kind === "i16" ? "array.get_s" : "array.get";
+    fctx.body.push({ op: getOp, typeIdx } as Instr);
   } else {
     emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element);
   }
-  return typeDef.element;
+  return valueType;
 }
