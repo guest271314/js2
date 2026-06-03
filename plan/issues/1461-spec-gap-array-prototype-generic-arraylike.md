@@ -1,9 +1,10 @@
 ---
 id: 1461
 title: "spec gap: Array.prototype.* called on array-like / exotic receivers"
-status: ready
+status: done
 created: 2026-05-20
 updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -141,3 +142,43 @@ In `src/codegen/array-methods.ts`:
 - The "ctors is not defined" 60 tests use a TypedArray harness
   fixture — those should be classified as a separate harness gap, not
   part of this issue's success count.
+
+## Resolution (2026-06-03)
+
+All concrete acceptance bullets are satisfied. By the time this slice was
+picked up, AC#1 (ToLength on `length`), AC#2 (HasProperty hole-skipping for
+forEach/map/filter/some/every/find/findIndex/reduce/reduceRight), AC#3
+(reduce/reduceRight initial-value-absent hole scan + TypeError on all-holes),
+AC#4 (mutating-method `length` writeback — verified for splice/push), AC#5
+(indexOf/lastIndexOf strict-eq, includes SameValueZero), and AC#7 (callback's
+third arg is the original receiver) were already implemented and pinned green
+in `tests/issue-1461.test.ts`.
+
+The one remaining localized gap was **AC#6 — `concat` honouring
+`Symbol.isConcatSpreadable` on array-like inputs**. `Array.prototype.concat`
+on an externref/any receiver routes through the `__array_concat_any` host
+import, which passed its arguments straight to native `[].concat(...args)`.
+For an opaque WasmGC struct array-like (`{0:'a', 1:'b', length:2}` with the
+flag set via `obj[Symbol.isConcatSpreadable] = true`), native concat sees a
+single opaque object and appends it whole → result length 1 instead of 2.
+
+Fix (`src/runtime.ts`):
+- Added `_isConcatSpreadable(obj, callbackState)` — reads the §23.1.3.1.1
+  flag from the struct sidecar (real symbol + the `@@isConcatSpreadable`
+  mirror). Returns false when absent/falsy, so a plain array-like is **not**
+  spread unless explicitly tagged.
+- `__array_concat_any` now spreads any non-Array WasmGC-struct argument whose
+  flag is truthy, reading its `length` and indexed elements via the
+  `__sget_length` / `__sget_<i>` struct-getter exports (the same path
+  `__extern_length` / `__extern_get_idx` use, since these are real WasmGC
+  fields, not sidecar entries). Real Arrays and untagged objects keep their
+  prior behaviour.
+
+Guard tests added to `tests/issue-1461.test.ts` (now 27 green): flag=true
+spreads + preserves element values; absent/false flag appends whole; real
+Array `.concat` is unaffected.
+
+**Remaining (NOT this issue):** the `indexOf({1:true},true)` boolean-struct-field
+case stays `it.fails`-pinned, tracked under #1784 / #1788 (boolean i32
+struct-field representation), which is a cross-cutting WasmGC representation
+matter rather than the #1461 generic-receiver algorithm.
