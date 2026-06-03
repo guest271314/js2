@@ -3653,8 +3653,14 @@ function compileCallExpression(
       const method = propAccess.name.text;
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be frozen/sealed at compile time
-      if (ts.isIdentifier(arg0)) {
+      // Compile-time fast path: identifier known to be frozen/sealed at compile
+      // time. This is execution-order-blind (Object.freeze(o) populates
+      // ctx.frozenVars during codegen, so an *earlier* Object.isFrozen(o) would
+      // wrongly fold to const 1). In standalone mode the Wasm-native
+      // __object_isFrozen/__object_isSealed read the live $Object.flags, so we
+      // skip the static fold and let the runtime answer correctly (#1472
+      // Phase B Blocker A Half 1).
+      if (!ctx.standalone && ts.isIdentifier(arg0)) {
         const isKnown =
           (method === "isFrozen" && ctx.frozenVars.has(arg0.text)) ||
           (method === "isSealed" && ctx.sealedVars.has(arg0.text));
@@ -3698,8 +3704,11 @@ function compileCallExpression(
     ) {
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be non-extensible
-      if (ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
+      // Compile-time fast path: identifier known to be non-extensible.
+      // Skipped in standalone (execution-order-blind, same reason as
+      // isFrozen/isSealed above) — the native __object_isExtensible reads the
+      // live $Object.flags instead (#1472 Phase B Blocker A Half 1).
+      if (!ctx.standalone && ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
         const argType = compileExpression(ctx, fctx, arg0);
         if (argType) fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: 0 });
@@ -6368,17 +6377,37 @@ function compileCallExpression(
       // #1321: when a radix was provided, route to the 2-arg host import that
       // actually uses it. The legacy 1-arg `number_toString` only handled base 10
       // and silently dropped the radix — `(255).toString(16)` returned "255".
+      // #1335: in standalone / WASI (nativeStrings) mode the native
+      // number_toString[_radix] helpers return an externref that wraps a
+      // `$NativeString`. Downstream string consumers (`.charAt`, `+`, return)
+      // coerce externref→native via `any.convert_extern` + `ref.cast`; if we
+      // report the value type as `externref` here, a consumer that ALSO
+      // unwraps applies a SECOND `any.convert_extern` to the already-native
+      // ref ("any.convert_extern expected externref, found native ref"). Unwrap
+      // once at the call site and report the native string type so consumers
+      // see a native receiver directly. JS-host mode keeps the externref.
+      const unwrapToNative = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && (ctx.standalone || ctx.wasi);
       if (radixLocalIdx !== undefined) {
         const radixFuncIdx = ctx.funcMap.get("number_toString_radix");
         if (radixFuncIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: radixLocalIdx });
           fctx.body.push({ op: "call", funcIdx: radixFuncIdx });
+          if (unwrapToNative) {
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+            return nativeStringType(ctx);
+          }
           return { kind: "externref" };
         }
       }
       const funcIdx = ctx.funcMap.get("number_toString");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
+        if (unwrapToNative) {
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+          return nativeStringType(ctx);
+        }
         return { kind: "externref" };
       }
     }

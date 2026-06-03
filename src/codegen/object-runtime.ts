@@ -73,6 +73,17 @@ const FLAG_TOMBSTONE = 0x80;
 const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
 
 /**
+ * `$Object.flags` (field 4) object-level integrity bits (#1472 Phase B Blocker
+ * A Half 1, landed via PR #1074). Read by the
+ * __object_isFrozen/isSealed/isExtensible helpers; set by the freeze/seal SET
+ * path (Half 2, not yet landed). On a never-frozen object the field is 0, so
+ * isFrozen/isSealed read false and isExtensible reads true.
+ */
+const OBJ_FLAG_NONEXTENSIBLE = 0x01;
+const OBJ_FLAG_SEALED = 0x02;
+const OBJ_FLAG_FROZEN = 0x04;
+
+/**
  * Type indices for the open-object runtime structs/arrays, allocated once per
  * module by `ensureObjectRuntime`. Stored on the context so subsequent slices
  * (keys/values/delete/for-in) can reference the same types.
@@ -1271,6 +1282,45 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       body,
     );
   }
+  // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
+  //
+  // __object_isFrozen / __object_isSealed / __object_isExtensible read the
+  // object-level `$Object.flags` (field 4). On a never-frozen `$Object` the
+  // flags field is 0 → isFrozen/isSealed read false, isExtensible reads true.
+  // ES §20.5.2.13/14: isFrozen/isSealed on a NON-object return TRUE; §20.5.2.12:
+  // isExtensible on a non-object returns FALSE. (Merged from main; preserved
+  // here through the Blocker B merge so the standalone predicates remain native.)
+  const emitIntegrityPredicate = (name: string, flagBit: number, invert: boolean, nonObjResult: number): void => {
+    const testExpr: Instr[] = [
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: flagBit },
+      { op: "i32.and" },
+    ];
+    if (invert) {
+      testExpr.push({ op: "i32.eqz" });
+    } else {
+      testExpr.push({ op: "i32.const", value: 0 }, { op: "i32.ne" });
+    }
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: testExpr,
+        else: [{ op: "i32.const", value: nonObjResult }],
+      },
+    ];
+    registerNative(name, [{ kind: "externref" }], [{ kind: "i32" }], [{ name: "any", type: { kind: "anyref" } }], body);
+  };
+  emitIntegrityPredicate("__object_isFrozen", OBJ_FLAG_FROZEN, false, 1);
+  emitIntegrityPredicate("__object_isSealed", OBJ_FLAG_SEALED, false, 1);
+  emitIntegrityPredicate("__object_isExtensible", OBJ_FLAG_NONEXTENSIBLE, true, 0);
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -1298,4 +1348,8 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_keys",
   "__extern_length",
   "__extern_get_idx",
+  // #1472 Phase B Blocker A Half 1 (PR #1074) — object integrity predicates.
+  "__object_isFrozen",
+  "__object_isSealed",
+  "__object_isExtensible",
 ]);
