@@ -18,7 +18,8 @@
 // On failure, returns a list of `IrVerifyError`s rather than throwing, so
 // callers can decide whether to bail or fall back to the legacy path.
 
-import type { IrBlock, IrFunction, IrValueId } from "./nodes.js";
+import type { IrBlock, IrFunction, IrType, IrValueId } from "./nodes.js";
+import { asVal } from "./nodes.js";
 import type { ValType } from "./types.js";
 
 export interface IrVerifyError {
@@ -60,7 +61,81 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
     }
   }
 
+  // #1798 — defense-in-depth: every `return` terminator's value types must be
+  // Wasm-assignment-compatible with the function's declared `resultTypes`.
+  // The from-ast layer is responsible for inserting the right coercions
+  // (e.g. `extern.convert_any` for ref → externref returns); if it ever omits
+  // one, the malformed body would otherwise slip past this gate and fail
+  // Wasm validation only at instantiate time. Flagging it here demotes the
+  // function to legacy (integration.ts skips functions with verify errors)
+  // instead of emitting an invalid module.
+  for (const block of func.blocks) {
+    const t = block.terminator;
+    if (t.kind !== "return") continue;
+    if (t.values.length !== func.resultTypes.length) {
+      errors.push({
+        message: `return arity ${t.values.length} != declared result arity ${func.resultTypes.length}`,
+        func: func.name,
+        block: block.id as number,
+      });
+      continue;
+    }
+    for (let i = 0; i < t.values.length; i++) {
+      const declared = func.resultTypes[i]!;
+      const actual = operandIrType(func, block, t.values[i]!, new Set());
+      if (!actual) continue; // not locally visible — SSA-scope check reports it
+      if (!returnTypeAssignable(actual, declared)) {
+        errors.push({
+          message:
+            `return[${i}] type ${describeKind(actual)} not assignable to declared ` +
+            `result ${describeKind(declared)}`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+  }
+
   return errors;
+}
+
+/**
+ * #1798 — conservative Wasm-level assignment check for return values. Catches
+ * the divergences that produce invalid Wasm (scalar ↔ reference, or two
+ * different native scalars) while staying lenient on reference-shaped IrTypes
+ * — those all lower to `externref`-compatible refs and may legitimately flow
+ * into an `externref` (`any`) result without an SSA-visible coercion node
+ * (e.g. host-strings, already-externref values). False positives here would
+ * silently demote working IR functions to legacy, so the check only fires on
+ * an unambiguous mismatch.
+ */
+function returnTypeAssignable(actual: IrType, declared: IrType): boolean {
+  const a = asVal(actual);
+  const d = asVal(declared);
+  const isScalar = (v: ValType | null): boolean =>
+    !!v && (v.kind === "f64" || v.kind === "i32" || v.kind === "i64" || v.kind === "i8" || v.kind === "i16");
+
+  // Native scalar declared result: the value must be the same scalar kind.
+  if (isScalar(d)) {
+    if (!a) return false; // reference-shaped value into a scalar result — invalid
+    return a.kind === d!.kind;
+  }
+  // Native scalar value into a non-scalar (reference / externref) result —
+  // needs a box the IR doesn't emit; this is the #1798 numeric-`any` case the
+  // from-ast layer defers to legacy. Flag it so a future regression demotes.
+  if (isScalar(a)) {
+    return false;
+  }
+  // Both reference-shaped (or externref): treat as assignable. The lowerer's
+  // `extern.convert_any` re-tags any anyref subtype into externref, and an
+  // externref result accepts every reference IrType.
+  return true;
+}
+
+function describeKind(t: IrType): string {
+  const v = asVal(t);
+  if (v) return v.kind;
+  return t.kind;
 }
 
 function verifyBlock(func: IrFunction, block: IrBlock, defs: Set<IrValueId>, errors: IrVerifyError[]): void {
