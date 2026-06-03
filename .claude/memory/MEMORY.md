@@ -107,6 +107,7 @@
 - [feedback_sprint_tags.md](feedback_sprint_tags.md) — Tag sprint-N/begin at start, sprint/N at end
 - [feedback_no_stash_before_merge.md](feedback_no_stash_before_merge.md) — Never stash before merge, commit first
 - [feedback_no_git_stash_in_worktree.md](feedback_no_git_stash_in_worktree.md) — NEVER `git stash` in a worktree; stash stack is shared across worktrees, concurrent agents clobber each other
+- [feedback_explicit_main_push.md](feedback_explicit_main_push.md) — Only push to main when the user explicitly asks for that exact push each time
 - [feedback_regression_analysis.md](feedback_regression_analysis.md) — Regressions may be false-positive exposure, not real regressions; `pass → compile_timeout` is runner-load flake unless baseline compile >5s
 
 Most project context lives in `/workspace/CLAUDE.md`.
