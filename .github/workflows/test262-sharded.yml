@@ -656,6 +656,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # #1081 — need full history + the test262 submodule SHA so we can
+          # resolve the PR's merge-base and read the current test262 version
+          # for the hash-indexed cache lookup below.
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -702,6 +708,31 @@ jobs:
             echo "baseline_ts=0" >> "$GITHUB_OUTPUT"
             echo "baseline_sha=unknown" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Load cached baseline for merge-base (#1081)
+        id: merge_base_cache
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        run: |
+          # #1081 — prefer the hash-indexed run cache for the PR's merge-base
+          # over the moving "latest main" pointer fetched above. On a cache HIT
+          # this overwrites benchmarks/results/test262-current.jsonl with the
+          # merge-base's exact results, so the regression diff attributes only
+          # the PR's own commits. On a MISS it leaves the latest-main baseline
+          # in place and warns. Never fails the build.
+          if [ ! -d /tmp/js2wasm-baselines/runs ]; then
+            echo "::warning::#1081 baselines clone has no runs/ dir yet — using latest-main baseline."
+            echo "cache=miss" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MERGE_BASE=$(git merge-base origin/main HEAD 2>/dev/null || git merge-base HEAD origin/main 2>/dev/null || echo "")
+          TEST262_VERSION=$(git submodule status test262 2>/dev/null | awk '{print $1}' | tr -d '+-' || echo "")
+          echo "Merge-base: ${MERGE_BASE:-<unknown>}; test262 version: ${TEST262_VERSION:-<unknown>}"
+          node scripts/resolve-merge-base-baseline.mjs \
+            --baselines-dir /tmp/js2wasm-baselines \
+            --merge-base "$MERGE_BASE" \
+            --test262-version "$TEST262_VERSION" \
+            --dest benchmarks/results/test262-current.jsonl || \
+            echo "::warning::#1081 merge-base resolution errored (non-fatal); keeping latest-main baseline."
 
       - name: Check baseline staleness (#1235)
         id: staleness
@@ -952,6 +983,21 @@ jobs:
             console.log('Skipped duplicate entry (same pass/total as last run)');
           }
           "
+
+          # #1081 — write the commit-hash-indexed run cache entry. This lets a
+          # PR's regression-gate diff against main *at the PR's merge-base*
+          # instead of the moving "latest main" pointer, eliminating drift
+          # attribution. The summary carries test262_version so a stale-corpus
+          # entry can be rejected on read.
+          TEST262_VERSION=$(git -C "${{ github.workspace }}" submodule status test262 2>/dev/null | awk '{print $1}' | tr -d '+-' || echo "")
+          node scripts/write-run-cache.mjs \
+            --report /tmp/js2wasm-baselines/test262-current.json \
+            --jsonl  /tmp/js2wasm-baselines/test262-current.jsonl \
+            --sha    "${{ github.sha }}" \
+            --runs-dir /tmp/js2wasm-baselines/runs \
+            --ref    "${{ github.ref }}" \
+            --run-id "${{ github.run_id }}" \
+            --test262-version "$TEST262_VERSION" || echo "::warning::#1081 run-cache write failed (non-fatal)"
 
           # Commit and push to baselines repo
           cd /tmp/js2wasm-baselines

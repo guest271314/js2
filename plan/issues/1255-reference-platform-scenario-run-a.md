@@ -1,9 +1,10 @@
 ---
 id: 1255
 title: "Reference platform scenario: run a Node-oriented example on Wasmtime via Edge.js"
-status: ready
+status: done
 created: 2026-04-20
-updated: 2026-04-20
+updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -85,3 +86,40 @@ concrete, end-to-end deployment surfaces, not only compiler internals.
 - #640 WASI HTTP handler
 - #1035 WASI hello-fs: console.log + node:fs → WASI fd_write
 - #1099 Standalone execution demo — FizzBuzz on Wasmtime, zero JS host
+- #1772 spike edge.js as a Node API / WASI shim layer (the deeper shim this scenario motivates)
+
+## Resolution (2026-06-03)
+
+Reference demo added at `examples/edge-platform/`:
+
+- `generate-artifacts.ts` — a Node-oriented program using `node:fs`
+  (`writeFileSync`) + `console` that emits two files (a service manifest and a
+  deploy marker).
+- `run.sh` — compiles with `--target wasi` and runs the resulting `.wasm` on
+  **Wasmtime** with `--dir=.`. Verified end-to-end: 6,360-byte module,
+  `console.log` + both `writeFileSync` calls execute, two files written.
+- `README.md` — documents the load-bearing distinction (Node-compatible
+  platform API surface vs. Node.js as deployment runtime), the host-provides
+  vs. Node-provides table, the explicit `--dir` capability model, and honest
+  scope limitations (string-literal `writeFileSync` is the reliably-supported
+  WASI surface today; runtime-composed file contents and `readFileSync` under
+  WASI are tracked follow-ups #1036–#1042; the edge.js shim layer is #1772).
+
+The "Edge.js" framing in the title is the Wasmtime/WASI edge-platform host: the
+demo proves Node-oriented code runs on a Wasm-native host (`node:fs` → WASI
+`path_open`/`fd_write`/`fd_close`, `console.log` → `fd_write`) with the
+deployment unit importing **only** `wasi_snapshot_preview1` — no embedded JS
+engine.
+
+Guard test: `tests/issue-1255.test.ts` (3 cases) — compiles the example under
+`--target wasi`, asserts imports are exclusively `wasi_snapshot_preview1` (no
+`env`/`wasm:js-string` leakage), and that `node:fs` lowers to `path_open` +
+`fd_write`. All pass.
+
+### Acceptance criteria status
+
+- [x] A non-trivial Node-oriented example runs on Wasmtime via the WASI host.
+- [x] The scenario includes a concrete API (`node:fs` `writeFileSync`).
+- [x] Docs explain the Node-platform-API vs. Node.js-runtime distinction.
+- [x] Documented as a reference platform path (README + run.sh, CI-guarded test).
+- [x] Strong enough to seed future demos / launch material; deeper shim is #1772.

@@ -47,7 +47,12 @@ export function mapTsTypeToWasm(type: ts.Type, checker: ts.TypeChecker, fast?: b
     return { kind: fast ? "i32" : "f64" };
   }
   if (type.flags & ts.TypeFlags.Boolean || type.flags & ts.TypeFlags.BooleanLiteral) {
-    return { kind: "i32" };
+    // (#1788) Brand the i32 as boolean so struct field getters box it as a JS
+    // boolean (`__box_boolean`) rather than a number (`__box_number`). The brand
+    // is structurally inert — every `.kind === "i32"` check still matches, so
+    // boolean locals / params / arithmetic keep bare-i32 codegen. Only the
+    // struct-field boxing decision (`buildGetterExtract`) reads `.boolean`.
+    return { kind: "i32", boolean: true };
   }
   if (type.flags & ts.TypeFlags.String || type.flags & ts.TypeFlags.StringLiteral) {
     return { kind: "externref" }; // JS string pass-through
