@@ -113,6 +113,7 @@ import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
 import {
+  ensureEncodeIntoHelper,
   ensureNativeStringExternBridge,
   ensureTextEncodingHelpers,
   stringConstantExternrefInstrs,
@@ -5500,6 +5501,50 @@ function compileCallExpression(
         }
         fctx.body.push({ op: "call", funcIdx: decodeU8Idx } as Instr);
         return nativeStringType(ctx);
+      }
+
+      // #1780 — TextEncoder.prototype.encodeInto(source, dest). Writes UTF-8
+      // bytes of `source` into the `dest` Uint8Array in place and returns a
+      // `{ read, written }` result struct. Native (no host import). The dest
+      // Uint8Array backing array is packed i8 under WASI/standalone, f64
+      // otherwise (mirrors `typedArrayVecStorage`), so pick the matching helper.
+      if (recvSym === "TextEncoder" && method === "encodeInto") {
+        const destElemKey: "f64" | "i8_byte" = ctx.wasi || ctx.standalone ? "i8_byte" : "f64";
+        const { encodeIntoIdx, destVecTypeIdx, resultTypeIdx } = ensureEncodeIntoHelper(ctx, destElemKey);
+        const recvResult = compileExpression(ctx, fctx, propAccess.expression);
+        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
+        // arg0: source string
+        if (expr.arguments.length > 0) {
+          compileExpression(ctx, fctx, expr.arguments[0]!, nativeStringType(ctx));
+        } else {
+          compileStringLiteral(ctx, fctx, "");
+        }
+        // arg1: destination Uint8Array (vec ref)
+        const destExpected: ValType = { kind: "ref_null", typeIdx: destVecTypeIdx };
+        if (expr.arguments.length > 1) {
+          const destType = compileExpression(ctx, fctx, expr.arguments[1]!, destExpected);
+          if (destType && !valTypesMatch(destType, destExpected)) {
+            coerceType(ctx, fctx, destType, destExpected);
+          }
+        } else {
+          fctx.body.push({ op: "ref.null", typeIdx: destVecTypeIdx } as Instr);
+        }
+        for (let i = 2; i < expr.arguments.length; i++) {
+          const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
+          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
+        }
+        // Helper leaves (i32 read, i32 written) on the stack. Materialize the
+        // `{ read, written }` result struct here, in this normally-compiled
+        // function, where struct.new of a registered type lowers cleanly (#1780).
+        fctx.body.push({ op: "call", funcIdx: encodeIntoIdx } as Instr);
+        const writtenLocal = allocLocal(fctx, "__enc_into_written", { kind: "i32" });
+        fctx.body.push({ op: "local.set", index: writtenLocal } as Instr);
+        // read is now on top; convert to f64 for the struct's `read` field
+        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: writtenLocal } as Instr);
+        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: resultTypeIdx };
       }
     }
 
