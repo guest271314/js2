@@ -4302,8 +4302,11 @@ function _formatDate(ts: bigint, mode: number): string {
 
   const wday = _DATE_DAY_NAMES[day];
   const mon = _DATE_MONTH_NAMES[month];
-  // Years < 0 keep the sign and pad to 4 digits of magnitude (e.g. "-000001").
-  const yearStr = year < 0 ? "-" + _datePad(year, 6) : _datePad(year, 4);
+  // DateString / UTCString family (§21.4.4.41.1, §21.4.4.43) require a minimum
+  // of four digits with a leading sign on negative years: -1 → "-0001",
+  // -12345 → "-12345". The ISO path (toISOString) uses its own ±YYYYYY 6-digit
+  // form and is handled by `d.toISOString()` above, so it is unaffected.
+  const yearStr = year < 0 ? "-" + _datePad(year, 4) : _datePad(year, 4);
   const dd = _datePad(date, 2);
   const hh = _datePad(hours, 2);
   const mm = _datePad(minutes, 2);
