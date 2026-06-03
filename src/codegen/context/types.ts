@@ -710,6 +710,9 @@ export interface CodegenContext {
   testRuntime: boolean;
   /** Map from native string helper name → function index */
   nativeStrHelpers: Map<string, number>;
+  /** #1539: map from native standalone-regex helper name → function index.
+   *  Mirrors `nativeStrHelpers`; populated by `src/codegen/native-regex.ts`. */
+  nativeRegexHelpers: Map<string, number>;
   /** #1677: import-function count captured the instant the native-string
    *  helpers were first emitted (mid-finalize). Used by
    *  `reconcileNativeStrFinalizeShift` to shift the helper bodies + map by the

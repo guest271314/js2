@@ -379,3 +379,61 @@ narrowed refusals and a dual-run equivalence test) as the buildable slice.
 The `regress` side-module sections above are retained as **possible Phase 2d
 material only**, gated on the two-instance design + test262 data; they are
 **not** the Phase 2a plan.
+
+---
+
+## Implementation Notes (sd-1539, 2026-06-03) — bytecode VM, not specialised emission
+
+Author: senior-dev (sd-1539), built on the architect's pure-WasmGC plan.
+**Mechanism decision recorded before writing code (feasibility:hard gate).**
+
+### Why a compiled-bytecode + single generic interpreter, not per-pattern raw Wasm
+
+The architect offered two run-time forms for Phase 2a: (a) "specialised
+per-pattern matcher functions emitted directly from the parsed AST (no
+interpreter)" — floated as "simpler to land first" — or (b) a generic
+interpreter over a compiled program. I chose **(b)** after weighing the
+control-flow cost:
+
+- A backtracking matcher fundamentally needs an **explicit backtrack stack**
+  in standalone (no JS call stack to recurse on — the architect flags this in
+  the edge-cases section). Form (a) would therefore have to *generate*
+  backtracking control flow — nested `block`/`loop`/`br` with a save/restore
+  stack — **as raw `Instr[]`, recursively, per pattern**. That is the single
+  hardest-to-verify thing to emit in raw Wasm, re-derived for every distinct
+  regex AST shape; stack-balance / branch-depth bugs there are exactly the
+  regression class this role exists to prevent.
+- Form (b) writes that backtracking VM **once**, as one hand-authored Wasm
+  function (`__regex_run`), debugged once. The per-pattern work becomes pure
+  TypeScript: parse the pattern → emit an `i32[]` bytecode program — trivially
+  unit-testable without Wasm. A bytecode bug is a data bug, not a
+  codegen-control-flow bug.
+- It is also exactly the `$progIdx`/bytecode model the architect names as the
+  Phase-2b+ promotion target, so (b) builds 2a on the spine 2b/2c already
+  need, avoiding a throwaway specialised emitter. (Mirrors #1584's own
+  bytecode-VM conclusion.)
+
+### Shapes
+
+- Compile time: `src/codegen/regex/parse.ts` (pattern → AST) + `compile.ts`
+  (AST → `number[]` program; backtracking VM opcodes `CHAR`, `ANY`, `CLASS`,
+  `SPLIT`, `JMP`, `SAVE`, `BOL`, `EOL`, `MATCH`). Capture count at compile
+  time. Pure TS, fully unit-tested.
+- `$NativeRegExp` struct supersedes #682's `__StandaloneRegExp {pattern,
+  flags}` — fields `{ prog: ref array<i32>, nGroups: i32, flags: i32,
+  source: ref $NativeString, lastIndex: mut f64 }`. #682's literal-substring
+  `.test` (`indexOf>=0`) becomes the `CHAR`-only degenerate path of the VM —
+  subsumed, not deleted.
+- Run time: one `__regex_run(prog, str, startIdx, caps) -> i32` Wasm helper
+  in `src/codegen/native-regex.ts`, registered in `ctx.nativeRegexHelpers`
+  (mirrors `ctx.nativeStrHelpers`). Backtrack stack = a WasmGC `i32` array;
+  a bounded step counter guards catastrophic backtracking (documented cap).
+
+### First-PR slice (within 2a)
+
+`RegExp.prototype.test`/`.exec`, `String.prototype.search`/`match`; pattern
+forms literal / `.` / `[...]` / `[^...]` / `^` / `$` / `* + ? {n,m}` greedy /
+`|` / `(?:…)` / capturing `(…)`; flags `i` (ASCII fold) and `g`. Everything
+the architect lists under "Refuse (narrowed)" stays a clean compile error
+citing the right later phase. Dual-run equivalence test compiles each pattern
+both JS-host and `--target standalone` and asserts identical results.
