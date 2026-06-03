@@ -74,3 +74,23 @@ describe("#1718 static helper arity + descriptors", () => {
     expect(sum).toBe(10);
   });
 });
+
+describe("#1718 zip/zipKeyed GetOptionsObject validation", () => {
+  // ES2025 GetOptionsObject: options must be undefined or an Object; any other
+  // value throws TypeError (test262 Iterator/{zip,zipKeyed}/options.js).
+  const invalid = [null, true, "", Symbol(), 0, 0n];
+
+  it.each(invalid)("Iterator.zipKeyed({}, %o) throws TypeError", (bad) => {
+    expect(() => I.zipKeyed({}, bad)).toThrow(TypeError);
+  });
+
+  it.each(invalid)("Iterator.zip([], %o) throws TypeError", (bad) => {
+    expect(() => I.zip([], bad)).toThrow(TypeError);
+  });
+
+  it("accepts undefined and object options", () => {
+    expect(() => I.zipKeyed({})).not.toThrow();
+    expect(() => I.zipKeyed({}, undefined)).not.toThrow();
+    expect(() => I.zipKeyed({}, {})).not.toThrow();
+  });
+});
