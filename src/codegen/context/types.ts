@@ -9,6 +9,7 @@
 import { ts } from "../../ts-api.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
+import type { ObjectRuntimeTypes } from "../object-runtime.js";
 
 export interface CodegenError {
   message: string;
@@ -862,6 +863,11 @@ export interface CodegenContext {
    *  compile-error so a single source construct emits at most one error per
    *  import name. Lazily initialized in late-imports.ts. */
   standaloneRefusedImports?: Set<string>;
+  /** (#1472 Phase B) Type indices for the Wasm-native open-object runtime
+   *  ($Object / $PropMap / $PropEntry), allocated once by ensureObjectRuntime
+   *  in object-runtime.ts. Undefined until first open-object op under
+   *  --target standalone. */
+  objectRuntimeTypes?: ObjectRuntimeTypes;
   /** (#682) Native standalone RegExp engine hook. Standalone mode currently
    *  enables the reduced literal-substring backend; null means RegExp lowering
    *  must stay on the explicit #1474 refusal path. */
