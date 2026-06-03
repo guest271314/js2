@@ -1,9 +1,10 @@
 ---
 id: 1748
 title: "readonly array as a nested struct field traps on indexed read (compiled WasmGC)"
-status: ready
+status: done
 created: 2026-05-30
-updated: 2026-05-30
+updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -68,3 +69,25 @@ compiled code isn't forced to drop the modifier.
 - Found via the slice-(b) "compile the dispatch loop itself" arm.
 - See [[1747]] for a sibling codegen trap found in the same investigation
   (`[].pop()` on an empty array).
+
+## Resolution (2026-06-03)
+
+Root cause: a `readonly T[]` / `ReadonlyArray<T>` type has the TS checker
+symbol name `"ReadonlyArray"`, not `"Array"`. `resolveWasmType`
+(`src/codegen/index.ts`) only matched `sym?.name === "Array"` when lowering a
+type to the vec ref `ref_null $vec_<elem>`. A `ReadonlyArray`-typed struct
+field therefore fell through to the anonymous-struct / externref path while the
+object literal's array value was still built as a vec — the two
+representations mismatched and indexed reads trapped.
+
+Fix (all `src/codegen/index.ts`):
+1. `resolveWasmType` — match `sym?.name === "Array" || === "ReadonlyArray"`.
+2. IR `resolvePositionType` — unwrap the `readonly` `TypeOperatorNode` to its
+   inner type, and accept `ReadonlyArray<T>` in the `Array<T>` reference arm
+   (keeps the IR path active rather than falling back to legacy).
+
+`ensureStructForType` already guarded `ReadonlyArray` (so it never built an
+anon struct for the field); the missing half was `resolveWasmType` picking the
+vec type for the field slot. Tests: `tests/issue-1748.test.ts` (4 cases —
+nested `readonly number[]`, `ReadonlyArray<number>`, `readonly string[]`,
+plain control). IR fallback gate + tsc clean.

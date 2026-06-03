@@ -770,3 +770,30 @@ slice, NOT this foundation:
    member-access on `any` to `__extern_length` / `__extern_get_idx`.
 `__object_values` / `__object_entries` / `__object_assign` / `__for_in_keys`
 stack trivially on the `$ObjVec` + `__objvec_*` primitives added here.
+
+## Phase B Blocker B Slice 2 — enumeration consumer (sd-1472, 2026-06-03)
+
+Branch `issue-1472-blocker-b-slice2` off origin/main (post-#1075). Wires the
+typed enumeration *consumer* chain to the native `$ObjVec` foundation so
+`Object.keys(o)` results are usable host-free in standalone.
+
+### What landed
+- `src/codegen/type-coercion.ts` `buildVecFromExternref`: under `ctx.standalone`,
+  SKIP the host-only `env::__array_from_iter` materialization (the source is
+  already an indexable externref — the `$ObjVec` from Object.keys/values/entries)
+  and read elements via the native `__extern_get_idx(obj, f64(idx))` instead of
+  `__extern_get(obj, boxed-index)` (the native `__extern_get` casts its key to
+  `$AnyString` and would trap on a boxed number). JS-host path unchanged.
+- `src/codegen/property-access.ts` `.length` block: under `ctx.standalone`, when
+  the receiver type is `any`/`unknown` and no vec fast-path matched, route
+  `.length` to the native `__extern_length` (the `$ObjVec` length reader) instead
+  of falling through to `__extern_get("length")`. JS-host path unchanged.
+- `tests/issue-1472.test.ts`: (a) `const ks: string[] = Object.keys(o); for…of`
+  validates + leaks zero `__array_from_iter`/object/array host imports; (b)
+  `(ks.length)` on an `any` routes to native `__extern_length`, validates, emits
+  it as a defined fn.
+
+### Validation
+- `tests/issue-1472.test.ts` — 15 pass. No gc-mode regression: issue-1471,
+  issue-1664, and the externref-array-destructuring / array-rest-destructuring /
+  for-of-array-destructuring / arguments-object equivalence suites all green.
