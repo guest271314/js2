@@ -903,6 +903,44 @@ try/catch-across-await + nested await + async arrows/methods → explicit
   `const x = await P; rest`, `await P; rest`). Returns `null` outside the shape
   gate → legacy fallback.
 - Issue → `status: in-progress`.
+- **4b44f5ae3** — `emitAsyncStateMachine` driver + `emitMakeContinuationCallback`
+  (item 3, DONE): prefix → awaited-expr → captures → continuation synth →
+  `__make_callback(cbId, capStruct)` → `Promise_then2(awaited, contCb, null)` →
+  return chained Promise. `.then`-chaining model (no Promise_new_pending /
+  manual settle — the continuation's `return X` is the cb's externref result,
+  and `.then`'s returned promise resolves to it).
+- **00649ccdb** — function-body.ts activation hook + AwaitExpression gate
+  (items 4-5-7, DONE): on eligible JS-host single-tail-await fns,
+  `rewriteFuncResultType(externref)` + `asyncCpsActive` + drive the machine +
+  skip the normal loop; nested/non-tail await under CPS → `reportError`.
+
+### DESIGN WALL — gate flip blocked (item 9, NOT done in PR1)
+
+Flipping `ASYNC_CPS_ENABLED` → true is a **genuine design wall**, not mechanical.
+The existing compiler lowers async functions **synchronously**: a caller does
+`f() as any as number` and gets the unwrapped value directly (see
+`tests/equivalence/async-function.test.ts` — "await expression is identity
+(pass-through)" exercises exactly `const v = await getValue(); return v` and
+asserts `test() as any as number === 100`). The CPS lowering changes the async
+return model to a **real Promise object** (externref). Flipping the gate
+therefore breaks the entire synchronous-async test suite and very likely many
+test262 async cases that depend on the sync model.
+
+Turning CPS on requires a **coordinated migration of the synchronous-async
+contract** (call sites, await pass-through, the whole async test corpus,
+test262 expectations) — a separate, larger effort that needs a product/architect
+decision, NOT something to force inside PR1. So **PR1 lands the full driver +
+wiring INERT** (gate off): emitted Wasm is byte-identical, existing async tests
+pass unchanged (verified: `async-function.test.ts` + `async-await.test.ts` green
+with the wiring in). The driver is exercised only when the gate is flipped in a
+follow-up that owns the model migration.
+
+Remaining (follow-up, gated): flip `ASYNC_CPS_ENABLED`, migrate the
+synchronous-async contract + tests, add `tests/issue-1042.test.ts` (the 5
+canonical cases — which require the gate on to pass). The `Promise_new_pending`
+/ `Promise_settle_*` runtime primitives committed in e42882074 remain available
+if the chosen settle model needs them, but the current driver uses the simpler
+`.then`-chaining path and does not require them.
 
 ### `__make_callback` contract (confirmed for the driver)
 `__make_callback: (i32 cbId, externref captures) -> externref` (index.ts:7060).
