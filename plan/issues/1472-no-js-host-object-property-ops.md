@@ -770,3 +770,48 @@ slice, NOT this foundation:
    member-access on `any` to `__extern_length` / `__extern_get_idx`.
 `__object_values` / `__object_entries` / `__object_assign` / `__for_in_keys`
 stack trivially on the `$ObjVec` + `__objvec_*` primitives added here.
+
+## Phase B Blocker A Half 2 — freeze/seal WRITE path (sd-1472, 2026-06-03)
+
+Branch `issue-1472-blocker-a-half2` off origin/main (post-#1075/#1077). Completes
+the object-integrity surface: the SET path + write enforcement, building on
+Half 1's read predicates + `OBJ_FLAG_*` constants (PR #1074, on main).
+
+### What landed
+- `src/codegen/object-runtime.ts`:
+  - Three native SET helpers via `emitSetFlags`: `__object_preventExtensions`
+    (sets NONEXTENSIBLE), `__object_seal` (NONEXTENSIBLE|SEALED), `__object_freeze`
+    (NONEXTENSIBLE|SEALED|FROZEN). Each ORs the bits into `$Object.flags`
+    (field 4) and returns the ORIGINAL externref (identity preserved per ES
+    §20.5.2.{5,6,18}). Non-`$Object` receiver returned unchanged. Added all 3 to
+    `OBJECT_RUNTIME_HELPER_NAMES`.
+  - WRITE GATES: `__extern_set` refuses ALL writes when `o.flags & FROZEN`
+    (return early, sloppy no-op; strict throw deferred to #1473). `__obj_insert`
+    empty-slot branch refuses NEW keys when `o.flags & NONEXTENSIBLE` — so a
+    sealed/non-extensible object still allows updates of existing keys (the
+    update-in-place branch is ungated) but rejects key additions, matching ES
+    §10.4.7.
+- `src/codegen/expressions/calls.ts`: at the Object.freeze/seal/preventExtensions
+  handler, under `ctx.standalone`, coerce a non-externref ref/ref_null/anyref
+  receiver to externref (`extern.convert_any`) BEFORE the externref branch — so
+  an open-`any` receiver actually reaches the native SET helper (otherwise it
+  fell through to the return-arg no-op and flags were never set). JS-host path
+  unchanged.
+- `tests/issue-1472.test.ts`: the 3 SET mutators emit as defined funcs, validate,
+  instantiate with `{}`, leak zero object host imports (standalone); gc-mode
+  Object.freeze still binds `env::__object_freeze` (regression guard).
+
+### Scoping note
+A runtime freeze→write→read *value* assertion is not expressible in standalone TS
+source: a locally-built `{}` is narrowed by TS to a closed struct that bypasses
+the open-`$Object` runtime (the SET helpers + write gates only fire on the open
+runtime). This is the same TS-narrowing limit documented for the Half 1 read
+predicates and the $ObjVec foundation — the write-gate enforcement is correct by
+construction (FROZEN/NONEXTENSIBLE bit checks in `__extern_set`/`__obj_insert`)
+and unit-covered the moment an open receiver reaches it.
+
+### Validation
+- `tests/issue-1472.test.ts` — 15 pass. issue-1462 + issue-1471 green. The 3
+  pre-existing `object-mutability.test.ts` gc-stub failures (isFrozen/isSealed/
+  isExtensible) are unrelated and unchanged by this standalone-only gate
+  (verified identical against origin/main HEAD). tsc clean.

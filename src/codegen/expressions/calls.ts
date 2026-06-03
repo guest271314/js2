@@ -3619,8 +3619,28 @@ function compileCallExpression(
       }
 
       // Compile the argument — returns the object itself (freeze/seal return their arg)
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+      let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (!argType) return null;
+
+      // #1472 Phase B Blocker A Half 2 — open-`any` receiver normalization.
+      // The open-object representation is a $Object wrapped to externref, but a
+      // variable reference (`Object.freeze(o)` where `o: any`) can compile to a
+      // ref/ref_null/anyref rather than externref, which would fall through to
+      // the return-arg no-op and never reach the native __object_freeze (the
+      // $flags would never be set). In standalone, coerce a non-externref
+      // ref/anyref receiver to externref first (extern.convert_any) so the
+      // native SET helper fires and the integrity bits actually get written.
+      // JS-host mode is unchanged (it already routes externref args to the host
+      // import; non-externref args there are typed objects with no dynamic
+      // freeze semantics).
+      if (
+        ctx.standalone &&
+        argType.kind !== "externref" &&
+        (argType.kind === "ref" || argType.kind === "ref_null" || argType.kind === "anyref")
+      ) {
+        coerceType(ctx, fctx, argType, { kind: "externref" });
+        argType = { kind: "externref" };
+      }
 
       // For externref objects, delegate to host import for runtime enforcement
       if (argType.kind === "externref") {
