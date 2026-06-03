@@ -1566,6 +1566,15 @@ function fixCallArgTypesInBody(
     let argOffset = isCallRef ? -1 : 0;
     let pos = ci - 1;
     const insertions: Array<{ afterPos: number; instrs: Instr[] }> = [];
+    // Track insert positions already queued, so a chain of delta-0 producers
+    // feeding a single call argument (e.g. `local.get; any.convert_extern;
+    // ref.cast; struct.get` for a native-Error `.name` read) does not queue
+    // the SAME externref→GC-ref coercion once per link. Without this, the
+    // backward walk re-coerces the one value 4× and the 2nd `any.convert_extern`
+    // receives an already-cast `(ref null $AnyString)` operand → invalid Wasm
+    // (#1791). The forward pass-through scan (below) collapses each chain to a
+    // single `insertPos`, so deduping by that position is exact.
+    const queuedInsertPositions = new Set<number>();
     // Track whether we've traversed through a sub-expression consumer.
     // When this is true, the backward walk's argOffset may conflate
     // sub-expression inputs with call arguments, so we restrict coercions
@@ -1634,7 +1643,8 @@ function fixCallArgTypesInBody(
             // Previously, ref→externref (extern.convert_any) was exempted as
             // "safe", but this is wrong when the intermediate call expects a
             // GC ref type, not externref (#963).
-            if (!inSubExpr) {
+            if (!inSubExpr && !queuedInsertPositions.has(insertPos)) {
+              queuedInsertPositions.add(insertPos);
               insertions.push({ afterPos: insertPos, instrs: coercion });
             }
           }

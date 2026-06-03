@@ -1107,6 +1107,19 @@ export function compilePropertyAccess(
       fctx.body.push({ op: "any.convert_extern" } as Instr);
       fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
       fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+      // The `$Error_struct` message/name fields are stored as `externref`
+      // (populated by the ctor via `extern.convert_any` over a native
+      // string). In nativeStrings/WASI mode every other string producer hands
+      // consumers a `$AnyString` ref, so coerce here once and return that ref
+      // type. Otherwise the externref result flows into native string ops
+      // (`=== `, `.length`, concat, interpolation) that expect `(ref null
+      // $AnyString)`, and the per-consumer externref→string coercion either
+      // misfires or is skipped → invalid Wasm (#1791).
+      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        const nativeRef: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+        coerceType(ctx, fctx, { kind: "externref" }, nativeRef);
+        return nativeRef;
+      }
       return { kind: "externref" };
     }
   }
@@ -2324,8 +2337,16 @@ export function compilePropertyAccess(
 
   // Handle string.length
   if (isStringType(objType) && propName === "length") {
-    compileExpression(ctx, fctx, expr.expression);
+    const recvType = compileExpression(ctx, fctx, expr.expression);
     if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      // The receiver must be a `$AnyString` ref before reading its `len`
+      // field. Some string producers (e.g. the native Error `.name`/`.message`
+      // reader, #1104/#1791) hand back an `externref`; coerce it to the GC
+      // string ref first, otherwise `struct.get $AnyString` validates against
+      // an externref operand → invalid Wasm (#1791).
+      if (recvType && recvType.kind === "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      }
       // len is field 0 of $AnyString — works for both FlatString and ConsString
       fctx.body.push({ op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 });
       return { kind: "i32" };
