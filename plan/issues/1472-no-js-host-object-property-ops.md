@@ -649,3 +649,69 @@ native `__hasOwnProperty` func alone is dead code. This is a **call-site
 method-dispatch gap**, not a runtime gap, and belongs with the
 `__extern_method_call` / `__get_builtin` dispatch slice (Slice "6"), which will
 route `obj.m(...)` through the prototype vtable. Tracked there.
+
+## Phase B — NEXT BLOCKERS + freeze/seal code preserved (senior-dev handoff 2026-06-03)
+
+Slices 1 (#1059) + 2 (#1067) merged: the $Object open-hash-map runtime core
+(new/get/set + proto walk) and __delete_property/tombstone. These are the
+dominant 26,880-row standalone lever. The remaining Object.* surface is gated on
+**two foundational blockers** (per-method slices keep dead-ending on these):
+
+### Blocker A — open-`any` receiver does not present as externref at Object.* call sites
+
+`Object.freeze(o)` / `Object.isFrozen(o)` / `o.hasOwnProperty(k)` only route to a
+helper when the *static wasm type* of the receiver is `externref`
+(`calls.ts` Object.freeze handler ~L3599; `compilePropertyIntrospection` in
+`object-ops.ts` ~L3021). For `const o: any = {}`:
+- The object LITERAL `{}` in `any` context DOES compile to externref
+  (`literals.ts:578` → `__new_plain_object`). So creation is externref.
+- But a later REFERENCE `o` in **call-argument position** (`Object.freeze(o)`)
+  goes through `compileExpression(o)`, which returns the variable's declared
+  wasm type — NOT necessarily externref. Member access `o.x` works (property
+  path handles it) but `Object.freeze(o)` falls through to the
+  return-arg NO-OP at `calls.ts` ~L3620 (helper never invoked; verified
+  `__object_freeze` ends up unreferenced).
+
+FIX (contained, ~6 lines per handler, no new types): in each of the
+`Object.freeze/seal/preventExtensions` and `isFrozen/isSealed/isExtensible` and
+`isExtensible` handlers, under `ctx.standalone`, when the compiled `argType` is a
+`ref`/`ref_null`/`anyref` (the open-object representation) rather than externref,
+call `coerceType(ctx, fctx, argType, { kind: "externref" })` (supports
+ref→externref via `extern.convert_any`, type-coercion.ts:130) BEFORE the
+`argType.kind === "externref"` branch, and treat it as externref thereafter.
+ALSO gate the compile-time static fast-paths (`ctx.frozenVars`/`sealedVars`/
+`nonExtensibleVars`) on `!ctx.standalone` — they are execution-order-blind and
+poison runtime-accurate isFrozen/isExtensible (verified: isFrozen returned 1
+BEFORE freeze ran). Same coercion unblocks hasOwnProperty/propertyIsEnumerable
+in compilePropertyIntrospection. Keep the JS-host path untouched (gate on
+ctx.standalone).
+
+### Blocker B — native $Vec build/iterate helper
+
+keys/values/entries, __object_assign (sources-array), __extern_get_idx/has_idx/
+length all need a native element-typed $Vec build+iterate. No single
+`anyVecTypeIdx` exists (vec types are per-element). Build on the machinery in
+literals.ts/type-coercion.ts. This is its own slice.
+
+### freeze/seal helper code (WRITTEN + tsc-clean, reverted pending Blocker A)
+
+Drops into object-runtime.ts once Blocker A lands. Uses $Object.$flags
+(field idx 4). Object-level flag bits (distinct from $PropEntry.$flags):
+`OBJ_FLAG_NON_EXTENSIBLE=0x01, OBJ_FLAG_SEALED=0x02, OBJ_FLAG_FROZEN=0x04`
+(freeze⊃seal⊃preventExtensions: freeze sets all 3, seal sets {nonext,sealed}).
+- `__object_preventExtensions/seal/freeze(externref)->externref`: `emitSetFlags`
+  helper — any.convert_extern; if ref.test $Object → cast + `flags |= bits`;
+  return the ORIGINAL externref (identity preserved). Non-$Object returned
+  unchanged.
+- `__object_isFrozen/isSealed(externref)->i32`: 1 iff bit set; non-$Object → 1
+  (primitive vacuously frozen/sealed §19.1.2.15/16).
+- `__object_isExtensible(externref)->i32`: 1 iff NON_EXTENSIBLE clear;
+  non-$Object → 0.
+- WRITE GATES (in object-runtime.ts): in `__obj_insert` empty-slot branch, if
+  `o.flags & NON_EXTENSIBLE` return (refuse NEW key, sloppy no-op). In
+  `__extern_set` after casting `o`, if `o.flags & FROZEN` return (refuse ALL
+  writes). Strict-mode throw deferred to error-machinery slice (#1473).
+- All 6 added to OBJECT_RUNTIME_HELPER_NAMES so ensureLateImport routes them.
+- Tests written (instantiate-and-run under Node WasmGC): isFrozen flips on
+  freeze; freeze refuses update; preventExtensions refuses new key/allows
+  update; seal isSealed+update; isExtensible flips; freeze returns same object.
