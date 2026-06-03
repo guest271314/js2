@@ -1,5 +1,5 @@
 ---
-id: 1788
+id: 1789
 title: "standalone/WASI module-level const/let initializers never run before exported functions → TDZ trap on any module-const object access"
 status: done
 created: 2026-06-03

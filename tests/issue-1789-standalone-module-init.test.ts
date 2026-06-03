@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #1788 — module-level const/let initializers must run before ANY exported
+ * #1789 — module-level const/let initializers must run before ANY exported
  * function in standalone / WASI mode, not just `_start`.
  *
  * Before this fix, `--target wasi` emitted `__module_init` only behind the
@@ -29,7 +29,7 @@ async function instantiateWasi(src: string): Promise<Record<string, unknown>> {
   return instance.exports as Record<string, unknown>;
 }
 
-describe("#1788 standalone module-init runs before exported functions", () => {
+describe("#1789 standalone module-init runs before exported functions", () => {
   it("reads a module-level const object (valueOf) from a direct export call without _start", async () => {
     const src = `const o = { valueOf() { return 42; } };
 export function test(): number { return (o as any) * 1; }`;

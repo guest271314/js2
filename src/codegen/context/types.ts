@@ -742,7 +742,7 @@ export interface CodegenContext {
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
   anyHelpersEmitted: boolean;
-  /** (#1788) Whether the WASI module-init guard (idempotent __module_init +
+  /** (#1789) Whether the WASI module-init guard (idempotent __module_init +
    *  prepended init call on exports) has been applied. */
   moduleInitGuardApplied: boolean;
   /** Shape-inferred array-like variables */

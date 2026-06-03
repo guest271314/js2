@@ -1461,7 +1461,7 @@ export function generateModule(
 }
 
 /**
- * (#1788) Ensure `__module_init` runs before any exported function in WASI
+ * (#1789) Ensure `__module_init` runs before any exported function in WASI
  * mode. Two steps, both idempotent:
  *   1. Add a fresh `__init_done` i32 global (0) and prepend a self-guard to
  *      `__module_init`: `if (__init_done) return; __init_done = 1; …`.
@@ -1542,7 +1542,7 @@ function addWasiStartExport(ctx: CodegenContext): void {
     }
   }
 
-  // (#1788) Make module init run before ANY exported function, not just
+  // (#1789) Make module init run before ANY exported function, not just
   // `_start`. The test262 standalone harness calls exports (e.g. `test()`)
   // directly without invoking `_start`, so a module-level `const`/`let`
   // object initializer would never run and a read of that binding would trip
