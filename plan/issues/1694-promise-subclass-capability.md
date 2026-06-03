@@ -195,3 +195,16 @@ traps that dispatch through the `__call_fn_N` / `__construct_*` exports, owned b
 carve a Promise-only fix.** Re-run
 `built-ins/Promise/{all,allSettled,any,race}/*ctor*`/`*species*` once `#1632b`'s
 representation lands.
+
+## Architect spec written (2026-06-03, senior-developer)
+
+Both re-validations above converge on the same owner: the A.i fix is now
+specced centrally as **#1632b — host-callable/constructible compiled-fn
+representation** in
+`plan/issues/1632-spec-gap-function-bind-tostring-internals.md`
+(`_wrapCallableForHost`: a `Proxy` over a real `function` target carrying
+`apply` + `construct` traps that dispatch through `__call_fn_N`). The
+combinator hook is in `_resolveCtor` (runtime.ts:7822): for the
+`.call(closure, …)` case it must return `_wrapCallableForHost(thisArg,
+exports)` so V8's `NewPromiseCapability(C)` can `Construct(C, [executor])`.
+Sub-task **#1632b-1** (runtime-only, no codegen) closes this A.i family.
