@@ -2247,8 +2247,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   }
 
   // Handle `new TypedArray(n)` — TypedArray constructors (Uint8Array, Int32Array, Float64Array, etc.)
-  // TypedArrays are fixed-length numeric arrays. We represent them as vec structs with f64 elements,
-  // where length equals capacity (no dynamic growth like regular arrays).
+  // TypedArrays are fixed-length numeric arrays. Native Uint8Array uses the
+  // byte-oriented i8_byte vec; other typed arrays stay on the legacy f64
+  // representation for now.
   if (ts.isIdentifier(expr.expression)) {
     const TYPED_ARRAY_NAMES = new Set([
       "Int8Array",
@@ -2262,8 +2263,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (TYPED_ARRAY_NAMES.has(expr.expression.text)) {
-      const elemWasm: ValType = { kind: "f64" };
-      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
+      const isNativeUint8Array = noJsHost(ctx) && expr.expression.text === "Uint8Array";
+      const elemWasm: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
+      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
@@ -2283,7 +2286,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         const argSym = argType.getSymbol?.();
         // #1654 — `new Uint8Array(arrayBuffer)` views the buffer's bytes. The
         // ArrayBuffer/DataView is backed by an i32_byte vec; copy the bytes
-        // into this TypedArray's f64 backing array. Must precede the
+        // into this TypedArray's backing array. Must precede the
         // size-constructor path (an ArrayBuffer is NOT a numeric length).
         //
         // #1670 — only in no-JS-host mode. The byte-buffer view path emits an
@@ -2372,6 +2375,63 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
                 dstTypeIdx: arrTypeIdx,
                 srcTypeIdx: arrTypeIdx,
               } as Instr);
+            } else if (srcArrTypeIdx >= 0) {
+              const srcArrDef = ctx.mod.types[srcArrTypeIdx];
+              const dstArrDef = ctx.mod.types[arrTypeIdx];
+              if (srcArrDef?.kind === "array" && dstArrDef?.kind === "array") {
+                const srcDataLocal = allocLocal(fctx, `__ta_src_data_${fctx.locals.length}`, {
+                  kind: "ref",
+                  typeIdx: srcArrTypeIdx,
+                });
+                const copyIndexLocal = allocLocal(fctx, `__ta_copy_i_${fctx.locals.length}`, { kind: "i32" });
+                fctx.body.push({ op: "local.get", index: srcVecLocal });
+                fctx.body.push({ op: "struct.get", typeIdx: srcTypeIdx, fieldIdx: 1 });
+                fctx.body.push({ op: "local.set", index: srcDataLocal });
+                fctx.body.push({ op: "i32.const", value: 0 });
+                fctx.body.push({ op: "local.set", index: copyIndexLocal });
+
+                const srcGetOp =
+                  srcArrDef.element.kind === "i8"
+                    ? "array.get_u"
+                    : srcArrDef.element.kind === "i16"
+                      ? "array.get_s"
+                      : "array.get";
+                const convertInstrs: Instr[] =
+                  srcArrDef.element.kind === "f64" && dstArrDef.element.kind !== "f64"
+                    ? [{ op: "i32.trunc_sat_f64_s" } as Instr]
+                    : srcArrDef.element.kind !== "f64" && dstArrDef.element.kind === "f64"
+                      ? [{ op: "f64.convert_i32_u" } as Instr]
+                      : [];
+
+                fctx.body.push({
+                  op: "block",
+                  blockType: { kind: "empty" },
+                  body: [
+                    {
+                      op: "loop",
+                      blockType: { kind: "empty" },
+                      body: [
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "local.get", index: lenLocal } as Instr,
+                        { op: "i32.ge_u" } as Instr,
+                        { op: "br_if", depth: 1 } as Instr,
+                        { op: "local.get", index: dstDataLocal } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "local.get", index: srcDataLocal } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: srcGetOp, typeIdx: srcArrTypeIdx } as Instr,
+                        ...convertInstrs,
+                        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "i32.const", value: 1 } as Instr,
+                        { op: "i32.add" } as Instr,
+                        { op: "local.set", index: copyIndexLocal } as Instr,
+                        { op: "br", depth: 0 } as Instr,
+                      ],
+                    } as Instr,
+                  ],
+                } as Instr);
+              }
             }
             // Build result vec struct
             fctx.body.push({ op: "local.get", index: lenLocal });
@@ -2913,7 +2973,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // new Uint8Array(n), new Int32Array(n), new Float64Array(n), etc. → vec struct with f64 elements
+  // new Uint8Array(n), new Int32Array(n), new Float64Array(n), etc. → vec struct.
+  // Native Uint8Array uses i8_byte storage; the remaining typed arrays keep
+  // the legacy f64 element representation.
   {
     const TYPED_ARRAY_CTORS = new Set([
       "Int8Array",
@@ -2926,8 +2988,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (className && TYPED_ARRAY_CTORS.has(className)) {
-      const elemType: ValType = { kind: "f64" };
-      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", elemType);
+      const isNativeUint8Array = noJsHost(ctx) && className === "Uint8Array";
+      const elemType: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
+      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
@@ -2941,8 +3005,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // #1654 — `new Uint8Array(arrayBuffer)` must VIEW the buffer's bytes,
         // not treat the buffer as a numeric length. The ArrayBuffer is backed
         // by an `i32_byte` vec (one i32 per byte). Detect that case and copy the
-        // bytes into the f64-element vec this TypedArray uses (so e.g.
-        // process.stdout.write, which expects a vec_f64, sees the real bytes).
+        // bytes into this TypedArray's backing vec.
         const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSymName = argTsType.getSymbol?.()?.name;
         // #1670 — gate on no-JS-host (see the matching guard above): the
@@ -3376,14 +3439,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
 /**
  * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
- * TypedArray's f64-element backing array.
+ * TypedArray backing array.
  *
  * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
  * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
  * variables to externref, so recover the struct via any.convert_extern +
- * ref.cast, read its length, allocate an f64 array of that length, and copy
- * byte-by-byte (i32 → f64). Returns true on success; false to let the caller
- * fall back to the numeric-length path.
+ * ref.cast, read its length, allocate a destination array of that length, and
+ * copy byte-by-byte. Returns true on success; false to let the caller fall back
+ * to the numeric-length path.
  */
 function emitTypedArrayFromByteBuffer(
   ctx: CodegenContext,
@@ -3441,7 +3504,10 @@ function emitTypedArrayFromByteBuffer(
   } as Instr);
   fctx.body.push({ op: "local.set", index: srcArrLocal });
 
-  // dstArr = new f64[len]
+  const dstArrDef = ctx.mod.types[dstArrTypeIdx];
+  const dstElemKind = dstArrDef?.kind === "array" ? dstArrDef.element.kind : undefined;
+
+  // dstArr = new element[len]
   const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, {
     kind: "ref",
     typeIdx: dstArrTypeIdx,
@@ -3450,7 +3516,7 @@ function emitTypedArrayFromByteBuffer(
   fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
   fctx.body.push({ op: "local.set", index: dstArrLocal });
 
-  // for (i = 0; i < len; i++) dstArr[i] = f64(srcArr[i] & 0xff)
+  // for (i = 0; i < len; i++) dstArr[i] = srcArr[i] converted to dst element type.
   const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, {
     kind: "i32",
   });
@@ -3462,7 +3528,7 @@ function emitTypedArrayFromByteBuffer(
     { op: "local.get", index: lenLocal } as Instr,
     { op: "i32.ge_s" } as Instr,
     { op: "br_if", depth: 1 } as Instr,
-    // dstArr[i] = f64(srcArr[i] & 0xff)
+    // dstArr[i] = converted srcArr[i] byte
     { op: "local.get", index: dstArrLocal } as Instr,
     { op: "local.get", index: iLocal } as Instr,
     { op: "local.get", index: srcArrLocal } as Instr,
@@ -3470,7 +3536,7 @@ function emitTypedArrayFromByteBuffer(
     { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
     { op: "i32.const", value: 0xff } as Instr,
     { op: "i32.and" } as Instr,
-    { op: "f64.convert_i32_u" } as Instr,
+    ...(dstElemKind === "f64" ? ([{ op: "f64.convert_i32_u" } as Instr] as Instr[]) : []),
     { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
     // i++
     { op: "local.get", index: iLocal } as Instr,

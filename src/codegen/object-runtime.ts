@@ -784,6 +784,87 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __delete_property(externref obj, externref key) -> i32 ───────────────
+  //
+  // ES §13.5.1 delete operator on an own data property. Finds the live entry;
+  // if present, marks it tombstoned (FLAG_TOMBSTONE), nulls its value (drop the
+  // reference for GC), decrements count, increments tombstones, returns 1. A
+  // configurable check could refuse non-configurable props, but data props
+  // created via __extern_set are always configurable (FLAG_DEFAULT), so delete
+  // always succeeds — returns 1 even when the key is absent (matches the host
+  // import, which returns true for missing own props per spec step 5).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=any(anyref) 3=o(ref null $Object) 4=e(ref null $PropEntry)
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !ref.test $Object → return 1 (no-op success)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; e = __obj_find(o, key)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 3 },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 4 },
+      // if e == null → property absent → return 1 (delete of missing key succeeds)
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
+      // e.flags |= TOMBSTONE
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: FLAG_TOMBSTONE },
+      { op: "i32.or" },
+      { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      // o.count-- ; o.tombstones++
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.sub" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      // return 1
+      { op: "i32.const", value: 1 },
+    ];
+    registerNative(
+      "__delete_property",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "e", type: entryRefNull },
+      ],
+      body,
+    );
+  }
+
   return types;
 }
 
@@ -800,4 +881,5 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__new_plain_object",
   "__extern_get",
   "__extern_set",
+  "__delete_property",
 ]);

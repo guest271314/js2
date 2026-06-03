@@ -125,6 +125,7 @@ export function createCodegenContext(
     nativeStrExternBridgeEmitted: false,
     testRuntimeStringHelpersEmitted: false,
     nativeStrHelpers: new Map(),
+    nativeRegexHelpers: new Map(),
     nativeStrHelperImportBase: -1,
     // #1103a Wasm-native Map runtime
     mapTypeIdx: -1,

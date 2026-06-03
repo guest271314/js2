@@ -444,7 +444,15 @@ export function compileBinaryExpression(
       // Strict: refs can be null but never undefined
       // Loose: null == undefined, so ref.is_null covers both
       if (valType.kind === "ref" || valType.kind === "ref_null") {
-        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId) {
+        // #1105: a nullable native-string ref models `string | undefined`
+        // (e.g. String.prototype.at out-of-range → undefined). For that ONE
+        // type, a null ref IS the `undefined` value, so `x === undefined`
+        // must reduce to ref.is_null rather than the always-false struct rule
+        // below. Gate strictly on the AnyString type index so class-instance
+        // struct refs keep `struct === undefined → false` semantics.
+        const isNullableNativeString =
+          valType.kind === "ref_null" && ctx.nativeStrings && valType.typeIdx === ctx.anyStrTypeIdx;
+        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId && !isNullableNativeString) {
           // struct === undefined → always false; struct !== undefined → always true
           fctx.body.push({ op: "drop" });
           fctx.body.push({ op: "i32.const", value: isStrictNeqOp ? 1 : 0 });
@@ -1646,6 +1654,130 @@ export function compileBinaryExpression(
     const rightIsNumber = isNumberType(rightTsType);
     const leftIsBool = isBooleanType(leftTsType);
     const rightIsBool = isBooleanType(rightTsType);
+
+    // #1776: standalone / WASI (no-JS-host) dynamic equality.
+    //
+    // The JS-host equality fallbacks below import `__host_eq` / `__host_loose_eq`
+    // and delegate to JS `===` / `==`. Under `--target standalone` (and WASI)
+    // there is no JS host, so emitting those calls leaks an unsatisfiable
+    // `env::__host_eq` import — the module then fails `WebAssembly.instantiate`
+    // ("Import #0 env: module is not an object or function"). That broke the
+    // test262 harness helper `isSameValue` for ~1,436 standalone tests (#1776):
+    // `isSameValue(a: any, b: any)` compiles both params to `externref`, so its
+    // `a === b` / `a !== a` comparisons all reach this externref-equality path.
+    //
+    // We replace the host delegation with a Wasm-native tag dispatch on the two
+    // boxed operands (left in $l, right in $r):
+    //   1. both typeof number  → unbox to f64, compare (f64.eq / f64.ne).
+    //      Recovers equal numbers boxed in DISTINCT structs (ref.eq is identity,
+    //      not value) AND makes NaN self-comparison work (`a !== a`).
+    //   2. both typeof boolean → unbox to i32, compare.
+    //   3. otherwise           → reference identity via any.convert_extern +
+    //      ref.test/ref.eq on the WasmGC eq heap type; non-eqref or mismatched
+    //      tags compare unequal. Per §7.2.16 two distinct non-primitive
+    //      references that are not identical are not `===`.
+    // This needs no host import and never feeds an externref into an f64/i32
+    // helper (acceptance criteria #1776).
+    const noJsHost = ctx.standalone === true || ctx.wasi === true;
+    if (noJsHost && (leftType.kind === "externref" || rightType.kind === "externref")) {
+      const EQ_HEAP = -19; // WasmGC `eq` abstract heap type (signed LEB 0x6d)
+      addUnionImports(ctx);
+      const typeofNum = ctx.funcMap.get("__typeof_number")!;
+      const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
+      const unboxNum = ctx.funcMap.get("__unbox_number")!;
+      const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
+
+      // Coerce both operands to externref temps (right is on top of stack).
+      const rTmp = allocTempLocal(fctx, { kind: "externref" });
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      fctx.body.push({ op: "local.set", index: rTmp });
+      const lTmp = allocTempLocal(fctx, { kind: "externref" });
+      if (leftType.kind !== "externref") {
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+      }
+      fctx.body.push({ op: "local.set", index: lTmp });
+
+      const eqInstrs: Instr[] = [
+        // ── number? ──
+        { op: "local.get", index: lTmp },
+        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "local.get", index: rTmp },
+        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: lTmp },
+            { op: "call", funcIdx: unboxNum },
+            { op: "local.get", index: rTmp },
+            { op: "call", funcIdx: unboxNum },
+            { op: "f64.eq" } as Instr,
+          ],
+          else: [
+            // ── boolean? ──
+            { op: "local.get", index: lTmp },
+            { op: "call", funcIdx: typeofBool } as Instr,
+            { op: "local.get", index: rTmp },
+            { op: "call", funcIdx: typeofBool } as Instr,
+            { op: "i32.and" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: lTmp },
+                { op: "call", funcIdx: unboxBool },
+                { op: "local.get", index: rTmp },
+                { op: "call", funcIdx: unboxBool },
+                { op: "i32.eq" } as Instr,
+              ],
+              else: [
+                // ── reference identity ──
+                // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                { op: "local.get", index: lTmp },
+                { op: "any.convert_extern" } as Instr,
+                { op: "local.get", index: rTmp },
+                { op: "any.convert_extern" } as Instr,
+                ...(() => {
+                  const lAny = allocTempLocal(fctx, { kind: "anyref" });
+                  const rAny = allocTempLocal(fctx, { kind: "anyref" });
+                  const seq: Instr[] = [
+                    { op: "local.set", index: rAny },
+                    { op: "local.tee", index: lAny },
+                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                    { op: "local.get", index: rAny },
+                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                    { op: "i32.and" } as Instr,
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "i32" } },
+                      then: [
+                        { op: "local.get", index: lAny },
+                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                        { op: "local.get", index: rAny },
+                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                        { op: "ref.eq" } as Instr,
+                      ],
+                      else: [{ op: "i32.const", value: 0 }],
+                    } as Instr,
+                  ];
+                  releaseTempLocal(fctx, lAny);
+                  releaseTempLocal(fctx, rAny);
+                  return seq;
+                })(),
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ];
+      for (const ins of eqInstrs) fctx.body.push(ins);
+      if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
+      releaseTempLocal(fctx, rTmp);
+      releaseTempLocal(fctx, lTmp);
+      return { kind: "i32" };
+    }
 
     // Wrapper object semantics (#1111): `new Number(n)`, `new String(s)`,
     // `new Boolean(b)` are OBJECTS (typeof x === "object"), not primitives.
