@@ -11,6 +11,7 @@ import { ts } from "../ts-api.js";
 import { isBooleanType, isNumberType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
+import { popBody, pushBody } from "./context/bodies.js";
 import type { CodegenContext, FunctionContext, NativeGeneratorInfo } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { addFuncType } from "./registry/types.js";
@@ -596,4 +597,168 @@ export function tryCompileNativeGeneratorResultProperty(
     else: [propName === "value" ? { op: "f64.const", value: 0 } : { op: "i32.const", value: 1 }],
   });
   return fieldType;
+}
+
+/**
+ * Look up a native-generator info by the **TS type** of a for-of subject
+ * expression, mapping the resolved wasm state struct typeIdx back to its
+ * NativeGeneratorInfo. Returns undefined when the subject is not a native
+ * generator value.
+ */
+export function nativeGeneratorInfoForForOfSubject(
+  ctx: CodegenContext,
+  subjectType: ValType,
+): NativeGeneratorInfo | undefined {
+  if (subjectType.kind !== "ref" && subjectType.kind !== "ref_null") return undefined;
+  return nativeInfoForStateType(ctx, subjectType.typeIdx);
+}
+
+/**
+ * #1665 — drive a `for (… of gen())` loop over a Wasm-native generator state
+ * machine WITHOUT the JS-host iterator protocol. The generator state ref is
+ * expected to already be on the stack (the caller compiled the iterable
+ * expression); `subjectType` is its ValType.
+ *
+ * Emits, structurally identical to the host iterator loop but calling the
+ * generator's resume function directly:
+ *
+ *   iter = <subject>
+ *   block:
+ *     loop:
+ *       res = __gen_resume_<g>(iter)        ;; ref $result {value:f64, done:i32}
+ *       if (res.done) br block
+ *       elem = res.value                    ;; f64 (or coerced to elem decl type)
+ *       <body>
+ *       br loop
+ *
+ * Only numeric (f64) yields are supported by the existing native generator
+ * (`isNativeGeneratorCandidate`), so the loop variable is f64. Returns true on
+ * success; false (with the stack untouched-by-contract: caller resets) when the
+ * shape is unsupported so the caller can fall back.
+ */
+export function tryCompileNativeGeneratorForOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  subjectType: ValType,
+  info: NativeGeneratorInfo,
+): boolean {
+  // for-await-of over a sync generator is not supported here.
+  if (stmt.awaitModifier) return false;
+  // Only plain identifier / simple binding loop variables in this slice;
+  // destructuring over a numeric generator value is meaningless (f64 isn't
+  // destructurable) and array/object patterns fall back.
+  let loopVarName: string | undefined;
+  let isConst = false;
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0]!;
+    if (!ts.isIdentifier(decl.name)) return false;
+    loopVarName = decl.name.text;
+    isConst = !!(stmt.initializer.flags & ts.NodeFlags.Const);
+  } else if (ts.isIdentifier(stmt.initializer)) {
+    loopVarName = stmt.initializer.text;
+  } else {
+    return false;
+  }
+
+  // The caller only reaches here when nativeGeneratorInfoForForOfSubject
+  // matched, i.e. subjectType is a ref/ref_null to the generator state struct.
+  if (subjectType.kind !== "ref" && subjectType.kind !== "ref_null") return false;
+  const subjectTypeIdx = subjectType.typeIdx;
+
+  const resumeIdx = ensureNativeGeneratorResumeFunction(ctx, info);
+  const resultRef: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
+
+  // Stash the generator state ref (currently on stack) into a local typed as
+  // the exact state struct (it always is; the static type may be ref_null).
+  const iterLocal = allocLocal(fctx, `__nativegen_iter_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: info.stateTypeIdx,
+  } as ValType);
+  if (subjectType.kind === "ref_null") {
+    fctx.body.push({ op: "ref.as_non_null" });
+  }
+  if (subjectTypeIdx !== info.stateTypeIdx) {
+    fctx.body.push({ op: "ref.cast", typeIdx: info.stateTypeIdx });
+  }
+  fctx.body.push({ op: "local.set", index: iterLocal });
+
+  const resultLocal = allocLocal(fctx, `__nativegen_res_${fctx.locals.length}`, resultRef);
+
+  // Loop variable: f64 (the native result value type). const-ness recorded so
+  // shadowing/TDZ logic downstream stays consistent.
+  const elemLocal = allocLocal(fctx, loopVarName, { kind: "f64" });
+  if (isConst) {
+    if (!fctx.constBindings) fctx.constBindings = new Set();
+    fctx.constBindings.add(loopVarName);
+  }
+
+  // block { loop { … } } — break = depth 1 (exit block), continue = depth 0.
+  const savedBody = pushBody(fctx);
+
+  // Adjust existing break/continue/return/rethrow depths: block + loop add 2.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
+
+  fctx.breakStack.push(1);
+  fctx.continueStack.push(0);
+
+  // res = resume(iter)
+  fctx.body.push({ op: "local.get", index: iterLocal });
+  if (subjectType.typeIdx !== info.stateTypeIdx) {
+    fctx.body.push({ op: "ref.cast", typeIdx: info.stateTypeIdx });
+  }
+  fctx.body.push({ op: "call", funcIdx: resumeIdx });
+  fctx.body.push({ op: "local.set", index: resultLocal });
+
+  // if (res.done) br block (depth 1: exit loop+block ⇒ depth to block is 1)
+  fctx.body.push({ op: "local.get", index: resultLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_DONE_FIELD });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "br", depth: 2 } as Instr], // if + loop = depth 2 to exit block
+    else: [],
+  });
+
+  // elem = res.value
+  fctx.body.push({ op: "local.get", index: resultLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD });
+  fctx.body.push({ op: "local.set", index: elemLocal });
+
+  // body
+  if (ts.isBlock(stmt.statement)) {
+    for (const s of stmt.statement.statements) {
+      compileStatement(ctx, fctx, s);
+    }
+  } else {
+    compileStatement(ctx, fctx, stmt.statement);
+  }
+
+  fctx.body.push({ op: "br", depth: 0 }); // continue loop
+
+  const loopBody = fctx.body;
+  fctx.breakStack.pop();
+  fctx.continueStack.pop();
+
+  // Restore depths.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
+
+  popBody(fctx, savedBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [
+      {
+        op: "loop",
+        blockType: { kind: "empty" },
+        body: loopBody,
+      } as Instr,
+    ],
+  });
+  return true;
 }
