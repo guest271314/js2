@@ -164,10 +164,44 @@ correct. When #1632b's representation lands, re-run the
 `built-ins/Promise/{all,allSettled,any,race}/*ctor*` / `*species*` suites to
 confirm the A.i `resolve-from-same-constructor` family flips.
 
-### Architect spec written (2026-06-03, senior-developer)
+## Independent re-validation #2 (2026-06-03, sd-846-slice3) — confirms the gap is the compiled-class-value host representation
 
-The A.i fix is now specced centrally as **#1632b — host-callable/constructible
-compiled-fn representation** in `plan/issues/1632-spec-gap-function-bind-tostring-internals.md`
+Re-built `dist/` from a fresh `origin/main` merge and re-probed via the
+`compile()` + `buildImports(result.imports, {}, result.stringPool)` two-step
+(the same harness `tests/promise-combinators.test.ts` uses). Findings:
+
+| Probe | Result | Reading |
+|---|---|---|
+| `Promise.all.call(5, [])` (ctx-non-object) | sentinel `1` | **TypeError thrown correctly** — spec step-2 enforced. Confirms re-validation #1. |
+| `Promise.all.call(NotPromise, […])`, `NotPromise` a compiled fn (A.i) | sentinel `1` | **TypeError thrown** — *spec-correct* for a non-constructor `C` (`ctx-non-ctor`). The `*resolve-from-same-constructor*` family wants a real subclass `C` to succeed — that path is the representation gap below, not the combinator. |
+| `typeof (X)` for `class X extends Promise {}` referenced as a value | `"object"` | the compiled class **value** is a WasmGC-struct proxy, **not** the host `Promise` subclass. |
+| `(X).all` (static method on the class value) | throws `WebAssembly.Exception` | the static method is **not resolvable** on the wasm-struct class value when the class is used as an expression. |
+
+**Root cause (confirmed at `src/runtime.ts:3592` `_wrapForHost`):** the host
+proxy `target` is `Object.create(null)` — a plain (non-callable) object. A JS
+`Proxy` can only carry `apply`/`construct` traps when its target is itself
+callable, so the wrapped compiled class/fn is neither `[[Call]]`- nor
+`[[Construct]]`-able. V8's `Construct(C, [executor])` inside
+`Promise.METHOD.call(C, …)` therefore rejects it. Identical to the `#1632b`
+bound-/host-callable-value representation gap and the `#820m`/`#1690`
+class-as-value family.
+
+**Net:** no tractable Promise-layer slice exists. The combinator code is
+spec-correct; every residual `#1694` failure (B, A.ii, A.i `*ctor*`/`*species*`)
+is gated on the **central compiled-value host representation** — `_wrapForHost`
+must produce a `function`/`Proxy(function, …)` target with `apply` + `construct`
+traps that dispatch through the `__call_fn_N` / `__construct_*` exports, owned by
+`#1632b`. **Keep `#1694` `status: backlog` + `needs_architect_spec: true`; do not
+carve a Promise-only fix.** Re-run
+`built-ins/Promise/{all,allSettled,any,race}/*ctor*`/`*species*` once `#1632b`'s
+representation lands.
+
+## Architect spec written (2026-06-03, senior-developer)
+
+Both re-validations above converge on the same owner: the A.i fix is now
+specced centrally as **#1632b — host-callable/constructible compiled-fn
+representation** in
+`plan/issues/1632-spec-gap-function-bind-tostring-internals.md`
 (`_wrapCallableForHost`: a `Proxy` over a real `function` target carrying
 `apply` + `construct` traps that dispatch through `__call_fn_N`). The
 combinator hook is in `_resolveCtor` (runtime.ts:7822): for the
