@@ -1,9 +1,9 @@
 ---
 id: 1539
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
-status: ready
+status: in-progress
 created: 2026-05-20
-updated: 2026-05-24
+updated: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -437,3 +437,34 @@ forms literal / `.` / `[...]` / `[^...]` / `^` / `$` / `* + ? {n,m}` greedy /
 the architect lists under "Refuse (narrowed)" stays a clean compile error
 citing the right later phase. Dual-run equivalence test compiles each pattern
 both JS-host and `--target standalone` and asserts identical results.
+
+### LANDED — first PR (sd-1539, 2026-06-03)
+
+Shipped the `RegExp.prototype.test` slice end-to-end:
+- `regex/{bytecode,parse,compile,vm}.ts` + `native-regex.ts` (the Wasm VM)
+  + `regexp-standalone.ts` rewired off the #682 `{pattern,flags}`/indexOf
+  struct onto the new `$NativeRegExp {flags,nGroups,prog,classTable,source}`
+  struct + `__regex_search`.
+- Pattern forms: literal / `.` / `[...]`/`[^...]` / `^`/`$` / `*+?{n,m}`
+  greedy & lazy / `|` / `(?:…)` / capturing `(…)`; flags `i` (ASCII fold),
+  `g`, `y` (sticky-at-0). `.exec`/`.match`/`.search`/`.replace`/`.split` and
+  fancy features (backrefs, lookaround, `\p{}`, `m`/`s`/`u`/`v`/`d`) stay
+  narrowed refusals citing #1539 Phase 2b/2c/2d (or #1474 for the
+  String-method gate).
+- Tests: `tests/regex-bytecode.test.ts` (105 pure-TS vs native RegExp),
+  `tests/issue-1539-standalone-regex.test.ts` (dual-run, real Wasm, empty
+  import object), `#682`/`#1474` refusal tests narrowed.
+
+**Field-ordering finding (load-bearing, documented in `regexp-standalone.ts`):**
+`getArrTypeIdxFromVec` (registry/types.ts) is a *structural* heuristic that
+classifies ANY struct whose **field[1] is a ref-to-array** as a "vec struct",
+which makes `coerceType` ref→externref attach `__make_iterable` (a JS host
+import) — breaking standalone purity for a `const re = /…/;` binding. The
+`$NativeRegExp` field order therefore puts the i32 scalars (`flags`,
+`nGroups`) at slots 0/1 and the array fields (`prog`, `classTable`) at 2/3, so
+field[1] is `i32` and the struct stays off that heuristic. #682's struct
+dodged this only incidentally (its field[1] was `flags:i32`).
+
+Remaining (later slices): `.exec`/`.match` capture arrays + named groups
+(2b); `.replace`/`.split`/`matchAll` + `m`/`s`/`d` (2c); `\p{}`/lookaround/
+backrefs (2d).
