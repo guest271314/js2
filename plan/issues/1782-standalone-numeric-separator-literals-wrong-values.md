@@ -1,9 +1,10 @@
 ---
 id: 1782
 title: "standalone numeric and BigInt separator literals evaluate to wrong values"
-status: ready
+status: done
 created: 2026-06-02
-updated: 2026-06-02
+updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -80,3 +81,35 @@ re-parsing the token text.
 - Add focused regression coverage for binary, octal, hexadecimal, decimal,
   exponent, and BigInt separator literals.
 - Default JS-host mode does not regress on numeric separator literals.
+
+## Completion Summary (2026-06-03)
+
+**Root cause was NOT literal value lowering.** TypeScript resolves
+`NumericLiteral.text` to the already-decimal value (`0o0_1` → `.text === "1"`,
+`0x01_00` → `.text === "256"`), so `Number(text.replace(/_/g, ""))` in
+`src/codegen/expressions.ts` and the `BigInt(...)` path were always correct
+for every radix, uppercase prefix, exponent, and BigInt suffix. WAT dumps
+confirm correct constants: `0o0_1`→`1`, `0x01_00`→`256`, `1.0e+1_0`→`1e10`,
+`0x01_00n`→`256n`, `0b0_1n`→`1n`.
+
+**Actual defect:** the standalone `isSameValue` externref-equality path. The
+50 baseline failures (`returned 2` = the *second* `assert.sameValue`, which is
+the uppercase-prefix variant `0O…`/`0X…`/`0B…`) came from comparing two
+separator literals that were boxed to externref through the `any`-typed
+`assert.sameValue(actual, expected)` harness. The standalone externref `===`
+comparison emitted invalid/mismatched Wasm there.
+
+**Already fixed on current main** by #1776 (commit `1ff16008d` "standalone
+isSameValue externref equality emits invalid Wasm" + `554b116e4` "refresh
+externref equality late-import indices"). Verified by re-running the full
+bucket through `wrapTest` + `compile(target: "standalone")` + `buildImports` +
+instantiate: **52/52** value-checking tests now return `test() === 1`; the 57
+remaining `*-err.js` entries are negative SyntaxError tests (expected
+compile-errors), not value failures.
+
+**This PR is docs + regression coverage only — no source change.** Added
+`tests/issue-1782.test.ts` pinning the standalone separator-literal equality
+(decimal/hex/octal/binary integers + lower/upper prefixes, decimal/exponent
+floats, and all BigInt separator forms, each compared through an `any`-typed
+`sv()` to exercise the externref path) plus a JS-host no-regression check on
+uppercase-prefix value lowering.
