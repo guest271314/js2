@@ -25,6 +25,7 @@ import {
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { addUnionImports, resolveWasmType } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
+import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -2997,6 +2998,14 @@ function compileExternPropertyGet(
 ): ValType | null {
   const className = objType.getSymbol()?.name;
   if (!className) return null;
+
+  // (#1103a) Native Map `.size` accessor in standalone / nativeStrings mode →
+  // `__map_size` instead of the `Map_get_size` host import. Mirrors the method
+  // interception in expressions/extern.ts.
+  if (className === "Map" && propName === "size" && ctx.nativeStrings) {
+    const sizeResult = tryCompileNativeMapSizeGet(ctx, fctx, expr.expression);
+    if (sizeResult !== undefined) return sizeResult as ValType;
+  }
 
   // Walk inheritance chain to find the class that declares the property
   const resolvedInfo = findExternInfoForMember(ctx, className, propName, "property");

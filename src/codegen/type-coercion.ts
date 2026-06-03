@@ -1617,6 +1617,22 @@ export function coerceType(
     fctx.body.push({ op: "any.convert_extern" } as Instr);
     return;
   }
+  // anyref → f64 (#1103a): a value read out of a native collection (e.g.
+  // `Map.prototype.get` returns anyref) used in numeric context. Numbers are
+  // stored boxed (`__box_number` externref converted to anyref), so externalize
+  // back to externref then unbox. Mirrors the `externref → f64` arm.
+  if (from.kind === "anyref" && to.kind === "f64") {
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      return;
+    }
+    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
+    return;
+  }
   // externref → eqref: any.convert_extern (eqref is subtype of anyref)
   if (from.kind === "externref" && to.kind === "eqref") {
     fctx.body.push({ op: "any.convert_extern" } as Instr);
