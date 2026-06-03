@@ -12,7 +12,6 @@ area: codegen, runtime
 language_feature: json
 goal: standalone-wasm
 sprint: 58
-owner: Copernicus
 related: [1474, 1539]
 claimed_by: codex-developer
 claimed_at: 2026-06-02T11:02:41.061Z
