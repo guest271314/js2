@@ -12,6 +12,7 @@ import { reportErrorNoNode } from "../context/errors.js";
 import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
+import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
 
 /**
  * #1471: helper names that `addUnionImports` provides Wasm-native
@@ -256,6 +257,21 @@ export function ensureLateImport(
   // #1472 object/property refusal family below.
   if ((ctx.wasi || ctx.standalone) && UNION_NATIVE_HELPER_NAMES.has(name)) {
     addUnionImportsViaRegistry(ctx);
+    return ctx.funcMap.get(name);
+  }
+  // #1472 Phase B — under --target standalone, the open-object property ops
+  // (__new_plain_object / __extern_get / __extern_set) have Wasm-native
+  // implementations emitted by ensureObjectRuntime (object-runtime.ts), backed
+  // by a $Object/$PropMap/$PropEntry open-hash-map instead of the JS-host
+  // WeakMap sidecars. Route here so the module needs no unsatisfiable env::*
+  // host import. ensureObjectRuntime is idempotent and registers every name in
+  // OBJECT_RUNTIME_HELPER_NAMES in funcMap as a DEFINED function (no import is
+  // added, so no index shift is required — same invariant as the #1471 boxing
+  // helpers above). This keeps every existing externref-based call site
+  // unchanged. (WASI is intentionally NOT routed here yet — it retains the
+  // host-import object machinery until the standalone path is proven.)
+  if (ctx.standalone && OBJECT_RUNTIME_HELPER_NAMES.has(name)) {
+    ensureObjectRuntime(ctx);
     return ctx.funcMap.get(name);
   }
   // #1472 Phase A — refuse dynamic-shape object/property host imports under

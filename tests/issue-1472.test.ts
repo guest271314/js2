@@ -80,23 +80,45 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     assertNoHostObjectImports(r.imports);
   });
 
-  it("dynamic property add on an any-typed object refuses with a #1472 Phase B error", async () => {
-    const r = await compile(
-      `
-        export function leak(): number {
-          const o: any = { x: 1 };
-          o.y = 2;
-          return o.y;
+  it("Phase B: dynamic property add/read on an any-typed object compiles native + runs", async () => {
+    // #1472 Phase B — open-object new/get/set now lower to the Wasm-native
+    // $Object open-hash-map runtime instead of refusing. The module must carry
+    // zero env::__extern_* / __new_plain_object host imports and instantiate +
+    // run with an empty import object.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o.x = 41;
+          o.y = (o.x as number) + 1;
+          return o.y as number;
         }
-      `,
-      { target: "standalone" },
-    );
-    expect(r.success).toBe(false);
-    const joined = r.errors.map((e) => e.message).join("\n");
-    expect(joined).toMatch(/standalone/);
-    expect(joined).toMatch(/#1472 Phase B/);
-    // The refusal must NOT leak the host import into the module.
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__new_plain_object")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("Phase B: property update + table grow/rehash run correctly", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o.a = 1; o.a = 2; o.a = 3;
+          o.k0=0; o.k1=1; o.k2=2; o.k3=3; o.k4=4; o.k5=5; o.k6=6; o.k7=7;
+          o.k8=8; o.k9=9; o.k10=10; o.k11=11; o.k12=12; o.k13=13; o.k14=14;
+          return (o.a as number) + (o.k0 as number) + (o.k7 as number) + (o.k14 as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    // 3 (final o.a) + 0 + 7 + 14 = 24
+    expect((instance.exports as Record<string, () => number>).run()).toBe(24);
   });
 
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
