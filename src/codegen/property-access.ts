@@ -1009,6 +1009,37 @@ export function compilePropertyAccess(
     }
   }
 
+  // #1780 — `TextEncoder.encodeInto(...).read` / `.written` under no-host
+  // targets. The call lowers to a native helper returning a
+  // `TextEncoderEncodeIntoResult` WasmGC struct; read its fields with a direct
+  // `struct.get` (fields: 0 = read, 1 = written, both f64) instead of the
+  // generic `__extern_get` host import, which is unavailable standalone/WASI.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "read" || propName === "written") &&
+    objType.getSymbol()?.name === "TextEncoderEncodeIntoResult"
+  ) {
+    // Compile the receiver first: the `encodeInto(...)` call registers the
+    // `TextEncoderEncodeIntoResult` struct and returns it as a ref, so the
+    // struct type index is only known *after* the call is lowered.
+    const recvType = compileExpression(ctx, fctx, expr.expression);
+    const resultTypeIdx = ctx.structMap.get("TextEncoderEncodeIntoResult");
+    if (
+      resultTypeIdx !== undefined &&
+      recvType &&
+      (recvType.kind === "ref" || recvType.kind === "ref_null") &&
+      recvType.typeIdx === resultTypeIdx
+    ) {
+      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+      return { kind: "f64" };
+    }
+    // Receiver didn't lower to the result struct — undo nothing (we already
+    // emitted it); coerce/return a sensible f64 fallback.
+    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
+  }
+
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
   // generic `__extern_get` host-import path: the standalone WASI module has
   // no `process` global, and even with a JS polyfill the generic extern lookup
