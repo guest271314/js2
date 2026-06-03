@@ -12,6 +12,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { noJsHost } from "./expressions/helpers.js";
 import { flushLateImportShifts } from "./expressions/late-imports.js";
 import {
   ensureWasiWriteAnyStringHelper,
@@ -70,8 +71,10 @@ export function tryCompileNodeProcessCall(
 
   const argSymName = argTsType.getSymbol?.()?.name;
   const isArrayBufferArg = argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
-  const elemKey: "i32_byte" | "f64" = isArrayBufferArg ? "i32_byte" : "f64";
-  const elemType: ValType = isArrayBufferArg ? { kind: "i32" } : { kind: "f64" };
+  const elemKey: "i8_byte" | "i32_byte" | "f64" =
+    noJsHost(ctx) && argSymName === "Uint8Array" ? "i8_byte" : isArrayBufferArg ? "i32_byte" : "f64";
+  const elemType: ValType =
+    elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
   const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
   const argType = compileExpression(ctx, fctx, argExpr);
   flushLateImportShifts(ctx, fctx);

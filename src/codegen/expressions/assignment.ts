@@ -1349,7 +1349,15 @@ function compileArrayDestructuringAssignment(
             { op: "local.get", index: tmpJ } as Instr,
             { op: "i32.const", value: i } as Instr,
             { op: "i32.add" } as Instr,
-            { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+            {
+              op:
+                arrDef!.element.kind === "i8"
+                  ? "array.get_u"
+                  : arrDef!.element.kind === "i16"
+                    ? "array.get_s"
+                    : "array.get",
+              typeIdx: arrTypeIdx,
+            } as Instr,
             { op: "array.set", typeIdx: arrTypeIdx } as Instr,
             { op: "local.get", index: tmpJ } as Instr,
             { op: "i32.const", value: 1 } as Instr,
