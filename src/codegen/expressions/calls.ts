@@ -4820,6 +4820,64 @@ function compileCallExpression(
       const externRef: ValType = { kind: "externref" };
       const i32Ty: ValType = { kind: "i32" };
 
+      // ── #1472 Phase C — Reflect.* under --target standalone ───────────────
+      //
+      // The host-dispatch path below registers an env::__reflect_* import for
+      // every Reflect method. There is no JS host in standalone mode, so any
+      // such import would leak into the binary and fail at instantiation with
+      // an opaque "unknown import" linker error. Route the one method backed by
+      // a native helper through it, and refuse the rest with a clear compile
+      // error rather than emitting a half-working module.
+      //
+      // - Reflect.ownKeys(target) → native __object_keys (string own keys of
+      //   the $Object hash-map, insertion order). The native runtime tracks
+      //   only string keys; Symbol/non-enumerable keys are out of scope for the
+      //   standalone object runtime (consistent approximation across #1472
+      //   Phase B). __object_keys is in OBJECT_RUNTIME_HELPER_NAMES, so
+      //   ensureLateImport auto-routes it to the in-module native func.
+      // - Reflect.has needs a *keyed* HasProperty over the hash-map; the native
+      //   __extern_has_idx is an *indexed* (array-like) helper, so it cannot
+      //   stand in here without being semantically wrong — refuse instead.
+      //   Reflect.apply/construct require host call machinery with no native
+      //   analog — refuse. The descriptor/prototype/integrity methods all rely
+      //   on the JS descriptor sidecar — refuse.
+      if (ctx.standalone) {
+        if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
+          emitReflectArgs(1);
+          const funcIdx = ensureLateImport(ctx, "__object_keys", [externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(1, "extern-null");
+        }
+        // Boolean-returning methods need an i32 on the stack; the rest return
+        // externref. Pick the fallback shape per method so the surrounding
+        // expression still type-checks even though the module is already marked
+        // failed by reportError.
+        const booleanReflect = new Set([
+          "set",
+          "has",
+          "deleteProperty",
+          "defineProperty",
+          "setPrototypeOf",
+          "isExtensible",
+          "preventExtensions",
+        ]);
+        reportError(
+          ctx,
+          expr,
+          `Codegen error: Reflect.${reflectMethod} not supported in standalone mode (#1472 Phase C).`,
+        );
+        if (booleanReflect.has(reflectMethod)) {
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
       // Reflect.get(target, key, [receiver]) — returns externref.
       if (reflectMethod === "get" && expr.arguments.length >= 2) {
         emitReflectArgs(3);

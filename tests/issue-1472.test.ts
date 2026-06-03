@@ -35,6 +35,7 @@ const BANNED_IMPORTS: ReadonlyArray<RegExp> = [
   /^env::__register_prototype$/,
   /^env::__register_class_object$/,
   /^env::__proxy_/,
+  /^env::__reflect_/,
 ];
 
 function assertNoHostObjectImports(imports: ReadonlyArray<{ module: string; name: string }>): void {
@@ -511,6 +512,76 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
       expect(joined).toMatch(/#1472 Phase C/);
       assertNoHostObjectImports(r.imports);
     }
+  });
+
+  it("Phase C: Reflect.ownKeys routes to native __object_keys in standalone (no host import)", async () => {
+    // #1472 Phase C — Reflect.ownKeys(o) on an open `any` lowers to the native
+    // __object_keys helper (string own keys of the $Object hash-map). Computed
+    // keys defeat shape inference and force the genuine open-object path.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a"; const kb = "b";
+          o[ka] = 1; o[kb] = 2;
+          const ks: any = Reflect.ownKeys(o);
+          return (ks.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_keys\b/);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(2);
+  });
+
+  it("Phase C: unsupported Reflect.* methods refuse in standalone without leaking __reflect_* imports", async () => {
+    // The descriptor/prototype/integrity/has/apply/construct family has no
+    // native analog yet; each must fail at compile time with the Phase C
+    // message instead of leaking an env::__reflect_* import that traps at
+    // instantiation.
+    const cases: ReadonlyArray<[string, string]> = [
+      ["get", `export function f(o: any): any { return Reflect.get(o, "k"); }`],
+      ["set", `export function f(o: any): boolean { return Reflect.set(o, "k", 1); }`],
+      ["has", `export function f(o: any): boolean { return Reflect.has(o, "k"); }`],
+      ["deleteProperty", `export function f(o: any): boolean { return Reflect.deleteProperty(o, "k"); }`],
+      ["defineProperty", `export function f(o: any): boolean { return Reflect.defineProperty(o, "k", {}); }`],
+      [
+        "getOwnPropertyDescriptor",
+        `export function f(o: any): any { return Reflect.getOwnPropertyDescriptor(o, "k"); }`,
+      ],
+      ["getPrototypeOf", `export function f(o: any): any { return Reflect.getPrototypeOf(o); }`],
+      ["setPrototypeOf", `export function f(o: any, p: any): boolean { return Reflect.setPrototypeOf(o, p); }`],
+      ["apply", `export function f(fn: any, t: any, a: any): any { return Reflect.apply(fn, t, a); }`],
+      ["construct", `export function f(c: any, a: any): any { return Reflect.construct(c, a); }`],
+    ];
+    for (const [method, source] of cases) {
+      const r = await compile(source, { target: "standalone" });
+      expect(r.success, `Reflect.${method} should refuse in standalone`).toBe(false);
+      const joined = r.errors.map((e) => e.message).join("\n");
+      expect(joined, `Reflect.${method} error text`).toMatch(
+        new RegExp(`Reflect\\.${method} not supported in standalone mode`),
+      );
+      expect(joined).toMatch(/#1472 Phase C/);
+      assertNoHostObjectImports(r.imports);
+    }
+  });
+
+  it("default target (gc) still routes Reflect.* through the JS-host __reflect_* imports", async () => {
+    // Regression guard: the standalone Phase C refusal must not disturb the gc
+    // target, which keeps the host Reflect MOP bridge.
+    const r = await compile(
+      `
+        export function f(o: any): boolean {
+          return Reflect.has(o, "k");
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__reflect_has")).toBe(true);
   });
 
   it("default target (gc) still allows Proxy via the JS-host runtime", async () => {
