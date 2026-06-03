@@ -1009,6 +1009,28 @@ export function compilePropertyAccess(
     }
   }
 
+  // #1780 — `TextEncoder.encodeInto(...).read` / `.written` under no-host
+  // targets. The call lowers to a native helper returning a
+  // `TextEncoderEncodeIntoResult` WasmGC struct; read its fields with a direct
+  // `struct.get` (fields: 0 = read, 1 = written, both f64) instead of the
+  // generic `__extern_get` host import, which is unavailable standalone/WASI.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "read" || propName === "written") &&
+    objType.getSymbol()?.name === "TextEncoderEncodeIntoResult"
+  ) {
+    const resultTypeIdx = ctx.structMap.get("TextEncoderEncodeIntoResult");
+    if (resultTypeIdx !== undefined) {
+      const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "ref", typeIdx: resultTypeIdx });
+      if (recvType && recvType.kind !== "ref" && recvType.kind !== "ref_null") {
+        // Receiver didn't lower to the struct ref — fall through to the generic path.
+      } else {
+        fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+        return { kind: "f64" };
+      }
+    }
+  }
+
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
   // generic `__extern_get` host-import path: the standalone WASI module has
   // no `process` global, and even with a JS polyfill the generic extern lookup
