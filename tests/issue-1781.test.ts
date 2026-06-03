@@ -66,14 +66,26 @@ describe("#1781 standalone test262 artifact root-cause map", () => {
         scope_official: true,
         strict: "both",
       },
+      {
+        file: "test/built-ins/Proxy/proxy-newtarget.js",
+        category: "built-ins/Proxy",
+        status: "compile_error",
+        error: "L12:3 Codegen error: Proxy not supported in standalone mode (#1472 Phase C).",
+        error_category: "other",
+        error_signature: "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).",
+        reached_test: false,
+        scope: "standard",
+        scope_official: true,
+        strict: "both",
+      },
     ]);
 
     const report = buildReport(input, output, ["--max-unclassified-root-causes", "0"]);
 
     expect(report.mode.target).toBe("standalone");
-    expect(report.summary.total).toBe(3);
-    expect(report.root_cause_map.total_non_pass_non_skip).toBe(2);
-    expect(report.root_cause_map.classified).toBe(2);
+    expect(report.summary.total).toBe(4);
+    expect(report.root_cause_map.total_non_pass_non_skip).toBe(3);
+    expect(report.root_cause_map.classified).toBe(3);
     expect(report.root_cause_map.unclassified.count).toBe(0);
 
     const byId = new Map(report.root_cause_map.buckets.map((bucket: any) => [bucket.id, bucket]));
@@ -81,6 +93,9 @@ describe("#1781 standalone test262 artifact root-cause map", () => {
     expect(byId.get("standalone-regexp").issues).toContain("#682");
     expect(byId.get("standalone-dynamic-object-property").sample_signatures).toContain(
       "wasm_compile:No dependency provided for imported function env::__extern_get",
+    );
+    expect(byId.get("standalone-dynamic-object-property").sample_signatures).toContain(
+      "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).",
     );
   });
 

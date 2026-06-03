@@ -4612,6 +4612,19 @@ function compileCallExpression(
       return { kind: "externref" };
     }
 
+    // Standalone has no JS Proxy machinery, so reject Proxy.revocable before
+    // argument lowering or generic built-in lookup can register host imports.
+    if (
+      ctx.standalone &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Proxy" &&
+      propAccess.name.text === "revocable"
+    ) {
+      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+
     // Handle Proxy.revocable(target, handler) — creates revocable Proxy (#965)
     if (
       ts.isIdentifier(propAccess.expression) &&

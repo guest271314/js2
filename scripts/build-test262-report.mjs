@@ -178,14 +178,17 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     label: "Standalone dynamic object/property operation gate",
     match: (record, text) =>
       record.host_import_leak_class === "dynamic_object_property" ||
+      pathHas(record, ["built-ins/proxy"]) ||
       hasAny(text, [
         "__extern_",
         "__object_",
         "__defineproperty",
         "__get_builtin",
         "__new_plain_object",
+        "__proxy_",
         "__register_",
         "__proto_method_call",
+        "proxy not supported in standalone mode",
         "dynamic object",
         "no dependency provided for imported function",
       ]),

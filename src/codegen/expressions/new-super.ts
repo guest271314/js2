@@ -1947,8 +1947,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   // Handle `new Proxy(target, handler)` — delegate to __proxy_create host import.
   // The host wraps the target in a real JS Proxy with the given handler object.
-  // In standalone (no-JS) mode, falls back to pass-through (target returned as-is).
+  // Standalone has no JS Proxy machinery, so fail clearly instead of silently
+  // lowering to a half-working pass-through value (#1472 Phase C).
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Proxy") {
+    if (ctx.standalone) {
+      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
     const args = expr.arguments ?? [];
     if (args.length >= 1) {
       // Compile target argument and coerce to externref
