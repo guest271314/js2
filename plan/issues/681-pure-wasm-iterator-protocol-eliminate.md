@@ -1,9 +1,9 @@
 ---
 id: 681
 title: "Pure Wasm iterator protocol (eliminate 5 host imports)"
-status: ready
+status: in-progress
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -65,3 +65,52 @@ For custom iterables: compile the [Symbol.iterator]() method return as $Iterator
 When iterating over externref values (unknown type), still need host `__iterator` to get the iterator. But for known types (Array, Map, Set, generators), use pure Wasm.
 
 ## Complexity: L (depends on #680 for generators)
+
+## 2026-06-03 senior-dev re-profile (current main state)
+
+The original issue (April) predates the #1665 generator work and the #1472
+Phase B native-vec foundation. The actual current state on main is **much
+further along** than "uses 5 host imports". Mapping the real surface:
+
+### What already works pure-Wasm in standalone/WASI (no host imports)
+- **Direct array for-of** `for (const x of [1,2,3])` → index loop
+  (`compileForOfArray`, loops.ts:2557). No host import.
+- **Array for-of destructuring** `for (const [a,b] of pairs)` → index loop.
+- **Native generator for-of** `for (const x of gen())` (numeric `function*`)
+  → drives the generator resume fn directly (`tryCompileNativeGeneratorForOf`,
+  generators-native.ts:639; #1665). No host import.
+- **Class custom-iterable for-of** — when the iterable is a class struct whose
+  `_@@iterator` method was compiled and whose `next()` returns a struct with
+  `done`/`value` fields, `compileForOfDirectIterator` (loops.ts:3073) drives the
+  whole loop in Wasm. No host import.
+- **Native string for-of** (`compileForOfString`, nativeStrings mode).
+
+### What currently HARD-ERRORS in standalone (the real #681 gap)
+Two shapes deliberately `reportError("#681 …")` rather than emit a host import
+(see tests/issue-681-standalone-iterators.test.ts, which pins this refusal):
+
+1. **`Array.prototype.values()/.keys()/.entries()`** —
+   `compileArrayIteratorMethod` (array-methods.ts:3084) hard-errors under
+   standalone/WASI. Highest-frequency gap; cleanly bounded.
+2. **for-of over an unknown externref `any`** — generic Iterator-Record dispatch
+   on an opaque value. Genuinely hard (needs a runtime `GetIterator` →
+   `IteratorStepValue` machine on an arbitrary externref). Out of this slice.
+
+The five `__iterator*` imports are NOT emitted in standalone at all anymore —
+they only fire in JS-host mode (the dual-mode fast path, which is legitimate
+per CLAUDE.md). So "eliminate 5 host imports" in standalone is mostly **done**;
+the residual is the two refusal shapes above. The 532-row figure is dominated
+by shape (1) — `[...].values()`-style iteration in array/TypedArray test262.
+
+### Chosen slice (this PR): native `Array.prototype.values()` for-of
+
+`for (x of arr.values())` is semantically identical to `for (x of arr)` —
+both drive the array's element list in order. So the slice recognizes a for-of
+whose subject is `<vecExpr>.values()` and lowers it to the existing
+`compileForOfArray` index loop driven by `<vecExpr>`, in standalone/WASI. Zero
+new runtime types, reuses the proven index-loop drive, byte-identical to the
+direct-array path. `.keys()`/`.entries()` (different element shape — index, or
+`[i, v]` pair) and the generic-externref case are explicit follow-ups.
+
+Source: loops.ts `compileForOfStatement` recognizer + a `valuesReceiverForForOf`
+helper. JS-host mode is unchanged (still routes through `__array_values`).
