@@ -21,7 +21,15 @@ import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
 import { ensureRegexSearch, i32ArrayLiteralInstrs, regexI32ArrayType } from "./native-regex.js";
-import { parseFlags, RegexUnsupportedError, RE_FLAG_Y } from "./regex/bytecode.js";
+import {
+  parseFlags,
+  RegexUnsupportedError,
+  RE_FLAG_G,
+  RE_FLAG_I,
+  RE_FLAG_M,
+  RE_FLAG_S,
+  RE_FLAG_Y,
+} from "./regex/bytecode.js";
 import { compilePattern, RepeatTooLargeError } from "./regex/compile.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
@@ -362,11 +370,14 @@ function emitStandaloneRegExpStruct(
     reportStandaloneRegExpUnsupported(ctx, node, describeRegexError(e, `flags ${JSON.stringify(flags)}`));
     return null;
   }
-  // Phase 2a: sticky `y` changes match anchoring (handled), but multiline `m`,
-  // dotAll `s`, unicode `u`/`v`, and the indices `d` flag are deferred.
-  const refusedFlags = flagBits & ~(/*g*/ (1 | /*i*/ 2 | RE_FLAG_Y));
+  // Supported flags: g (global), i (case-insensitive, ASCII fold), y (sticky),
+  // m (multiline — `^`/`$` at line boundaries, #1539 Phase 2c), and s (dotAll —
+  // `.` matches line terminators, #1539 Phase 2c). The unicode `u`/`v`
+  // (code-point semantics) and indices `d` flags remain deferred (Phase 2d).
+  const SUPPORTED_FLAGS = RE_FLAG_G | RE_FLAG_I | RE_FLAG_Y | RE_FLAG_M | RE_FLAG_S;
+  const refusedFlags = flagBits & ~SUPPORTED_FLAGS;
   if (refusedFlags !== 0) {
-    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (m/s/u/v/d are #1539 Phase 2c/2d)`);
+    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (u/v/d are #1539 Phase 2d)`);
     return null;
   }
 

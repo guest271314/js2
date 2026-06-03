@@ -64,6 +64,17 @@ const CASES: Array<{ p: string; f: string; inputs: string[] }> = [
   { p: "(?:ab)+c", f: "", inputs: ["ababc", "c"] },
   { p: "abc", f: "i", inputs: ["ABC", "AbC", "xyz"] },
   { p: "[a-c]+", f: "i", inputs: ["ABC", "aBcD", "xyz"] },
+  // #1539 Phase 2c — dotAll `s`: `.` matches line terminators too.
+  { p: "a.c", f: "s", inputs: ["a\nc", "a\rc", "abc"] },
+  { p: "a.*z", f: "s", inputs: ["a\nbz", "az", "abc"] },
+  // #1539 Phase 2c — multiline `m`: `^`/`$` match at line boundaries.
+  { p: "^abc", f: "m", inputs: ["x\nabc", "abc", "xabc"] },
+  { p: "abc$", f: "m", inputs: ["abc\ny", "abc", "abcx"] },
+  { p: "^abc$", f: "m", inputs: ["x\nabc\ny", "abc", "xabc"] },
+  // Non-multiline `^`/`$` unaffected by interior newlines.
+  { p: "^abc", f: "", inputs: ["x\nabc", "abc"] },
+  // Combined `m` + `s`.
+  { p: "^a.b$", f: "ms", inputs: ["a\nb", "x\na\nb\ny", "ab"] },
 ];
 
 describe("#1539 standalone RegExp.test — no JS host, matches native", () => {
@@ -94,7 +105,13 @@ describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   it("refuses lookahead", async () => {
     await expectRefused(`export function f(s: string): boolean { return /a(?=b)/.test(s); }`);
   });
-  it("refuses multiline flag", async () => {
-    await expectRefused(`export function f(s: string): boolean { return /^a/m.test(s); }`);
+  // #1539 Phase 2c landed the `m` (multiline) and `s` (dotAll) flags — they are
+  // no longer refused (see the dual-run CASES above). The `u`/`v` (code-point)
+  // and `d` (indices) flags remain deferred to Phase 2d.
+  it("refuses unicode flag (u, Phase 2d)", async () => {
+    await expectRefused(`export function f(s: string): boolean { return /^a/u.test(s); }`);
+  });
+  it("refuses indices flag (d, Phase 2d)", async () => {
+    await expectRefused(`export function f(s: string): boolean { return /^a/d.test(s); }`);
   });
 });
