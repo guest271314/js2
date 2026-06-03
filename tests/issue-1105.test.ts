@@ -139,4 +139,46 @@ describe("#1105 native String method helpers", () => {
 
     expect((exports.repeatLen as () => number)()).toBe(6);
   });
+
+  it("concatenates via the native helper without requesting string_concat", async () => {
+    // ECMA-262 §22.1.3.4 String.prototype.concat: ToString each argument, then
+    // append left-to-right. Standalone mode must lower this to the native
+    // __str_concat chain and never reach the JS-host `string_concat` import.
+    const result = await compile(
+      `
+      export function concatTwo(): number {
+        return "ab".concat("cd").length;
+      }
+      `,
+      { target: "standalone", fileName: "issue-1105-concat.ts" },
+    );
+    expect(result.success, result.errors.map((err) => err.message).join("\n")).toBe(true);
+    expect(envStringMethodImports(result.imports)).toEqual([]);
+    expect(result.wat).not.toContain("wasm:js-string");
+
+    const exports = await compileNativeRuntime(`
+      export function concatTwo(): number {
+        return "ab".concat("cd").length;
+      }
+
+      export function concatVariadic(): number {
+        return "a".concat("b", "c", "d").length;
+      }
+
+      export function concatNoArgs(): number {
+        return "abc".concat().length;
+      }
+
+      export function concatCharAt(): number {
+        const a = "xy";
+        const b = "z";
+        return a.concat(b).charCodeAt(2);
+      }
+    `);
+
+    expect((exports.concatTwo as () => number)()).toBe(4);
+    expect((exports.concatVariadic as () => number)()).toBe(4);
+    expect((exports.concatNoArgs as () => number)()).toBe(3);
+    expect((exports.concatCharAt as () => number)()).toBe(122);
+  });
 });
