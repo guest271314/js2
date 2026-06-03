@@ -427,3 +427,59 @@ GetIterator) and throws correctly, so it needed no change.
   string pool / import caches across files), not regressions. Spot-checked 7
   standalone: all pass. The 9 apparent "flips to pass" are stale-baseline drift
   (already pass on clean HEAD too).
+
+## Slice 3 re-profile (sd-846-slice3, 2026-06-03): no localized win left — Option A already done
+
+Fresh profiling against the current `loopdive/js2wasm-baselines`
+`test262-current.jsonl` (48,117 entries, fetched 2026-06-03). Filtered to
+failures where the **failing assertion line itself** is an `assert.throws(...)`
+(not a `sameValue`/`compareArray` mislabeled by a coarser regex). Top
+not-thrown buckets and their disposition:
+
+| Bucket (failing `assert.throws` only) | Count | Disposition |
+|---|---|---|
+| `built-ins/Array/prototype` | 100 | see breakdown below |
+| `built-ins/Object/define{Property,Properties}` + `Object/create` | 104 | **descriptor model** — escalated #1630/#1631; all 104 are descriptor-conflict / array-`length` RangeError / non-object-descriptor (`ToPropertyDescriptor`), not non-object-1st-arg (that subset already throws) |
+| `built-ins/String/prototype` | 7 | ToPrimitive/Symbol coercion — overlaps done #1525/#1564 |
+| RequireObjectCoercible via `X.prototype.M.call(null/undefined)` | 9 | heterogeneous host-bridge dispatch (Function.prototype.call/apply, Object.prototype.hasOwnProperty/propertyIsEnumerable, String.prototype.concat) — one fix per dispatch path, no shared seam |
+
+**Array/prototype 100-fail breakdown** — the largest single area, but the
+top sub-clusters (reduce 11, reduceRight 10) are **`reduce`/`reduceRight` on a
+sparse / all-holes array with no initial value → TypeError**:
+- `15.4.4.21-8-c-1.js` (`new Array(10)`), `15.4.4.21-8-c-3.js` (`[1,2,3,4,5]`
+  then `delete` all elements), `15.4.4.21-5-*` (custom array-like with
+  `length` coerced to 0/null).
+- Confirmed via probe (`compileAndInstantiate`): `[].reduce(cb)` **already
+  throws** correctly (the `len === 0` guard at `array-methods.ts:5191-5198`
+  works), but `new Array(3).reduce(cb)` **returns `0`** instead of throwing —
+  because our dense WasmGC vec fills `new Array(3)` with three `0`/`NaN`
+  elements (`len = 3`), with no concept of "holes". Per ES §23.1.3.24 step 6,
+  reduce counts only *present* (HasProperty) elements, so all-holes ⇒ throw.
+  **Fixing this requires hole / sparse-array tracking** — the same dense-array
+  representation gap already escalated under **#1130** (accessor-getter
+  observation) and **#1592** (elision/over-consumption). Not a localized fix.
+- The remaining Array sub-buckets (splice/slice on frozen/non-extensible
+  target, concat on frozen target) need the **frozen-object model**, also
+  escalated under the descriptor-model work.
+
+**Callback type-check (team-lead's recommended Option A) is ALREADY DONE.**
+Verified by probe on both dispatch paths:
+- direct receiver: `[1,2,3].map(null)` → `TypeError: ... is not a function`;
+- `.call()` path: `Array.prototype.map.call(a, null)` / `forEach.call(a, 42)`
+  → TypeError.
+The shared emitter is `emitCallbackTypeCheck` (`array-methods.ts:78`), wired
+into filter/map/reduce/reduceRight/forEach/find/findIndex/some/every; the
+array-like `.call()` path routes non-closure callbacks to `__proto_method_call`
+which throws via the host. No further callback-validity work is needed.
+
+### Conclusion
+Slice 3 has **no implementation deliverable** — the recommended pattern is
+already shipped, and every remaining not-thrown sub-cluster of meaningful size
+is blocked on a representation/model gap (holes/sparse arrays → #1130/#1592;
+descriptor model → #1630/#1631; frozen-object model) or overlaps with
+already-done coercion issues (#1525/#1564/#820 family). This re-confirms the
+2026-05-27 profiling conclusion against fresher data. The umbrella's progress
+is gated on those representation issues, not on more silent-throw guards.
+Recommend the umbrella stay open but be **de-prioritised** until #1130/#1592
+(hole tracking) and #1630/#1631 (descriptor model) land, which will unblock the
+bulk of the residual not-thrown buckets at once.
