@@ -112,6 +112,38 @@ the same #1320 iterator-identity chain — carve + escalate per the issue
 guardrail if they need the compiled-value↔host-iterator foundation.
 
 
+## S2 (landed 2026-06-03) — static-helper arity + property descriptors
+
+Localized spec-compliance fix in `src/runtime.ts`
+(`_installIteratorHelperPolyfills`). The polyfilled `Iterator.from` / `zip` /
+`zipKeyed` / `concat` were installed via raw `Object.defineProperty`, so the
+TS optional param (`options?`) inflated the function `.length` to **2** —
+§17/§27 mandate `1` for `from`/`zip`/`zipKeyed` and `0` for the variadic
+`concat`. Their own `length`/`name` data-properties were also left with the
+default `writable:true`, failing the test262 `verifyProperty` checks.
+
+Added `_installStaticHelper(target, name, length, impl)` (mirrors the existing
+`_installBuiltinMethod`): resets `fn.length`/`fn.name` to spec values with
+`{writable:false, enumerable:false, configurable:true}` and installs the
+property on `Iterator` with `{writable:true, enumerable:false,
+configurable:true}` (§17 default data-property attributes). Converted the four
+static installs to use it. Runtime iteration behaviour unchanged.
+
+Result (host-runner tally, this Node which ships only native `flatMap`):
+`zip` 8→9, `zipKeyed` 8→9 (the `length.js` `verifyProperty` cases now pass),
+`concat`/`flatMap` unchanged, **no regressions**. Unit test:
+`tests/issue-1718-static-arity.test.ts` (18 cases).
+
+**Remaining (bridge-blocked, NOT this slice):** the dominant residual buckets
+are `Iterator helper: argument is not iterable` (concat ~18, zipKeyed ~16) and
+`flatMap is not a function` (~7). These all reduce to the same root cause:
+a **compiled object literal / generator carrying a `[Symbol.iterator]` (or
+`flatMap`) method is opaque to the host polyfill** — the well-known-symbol
+method and the `%Iterator.prototype%` chain don't survive the
+compiled-value↔host boundary. That is the #1320 / #1665 iterator-bridge
+foundation (`related: [1320]`), explicitly escalated as needs-architect and
+out of a localized dev's scope. Issue stays `ready` for those slices.
+
 ### Type-check lib (lib.esnext.iterator.d.ts) — DEFERRED
 
 Adding lib.esnext.iterator.d.ts to the checker lib set (src/checker/index.ts)
