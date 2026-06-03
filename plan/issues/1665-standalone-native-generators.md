@@ -1,9 +1,10 @@
 ---
 id: 1665
 title: "host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler)"
-status: ready
+status: done
 created: 2026-05-25
 updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: hard
 task_type: feature
@@ -13,8 +14,8 @@ goal: standalone-mode
 sprint: 58
 required_by: [1344, 1732]
 related: [1662, 1376, 1103, 1320, 1340, 1464, 1718]
-claimed_by: codex-developer
-claimed_at: 2026-06-02T22:53:01.322Z
+claimed_by: sd-1665
+claimed_at: 2026-06-03T00:00:00.000Z
 ---
 # #1665 — Wasm-native generators for standalone mode
 
@@ -504,3 +505,58 @@ Remaining standalone work:
 - A mis-scoped `pnpm test -- tests/issue-1665.test.ts` run invoked the broad
   suite, reported unrelated existing failures, and ended with a Vitest worker
   OOM. The direct scoped commands above passed.
+
+## Senior-dev recon — 2026-06-03 (standalone native track de-risked + ALLOCATED)
+
+Re-examined the standalone-native track on fresh `origin/main`
+(`acbfad032`). Prereqs are met: #1664 (task #91) and #1666 (task #135) are
+`done`. Tech-lead allocated the native-generator track to sd-1665.
+
+### The host-import leak is GONE — it is now a hard compile error
+
+`function*` + `for (const x of gen())` under `--target wasi` no longer
+*leaks* `__gen_*` / `__iterator*` imports. It hits the `#681` gate
+(`src/codegen/statements/loops.ts:3424`; IR twin `src/ir/integration.ts:1245`)
+and **fails to compile**. This **invalidates the prior stop-reason #2**
+("native eager would be silently wrong → worse than the honest host leak"):
+there is no leak anymore. The eager model is *already* what host mode ships
+(`closures.ts:2120` runs the body to completion at creation), so a native
+eager port makes standalone **equivalent to host** — a strict improvement.
+The state-machine/CPS rewrite remains the long-term fix but is orthogonal.
+
+### The native `$Iterator` struct shape ALREADY validates today
+
+`compileForOfDirectIterator` (`loops.ts:3078`) is a complete pure-Wasm
+for-of driver. Verified: a hand-written
+`class Range { [Symbol.iterator]() { return { next() {…} } } }` compiles
+`--target wasi` to a **valid** module with zero `__iterator*` imports. So
+#1665a's shared native iterator interface is the de-facto contract that path
+already consumes; generators need to *emit into it*.
+
+The driver resolves the contract **by name**: an iterable struct named
+`$X` needs a `${X}_@@iterator` func (returns a `ref`/`ref_null` iterator
+struct), the iterator struct `$I` needs a `${I}_next` func (returns a
+`ref`/`ref_null` result struct), and the result struct needs fields literally
+named `done` (i32 or f64) and `value` (loop element type), discoverable via
+`ctx.structFields.get("${I}_next_result")` or `findStructFieldsByTypeIdx`.
+
+### Decomposition (allocated, multi-PR)
+
+- **N1 (native generator value):** lower `function*` to a WasmGC
+  `$Generator` struct `{ items: (array (mut anyref)), len: i32, index: i32,
+  pendingThrow: anyref }`; port the 14 helpers at `index.ts:6930-7027`
+  (`__gen_create_buffer`, `__gen_push_{f64,i32,ref}`, `__gen_yield_star`,
+  `__create_generator`, `__gen_next/return/throw`, `__gen_result_*`) to
+  native funcs in `addUnionImportsAsNativeFuncs` (`index.ts:7459`), reusing
+  the `__box_number`/`__box_boolean` precedent.
+- **N2 (preferred):** give `$Generator` the `@@iterator`/`next`/`{value,done}`
+  triple so it flows through `compileForOfDirectIterator` — **no `#681` gate
+  change**, and Map/Set (#1103) reuse the same path.
+- **N3:** `.next()`/`.return()`/`.throw()` call sites read the native struct.
+- Then drop the `__gen_*`/`__create_generator*` allowlist entries
+  (`host-import-allowlist.ts:287-304`). Async generators stay deferred.
+
+### Constraint
+Hard rule from tech-lead: do NOT regress the iterator cluster. Land
+incrementally per slice (PR → CI → self-merge). Keep `status` until a native
+slice actually lands.

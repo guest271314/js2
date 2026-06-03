@@ -18,52 +18,52 @@ async function expectRefused(src: string): Promise<ReturnType<typeof compile>> {
   const r = await compile(src, { target: "standalone" });
   expect(r.success, `expected compile failure, got success for:\n${src}`).toBe(false);
   expect(r.errors.length).toBeGreaterThan(0);
-  expect(r.errors.some((e) => /#1474/.test(e.message))).toBe(true);
+  // #1539 narrowed the standalone-RegExp refusals; the residual ones cite
+  // either #1474 (String-method gate) or #1539 (engine subset).
+  const cite = /#1474|#1539/;
+  expect(r.errors.some((e) => cite.test(e.message))).toBe(true);
   // Source location must be reported (line > 0).
-  const refusal = r.errors.find((e) => /#1474/.test(e.message))!;
+  const refusal = r.errors.find((e) => cite.test(e.message))!;
   expect(refusal.line).toBeGreaterThan(0);
   return r;
 }
 
-describe("#1474 --target standalone refuses RegExp", () => {
-  it("rejects a regex literal", async () => {
-    await expectRefused(`export function f(s: string): boolean { return /\\d+/.test(s); }`);
-  });
-
-  it("rejects a flagged regex literal", async () => {
-    await expectRefused(`export function f(s: string): string { return s.replace(/a/g, "b"); }`);
-  });
-
-  it("rejects new RegExp(...)", async () => {
+// #1539 Phase 2a narrowed these refusals: a static-pattern `RegExp.prototype.
+// test` now compiles to the pure-WasmGC backtracking VM (see
+// tests/issue-1539-standalone-regex.test.ts). The cases below are the residual
+// forms that are STILL refused — dynamic patterns, the String.prototype
+// regex-coercing methods (Phase 2c), and out-of-subset pattern features.
+describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
+  it("rejects new RegExp(dynamicPattern, ...)", async () => {
     await expectRefused(`export function f(p: string): boolean { return new RegExp(p, "g").test("x"); }`);
   });
 
-  it("rejects RegExp(...) called without new", async () => {
+  it("rejects RegExp(dynamicPattern) called without new", async () => {
     await expectRefused(`export function f(p: string): boolean { const r = RegExp(p); return r.test("x"); }`);
   });
 
-  it("rejects s.match(regexLiteral)", async () => {
+  it("rejects s.match(regexLiteral) — String method (Phase 2c)", async () => {
     await expectRefused(`export function f(s: string): boolean { return s.match(/\\d+/) !== null; }`);
   });
 
-  it("rejects s.matchAll(regexLiteral)", async () => {
+  it("rejects s.matchAll(regexLiteral) — Phase 2c", async () => {
     await expectRefused(`export function f(s: string): number { return [...s.matchAll(/\\d/g)].length; }`);
   });
 
-  it("rejects s.search(regexLiteral)", async () => {
+  it("rejects s.search(regexLiteral) — String method (Phase 2c)", async () => {
     await expectRefused(`export function f(s: string): number { return s.search(/\\d/); }`);
   });
 
-  it("rejects s.split(regexArg)", async () => {
+  it("rejects s.split(regexArg) — Phase 2c", async () => {
     await expectRefused(`export function f(s: string): number { const r = /,/; return s.split(r).length; }`);
   });
 
-  it("rejects s.replace(regexArg, ...)", async () => {
+  it("rejects s.replace(regexArg, ...) — Phase 2c", async () => {
     await expectRefused(`export function f(s: string): string { const r = /a/g; return s.replace(r, "b"); }`);
   });
 
   it("emits no env::RegExp_new import when refused", async () => {
-    const r = await compile(`export function f(s: string): boolean { return /\\d+/.test(s); }`, {
+    const r = await compile(`export function f(p: string): boolean { return new RegExp(p, "g").test("x"); }`, {
       target: "standalone",
     });
     expect(r.success).toBe(false);
