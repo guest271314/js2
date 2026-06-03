@@ -2,18 +2,23 @@
 // Reproduce the #389 Native Messaging memory scenario across wasmtime versions
 // and host implementations, with echo-correctness checking.
 //
-// For each (host source × wasmtime binary) it compiles the source to standalone
-// WASI, streams `--frames` Chrome-framed messages of `--mib` MiB each (a
-// comma-laden `JSON.stringify(Array(N))` body — the shape produced by
-// `port.postMessage(Array(209715*64))`), reassembles the framed stdout, and
-// reports peak RSS, whether the echo round-tripped byte-exactly, and wall time.
+// For each (host source × wasmtime binary) and each `--sizes` entry it compiles
+// the source to standalone WASI, streams `--frames` Chrome-framed messages of
+// that many MiB each (a comma-laden `JSON.stringify(Array(N))` body — the shape
+// produced by `port.postMessage(Array(209715*64))`), reassembles the framed
+// stdout, and reports peak RSS, whether the echo round-tripped byte-exactly,
+// and wall time. One table is printed per size.
+//
+// Every .ts source is ALSO transpiled to .js (TS types stripped, JSDoc @param
+// types kept so js2wasm still types it) and compiled, so the table shows both
+// the .ts host and its .js form behave identically. Disable with --no-js.
 //
 // Examples:
-//   # default 3 x 64 MiB, both sources, wasmtime on PATH
+//   # default: 3 frames at both 1 MiB and 64 MiB, .ts + .js, wasmtime on PATH
 //   node examples/native-messaging/compare-memory.mjs
 //
 //   # compare two pinned wasmtime builds against both host versions
-//   node examples/native-messaging/compare-memory.mjs --frames 3 --mib 64 \
+//   node examples/native-messaging/compare-memory.mjs --frames 3 --sizes 1,64 \
 //     --wasmtime 44.0.2=/path/to/wasmtime-44 \
 //     --wasmtime 45.0.0=/path/to/wasmtime-45
 //
@@ -24,11 +29,12 @@
 // nm_js2wasm_guest.ts. Override with --source LABEL=FILE (repeatable).
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import ts from "typescript";
 
 const WASMTIME_FLAGS = ["-W", "gc=y,function-references=y,tail-call=y,exceptions=y"];
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -37,19 +43,27 @@ const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 function parseArgs(argv) {
   const opts = {
     frames: 3,
-    mib: 64,
+    sizes: null, // MiB list; default applied after parsing
     guardMb: 6144,
     sampleMs: 15,
     wasmtimes: [], // {label, path}
     sources: [], // {label, file}
     download: [],
+    js: true,
     keep: false,
   };
+  const toSizes = (s) =>
+    s
+      .split(",")
+      .map((x) => Number(x.trim()))
+      .filter((n) => n > 0);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => (a.includes("=") ? a.slice(a.indexOf("=") + 1) : argv[++i]);
     if (a === "--frames") opts.frames = Number(argv[++i]);
-    else if (a === "--mib") opts.mib = Number(argv[++i]);
+    else if (a.startsWith("--sizes")) opts.sizes = toSizes(val());
+    else if (a === "--mib") opts.sizes = [Number(argv[++i])];
+    else if (a === "--no-js") opts.js = false;
     else if (a === "--guard-mb") opts.guardMb = Number(argv[++i]);
     else if (a === "--sample-ms") opts.sampleMs = Number(argv[++i]);
     else if (a.startsWith("--wasmtime")) {
@@ -74,7 +88,31 @@ function parseArgs(argv) {
       process.exit(0);
     } else throw new Error(`unknown option: ${a}`);
   }
+  if (!opts.sizes || opts.sizes.length === 0) opts.sizes = [1, 64];
   return opts;
+}
+
+// Strip a label down to a filesystem-safe key for temp dirs / filenames.
+function keyOf(label) {
+  return label.replace(/[^a-z0-9]+/gi, "_");
+}
+
+// Transpile a .ts host to .js with TS type annotations removed but comments
+// (JSDoc @param types) KEPT — js2wasm reads those JSDoc types, so the .js form
+// compiles to the same typed Wasm as the .ts. esbuild strips JSDoc, which would
+// drop the types and mis-compile (e.g. number params), so use the TS transpiler.
+function transpileToJs(tsFile, outDir, key) {
+  const src = readFileSync(tsFile, "utf8");
+  const out = ts.transpileModule(src, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ESNext,
+      module: ts.ModuleKind.ESNext,
+      removeComments: false,
+    },
+  }).outputText;
+  const dest = join(outDir, `${key}.js`);
+  writeFileSync(dest, out);
+  return dest;
 }
 
 function hostArch() {
@@ -114,8 +152,8 @@ function buildCli(outDir) {
   return cli;
 }
 
-function compile(cli, source, outDir, label) {
-  const dir = join(outDir, label);
+function compile(cli, source, outDir, key) {
+  const dir = join(outDir, key);
   mkdirSync(dir, { recursive: true });
   const r = spawnSync(process.execPath, [cli, source, "--target", "wasi", "-o", dir, "--quiet"], {
     cwd: REPO_ROOT,
@@ -253,21 +291,33 @@ async function main() {
     }
 
     const cli = buildCli(work);
-    const wasms = opts.sources.map((s) => ({ label: s.label, wasm: compile(cli, s.file, work, s.label) }));
-    const versions = opts.wasmtimes.map((w) => ({ ...w, ver: wasmtimeVersion(w.path) }));
-    const body = jsonArrayBody(Math.floor((opts.mib * 1048576) / 1)); // per-frame body ~mib MiB
 
-    console.log(`\n# ${opts.frames} x ${(body.length / 1048576).toFixed(0)} MiB JSON-array frames (Array shape)\n`);
-    console.log("| host | wasmtime | peak RSS | Δ RSS | echoed | frames | exact? | wall |");
-    console.log("|---|---|---:|---:|---:|---:|:--:|---:|");
-    for (const { label, wasm } of wasms) {
-      for (const v of versions) {
-        const r = await runOne(v.path, v.ver, wasm, body, opts.frames, opts);
-        const tag = r.killed ? " ⚠KILLED" : r.code !== 0 ? ` ⚠exit=${r.code}` : "";
-        console.log(
-          `| ${label} | ${v.label} | ${r.peakMb.toFixed(0)} MB | ${r.deltaMb.toFixed(0)} MB | ` +
-            `${r.outMib.toFixed(0)} MiB | ${r.outFrames} | ${r.exact ? "✅" : "❌"} | ${(r.wall / 1000).toFixed(1)} s${tag} |`,
-        );
+    // Expand each source into the .ts host plus its transpiled .js form.
+    const variants = [];
+    for (const s of opts.sources) {
+      variants.push({ label: s.label, file: s.file, key: keyOf(s.label) });
+      if (opts.js && s.file.endsWith(".ts")) {
+        const key = `${keyOf(s.label)}_js`;
+        variants.push({ label: `${s.label} (.js)`, file: transpileToJs(s.file, work, key), key });
+      }
+    }
+    const wasms = variants.map((v) => ({ label: v.label, wasm: compile(cli, v.file, work, v.key) }));
+    const versions = opts.wasmtimes.map((w) => ({ ...w, ver: wasmtimeVersion(w.path) }));
+
+    for (const mib of opts.sizes) {
+      const body = jsonArrayBody(mib * 1048576); // per-frame body ~mib MiB
+      console.log(`\n# ${opts.frames} x ${(body.length / 1048576).toFixed(0)} MiB JSON-array frames (Array shape)\n`);
+      console.log("| host | wasmtime | peak RSS | Δ RSS | echoed | frames | exact? | wall |");
+      console.log("|---|---|---:|---:|---:|---:|:--:|---:|");
+      for (const { label, wasm } of wasms) {
+        for (const v of versions) {
+          const r = await runOne(v.path, v.ver, wasm, body, opts.frames, opts);
+          const tag = r.killed ? " ⚠KILLED" : r.code !== 0 ? ` ⚠exit=${r.code}` : "";
+          console.log(
+            `| ${label} | ${v.label} | ${r.peakMb.toFixed(0)} MB | ${r.deltaMb.toFixed(0)} MB | ` +
+              `${r.outMib.toFixed(0)} MiB | ${r.outFrames} | ${r.exact ? "✅" : "❌"} | ${(r.wall / 1000).toFixed(1)} s${tag} |`,
+          );
+        }
       }
     }
     console.log("");
