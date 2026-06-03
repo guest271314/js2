@@ -81,6 +81,12 @@ export interface ObjectRuntimeTypes {
   propEntryTypeIdx: number;
   propMapTypeIdx: number;
   objectTypeIdx: number;
+  /** `$ObjVec` struct {len: i32, data: (ref (array (mut externref)))} — the
+   *  growable externref vector that backs standalone `Object.keys/values/entries`
+   *  enumeration results (#1472 Phase B Blocker B). */
+  objVecTypeIdx: number;
+  /** Backing `(array (mut externref))` for `$ObjVec.data`. */
+  objVecArrTypeIdx: number;
 }
 
 /**
@@ -138,7 +144,38 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ],
   });
 
-  const types: ObjectRuntimeTypes = { propEntryTypeIdx, propMapTypeIdx, objectTypeIdx };
+  // $ObjVec backing array: (array (mut externref)) — holds enumeration results
+  // (keys/values/entries) as boxed externrefs. Separate from the closed-shape
+  // __vec_externref/__arr_externref the array literal path uses, so this runtime
+  // owns its own type and never collides with shifted indices there.
+  const objVecArrTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "array",
+    name: "$ObjVecArr",
+    element: { kind: "externref" },
+    mutable: true,
+  });
+
+  // $ObjVec struct {len: i32, data: (ref $ObjVecArr)} — a growable externref
+  // vector. Wrapped to externref via extern.convert_any so it flows through the
+  // existing externref-typed enumeration call sites (Object.keys → __extern_*).
+  const objVecTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$ObjVec",
+    fields: [
+      { name: "len", type: { kind: "i32" }, mutable: true },
+      { name: "data", type: { kind: "ref", typeIdx: objVecArrTypeIdx }, mutable: true },
+    ],
+  });
+
+  const types: ObjectRuntimeTypes = {
+    propEntryTypeIdx,
+    propMapTypeIdx,
+    objectTypeIdx,
+    objVecTypeIdx,
+    objVecArrTypeIdx,
+  };
   ctx.objectRuntimeTypes = types;
 
   // Common ValTypes.
@@ -148,6 +185,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const entryRefNull: ValType = { kind: "ref_null", typeIdx: propEntryTypeIdx };
   const anyStrRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
   const nativeStrRef: ValType = { kind: "ref", typeIdx: nativeStrTypeIdx };
+  const objVecRef: ValType = { kind: "ref", typeIdx: objVecTypeIdx };
+  const objVecArrRef: ValType = { kind: "ref", typeIdx: objVecArrTypeIdx };
 
   // Helper: register a defined function, return its funcIdx.
   const registerNative = (
@@ -865,6 +904,379 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // #1472 Phase B Blocker B — native $ObjVec build/iterate foundation.
+  //
+  // A growable externref vector that backs standalone enumeration results
+  // (Object.keys/values/entries). It is wrapped to externref via
+  // extern.convert_any so the result flows unchanged through the existing
+  // externref-typed enumeration call sites, where the consumer reads it back
+  // via __extern_length + __extern_get_idx. Those two helpers gain a
+  // $ObjVec-aware native path here so the round-trip is fully host-free.
+  //
+  // Insert/append uses doubling growth; INITIAL_CAP keeps small objects cheap.
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── __objvec_new() -> externref ─────────────────────────────────────────
+  // struct.new $ObjVec { len: 0, data: new $ObjVecArr[INITIAL_CAP] }, wrapped.
+  {
+    const body: Instr[] = [
+      { op: "i32.const", value: 0 }, // len
+      { op: "i32.const", value: INITIAL_CAP }, // data: array.new_default count
+      { op: "array.new_default", typeIdx: objVecArrTypeIdx },
+      { op: "struct.new", typeIdx: objVecTypeIdx },
+      { op: "extern.convert_any" },
+    ];
+    registerNative("__objvec_new", [], [{ kind: "externref" }], [], body);
+  }
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new")!;
+
+  // ── __objvec_push(externref vec, externref elem) -> void ─────────────────
+  //
+  // Append elem to the wrapped $ObjVec, doubling the backing array when full.
+  // No-op (silently) if vec is not a $ObjVec — keeps the helper total.
+  //
+  // params: 0=vec(externref) 1=elem(externref)
+  // locals: 2=any(anyref) 3=v(ref null $ObjVec) 4=arr(ref null $ObjVecArr)
+  //         5=len 6=cap 7=narr(ref null $ObjVecArr) 8=i
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(vec); if !$ObjVec → return
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objVecTypeIdx },
+      { op: "i32.eqz" },
+      { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
+      // v = cast<$ObjVec>(any)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objVecTypeIdx },
+      { op: "local.set", index: 3 },
+      // arr = v.data ; len = v.len ; cap = arr.len
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+      { op: "local.tee", index: 4 },
+      { op: "array.len" },
+      { op: "local.set", index: 6 },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: 5 },
+      // if len >= cap → grow: narr = new[cap*2]; copy 0..len; v.data = narr; arr = narr
+      { op: "local.get", index: 5 },
+      { op: "local.get", index: 6 },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // narr = array.new_default(cap*2)  (cap is always >=1)
+          { op: "local.get", index: 6 },
+          { op: "i32.const", value: 2 },
+          { op: "i32.mul" },
+          { op: "array.new_default", typeIdx: objVecArrTypeIdx },
+          { op: "local.set", index: 7 },
+          // i = 0; while i < len: narr[i] = arr[i]; i++
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: 8 },
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 5 },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
+                  // narr[i] = arr[i]
+                  { op: "local.get", index: 7 },
+                  { op: "ref.as_non_null" },
+                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 4 },
+                  { op: "ref.as_non_null" },
+                  { op: "local.get", index: 8 },
+                  { op: "array.get", typeIdx: objVecArrTypeIdx },
+                  { op: "array.set", typeIdx: objVecArrTypeIdx },
+                  // i++
+                  { op: "local.get", index: 8 },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: 8 },
+                  { op: "br", depth: 0 },
+                ],
+              },
+            ],
+          },
+          // v.data = narr ; arr = narr
+          { op: "local.get", index: 3 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 7 },
+          { op: "ref.as_non_null" },
+          { op: "struct.set", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+          { op: "local.get", index: 7 },
+          { op: "local.set", index: 4 },
+        ],
+      },
+      // arr[len] = elem ; v.len = len + 1
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 5 },
+      { op: "local.get", index: 1 },
+      { op: "array.set", typeIdx: objVecArrTypeIdx },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 5 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+    ];
+    registerNative(
+      "__objvec_push",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "v", type: { kind: "ref_null", typeIdx: objVecTypeIdx } },
+        { name: "arr", type: { kind: "ref_null", typeIdx: objVecArrTypeIdx } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "narr", type: { kind: "ref_null", typeIdx: objVecArrTypeIdx } },
+        { name: "i", type: { kind: "i32" } },
+      ],
+      body,
+    );
+  }
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
+
+  // ── __object_keys(externref obj) -> externref ────────────────────────────
+  //
+  // ES §20.1.2.18 — own enumerable string keys, insertion-order-ish (we walk
+  // the open-hash table slots; order is hash order, acceptable for the
+  // standalone open-object path which has no host array to preserve order).
+  // Build a fresh $ObjVec, push each LIVE (non-tombstone) entry's key. Non
+  // $Object receivers return an empty $ObjVec (host returns [] for those that
+  // reach here; ToObject-throw on null/undefined is handled at the call site).
+  //
+  // params: 0=obj(externref)
+  // locals: 1=any(anyref) 2=o(ref null $Object) 3=arr(ref $PropMap) 4=cap 5=i
+  //         6=e(ref null $PropEntry) 7=vec(externref)
+  {
+    const body: Instr[] = [
+      // vec = __objvec_new()
+      { op: "call", funcIdx: objVecNewIdx },
+      { op: "local.set", index: 7 },
+      // any = any.convert_extern(obj); if !$Object → return empty vec
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; arr = o.props ; cap = arr.len
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 2 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "local.tee", index: 3 },
+      { op: "array.len" },
+      { op: "local.set", index: 4 },
+      // i = 0
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 5 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= cap break
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 4 },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              // e = arr[i]
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 5 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.tee", index: 6 },
+              // if e != null && !(e.flags & TOMBSTONE) && (e.flags & ENUMERABLE):
+              //   __objvec_push(vec, extern.convert_any(e.key))
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 6 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_TOMBSTONE },
+                  { op: "i32.and" },
+                  { op: "i32.eqz" }, // not tombstone
+                  { op: "local.get", index: 6 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_ENUMERABLE },
+                  { op: "i32.and" }, // enumerable bit
+                  { op: "i32.and" }, // (not tombstone) && enumerable
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: 7 },
+                      { op: "local.get", index: 6 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                      { op: "extern.convert_any" },
+                      { op: "call", funcIdx: objVecPushIdx },
+                    ],
+                  },
+                ],
+              },
+              // i++ ; loop
+              { op: "local.get", index: 5 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 5 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // return vec
+      { op: "local.get", index: 7 },
+    ];
+    registerNative(
+      "__object_keys",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "arr", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+        { name: "vec", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
+  // ── __extern_length(externref v) -> f64 ──────────────────────────────────
+  //
+  // Standalone numeric "length" for an enumeration result. Recognises a wrapped
+  // $ObjVec and returns its f64 len; any other value returns 0 (matches the
+  // host import's null/non-array fallback). This is what the array-iteration
+  // consumers (buildVecFromExternref, array-methods length loops) read.
+  //
+  // params: 0=v(externref) ; locals: 1=any(anyref)
+  {
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objVecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "f64" } },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: objVecTypeIdx },
+          { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+          { op: "f64.convert_i32_s" },
+        ],
+        else: [{ op: "f64.const", value: 0 }],
+      },
+    ];
+    registerNative(
+      "__extern_length",
+      [{ kind: "externref" }],
+      [{ kind: "f64" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  }
+
+  // ── __extern_get_idx(externref v, f64 idx) -> externref ───────────────────
+  //
+  // Standalone indexed read. Recognises a wrapped $ObjVec and returns
+  // data[i32(idx)] when 0 <= idx < len; otherwise null. Any non-$ObjVec value
+  // returns null (matches the host import's null/undefined fallback).
+  //
+  // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=vec(ref null $ObjVec) 4=i
+  {
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objVecTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // vec = cast<$ObjVec>(any) ; i = i32(idx)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objVecTypeIdx },
+      { op: "local.set", index: 3 },
+      { op: "local.get", index: 1 },
+      { op: "i32.trunc_sat_f64_s" },
+      { op: "local.tee", index: 4 },
+      // if i < 0 || i >= vec.len → null
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      { op: "local.get", index: 4 },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // return vec.data[i]
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+      { op: "local.get", index: 4 },
+      { op: "array.get", typeIdx: objVecArrTypeIdx },
+    ];
+    registerNative(
+      "__extern_get_idx",
+      [{ kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "vec", type: { kind: "ref_null", typeIdx: objVecTypeIdx } },
+        { name: "i", type: { kind: "i32" } },
+      ],
+      body,
+    );
+  }
+  // Silence "declared but never used" for ValType aliases reserved for the
+  // values/entries/assign slices that stack on this foundation.
+  void objVecRef;
+  void objVecArrRef;
+  void nativeStrRef;
+
   return types;
 }
 
@@ -882,4 +1294,8 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__extern_get",
   "__extern_set",
   "__delete_property",
+  // #1472 Phase B Blocker B — native $ObjVec-backed enumeration + indexed read.
+  "__object_keys",
+  "__extern_length",
+  "__extern_get_idx",
 ]);

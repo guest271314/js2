@@ -145,6 +145,48 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(46);
   });
 
+  it("Phase B Blocker B: Object.keys + indexed read over an open `any` lowers native (no host imports, validates)", async () => {
+    // #1472 Phase B Blocker B — the native $ObjVec build/iterate foundation.
+    // For an `any`-typed receiver that TypeScript cannot narrow to a closed
+    // struct shape (a bare function parameter), `Object.keys(o)` lowers to the
+    // native __object_keys helper (walks the $Object PropMap → fresh $ObjVec),
+    // and an all-`any` indexed read `(ks as any)[i]` lowers to the native
+    // __extern_get_idx ($ObjVec[i]). Both must appear as DEFINED Wasm functions
+    // (not env::* imports), the module must validate, and zero object/array
+    // host imports may leak.
+    //
+    // NOTE: a runtime *value* assertion through Object.keys is intentionally
+    // NOT made here — standalone has no JS host to hand in an open object, and
+    // a locally-built `{}` is narrowed by TS to a closed struct (routed to the
+    // struct fast path, not this runtime). Exercising the end-to-end value path
+    // depends on the open-`any` receiver-dispatch work (Blocker A) + the
+    // enumeration-consumer slice (for-of / string[] coercion / `.length`
+    // routing). This test pins the foundation: the helpers emit, validate, and
+    // stay host-free.
+    const source = `
+        export function run(o: any): number {
+          const ks: any = Object.keys(o);
+          const first: any = (ks as any)[0];
+          return first === null ? -1 : 7;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    // No host array bridge leaked either (the $ObjVec is the array).
+    expect(r.imports.some((i) => i.module === "env" && i.name.startsWith("__array_from"))).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    // The native runtime helpers are emitted as defined functions, not imports.
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_keys\b/);
+    expect(wat).toMatch(/\(func \$__objvec_new\b/);
+    expect(wat).toMatch(/\(func \$__objvec_push\b/);
+    expect(wat).toMatch(/\(func \$__extern_get_idx\b/);
+    expect(wat).toMatch(/\(func \$__extern_length\b/);
+    // And the module instantiates with an empty import object (pure Wasm).
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `
