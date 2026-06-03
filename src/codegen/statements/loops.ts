@@ -35,6 +35,7 @@ import {
   emitBoundsCheckedArrayGet,
   valTypesMatch,
 } from "../shared.js";
+import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
 import {
   compileArrayDestructuring,
   arrayDstrNeedsIdentity,
@@ -3417,6 +3418,18 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
           return;
         }
       }
+    }
+  }
+
+  // #1665: Wasm-native generator for-of. When the iterable is a native
+  // generator state struct (the value produced by a `function*` declaration
+  // under --target wasi/standalone), drive the loop via the generator's resume
+  // function — no JS-host iterator protocol, no #681 gate. The subject value is
+  // already on the stack from compileExpression above.
+  if ((ctx.standalone || ctx.wasi) && (iterableType.kind === "ref" || iterableType.kind === "ref_null")) {
+    const genInfo = nativeGeneratorInfoForForOfSubject(ctx, iterableType);
+    if (genInfo && tryCompileNativeGeneratorForOf(ctx, fctx, stmt, iterableType, genInfo)) {
+      return;
     }
   }
 
