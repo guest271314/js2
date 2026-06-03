@@ -3,7 +3,7 @@ id: 1732
 title: "spec gap: builtin method values lack [[Construct]]-absent brand + own length/name descriptors (~40 String.prototype A7/A8 fails)"
 status: ready
 created: 2026-05-29
-updated: 2026-05-29
+updated: 2026-06-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -479,3 +479,32 @@ Tests: `tests/issue-1732-s2.test.ts` (6) — `new Math.f16round`/`Math.sumPrecis
 S1 tests stay green. Closes test262
 `built-ins/Math/f16round/not-a-constructor.js` and the analogous newer-method
 not-a-constructor cases.
+
+## Namespace call-as-function slice landed (2026-06-03)
+
+**Companion to the S2 `new <namespace>()` guard: the call-as-function form.**
+The S2 work made `new Math()` / `new <Namespace>.<method>()` throw TypeError,
+but `Math()` / `JSON()` / `Reflect()` / `Atomics()` called *as a function*
+still returned silently — these namespace objects have **no `[[Call]]`**
+internal method (§sec-math-object etc.), so the call must throw TypeError.
+
+Re-validation against current main (baseline 9ee8e92 was 136h stale) showed the
+remaining Math-suite failures were almost all already-green or harness-include
+gaps; the one genuine localized compiler defect was
+`built-ins/Math/prop-desc.js` L28 `assert.throws(TypeError, () => Math())`.
+
+Fix: a guard at the top of `compileCallExpression`
+(`src/codegen/expressions/calls.ts`) mirroring the S2 `new`-site
+`NAMESPACE_NON_CONSTRUCTORS` set — when the (paren/as/!-unwrapped) callee is a
+bare identifier in `{Math, JSON, Reflect, Atomics}`, evaluate the arguments for
+side effects, then `emitThrowTypeError("<name> is not a function")`. Member
+calls (`Math.abs(-5)`, `Reflect.construct(...)`) keep their existing paths —
+the guard only fires when the *whole* callee is the namespace identifier.
+
+Tests: `tests/issue-1732-ns-call.test.ts` (12) — `Math/JSON/Reflect/Atomics()`
+throw TypeError in both js-host and standalone modes; guards confirm
+`Math.abs(-5)`/`Math.max(1,2)` member calls, `new Math()`, and a user function
+named like a namespace all still work. Closes
+`built-ins/Math/prop-desc.js` (+ JSON/Reflect/Atomics `prop-desc.js` "no
+[[Call]]" arms). S3 (unified `$FuncObj`) and S4 (standalone parity) remain open
+under this tracking issue — status stays `ready`.

@@ -1815,6 +1815,45 @@ function compileCallExpression(
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // (#1732) Calling a built-in non-constructor namespace — `Math()`, `JSON()`,
+  // `Reflect()`, `Atomics()` — must throw TypeError ("no [[Call]]"). These
+  // namespace objects have neither a [[Call]] nor [[Construct]] internal
+  // method (§sec-math-object etc.). The `new`-site already throws via the
+  // mirror guard in new-super.ts (NAMESPACE_NON_CONSTRUCTORS); this closes the
+  // call-as-function form (built-ins/Math/prop-desc.js "no [[Call]]"). Unwrap
+  // paren/as/!-assertion wrappers so `(Math as any)()` also fires.
+  {
+    let unwrapped: ts.Expression = expr.expression;
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isNonNullExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
+      unwrapped = ts.isParenthesizedExpression(unwrapped)
+        ? unwrapped.expression
+        : ts.isAsExpression(unwrapped)
+          ? unwrapped.expression
+          : ts.isNonNullExpression(unwrapped)
+            ? unwrapped.expression
+            : (unwrapped as ts.TypeAssertion).expression;
+    }
+    if (ts.isIdentifier(unwrapped)) {
+      const NAMESPACE_NON_CALLABLE = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+      if (NAMESPACE_NON_CALLABLE.has(unwrapped.text)) {
+        // Evaluate arguments for their side effects (spec: argument list is
+        // evaluated before the [[Call]] check would normally run), then throw.
+        for (const arg of expr.arguments) {
+          const t = compileExpression(ctx, fctx, arg);
+          if (t !== null && t !== undefined) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, `${unwrapped.text} is not a function`);
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // (#1540) JSX runtime call intercept — `_jsx(type, props, key?)` /
   // `_jsxs(type, props, key?)` / `_jsxDEV(...)`. TypeScript emits these
   // automatically when `jsx: react-jsx` is set; preprocessImports recorded
