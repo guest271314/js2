@@ -1,16 +1,16 @@
 ---
 id: 1623
 title: "codegen: invalid Wasm binary at type-boundary coercion (extern/anyref + struct ref types)"
-status: in-review
+status: ready
 created: 2026-05-20
-updated: 2026-06-02
+updated: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: type-coercion, externref, wasm-gc
-sprint: Backlog
+sprint: 58
 renumbered_from: 1522
 es_edition: n/a
 test262_category: multiple (Iterator, Promise, Temporal, super, class)

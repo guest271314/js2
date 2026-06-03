@@ -1,7 +1,7 @@
 ---
 id: 1665
 title: "host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler)"
-status: in-review
+status: ready
 created: 2026-05-25
 updated: 2026-06-03
 priority: medium
