@@ -1369,6 +1369,21 @@ function _canBeWeakKey(obj: any): boolean {
 }
 
 /**
+ * IsConcatSpreadable (§23.1.3.1.1) for an opaque WasmGC struct receiver: true
+ * iff `Symbol.isConcatSpreadable` resolves to a truthy value. The flag is stored
+ * in the sidecar under both the real symbol and the `@@isConcatSpreadable`
+ * string mirror (see `_symbolIdToKeys`). Returns false when the property is
+ * absent or falsy, so a plain array-like is NOT spread unless explicitly tagged.
+ */
+function _isConcatSpreadable(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  const v = _safeGet(obj, Symbol.isConcatSpreadable, callbackState) ?? _sidecarGet(obj, "@@isConcatSpreadable");
+  return v !== undefined && v !== null && !!v;
+}
+
+/**
  * (#1382) Wrap a Wasm closure struct in a JS Function so it can be called
  * from JS host code (e.g. `Array.from(iter, mapFn)` where mapFn is a Wasm
  * closure rather than a real `function`).
@@ -8321,15 +8336,72 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const vecLen = exports?.__vec_len;
           const vecGet = exports?.__vec_get;
+          // §23.1.3.1 step 5.b / IsConcatSpreadable: an argument that is not a
+          // native Array is still spread when its Symbol.isConcatSpreadable
+          // property is truthy. Native concat reads that flag for plain JS
+          // objects already, but for an opaque WasmGC struct array-like (e.g.
+          // `{0:'a', length:2}` with the flag set in the sidecar) it sees a
+          // single opaque object and appends it whole — so spread those here.
+          const concatLen = (x: any): number => {
+            let raw = _safeGet(x, "length", callbackState);
+            // `length` on a struct-backed array-like is a real WasmGC field, not
+            // a sidecar entry — read it via the __sget_length getter export, the
+            // same path __extern_length uses.
+            if (raw === undefined) {
+              const getter = exports?.__sget_length;
+              if (typeof getter === "function") {
+                try {
+                  raw = (getter as (o: any) => unknown)(x);
+                } catch {
+                  /* not a field on this struct variant */
+                }
+              }
+            }
+            const n = typeof raw === "number" ? raw : Number(raw);
+            if (Number.isNaN(n) || n <= 0) return 0;
+            return Math.min(Math.trunc(n), 0x1fffffffffffff);
+          };
+          const applyConcat = (out: any[], xs: any[]): any[] => {
+            for (const x of xs) {
+              if (
+                x != null &&
+                typeof x === "object" &&
+                !Array.isArray(x) &&
+                _isWasmStruct(x) &&
+                _isConcatSpreadable(x, callbackState)
+              ) {
+                const n = concatLen(x);
+                for (let i = 0; i < n; i++) {
+                  let v = _safeGet(x, i, callbackState);
+                  // Indexed struct fields ("0", "1", …) live in WasmGC fields, not
+                  // the sidecar — fall back to the __sget_<i> getter export.
+                  if (v === undefined) {
+                    const idxGetter = exports?.[`__sget_${i}`];
+                    if (typeof idxGetter === "function") {
+                      try {
+                        v = (idxGetter as (o: any) => unknown)(x);
+                      } catch {
+                        /* not a field on this struct variant */
+                      }
+                    }
+                  }
+                  out.push(v);
+                }
+              } else {
+                out.push(x);
+              }
+            }
+            return out;
+          };
           if (typeof vecLen !== "function" || typeof vecGet !== "function") {
-            return ([] as any[]).concat(...args);
+            return applyConcat([], args);
           }
           const len = vecLen(arr) as number;
           const jsArr: any[] = new Array(len);
           for (let i = 0; i < len; i++) {
             jsArr[i] = vecGet(arr, i);
           }
-          return jsArr.concat(...args);
+          return applyConcat(jsArr, args);
         };
       // Array.prototype.join(sep?) fallback for externref receivers (#1286).
       // When the receiver is a JS array (e.g., from Object.keys host import),

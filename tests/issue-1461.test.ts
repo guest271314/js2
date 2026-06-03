@@ -324,6 +324,63 @@ describe("#1461 — Array.prototype.* on array-like / exotic receivers", () => {
     });
   });
 
+  describe("Acceptance bullet 6: concat honours Symbol.isConcatSpreadable", () => {
+    // §23.1.3.1.1 IsConcatSpreadable: a non-Array argument is spread when its
+    // Symbol.isConcatSpreadable property is truthy. An opaque WasmGC struct
+    // array-like reaches the host concat path as a single opaque object, so the
+    // flag has to be honoured in __array_concat_any.
+    it("spreads array-like when Symbol.isConcatSpreadable is true", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", 1: "b", length: 2 };
+            obj[Symbol.isConcatSpreadable] = true;
+            const r: any = Array.prototype.concat.call([], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(2);
+    });
+
+    it("spread preserves the array-like's element values", async () => {
+      expect(
+        await runWasm(`
+          export function test(): any {
+            const obj: any = { 0: "x", 1: "y", length: 2 };
+            obj[Symbol.isConcatSpreadable] = true;
+            const r: any = Array.prototype.concat.call([], obj);
+            return r[1];
+          }
+        `),
+      ).toBe("y");
+    });
+
+    it("does NOT spread an array-like without the flag (appended whole)", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", 1: "b", length: 2 };
+            const r: any = Array.prototype.concat.call([], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(1);
+    });
+
+    it("does NOT spread when Symbol.isConcatSpreadable is false", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", length: 1 };
+            obj[Symbol.isConcatSpreadable] = false;
+            const r: any = Array.prototype.concat.call([1], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(2);
+    });
+  });
+
   describe("Boxed String wrapper as receiver", () => {
     // Array.prototype.METHOD.call(new String("..."), cb): per spec the String
     // wrapper exposes integer-indexed accessors and a `length` property, so
