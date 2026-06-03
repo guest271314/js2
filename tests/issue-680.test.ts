@@ -96,6 +96,22 @@ describe("#680 Wasm-native generator state machines", () => {
     expect(exports.run()).toBe(1212);
   });
 
+  it("registers helper imports for standalone generator fallback bodies", async () => {
+    const result = await compileStandalone(`
+      class C {
+        *method(): Generator<number> {}
+      }
+
+      export function run(): number {
+        return 1;
+      }
+    `);
+
+    expect(envImportNames(result)).toContain("__gen_create_buffer");
+    expect(envImportNames(result)).toContain("__create_generator");
+    expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
+  });
+
   it("keeps the JS host eager-buffer fallback outside standalone targets", async () => {
     const result = await compile(`
       function* gen(): Generator<number> {
