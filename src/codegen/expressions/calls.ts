@@ -19,6 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { ensureObjVecBuilders } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
@@ -4544,9 +4545,20 @@ function compileCallExpression(
       const targetArg = expr.arguments[0]!;
       const targetType = compileExpression(ctx, fctx, targetArg, { kind: "externref" });
       if (targetType && targetType.kind !== "externref") coerceType(ctx, fctx, targetType, { kind: "externref" });
-      // Build sources as a JS array
-      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      // Build sources as a JS array (host) or native $ObjVec (standalone). The
+      // native __object_assign iterates a $ObjVec, so under ctx.standalone the
+      // sources list is built with the $ObjVec builders instead of the JS-host
+      // array imports (#1472 Phase B Slice 3).
+      let arrNewIdx: number | undefined;
+      let arrPushIdx: number | undefined;
+      if (ctx.standalone) {
+        const b = ensureObjVecBuilders(ctx);
+        arrNewIdx = b.newIdx;
+        arrPushIdx = b.pushIdx;
+      } else {
+        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      }
       const assignIdx = ensureLateImport(
         ctx,
         "__object_assign",

@@ -797,3 +797,77 @@ typed enumeration *consumer* chain to the native `$ObjVec` foundation so
 - `tests/issue-1472.test.ts` — 15 pass. No gc-mode regression: issue-1471,
   issue-1664, and the externref-array-destructuring / array-rest-destructuring /
   for-of-array-destructuring / arguments-object equivalence suites all green.
+
+## Phase B Slice 3 — values / entries / assign / has_idx (sd-1472, 2026-06-03)
+
+Branch `issue-1472-slice3` off origin/main (post-#1075/#1078). Completes the
+remaining open-object enumeration / indexed-access / assign surface on top of
+the `$ObjVec` foundation, all as DEFINED Wasm functions (no host imports, no
+index shift — same invariant as Slices 1/2).
+
+### What landed (`src/codegen/object-runtime.ts`)
+- `__object_values(externref) -> externref`: walks the `$Object` `$PropMap`,
+  pushes each LIVE + enumerable entry's *value* (anyref → externref) into a fresh
+  `$ObjVec`. Mirror of `__object_keys` over the value field.
+- `__object_entries(externref) -> externref`: each entry is itself a 2-element
+  `$ObjVec` (`[key, value]`), wrapped to externref and pushed into the outer
+  `$ObjVec`. The native `__extern_get_idx` already indexes a `$ObjVec`, so a
+  consumer reading `entry[0]`/`entry[1]` round-trips without a host array.
+- `__extern_has_idx(externref, f64) -> i32`: array-like `HasProperty(O,
+  ToString(idx))` — present iff `0 <= i32(idx) < len` over a `$ObjVec` (mirror of
+  `__extern_get_idx`, returns i32). Drives array-method callback loops
+  (`Array.prototype.filter.call(arrayLike, …)`) so they skip holes host-free.
+- `__object_assign(externref target, externref sources) -> externref`: §20.1.2.1.
+  `sources` is a `$ObjVec` of source externrefs; for each source that is a
+  `$Object`, copy every LIVE + enumerable own prop into `target` via the native
+  `__extern_set` (lenient no-op on a non-`$Object` target / nullish source).
+  Returns `target` (identity preserved).
+- New export `ensureObjVecBuilders(ctx)` returns the `__objvec_new` /
+  `__objvec_push` funcIdxs.
+
+### Call-site retargeting (the one non-trivial design call)
+`Object.assign(target, ...sources)` and the object-spread fallback build the
+variadic `...sources` list with `__js_array_new` / `__js_array_push`. Those two
+names are **not** safe to globally alias onto the `$ObjVec` builders: they are
+also used pervasively for real JS-array construction (spread call args, tagged
+templates, `new`-with-spread, `Reflect.apply` arg arrays, array-method results),
+whose consumers expect a genuine JS array — aliasing would silently corrupt
+those paths. So instead of a global alias, the **3 assign/spread call sites**
+(`calls.ts` Object.assign handler, `literals.ts`
+`compileObjectLiteralAsExternref` + `compileObjectLiteralWithAccessors`) branch
+on `ctx.standalone` to build the sources list with `ensureObjVecBuilders` (native
+`$ObjVec`) vs the JS-host imports. `__object_assign` itself iterates a `$ObjVec`
+(`ref.test $ObjVec`), so the only call-site delta is *which funcIdx* the existing
+builder loop calls. JS-host path is byte-for-byte unchanged (the `else` branch).
+
+### Latent bug fixed: enumerable-bit AND in `__object_keys` (Blocker B)
+While end-to-end testing enumeration I found `__object_keys` (merged in #1075,
+never runtime-asserted — its test only checked compile+validate) computed
+`(not-tombstone:0/1) i32.and (flags & ENUMERABLE:0/0x02)`. `1 & 0x02 == 0`, so
+`Object.keys` ALWAYS returned an empty `$ObjVec`. Fixed by normalising the
+enumerable bit to 0/1 (`i32.eqz; i32.eqz`) before the `&&`; applied the same
+normalisation in the new values/entries/assign helpers. Now `Object.keys/values/
+entries` return the correct elements (verified by for-of sum/count + `.length`).
+
+### Validation
+- `tests/issue-1472.test.ts` — 21 pass (6 new Slice-3 tests, all
+  instantiate-and-run under Node's WasmGC engine with empty imports):
+  values count + values-element round-trip via typed for-of (sum=30), entries
+  count, Object.assign merge (later-source-wins → 18), object-spread `{...src}`,
+  `__extern_has_idx` resolves native (no host import). Tests use *computed* keys
+  (`o[k]=v`) to defeat static struct-shape inference and force the genuine open
+  `$Object` runtime path (a literal `o.a=1` lets the compiler shape `o` into a
+  closed struct that bypasses the runtime entirely).
+- `npx tsc --noEmit` clean; `biome lint` clean (error level) on the 4 changed
+  files. gc-mode `Object.assign merges properties` (#965) still green; the one
+  pre-existing #965 `Symbol.for` failure reproduces identically on clean
+  origin/main (unrelated). No gc-mode path touched — every change is
+  `ctx.standalone`-gated or inside `ensureObjectRuntime` (standalone-only).
+
+### Known consumer gaps (out of scope — Blocker A receiver-dispatch)
+Reading a single element back via chained `any` indexing (`Object.values(o)[0]`
+or `entries[0][1]`) does not route the *second* index through the native
+helpers (the externref result loses its static type), and `Array.prototype.
+filter.call(arrayLike, …)` emits a module with independent standalone gaps. The
+helpers build correct structures (verified via the typed for-of consumer); the
+element-readback routing belongs with the Blocker A receiver-dispatch slice.
