@@ -429,6 +429,13 @@ function resolvePositionType(
   classShapes?: ReadonlyMap<string, import("../ir/nodes.js").IrClassShape>,
 ): IrType {
   if (node) {
+    // `readonly T[]` parses as a `readonly`-TypeOperatorNode wrapping the array
+    // type. `readonly` is a TS-only modifier with no runtime representation, so
+    // resolve the inner type directly (parallels the ReadonlyArray handling in
+    // resolveWasmType — #1748).
+    if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
+      return resolvePositionType(node.type, mapped, ctx, classShapes);
+    }
     if (node.kind === ts.SyntaxKind.NumberKeyword) return irVal({ kind: "f64" });
     if (node.kind === ts.SyntaxKind.BooleanKeyword) return irVal({ kind: "i32" });
     if (node.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
@@ -487,7 +494,11 @@ function resolvePositionType(
       }
       // Slice 6 part 2 (#1181) — `Array<T>` TypeReferenceNode resolves
       // to a vec ref, parallel to the `T[]` ArrayTypeNode arm above.
-      if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && node.typeName.text === "Array") {
+      if (
+        ts.isTypeReferenceNode(node) &&
+        ts.isIdentifier(node.typeName) &&
+        (node.typeName.text === "Array" || node.typeName.text === "ReadonlyArray")
+      ) {
         const typeArgs = node.typeArguments;
         if (typeArgs && typeArgs.length === 1) {
           const elemIr = resolvePositionType(typeArgs[0]!, undefined, ctx, classShapes);
@@ -8251,7 +8262,12 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   // in the lib as `declare var Array: ArrayConstructor` which would match externref
   if (tsType.flags & ts.TypeFlags.Object) {
     const sym = (tsType as ts.TypeReference).symbol ?? (tsType as ts.Type).symbol;
-    if (sym?.name === "Array") {
+    // `readonly T[]` / `ReadonlyArray<T>` lower identically to `T[]` — `readonly`
+    // is a TS-only modifier with no runtime representation. Without this, a
+    // ReadonlyArray-typed struct field falls through to the anonymous-struct /
+    // externref path and mismatches the vec the array literal builds, trapping
+    // on indexed read (#1748).
+    if (sym?.name === "Array" || sym?.name === "ReadonlyArray") {
       const typeArgs = ctx.checker.getTypeArguments(tsType as ts.TypeReference);
       const elemTsType = typeArgs[0];
       const elemWasm: ValType = elemTsType
