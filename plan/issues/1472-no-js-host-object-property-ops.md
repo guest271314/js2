@@ -507,10 +507,78 @@ When `ctx.standalone` is set:
   `src/codegen/expressions/new-super.ts`. **Implemented 2026-06-03.**
 - `Proxy.revocable(...)` → same error. **Implemented 2026-06-03** from
   `src/codegen/expressions/calls.ts`.
-- `Reflect.*` methods that don't have a `Object.*` equivalent
-  (`Reflect.construct` with proxy target, `Reflect.apply` against
-  externrefs) → error. Pure-Wasm `Reflect.get` / `Reflect.set` /
-  `Reflect.has` are aliases of the `$__obj_*` helpers. **Still follow-up.**
+- `Reflect.*` methods → routed/refused per the **Phase C — Reflect.\***
+  section below. **Implemented 2026-06-03.**
+
+## Phase C — Reflect.* standalone routing — IMPLEMENTED 2026-06-03 (senior-dev)
+
+Folded into PR #1081 (branch `issue-1472-blocker-a-half2`).
+
+### Root cause
+Every `Reflect.*` method in `src/codegen/expressions/calls.ts` (the Reflect
+dispatch block ~L4787) routes through `ensureLateImport(ctx, "__reflect_X", …)`,
+adding an `env::__reflect_X` host import. The `__reflect_*` family is **not** in
+`STANDALONE_REFUSED_IMPORT` (`late-imports.ts`), so under `--target standalone`
+these imports silently **leaked** into the binary and failed at instantiation
+with an opaque "unknown import env::__reflect_X" linker error — the bug class
+#1472 exists to eliminate.
+
+### What landed
+A single `if (ctx.standalone)` branch at the top of the Reflect dispatch block,
+before any per-method handler registers a host import:
+
+- `Reflect.ownKeys(target)` → native **`__object_keys`** (already in
+  `OBJECT_RUNTIME_HELPER_NAMES`, so `ensureLateImport` auto-routes it through
+  `ensureObjectRuntime` to the in-module func). Returns the string own keys of
+  the `$Object` hash-map in insertion order. The native runtime tracks only
+  string keys; Symbol/non-enumerable keys are out of scope (a consistent
+  approximation across the whole standalone object runtime). Validated
+  end-to-end: instantiates under empty imports, correct key count.
+- **All other** `Reflect.*` (`get`/`set`/`has`/`deleteProperty`/
+  `defineProperty`/`getOwnPropertyDescriptor`/`getPrototypeOf`/`setPrototypeOf`/
+  `isExtensible`/`preventExtensions`/`apply`/`construct`) → emit
+  `Codegen error: Reflect.X not supported in standalone mode (#1472 Phase C).`
+  (hard-fail via the `Codegen error:` prefix), pushing the correct fallback
+  value shape (i32 for boolean-returning methods, externref otherwise) so
+  codegen doesn't crash before the error surfaces.
+
+Default/gc + wasi-with-host is **unchanged** — host `__reflect_*` dispatch is
+only bypassed under `ctx.standalone`.
+
+### Two deliberate divergences from the original plan sketch (root-cause)
+1. **`Reflect.has` refuses rather than routing to `__extern_has_idx`.** The plan
+   suggested `__extern_has_idx`, but that is an *indexed* (array-like
+   `HasProperty(O, ToString(idx))`) check over a `$ObjVec` by integer index — not
+   a keyed `HasProperty` over the `$Object` hash-map. No native keyed
+   `__extern_has` is registered, so routing there would be *semantically wrong*.
+   Correct-or-refuse: it refuses. A real keyed native `has` (thin wrapper over
+   `__obj_find`) is a follow-up slice.
+2. **`Reflect.apply` / `Reflect.construct` refuse under standalone** (the sketch
+   said "keep existing host path"). The existing path adds `env::__reflect_apply`
+   / `env::__reflect_construct` with no native analog — keeping it would leak
+   host imports and break the #1472 acceptance criterion. They refuse in
+   standalone; default/gc keeps the host path.
+
+### Follow-up slices
+- Native keyed `__extern_has` (`Reflect.has` / `key in obj`) over `$Object`.
+- Native `Reflect.get`/`set`/`deleteProperty` as thin aliases of the existing
+  `__extern_get`/`__extern_set`/`__delete_property` natives (receiver/key
+  coercion + boolean-return semantics differ from the bare property ops).
+- Descriptor / prototype-mutation Reflect methods depend on the descriptor
+  sidecar model (gated on the broader Phase B descriptor work).
+
+### Validation
+- `tests/issue-1472.test.ts`: added `/^env::__reflect_/` to `BANNED_IMPORTS` and
+  3 tests — `Reflect.ownKeys` routes native (returns 2, zero host imports,
+  instantiates); all 10 unsupported methods refuse with the Phase C message and
+  no leaked `__reflect_*`; gc-mode guard confirms `Reflect.has` still binds
+  `env::__reflect_has`. Full file: 26 tests green.
+- `npx tsc --noEmit` clean; `biome lint` no errors on `calls.ts`.
+- `tests/equivalence/ts-wasm-equivalence.test.ts`: the 11 "tagged template
+  literals — *" compile failures are pre-existing on `origin/main` (reproduced
+  identically on the clean merge commit 830cd2e10 with these edits stashed) —
+  NOT a regression from this change, which only touches the `ctx.standalone`
+  Reflect path.
 
 ### Test approach
 
