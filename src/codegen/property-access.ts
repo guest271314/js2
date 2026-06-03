@@ -1019,16 +1019,25 @@ export function compilePropertyAccess(
     (propName === "read" || propName === "written") &&
     objType.getSymbol()?.name === "TextEncoderEncodeIntoResult"
   ) {
+    // Compile the receiver first: the `encodeInto(...)` call registers the
+    // `TextEncoderEncodeIntoResult` struct and returns it as a ref, so the
+    // struct type index is only known *after* the call is lowered.
+    const recvType = compileExpression(ctx, fctx, expr.expression);
     const resultTypeIdx = ctx.structMap.get("TextEncoderEncodeIntoResult");
-    if (resultTypeIdx !== undefined) {
-      const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "ref", typeIdx: resultTypeIdx });
-      if (recvType && recvType.kind !== "ref" && recvType.kind !== "ref_null") {
-        // Receiver didn't lower to the struct ref — fall through to the generic path.
-      } else {
-        fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
-        return { kind: "f64" };
-      }
+    if (
+      resultTypeIdx !== undefined &&
+      recvType &&
+      (recvType.kind === "ref" || recvType.kind === "ref_null") &&
+      recvType.typeIdx === resultTypeIdx
+    ) {
+      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+      return { kind: "f64" };
     }
+    // Receiver didn't lower to the result struct — undo nothing (we already
+    // emitted it); coerce/return a sensible f64 fallback.
+    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
   }
 
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
