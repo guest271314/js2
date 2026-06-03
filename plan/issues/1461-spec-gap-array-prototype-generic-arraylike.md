@@ -1,9 +1,9 @@
 ---
 id: 1461
 title: "spec gap: Array.prototype.* called on array-like / exotic receivers"
-status: in-review
+status: ready
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: array-methods
 goal: spec-completeness
-sprint: 52
+sprint: 58
 related: [1154]
 ---
 # #1461 - spec gap: Array.prototype.* called on array-like / exotic receivers
