@@ -1,9 +1,10 @@
 ---
 id: 1081
 title: "Index test262 runs by commit hash — enable merge-base comparisons without re-running"
-status: ready
+status: done
+completed: 2026-06-03
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-06-03
 priority: critical
 feasibility: medium
 reasoning_effort: medium
@@ -200,3 +201,36 @@ without loading the full 1.5 MB jsonl.
   on historical commits.
 - Every PR that touches code but isn't the merge-base itself benefits
   from this cache automatically — no dev workflow changes required.
+
+## Implementation note — 2026-06-03
+
+Shipped as three pure, unit-tested Node helpers plus workflow wiring; the
+cache physically lives in the `loopdive/js2wasm-baselines` repo (out of the
+main repo to avoid clone bloat), consistent with the existing baseline-JSONL
+split (#1528).
+
+- `scripts/write-run-cache.mjs` — builds `runs/<sha>.json` (summary + per-
+  category breakdown + `test262_version`) and copies `runs/<sha>.jsonl`.
+  Declines corrupt reports (pass < 1000 or total < 40000). Called from the
+  `promote-baseline` job after the `runs/index.json` update.
+- `scripts/resolve-merge-base-baseline.mjs` — in the PR `regression-gate` job,
+  computes `git merge-base origin/main HEAD`, and on a cache hit (entry exists
+  AND its `test262_version` matches the PR's submodule) overwrites
+  `benchmarks/results/test262-current.jsonl` with the merge-base's exact
+  results. A miss warns (`::warning::#1081 … MISS`) and keeps the latest-main
+  baseline — never fails the build. The `regression-gate` checkout was changed
+  to `fetch-depth: 0` + `submodules: recursive` so merge-base + test262 version
+  are resolvable.
+- `scripts/prune-run-cache.mjs` + `.github/workflows/test262-cache-prune.yml`
+  — weekly retention: sprint-tagged SHAs (derived from `sprint/*` /
+  `sprint-*/begin` tags) kept forever; non-tagged entries older than 30 days
+  evicted; LRU eviction once total exceeds the 500 MB cap.
+- `benchmarks/runs/README.md` documents the layout, schema, flow, and policy.
+- Unit tests: `tests/issue-1081.test.ts` (11 tests, green) cover summary build,
+  corrupt-report rejection, cache hit/miss/version-mismatch, and the eviction
+  planner (age, sprint-pin immunity, LRU cap). End-to-end smoke of all three
+  scripts against a synthetic baselines dir confirmed hit/miss/prune behavior.
+
+`diff-test262.ts` was left untouched (it already takes two arbitrary JSONL
+files — per the non-goals). #1077 is now redundant per the issue's Relationship
+section and can be closed separately.
