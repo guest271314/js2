@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
@@ -117,5 +117,82 @@ describe("#1470 --target standalone removes JS-host string imports", () => {
     // The default path is allowed to (and does) emit wasm:js-string and
     // __concat_N; we only assert it remains the externref-string backend.
     expect(r.wat).not.toContain("NativeString");
+  });
+});
+
+/**
+ * #1470 — mixed-operand string concatenation (`"x" + number`, `+ boolean`,
+ * `+ object`, template substitutions) must lower to a runnable pure-Wasm
+ * module under `--target standalone`. Previously the native concat path pushed
+ * the raw f64 / i32 / struct-ref operand straight into `__str_concat`, which
+ * expects `(ref $AnyString, ref $AnyString)` on both args — producing an
+ * INVALID module (`call expected (ref null N), found local.get of type i32`).
+ *
+ * The fix coerces each non-string operand to a native `ref $AnyString` in pure
+ * Wasm: numbers via the native `number_toString` helper, booleans/null/
+ * undefined via native literals, and dynamic `any` / object refs via the
+ * in-module `$__any_to_string` dispatcher (the standalone replacement for the
+ * `env::__extern_toString` host import).
+ */
+describe("#1470 standalone mixed-operand string concat is runnable pure Wasm", () => {
+  // Compile a builder expression in standalone mode, instantiate with NO host
+  // imports, then read the resulting native string back char-by-char via the
+  // `len()` / `code(i)` exports (both use native string methods that work
+  // standalone). Returns the reconstructed JS string.
+  async function buildAndRead(builderExpr: string): Promise<string> {
+    const src = `
+      export function len(): number { const s = ${builderExpr}; return s.length; }
+      export function code(i: number): number { const s = ${builderExpr}; return s.charCodeAt(i); }
+    `;
+    const r = await compile(src, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoJsHostStringImports(r.imports);
+    // Instantiate with an empty import object — a standalone module must not
+    // require any host functions.
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    const exports = instance.exports as {
+      len(): number;
+      code(i: number): number;
+    };
+    const n = exports.len();
+    let out = "";
+    for (let i = 0; i < n; i++) out += String.fromCharCode(exports.code(i));
+    return out;
+  }
+
+  it("string + number coerces via native number_toString", async () => {
+    expect(await buildAndRead(`"n=" + (42 as number)`)).toBe("n=42");
+  });
+
+  it("string + negative / fractional number", async () => {
+    expect(await buildAndRead(`"f=" + (-3.5 as number)`)).toBe("f=-3.5");
+  });
+
+  it("string + boolean coerces to true/false native literal", async () => {
+    expect(await buildAndRead(`"b=" + (true as boolean)`)).toBe("b=true");
+    expect(await buildAndRead(`"b=" + (false as boolean)`)).toBe("b=false");
+  });
+
+  it("chained mixed concat (string + number + string + number)", async () => {
+    expect(await buildAndRead(`"a" + (3 as number) + "b" + (4 as number)`)).toBe("a3b4");
+  });
+
+  it("template literal with numeric substitution", async () => {
+    expect(await buildAndRead("`val ${(7 as number)}`")).toBe("val 7");
+  });
+
+  it("dynamic any operand holding a string passes through __any_to_string", async () => {
+    expect(await buildAndRead(`"v=" + ("hi" as any)`)).toBe("v=hi");
+  });
+
+  it("dynamic any operand holding a number formats via __any_to_string", async () => {
+    expect(await buildAndRead(`"n=" + (5 as any)`)).toBe("n=5");
+  });
+
+  it("object operand stringifies to [object Object] (phase-1 __any_to_string)", async () => {
+    // Spec-correct toString()/@@toPrimitive vtable dispatch lands with #1472;
+    // the phase-1 fallback is the canonical "[object Object]" so the module
+    // never traps on a string coercion of an arbitrary value.
+    expect(await buildAndRead(`"o=" + ({ a: 1 } as any)`)).toBe("o=[object Object]");
   });
 });
