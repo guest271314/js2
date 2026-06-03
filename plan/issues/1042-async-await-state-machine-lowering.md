@@ -1006,3 +1006,126 @@ use, and at the state-machine site emit `cbId` + captures-struct +
 `call __make_callback`. Source from a statement list + explicit capture set
 instead of an arrow AST node. Branch merged with latest origin/main (incl.
 #1103a Map) — clean.
+
+---
+
+## Slice 2A — runtime-validated blockers (senior-dev, 2026-06-03)
+
+**Status update that supersedes the "flip a dead no-op" framing.** The entire
+Slice 2A machinery is *already implemented and wired*, gated only by
+`ASYNC_CPS_ENABLED = false` (`src/codegen/async-cps.ts`):
+
+- `analyzeAsyncBody`, `splitBodyAtAwait`, `emitAsyncStateMachine`,
+  `emitMakeContinuationCallback` — all real (commits `f02d12c00`,
+  `c991edc92`, `4b44f5ae3`).
+- `compileSyntheticAsyncContinuation` + `AsyncCapture` — real in
+  `src/codegen/closures.ts:2775/2809`.
+- `__make_callback` (declarations.ts:1221 + runtime.ts:8861 dispatch on
+  `__cb_${id}`) and `Promise_then2` (runtime.ts:7911) host imports — real.
+- Activation hook in `function-body.ts:981-1003` (gated on `ASYNC_CPS_ENABLED`,
+  `isAsync`, not-wasi/standalone, single-await + no-try + `splitBodyAtAwait`
+  accepts) → `rewriteFuncResultType(ctx, func, externref)` (function-body.ts:59),
+  `fctx.asyncCpsActive = true`, `emitAsyncStateMachine`, skip the stmt loop.
+- The await dispatcher at `expressions.ts:1165` already routes a stray
+  CPS-mode await to a `reportError`.
+
+So the remaining work is **flip the gate + fix what the flip exposes**, not
+new emission code. I flipped `ASYNC_CPS_ENABLED = true` locally and exercised
+the four canonical shapes (`return await g()`, `await g(); return 7`,
+`const y = await h(); return y+1`, plus the no-await control). Findings:
+
+### Compiles cleanly (no Wasm-validation error)
+
+All four shapes produce valid Wasm with the gate on. The no-await async fn
+correctly stays on the legacy synchronous path (the gate predicate excludes
+it — `awaitPoints.length === 1` is required). So `rewriteFuncResultType` and
+the gate predicate are sound; there is **no module-wide invalid-Wasm blast
+radius** (the spec's top risk does not materialise for the linear scope).
+
+### Pre-existing legacy bug confirmed (motivation, not regression)
+
+With the gate OFF, `return await realPromise()` / `const y = await
+realPromise()` already return `null`/wrong — the legacy path fakes async
+synchronously and only "works" when the awaited value is synchronously
+available. CPS is what fixes this; it is not introducing the failure.
+
+### BLOCKER 1 — late-import index shift on the OUTER async body (the real gate)
+
+Runtime trace (Node, real host `Promise_then2`/`__make_callback`): with the
+gate on, `__make_callback` fires but **`Promise_then2` never does**, and the
+async fn returns the *callback function itself* instead of the chained
+promise. The WAT prints `call 2` = `Promise_then2` (symbolic resolution is
+correct), but the **binary's raw funcIdx is stale**. Root cause: the outer
+`$f` body emits `call __make_callback` / `call Promise_then2` with funcIdx
+values captured at emit time, but those two are added via `ensureLateImport`
+during `emitAsyncStateMachine`, and `__box_number` (added while coercing the
+awaited value) lands at a *different* relative position run-to-run
+(observed import orders: `g, __make_callback, Promise_then2, __box_number`
+for return-await vs `g, __box_number, __make_callback, Promise_then2` for
+`await; return 7`). The outer `fctx.body` is **not** in `ctx.liveBodies`
+during emission, so the shift walker never patches its `call` opcodes — the
+classic late-import index-shift hazard the spec flagged as risk #1.
+
+What I tried (reverted — kept the tree byte-identical / gate-off):
+- Adding `ctx.liveBodies.add(fctx.body)` for the whole `emitAsyncStateMachine`
+  span (mirroring `compileSyntheticAsyncContinuation`'s own
+  `liveBodies.add(cbFctx.body)` at closures.ts:2854). **Necessary but not
+  sufficient** on its own — still returned `undefined`.
+- Also calling `flushLateImportShifts(ctx, fctx)` at the end → **double-counts**
+  the delta on top of the live-body shifts and causes infinite recursion
+  (`$f` ends up calling itself). So liveBodies-membership and an explicit
+  flush are mutually exclusive; pick one.
+
+**The robust fix (recommended for the follow-up):** pre-register
+`__make_callback` and `Promise_then2` **upfront** via a `collectAsyncCpsImports`
+prepass — exactly the pattern `collectCallbackImports` (index.ts:7066) uses for
+`__make_callback` when an arrow/function-expression is present (it scans the
+source and `addImport`s upfront so `funcMap` carries a stable index). A bare
+`async function f(){ return await g(); }` has no arrow, so that prepass does
+**not** fire, which is why `emitAsyncStateMachine` is forced onto the
+late-import path. Add a sibling prepass that, when the gate is on and any
+CPS-eligible async fn is present, pre-registers both imports; then have
+`emitAsyncStateMachine` use `ctx.funcMap.get("__make_callback")` /
+`ctx.funcMap.get("Promise_then2")` (stable) instead of `ensureLateImport`.
+That removes the shift hazard at its source and matches every other
+host-callback path. `__box_number` is itself a late import but it is consumed
+*inside* the same body before the `Promise_then2` call is emitted, so once the
+two callback imports are stable the boxing shift is harmless.
+
+### BLOCKER 2 — `return await` collapse discards the resolved value
+
+For `isReturnAwait`, `emitAsyncStateMachine` synthesizes the continuation with
+an empty suffix, and `compileSyntheticAsyncContinuation` falls through to
+`ref.null.extern` (closures.ts:2898) — so the chained promise resolves to
+`undefined`, not the awaited value. Fix: the `return await` continuation must
+be the **identity** — return its `__awaitValue` param (`local.get 1`). I
+prototyped this as a `compileSyntheticAsyncContinuation(..., { returnAwaitValue
+})` option that emits `local.get 1` instead of `ref.null.extern` at the tail;
+it is a clean ~6-line change. (Reverted with the rest.)
+
+### Revised follow-up plan (now that blockers are concrete)
+
+1. `collectAsyncCpsImports` prepass (index.ts, beside `collectCallbackImports`)
+   — pre-register `__make_callback` + `Promise_then2` upfront when the gate is
+   on and a CPS-eligible async fn exists. ~25 LoC.
+2. `emitAsyncStateMachine`: replace the two `ensureLateImport` calls with
+   `ctx.funcMap.get(...)` (with a `reportError` if absent). ~6 LoC.
+3. `compileSyntheticAsyncContinuation`: add `returnAwaitValue` identity tail.
+   ~6 LoC.
+4. Flip `ASYNC_CPS_ENABLED = true`; update the
+   `tests/issue-1042.test.ts` "gate is OFF" assertion.
+5. Tests: S1–S4 resolved-value assertions through a real microtask tick;
+   a no-regression test that two-await / branchy async still compiles on the
+   legacy path; equivalence-test pass for await-less async fns (gate predicate
+   must exclude them — confirmed locally it does).
+6. **Watch the existing `tests/async-await.test.ts`**: those tests currently
+   expect the *synchronous* legacy result (`getNum()` toBe `42`, not a
+   Promise). Flipping the gate makes single-await JS-host async fns return a
+   Promise — those assertions must be updated to `await exports.f()`, OR the
+   gate predicate must be confirmed to exclude their exact shapes. This is the
+   real review surface for the follow-up PR, not the codegen.
+
+Estimate for the follow-up: ~45 LoC of source + ~120 LoC tests + the
+`async-await.test.ts` assertion migration. The module-wide return-type-flip
+risk is **lower than feared** (compiles clean), but the test-expectation
+migration in #6 is the genuine blast radius.
