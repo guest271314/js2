@@ -73,7 +73,11 @@ export function runAt(
   const stack: Frame[] = [];
   let pc = 0;
   let sp = startIdx;
-  let caps = initCaps;
+  // Explicit `Int32Array` (not the narrower `Int32Array<ArrayBuffer>` the
+  // compiler infers from `new Int32Array(...)`) so reassignment from
+  // `frame.caps` / `.slice()` (both `Int32Array<ArrayBufferLike>`) typechecks
+  // under the stricter lib in CI.
+  let caps: Int32Array = initCaps;
   let steps = 0;
   const len = input.length;
 
