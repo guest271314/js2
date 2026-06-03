@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -188,6 +189,28 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
   function walk(node: ts.Node): void {
     if (found) return;
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      found = true;
+      return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * #1623 — true when the source contains any object/array binding pattern
+ * (destructuring) in a parameter, variable declaration, or assignment target.
+ * Used to decide whether to pre-emit the WASI/standalone TypeError constructor
+ * before user functions compile, so the destructuring null-throw guard's
+ * `emitWasiErrorConstructor` call doesn't run mid-prologue and clobber a
+ * reserved user-function slot.
+ */
+function sourceContainsBindingPattern(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (ts.isObjectBindingPattern(node) || ts.isArrayBindingPattern(node)) {
       found = true;
       return;
     }
@@ -1003,6 +1026,20 @@ export function generateModule(
 
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
+
+    // #1623 — pre-emit the WASI/standalone error constructors BEFORE any user
+    // function compiles. The destructuring null-throw path
+    // (`buildDestructureNullThrow`) lazily calls `emitWasiErrorConstructor`
+    // mid-prologue while a user function's own array slot is reserved-but-not-
+    // yet-pushed; the constructor then takes that reserved slot and the user
+    // function clobbers it on its own push, leaving a dangling funcMap index
+    // (observed as `throw expected externref, found call of type f64` and
+    // `Invalid global index`). Emitting the constructor here gives it a stable
+    // slot ahead of user-function compilation. The emitter is idempotent, so
+    // this is a no-op when no binding patterns exist.
+    if ((ctx.wasi || ctx.standalone) && sourceContainsBindingPattern(ast.sourceFile)) {
+      emitWasiErrorConstructor(ctx, "TypeError", 1);
+    }
 
     // #1121: Pre-compute return-type inference for recursive numeric kernels
     // (e.g. unannotated `function fib(n) { ... }`). This runs BEFORE
