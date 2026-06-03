@@ -4,6 +4,7 @@ title: "standalone test262 isSameValue emits invalid Wasm for externref operands
 status: done
 created: 2026-06-01
 updated: 2026-06-02
+completed: 2026-06-02
 priority: high
 feasibility: medium
 reasoning_effort: high

@@ -14,7 +14,6 @@ language_feature: classes
 goal: spec-completeness
 sprint: 51
 parent_issue: 1366
-pr: 307
 branch: issue-1366a-extends-error-subclassing
 ---
 # #1366a — `extends Error` builtin subclassing

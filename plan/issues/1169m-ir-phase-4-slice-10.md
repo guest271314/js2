@@ -14,7 +14,6 @@ language_feature: compiler-internals
 goal: async-model
 sprint: 46
 depends_on: [1169i, 1169c]
-pr: 102
 ---
 ## Implementation status (2026-04-30, senior-dev-1210)
 

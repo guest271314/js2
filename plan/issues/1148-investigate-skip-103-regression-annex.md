@@ -11,7 +11,6 @@ reasoning_effort: medium
 goal: spec-completeness
 sprint: 44
 closed: 2026-04-23
-pr: 240
 net_improvement: 21
 ---
 # #1148 — Investigate skip:103 regression

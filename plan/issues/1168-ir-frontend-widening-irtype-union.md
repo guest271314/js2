@@ -16,7 +16,6 @@ sprint: 44
 depends_on: [1131]
 required_by: [1166, 1167c, 1169, 1169a, 1169b, 1169c]
 closed: 2026-04-23
-pr: 5
 ---
 ## Implementation Summary
 

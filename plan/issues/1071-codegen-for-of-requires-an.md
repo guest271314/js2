@@ -14,7 +14,6 @@ goal: iterator-protocol
 sprint: 42
 parent: 1034
 closed: 2026-04-12
-pr: 137
 ---
 # #1071 — for-of requires an array expression (non-array iterables in bundled JS)
 

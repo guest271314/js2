@@ -5,7 +5,6 @@ status: done
 created: 2026-03-20
 updated: 2026-06-02
 completed: 2026-06-02
-pr: 1038
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -61,7 +60,6 @@ files:
     changed:
       - "document that #1474 now covers forms outside #682's reduced native subset"
 ---
-
 # #682 — RegExp standalone mode: native engine or embedded library for non-JS targets
 
 ## Status: done

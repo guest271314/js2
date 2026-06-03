@@ -13,7 +13,6 @@ sprint: 44
 required_by: [1156]
 closed: 2026-04-21
 test262_fail: 217
-pr: 247
 net_improvement: 624
 ---
 # #1152 — Array.prototype higher-order methods regression from PR #195

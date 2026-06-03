@@ -16,7 +16,6 @@ sprint: 44
 depends_on: [1131, 1166]
 required_by: [1167b]
 closed: 2026-04-23
-pr: 6
 net_improvement: 0
 ---
 ## Implementation Summary

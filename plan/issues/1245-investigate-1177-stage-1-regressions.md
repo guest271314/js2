@@ -14,7 +14,6 @@ language_feature: closures, TDZ
 goal: test262-conformance
 sprint: 47
 related: [1177, 1205, 1223, 1258, 1259, 1260]
-pr: 155
 ---
 ## Outcome (2026-05-02 close)
 

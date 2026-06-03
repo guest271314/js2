@@ -19,7 +19,6 @@ files:
       - "yield compiles to state save + return, next() resumes from saved state"
 claimed_by: codex-developer
 claimed_at: 2026-06-02T22:52:32.748Z
-pr: 1052
 ---
 # #680 — Wasm-native generators (state machines) with optional JS host fallback
 

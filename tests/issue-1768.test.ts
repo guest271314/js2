@@ -7,7 +7,14 @@
 // path is first-class, so keep this regression as allowJs/.js source.
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { compile } from "../src/index.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
 
 async function compileWasiJs(source: string) {
   return await compile(source, {
@@ -57,6 +64,21 @@ function runWasiCaptureStdout(binary: Uint8Array): Uint8Array {
 }
 
 describe("#1768 allowJs Native Messaging sendMessage validates under --target wasi", () => {
+  it("validates the full native-messaging host after TypeScript-to-JavaScript transpilation", async () => {
+    const source = ts.transpileModule(readFileSync(hostPath, "utf-8"), {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ES2022,
+        removeComments: false,
+      },
+    }).outputText;
+
+    const result = await compileWasiJs(source);
+    expect(result.success, result.success ? "" : result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
+    expect(result.wat).not.toContain('(import "env"');
+  });
+
   it("validates and runs sendMessage with Uint8Array subarray/indexOf/set/stdout.write", async () => {
     const source = `
       function sendMessage(message) {

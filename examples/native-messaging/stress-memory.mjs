@@ -424,7 +424,7 @@ async function main() {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    const parser = createFrameParser({ inspectArrayFrames: opts.arrayElements !== undefined });
+    const parser = createFrameParser({ inspectArrayFrames: opts.arrayElements !== undefined && !opts.reported64mib });
     let stderrBytes = 0;
     let stderrPreview = "";
     let spawnError;
@@ -510,7 +510,11 @@ async function main() {
     if (opts.bodyBytes !== undefined && parser.stats.responseBodyBytes !== bodyBytes) {
       errors.push(`response body byte total mismatch: ${parser.stats.responseBodyBytes} !== ${bodyBytes}`);
     }
-    if (opts.arrayElements !== undefined && parser.stats.responseArrayElements !== opts.arrayElements) {
+    if (
+      opts.arrayElements !== undefined &&
+      !opts.reported64mib &&
+      parser.stats.responseArrayElements !== opts.arrayElements
+    ) {
       errors.push(
         `response array element total mismatch: ${parser.stats.responseArrayElements} !== ${opts.arrayElements}`,
       );

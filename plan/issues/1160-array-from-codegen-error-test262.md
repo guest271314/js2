@@ -13,7 +13,6 @@ language_feature: array-builtins
 goal: spec-completeness
 sprint: 44
 closed: 2026-04-23
-pr: 7
 net_improvement: 578
 ---
 ## Implementation Summary

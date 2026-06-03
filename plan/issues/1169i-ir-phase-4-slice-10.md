@@ -15,7 +15,6 @@ goal: async-model
 sprint: 45
 depends_on: [1169d]
 required_by: [1169j, 1169k, 1169l, 1169m]
-pr: 86
 merged: 2026-04-28
 ---
 # #1169i — IR Phase 4 Slice 10: remaining builtins through IR

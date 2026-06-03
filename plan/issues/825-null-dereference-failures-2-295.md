@@ -13,7 +13,6 @@ sprint: 44
 parent: 820
 required_by: [1146]
 closed: 2026-04-23
-pr: 145
 net_improvement: 38
 branch: issue-825-null-deref
 test262_fail: 2295

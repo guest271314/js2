@@ -14,7 +14,6 @@ language_feature: strings
 goal: compilable
 sprint: 45
 required_by: [1210]
-pr: 64
 merged: 2026-04-27
 origin: surfaced by competitive-benchmark refresh after #1175 landed (2026-04-27)
 related: [1175]

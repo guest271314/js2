@@ -12,7 +12,6 @@ task_type: refactor
 language_feature: compiler-internals
 goal: platform
 sprint: 45
-pr: 43
 merged: 2026-04-26
 es_edition: n/a
 ---

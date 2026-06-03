@@ -13,7 +13,6 @@ language_feature: destructuring
 goal: crash-free
 sprint: 44
 closed: 2026-04-23
-pr: 12
 net_improvement: 396
 ---
 # #1161 — Destructure null/undefined in private class method params (429 tests)

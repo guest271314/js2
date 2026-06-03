@@ -5,7 +5,6 @@ status: done
 created: 2026-05-25
 updated: 2026-06-02
 completed: 2026-05-25
-pr: 619
 feasibility: easy
 sprint: 55
 owner: tech-lead
