@@ -19,7 +19,6 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
-import { ensureObjVecBuilders } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
@@ -56,7 +55,7 @@ import {
 } from "../index.js";
 import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
-import { emitJsonQuoteString } from "../json-runtime.js";
+import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -114,7 +113,6 @@ import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
 import {
-  ensureEncodeIntoHelper,
   ensureNativeStringExternBridge,
   ensureTextEncodingHelpers,
   stringConstantExternrefInstrs,
@@ -479,6 +477,60 @@ function tryEmitJsonStringifyPrimitive(
   // bigint / unhandled — fall through to the host import. Full
   // pure-Wasm support tracked under #1353.
   return undefined;
+}
+
+/**
+ * (#1599 Phase 2) Try to emit `JSON.parse(s)` for a runtime string-typed
+ * argument in standalone / WASI mode, where there is no `env::JSON_parse`
+ * host import. Handles the JSON *primitive* slice — number / `true` / `false`
+ * / `null` — via the pure-Wasm `__json_parse_primitive` helper, which boxes
+ * the parsed value into the host-free `$AnyValue` tagged union.
+ *
+ * Returns the emitted `ref $AnyValue` type (so the downstream AnyValue→
+ * primitive coercion path unboxes it to number / boolean as the consumer
+ * requires) and pushes the value; returns `undefined` (no stack effect) when
+ * the argument is not a runtime string — objects, arrays, and string *values*
+ * still fall through to the #1599 refusal (they need the full Phase 2 codec).
+ *
+ * Spec: ECMA-262 §25.5.2 `JSON.parse` / `ParseJSON`, ECMA-404.
+ */
+function tryEmitJsonParsePrimitive(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  call: ts.CallExpression,
+  arg: ts.Expression,
+): ValType | undefined {
+  if (!(ctx.standalone || ctx.wasi)) return undefined;
+  // A property/element read on the result — `JSON.parse(s).x` / `JSON.parse(s)[i]`
+  // — means the parsed value is consumed as an object/array, which the primitive
+  // slice does not produce. Leave those to the #1599 refusal (full Phase 2 codec).
+  const parent = call.parent;
+  if (
+    (ts.isPropertyAccessExpression(parent) && parent.expression === call) ||
+    (ts.isElementAccessExpression(parent) && parent.expression === call)
+  ) {
+    return undefined;
+  }
+  let argType: ts.Type;
+  try {
+    argType = ctx.checker.getTypeAtLocation(arg);
+  } catch {
+    return undefined;
+  }
+  // Only a string-typed argument routes here. `JSON.parse(<string literal>)`
+  // is folded earlier by tryEmitJsonParseLiteral; this handles the runtime
+  // string-value case.
+  if ((argType.flags & ts.TypeFlags.StringLike) === 0) return undefined;
+
+  const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (argResult === null) return undefined;
+  if (argResult.kind !== "externref") {
+    coerceType(ctx, fctx, argResult, { kind: "externref" });
+  }
+  const parseIdx = emitJsonParsePrimitive(ctx);
+  flushLateImportShifts(ctx, fctx);
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_primitive") ?? parseIdx } as Instr);
+  return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
 }
 
 /**
@@ -1815,6 +1867,45 @@ function compileCallExpression(
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // (#1732) Calling a built-in non-constructor namespace — `Math()`, `JSON()`,
+  // `Reflect()`, `Atomics()` — must throw TypeError ("no [[Call]]"). These
+  // namespace objects have neither a [[Call]] nor [[Construct]] internal
+  // method (§sec-math-object etc.). The `new`-site already throws via the
+  // mirror guard in new-super.ts (NAMESPACE_NON_CONSTRUCTORS); this closes the
+  // call-as-function form (built-ins/Math/prop-desc.js "no [[Call]]"). Unwrap
+  // paren/as/!-assertion wrappers so `(Math as any)()` also fires.
+  {
+    let unwrapped: ts.Expression = expr.expression;
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isNonNullExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
+      unwrapped = ts.isParenthesizedExpression(unwrapped)
+        ? unwrapped.expression
+        : ts.isAsExpression(unwrapped)
+          ? unwrapped.expression
+          : ts.isNonNullExpression(unwrapped)
+            ? unwrapped.expression
+            : (unwrapped as ts.TypeAssertion).expression;
+    }
+    if (ts.isIdentifier(unwrapped)) {
+      const NAMESPACE_NON_CALLABLE = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+      if (NAMESPACE_NON_CALLABLE.has(unwrapped.text)) {
+        // Evaluate arguments for their side effects (spec: argument list is
+        // evaluated before the [[Call]] check would normally run), then throw.
+        for (const arg of expr.arguments) {
+          const t = compileExpression(ctx, fctx, arg);
+          if (t !== null && t !== undefined) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, `${unwrapped.text} is not a function`);
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // (#1540) JSX runtime call intercept — `_jsx(type, props, key?)` /
   // `_jsxs(type, props, key?)` / `_jsxDEV(...)`. TypeScript emits these
   // automatically when `jsx: react-jsx` is set; preprocessImports recorded
@@ -1902,11 +1993,6 @@ function compileCallExpression(
       return { kind: "externref" };
     }
   }
-
-  // (#1103a) Note: `new Map()` is a NewExpression handled in
-  // expressions/new-super.ts (compileNewExpression), not here. Bare `Map(...)`
-  // without `new` is not valid for Map, so there is no call-expression
-  // interception to add.
 
   // `Object(x)` called without `new` — ECMAScript §20.1.1.1 / §7.1.18 ToObject.
   // Per spec: Object() / Object(null) / Object(undefined) → fresh empty object;
@@ -3621,8 +3707,28 @@ function compileCallExpression(
       }
 
       // Compile the argument — returns the object itself (freeze/seal return their arg)
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+      let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (!argType) return null;
+
+      // #1472 Phase B Blocker A Half 2 — open-`any` receiver normalization.
+      // The open-object representation is a $Object wrapped to externref, but a
+      // variable reference (`Object.freeze(o)` where `o: any`) can compile to a
+      // ref/ref_null/anyref rather than externref, which would fall through to
+      // the return-arg no-op and never reach the native __object_freeze (the
+      // $flags would never be set). In standalone, coerce a non-externref
+      // ref/anyref receiver to externref first (extern.convert_any) so the
+      // native SET helper fires and the integrity bits actually get written.
+      // JS-host mode is unchanged (it already routes externref args to the host
+      // import; non-externref args there are typed objects with no dynamic
+      // freeze semantics).
+      if (
+        ctx.standalone &&
+        argType.kind !== "externref" &&
+        (argType.kind === "ref" || argType.kind === "ref_null" || argType.kind === "anyref")
+      ) {
+        coerceType(ctx, fctx, argType, { kind: "externref" });
+        argType = { kind: "externref" };
+      }
 
       // For externref objects, delegate to host import for runtime enforcement
       if (argType.kind === "externref") {
@@ -4545,20 +4651,9 @@ function compileCallExpression(
       const targetArg = expr.arguments[0]!;
       const targetType = compileExpression(ctx, fctx, targetArg, { kind: "externref" });
       if (targetType && targetType.kind !== "externref") coerceType(ctx, fctx, targetType, { kind: "externref" });
-      // Build sources as a JS array (host) or native $ObjVec (standalone). The
-      // native __object_assign iterates a $ObjVec, so under ctx.standalone the
-      // sources list is built with the $ObjVec builders instead of the JS-host
-      // array imports (#1472 Phase B Slice 3).
-      let arrNewIdx: number | undefined;
-      let arrPushIdx: number | undefined;
-      if (ctx.standalone) {
-        const b = ensureObjVecBuilders(ctx);
-        arrNewIdx = b.newIdx;
-        arrPushIdx = b.pushIdx;
-      } else {
-        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
-      }
+      // Build sources as a JS array
+      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
       const assignIdx = ensureLateImport(
         ctx,
         "__object_assign",
@@ -4799,6 +4894,64 @@ function compileCallExpression(
 
       const externRef: ValType = { kind: "externref" };
       const i32Ty: ValType = { kind: "i32" };
+
+      // ── #1472 Phase C — Reflect.* under --target standalone ───────────────
+      //
+      // The host-dispatch path below registers an env::__reflect_* import for
+      // every Reflect method. There is no JS host in standalone mode, so any
+      // such import would leak into the binary and fail at instantiation with
+      // an opaque "unknown import" linker error. Route the one method backed by
+      // a native helper through it, and refuse the rest with a clear compile
+      // error rather than emitting a half-working module.
+      //
+      // - Reflect.ownKeys(target) → native __object_keys (string own keys of
+      //   the $Object hash-map, insertion order). The native runtime tracks
+      //   only string keys; Symbol/non-enumerable keys are out of scope for the
+      //   standalone object runtime (consistent approximation across #1472
+      //   Phase B). __object_keys is in OBJECT_RUNTIME_HELPER_NAMES, so
+      //   ensureLateImport auto-routes it to the in-module native func.
+      // - Reflect.has needs a *keyed* HasProperty over the hash-map; the native
+      //   __extern_has_idx is an *indexed* (array-like) helper, so it cannot
+      //   stand in here without being semantically wrong — refuse instead.
+      //   Reflect.apply/construct require host call machinery with no native
+      //   analog — refuse. The descriptor/prototype/integrity methods all rely
+      //   on the JS descriptor sidecar — refuse.
+      if (ctx.standalone) {
+        if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
+          emitReflectArgs(1);
+          const funcIdx = ensureLateImport(ctx, "__object_keys", [externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(1, "extern-null");
+        }
+        // Boolean-returning methods need an i32 on the stack; the rest return
+        // externref. Pick the fallback shape per method so the surrounding
+        // expression still type-checks even though the module is already marked
+        // failed by reportError.
+        const booleanReflect = new Set([
+          "set",
+          "has",
+          "deleteProperty",
+          "defineProperty",
+          "setPrototypeOf",
+          "isExtensible",
+          "preventExtensions",
+        ]);
+        reportError(
+          ctx,
+          expr,
+          `Codegen error: Reflect.${reflectMethod} not supported in standalone mode (#1472 Phase C).`,
+        );
+        if (booleanReflect.has(reflectMethod)) {
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
 
       // Reflect.get(target, key, [receiver]) — returns externref.
       if (reflectMethod === "get" && expr.arguments.length >= 2) {
@@ -5201,6 +5354,13 @@ function compileCallExpression(
           if (parsedType !== undefined) {
             return parsedType;
           }
+          // (#1599 Phase 2) Runtime string-value JSON.parse → primitive slice
+          // (number / true / false / null) via pure-Wasm helper, boxed as
+          // $AnyValue. Strings / objects / arrays still fall through to refusal.
+          const primitiveParsed = tryEmitJsonParsePrimitive(ctx, fctx, expr, expr.arguments[0]!);
+          if (primitiveParsed !== undefined) {
+            return primitiveParsed;
+          }
         }
         // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
         // WASI mode there is no `env::JSON_*` host import to fall back to.
@@ -5513,50 +5673,6 @@ function compileCallExpression(
         }
         fctx.body.push({ op: "call", funcIdx: decodeU8Idx } as Instr);
         return nativeStringType(ctx);
-      }
-
-      // #1780 — TextEncoder.prototype.encodeInto(source, dest). Writes UTF-8
-      // bytes of `source` into the `dest` Uint8Array in place and returns a
-      // `{ read, written }` result struct. Native (no host import). The dest
-      // Uint8Array backing array is packed i8 under WASI/standalone, f64
-      // otherwise (mirrors `typedArrayVecStorage`), so pick the matching helper.
-      if (recvSym === "TextEncoder" && method === "encodeInto") {
-        const destElemKey: "f64" | "i8_byte" = ctx.wasi || ctx.standalone ? "i8_byte" : "f64";
-        const { encodeIntoIdx, destVecTypeIdx, resultTypeIdx } = ensureEncodeIntoHelper(ctx, destElemKey);
-        const recvResult = compileExpression(ctx, fctx, propAccess.expression);
-        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
-        // arg0: source string
-        if (expr.arguments.length > 0) {
-          compileExpression(ctx, fctx, expr.arguments[0]!, nativeStringType(ctx));
-        } else {
-          compileStringLiteral(ctx, fctx, "");
-        }
-        // arg1: destination Uint8Array (vec ref)
-        const destExpected: ValType = { kind: "ref_null", typeIdx: destVecTypeIdx };
-        if (expr.arguments.length > 1) {
-          const destType = compileExpression(ctx, fctx, expr.arguments[1]!, destExpected);
-          if (destType && !valTypesMatch(destType, destExpected)) {
-            coerceType(ctx, fctx, destType, destExpected);
-          }
-        } else {
-          fctx.body.push({ op: "ref.null", typeIdx: destVecTypeIdx } as Instr);
-        }
-        for (let i = 2; i < expr.arguments.length; i++) {
-          const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
-        }
-        // Helper leaves (i32 read, i32 written) on the stack. Materialize the
-        // `{ read, written }` result struct here, in this normally-compiled
-        // function, where struct.new of a registered type lowers cleanly (#1780).
-        fctx.body.push({ op: "call", funcIdx: encodeIntoIdx } as Instr);
-        const writtenLocal = allocLocal(fctx, "__enc_into_written", { kind: "i32" });
-        fctx.body.push({ op: "local.set", index: writtenLocal } as Instr);
-        // read is now on top; convert to f64 for the struct's `read` field
-        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-        fctx.body.push({ op: "local.get", index: writtenLocal } as Instr);
-        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-        fctx.body.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
-        return { kind: "ref", typeIdx: resultTypeIdx };
       }
     }
 

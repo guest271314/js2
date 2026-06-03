@@ -194,6 +194,14 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
+    id: "standalone-reflect-refusal",
+    issues: ["#1472"],
+    label: "Reflect.* refused in standalone mode (#1472 Phase C)",
+    match: (record, text) =>
+      pathHas(record, ["built-ins/reflect"]) ||
+      hasAny(text, ["not supported in standalone mode (#1472 phase c)", "reflect."]),
+  },
+  {
     id: "standalone-iterator-protocol",
     issues: ["#1665", "#681", "#1718"],
     label: "Generic iterator protocol still needs a pure-Wasm standalone path",

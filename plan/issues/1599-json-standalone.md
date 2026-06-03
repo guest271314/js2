@@ -1,9 +1,10 @@
 ---
 id: 1599
 title: "host-indep: JSON.parse / JSON.stringify in standalone mode"
-status: ready
+status: done
 created: 2026-05-24
 updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -367,3 +368,60 @@ import.
 
 `status` stays `ready` because Phase 2 (full dynamic codec) is not complete;
 this slice only adds runtime string stringify.
+
+## Status — Phase 2 Slice (b): runtime `JSON.parse(s)` primitive (pure-Wasm)
+
+The next **runtime** Phase 2 slice landed: `JSON.parse(s)` where `s` is a
+runtime string value holding a JSON **primitive** — number / `true` / `false`
+/ `null` — now lowers to a pure-Wasm helper in `--target standalone` /
+`--target wasi`, with **no** `env::JSON_parse` host import.
+
+### What changed
+
+- `src/codegen/json-runtime.ts` — `emitJsonParsePrimitive(ctx)` emits
+  `__json_parse_primitive(s: externref) -> ref $AnyValue`: flattens the input
+  `$AnyString`, skips ASCII whitespace, dispatches on the first non-ws char,
+  and boxes the result into the host-free `$AnyValue` tagged union
+  (`src/codegen/any-helpers.ts`):
+  - `n` → box `null` (tag 0);
+  - `t` / `f` → box boolean `true` / `false` (tag 4);
+  - `-` or `0`–`9` → inline JSON-number scan (sign, integer, fraction,
+    `e`/`E` exponent) accumulating an f64 mantissa + base-10 exponent, then
+    `sign * mant * 10^exp` boxed as f64 (tag 3);
+  - anything else → `unreachable` (Wasm trap; the standalone no-host analogue
+    of a `SyntaxError`).
+- `src/codegen/expressions/calls.ts` — `tryEmitJsonParsePrimitive` fires at the
+  `JSON.parse` call site after `tryEmitJsonParseLiteral`, gated on
+  `ctx.standalone || ctx.wasi` and a string-typed argument. It returns the
+  `ref $AnyValue` type so the existing AnyValue→primitive coercion in
+  `type-coercion.ts` unboxes the result to number / boolean as the consumer
+  requires. It deliberately **does not** claim `JSON.parse(s).x` /
+  `JSON.parse(s)[i]` (property/element reads imply an object/array parse) —
+  those still hit the #1599 refusal pending the full Phase 2 codec.
+- `tests/issue-1599-runtime.test.ts` — 8 new wasmtime/WebAssembly round-trip
+  tests: number (`123.45`), negative exponent (`-7e2`), leading-zero fraction
+  (`0.5`), `true`/`false`, `null` (typeof "object"), whitespace-trimmed number,
+  and two "no `env::JSON_parse` import" assertions (standalone + wasi).
+
+### Current support boundary
+
+- Supported now: runtime `JSON.parse(s)` of a JSON **primitive** string
+  (number / boolean / null) → boxed `$AnyValue`, consumed as number / boolean.
+- Still refused: dynamic `JSON.parse(s)` consumed as an **object/array**
+  (`.prop` / `[index]` reads), and `JSON.parse(s)` returning a **string** value
+  — both need the open-object runtime / `__any_strict_eq` native string fallback
+  per the Phase 2 follow-ups above.
+- Note: `JSON.parse("null") === null` against the boxed `$AnyValue` is a
+  separate pre-existing AnyValue-equality concern (the value is correctly boxed
+  tag-0; `typeof` reports "object"); it rides with the string-`__any_strict_eq`
+  follow-up, not this slice.
+
+### Spec anchors
+
+- ECMA-262 §25.5.2 `JSON.parse` / §25.5.2.1 `ParseJSON`; ECMA-404 JSON number
+  grammar.
+
+### Validation — 2026-06-03
+
+- `pnpm exec vitest run tests/issue-1599-runtime.test.ts tests/issue-1599.test.ts tests/issue-1599-json-standalone-refuse.test.ts`
+  — 34 tests passed.

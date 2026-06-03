@@ -561,12 +561,31 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 7 },
               { op: "array.get", typeIdx: propMapTypeIdx },
               { op: "local.tee", index: 8 },
-              // empty slot → create new entry here
+              // empty slot → create new entry here, UNLESS the object is
+              // non-extensible (#1472 Phase B Blocker A Half 2). A
+              // sealed/preventExtensions/frozen object refuses NEW keys per ES
+              // §10.4.7 [[DefineOwnProperty]] extensibility check — sloppy no-op
+              // (strict throw deferred to #1473). Updates of existing keys are
+              // unaffected (they take the update-in-place branch below). A
+              // frozen object never reaches __obj_insert via __extern_set (the
+              // FROZEN gate there returns first), but __obj_insert is also
+              // called during __obj_grow rehash — where the table is rebuilt
+              // from existing live entries, all of which take the empty-slot
+              // branch. We must NOT refuse those, so the gate is keyed on the
+              // OBJECT's NON_EXTENSIBLE bit, which during a grow only matters
+              // when a non-extensible object grows (it can't — no new key was
+              // accepted, so load never rises to force a grow). Safe.
               { op: "ref.is_null" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
+                  // if o.flags & NON_EXTENSIBLE → refuse new key (return)
+                  { op: "local.get", index: 0 },
+                  { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+                  { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+                  { op: "i32.and" },
+                  { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
                   // arr[i] = struct.new $PropEntry { keyStr, value, flags }
                   { op: "local.get", index: 4 },
                   { op: "local.get", index: 7 },
@@ -785,6 +804,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 6 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.set", index: 3 },
+      // #1472 Phase B Blocker A Half 2 — FROZEN write gate. A frozen object
+      // refuses ALL data writes (update AND new key) per ES §10.4.7 / the
+      // [[Set]] invariant on non-writable own data properties. Sloppy-mode
+      // no-op here (strict-mode TypeError throw is deferred to the error
+      // machinery slice, #1473). Sealed/non-extensible objects still allow
+      // updates of existing keys — that new-key refusal lives in __obj_insert's
+      // empty-slot branch (gated on NON_EXTENSIBLE), so it is NOT gated here.
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_FROZEN },
+      { op: "i32.and" },
+      { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
       // load = o.count + o.tombstones ; cap = o.props.len
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
@@ -1913,6 +1944,62 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   emitIntegrityPredicate("__object_isSealed", OBJ_FLAG_SEALED, false, 1);
   emitIntegrityPredicate("__object_isExtensible", OBJ_FLAG_NONEXTENSIBLE, true, 0);
 
+  // ── Object integrity SET path (#1472 Phase B Blocker A Half 2) ────────────
+  //
+  // __object_preventExtensions / __object_seal / __object_freeze set the
+  // object-level `$Object.flags` (field 4) integrity bits and return the
+  // ORIGINAL externref (identity preserved — these return their argument per
+  // ES §20.5.2.{5,18,6}). freeze ⊃ seal ⊃ preventExtensions, so each sets a
+  // cumulative bit-mask:
+  //   preventExtensions → NONEXTENSIBLE
+  //   seal              → NONEXTENSIBLE | SEALED
+  //   freeze            → NONEXTENSIBLE | SEALED | FROZEN
+  // The write gates in __extern_set (FROZEN → refuse all) and __obj_insert
+  // empty-slot (NONEXTENSIBLE → refuse new key) read these bits to enforce
+  // immutability. Non-$Object receiver: returned unchanged (primitives are
+  // already non-extensible; the predicate readers handle their query side).
+  //
+  // params: 0=obj(externref) ; locals: 1=any(anyref) 2=o(ref null $Object)
+  const emitSetFlags = (name: string, bits: number): void => {
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // o = cast<$Object>(any) ; o.flags |= bits
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.tee", index: 2 },
+          { op: "local.get", index: 2 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+          { op: "i32.const", value: bits },
+          { op: "i32.or" },
+          { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 4 },
+        ],
+      },
+      // return the original externref unchanged (identity preserved)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      name,
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+      ],
+      body,
+    );
+  };
+  emitSetFlags("__object_preventExtensions", OBJ_FLAG_NONEXTENSIBLE);
+  emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED);
+  emitSetFlags("__object_freeze", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN);
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -1970,6 +2057,10 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_isFrozen",
   "__object_isSealed",
   "__object_isExtensible",
+  // #1472 Phase B Blocker A Half 2 — object integrity SET path.
+  "__object_preventExtensions",
+  "__object_seal",
+  "__object_freeze",
   // #1629 S6 — native data-descriptor define (Object.defineProperty /
   // Reflect.defineProperty with a { value, writable?, enumerable?, configurable? }
   // descriptor). Accessor descriptors stay refused (see the __defineProperty_value

@@ -33,6 +33,7 @@
  * - ECMA-262 §25.5.4.3 `QuoteJSONString`
  */
 import type { Instr, ValType } from "../ir/types.js";
+import { ensureAnyValueType } from "./any-helpers.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
@@ -383,6 +384,568 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
       { count: 1, type: i32 }, // L_W
       { count: 1, type: i32 }, // L_OFF
       { count: 1, type: i32 }, // L_NIB
+    ],
+    body,
+    exported: false,
+  } as unknown as (typeof ctx.mod.functions)[number]);
+
+  return funcIdx;
+}
+
+// eq abstract heap type, signed-LEB128 → 0x6d. Used for the AnyValue $refval
+// null payload (matches ensureAnyHelpers in any-helpers.ts).
+const EQ_HEAP_TYPE = -19;
+
+/**
+ * Emit `__json_parse_primitive(s: externref) -> ref $AnyValue` and register it
+ * in `ctx.funcMap`. Idempotent. Parses a runtime string holding a single JSON
+ * primitive (number / `true` / `false` / `null`) entirely in Wasm — no
+ * `env::JSON_parse` host import — and boxes the result into the host-free
+ * `$AnyValue` tagged union (#1599 Phase 2):
+ *
+ *   - `"null"`             → tag 0 (null)
+ *   - `"true"` / `"false"` → tag 4 (boolean), i32val 1 / 0
+ *   - JSON number          → tag 3 (f64), f64val = parsed value
+ *   - anything else        → `unreachable` (Wasm trap; matches a SyntaxError
+ *                             throw under the standalone no-host contract)
+ *
+ * The caller (`tryEmitJsonParsePrimitive` in expressions/calls.ts) gates this
+ * on `ctx.standalone || ctx.wasi` and a string-typed argument, and returns the
+ * `ref $AnyValue` type so the existing AnyValue→primitive coercion path in
+ * type-coercion.ts unboxes it to number / boolean as the consumer requires.
+ *
+ * Must run after `ensureNativeStringHelpers` (called here) so `__str_flatten`
+ * exists, and before any function body that calls it.
+ *
+ * Spec: ECMA-262 §25.5.2 `JSON.parse` / `ParseJSON`, ECMA-404 JSON grammar.
+ */
+export function emitJsonParsePrimitive(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__json_parse_primitive");
+  if (existing !== undefined) return existing;
+
+  ensureNativeStringHelpers(ctx);
+  ensureAnyValueType(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
+  const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString (FlatString): len, off, data
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx; // (array (mut i16))
+  const anyTypeIdx = ctx.anyValueTypeIdx;
+  const i32: ValType = { kind: "i32" };
+  const f64: ValType = { kind: "f64" };
+  const extern: ValType = { kind: "externref" };
+
+  const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
+  const typeIdx = addFuncType(ctx, [extern], [anyRef]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__json_parse_primitive", funcIdx);
+
+  // params: 0 s:externref
+  // locals:
+  //  1 flat:ref $NativeString  2 data:ref $__str_data  3 end:i32  4 i:i32
+  //  5 c:i32  6 sign:f64  7 mant:f64  8 frac:f64  9 expSign:i32  10 exp:i32
+  const L_FLAT = 1;
+  const L_DATA = 2;
+  const L_END = 3;
+  const L_I = 4;
+  const L_C = 5;
+  const L_SIGN = 6;
+  const L_MANT = 7;
+  const L_FRAC = 8;
+  const L_EXPSIGN = 9;
+  const L_EXP = 10;
+  const L_EXPMAG = 11;
+
+  // c = data[i]
+  const getC: Instr[] = [
+    { op: "local.get", index: L_DATA },
+    { op: "local.get", index: L_I },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: L_C },
+  ];
+
+  // boxed AnyValue constructors (push a ref $AnyValue)
+  const boxNull: Instr[] = [
+    { op: "i32.const", value: 0 }, // tag 0 = null
+    { op: "i32.const", value: 0 },
+    { op: "f64.const", value: 0 },
+    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: anyTypeIdx },
+  ];
+  const boxBool = (v: number): Instr[] => [
+    { op: "i32.const", value: 4 }, // tag 4 = boolean
+    { op: "i32.const", value: v },
+    { op: "f64.const", value: 0 },
+    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: anyTypeIdx },
+  ];
+  // box the f64 currently in local L_MANT*... — caller leaves value in L_FRAC
+  const boxF64FromLocal = (local: number): Instr[] => [
+    { op: "i32.const", value: 3 }, // tag 3 = f64 number
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: local },
+    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: anyTypeIdx },
+  ];
+
+  // ── Preamble: flatten, load data, skip leading whitespace, read first char ──
+  const preamble: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
+    { op: "local.set", index: L_FLAT },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // data
+    { op: "local.set", index: L_DATA },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // off
+    { op: "local.set", index: L_I },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }, // len
+    { op: "local.get", index: L_I },
+    { op: "i32.add" },
+    { op: "local.set", index: L_END }, // end = off + len (exclusive)
+  ];
+
+  // skip whitespace: while i<end && (c==' '|'\t'|'\n'|'\r') i++
+  const skipWs: Instr[] = [
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_END },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            ...getC,
+            // ws = c==32 | c==9 | c==10 | c==13
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 32 },
+            { op: "i32.eq" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 9 },
+            { op: "i32.eq" },
+            { op: "i32.or" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 10 },
+            { op: "i32.eq" },
+            { op: "i32.or" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 13 },
+            { op: "i32.eq" },
+            { op: "i32.or" },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 }, // non-ws → stop
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // c = data[i] (first non-ws char). If i>=end the input is empty → trap.
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.ge_s" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "unreachable" }] } as unknown as Instr,
+    ...getC,
+  ];
+
+  // c==code → i32 bool
+  const cEq = (code: number): Instr[] => [
+    { op: "local.get", index: L_C },
+    { op: "i32.const", value: code },
+    { op: "i32.eq" },
+  ];
+
+  // ── Number parser: sign? int frac? exp? → f64 in L_FRAC ──
+  // Reads from cursor L_I (positioned at first digit or '-'). Accumulates the
+  // mantissa as f64 (sufficient precision for the primitive slice), applies a
+  // base-10 exponent for the fractional and 'e' parts, and stores into L_FRAC.
+  const parseNumber: Instr[] = [
+    { op: "f64.const", value: 1 },
+    { op: "local.set", index: L_SIGN },
+    { op: "f64.const", value: 0 },
+    { op: "local.set", index: L_MANT },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_EXP }, // net base-10 exponent
+    // optional '-'
+    ...cEq(45),
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "f64.const", value: -1 },
+        { op: "local.set", index: L_SIGN },
+        { op: "local.get", index: L_I },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_I },
+      ],
+    } as unknown as Instr,
+    // integer digits: while i<end && '0'<=c<='9' { mant=mant*10+(c-'0'); i++ }
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_END },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            ...getC,
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 48 },
+            { op: "i32.lt_s" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 57 },
+            { op: "i32.gt_s" },
+            { op: "br_if", depth: 1 },
+            // mant = mant*10 + (c-48)
+            { op: "local.get", index: L_MANT },
+            { op: "f64.const", value: 10 },
+            { op: "f64.mul" },
+            { op: "local.get", index: L_C },
+            { op: "i32.const", value: 48 },
+            { op: "i32.sub" },
+            { op: "f64.convert_i32_s" },
+            { op: "f64.add" },
+            { op: "local.set", index: L_MANT },
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // fraction: if c=='.' { i++; while digit { mant=mant*10+d; exp--; i++ } }
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...getC,
+        ...cEq(46), // '.'
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: L_I },
+                    { op: "local.get", index: L_END },
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
+                    ...getC,
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 48 },
+                    { op: "i32.lt_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 57 },
+                    { op: "i32.gt_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: L_MANT },
+                    { op: "f64.const", value: 10 },
+                    { op: "f64.mul" },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 48 },
+                    { op: "i32.sub" },
+                    { op: "f64.convert_i32_s" },
+                    { op: "f64.add" },
+                    { op: "local.set", index: L_MANT },
+                    { op: "local.get", index: L_EXP },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.sub" },
+                    { op: "local.set", index: L_EXP },
+                    { op: "local.get", index: L_I },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: L_I },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+          ],
+        } as unknown as Instr,
+      ],
+    } as unknown as Instr,
+    // exponent: if c=='e'|'E' { i++; optional sign; exp += expSign * digits }
+    { op: "local.get", index: L_I },
+    { op: "local.get", index: L_END },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...getC,
+        ...cEq(101), // 'e'
+        ...cEq(69), // 'E'
+        { op: "i32.or" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // consume 'e'/'E'
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            // expSign = 1
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: L_EXPSIGN },
+            // optional exponent sign
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_END },
+            { op: "i32.lt_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...getC,
+                ...cEq(45), // '-'
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "i32.const", value: -1 },
+                    { op: "local.set", index: L_EXPSIGN },
+                    { op: "local.get", index: L_I },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: L_I },
+                  ],
+                  else: [
+                    ...cEq(43), // '+'
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: L_I },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: L_I },
+                      ],
+                    } as unknown as Instr,
+                  ],
+                } as unknown as Instr,
+              ],
+            } as unknown as Instr,
+            // explicit exponent digits: expMag = Σ digits; exp += expSign*expMag
+            { op: "i32.const", value: 0 },
+            { op: "local.set", index: L_EXPMAG },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: L_I },
+                    { op: "local.get", index: L_END },
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
+                    ...getC,
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 48 },
+                    { op: "i32.lt_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 57 },
+                    { op: "i32.gt_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: L_EXPMAG },
+                    { op: "i32.const", value: 10 },
+                    { op: "i32.mul" },
+                    { op: "local.get", index: L_C },
+                    { op: "i32.const", value: 48 },
+                    { op: "i32.sub" },
+                    { op: "i32.add" },
+                    { op: "local.set", index: L_EXPMAG },
+                    { op: "local.get", index: L_I },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: L_I },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+            // exp += expSign * expMag
+            { op: "local.get", index: L_EXP },
+            { op: "local.get", index: L_EXPSIGN },
+            { op: "local.get", index: L_EXPMAG },
+            { op: "i32.mul" },
+            { op: "i32.add" },
+            { op: "local.set", index: L_EXP },
+          ],
+        } as unknown as Instr,
+      ],
+    } as unknown as Instr,
+    // result = sign * mant * 10^exp  → L_FRAC
+    // Compute 10^exp by repeated multiply/divide (exp is small for the
+    // primitive slice; loop |exp| times). pow accumulates in L_FRAC.
+    { op: "f64.const", value: 1 },
+    { op: "local.set", index: L_FRAC }, // pow = 1
+    // if exp >= 0: multiply by 10, exp times; else divide by 10, -exp times.
+    { op: "local.get", index: L_EXP },
+    { op: "i32.const", value: 0 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_EXP },
+                { op: "i32.eqz" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.const", value: 10 },
+                { op: "f64.mul" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_EXP },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "local.set", index: L_EXP },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+      else: [
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_EXP },
+                { op: "i32.eqz" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.const", value: 10 },
+                { op: "f64.div" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_EXP },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_EXP },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    } as unknown as Instr,
+    // L_FRAC = sign * mant * pow
+    { op: "local.get", index: L_SIGN },
+    { op: "local.get", index: L_MANT },
+    { op: "f64.mul" },
+    { op: "local.get", index: L_FRAC },
+    { op: "f64.mul" },
+    { op: "local.set", index: L_FRAC },
+  ];
+
+  // Build the result by switching on the first char.
+  const dispatch: Instr[] = [
+    ...cEq(110), // 'n' → null
+    {
+      op: "if",
+      blockType: { kind: "val", type: anyRef },
+      then: boxNull,
+      else: [
+        ...cEq(116), // 't' → true
+        {
+          op: "if",
+          blockType: { kind: "val", type: anyRef },
+          then: boxBool(1),
+          else: [
+            ...cEq(102), // 'f' → false
+            {
+              op: "if",
+              blockType: { kind: "val", type: anyRef },
+              then: boxBool(0),
+              else: [
+                // number: '-' or digit; otherwise trap
+                ...cEq(45),
+                { op: "local.get", index: L_C },
+                { op: "i32.const", value: 48 },
+                { op: "i32.ge_s" },
+                { op: "local.get", index: L_C },
+                { op: "i32.const", value: 57 },
+                { op: "i32.le_s" },
+                { op: "i32.and" },
+                { op: "i32.or" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: anyRef },
+                  then: [...parseNumber, ...boxF64FromLocal(L_FRAC)],
+                  else: [{ op: "unreachable" }],
+                } as unknown as Instr,
+              ],
+            } as unknown as Instr,
+          ],
+        } as unknown as Instr,
+      ],
+    } as unknown as Instr,
+  ];
+
+  const body: Instr[] = [...preamble, ...skipWs, ...dispatch];
+
+  ctx.mod.functions.push({
+    name: "__json_parse_primitive",
+    typeIdx,
+    locals: [
+      { count: 1, type: { kind: "ref", typeIdx: strTypeIdx } }, // L_FLAT
+      { count: 1, type: { kind: "ref", typeIdx: strDataTypeIdx } }, // L_DATA
+      { count: 1, type: i32 }, // L_END
+      { count: 1, type: i32 }, // L_I
+      { count: 1, type: i32 }, // L_C
+      { count: 1, type: f64 }, // L_SIGN
+      { count: 1, type: f64 }, // L_MANT
+      { count: 1, type: f64 }, // L_FRAC
+      { count: 1, type: i32 }, // L_EXPSIGN
+      { count: 1, type: i32 }, // L_EXP
+      { count: 1, type: i32 }, // L_EXPMAG
     ],
     body,
     exported: false,

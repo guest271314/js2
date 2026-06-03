@@ -35,6 +35,7 @@ const BANNED_IMPORTS: ReadonlyArray<RegExp> = [
   /^env::__register_prototype$/,
   /^env::__register_class_object$/,
   /^env::__proxy_/,
+  /^env::__reflect_/,
 ];
 
 function assertNoHostObjectImports(imports: ReadonlyArray<{ module: string; name: string }>): void {
@@ -238,12 +239,6 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
 
   it("Phase B Blocker B Slice 2: Object.keys(any) for-of consumer is host-free (no __array_from_iter)", async () => {
     // #1472 Phase B Blocker B Slice 2 — the typed enumeration consumer chain.
-    // `const ks: string[] = Object.keys(o); for (const k of ks)` previously
-    // pulled in host-only env::__array_from_iter (via buildVecFromExternref) and
-    // emitted INVALID Wasm in standalone. The Slice 2 bypass: when the coerced
-    // source is already an indexable externref ($ObjVec from Object.keys), skip
-    // __array_from_iter and read it via the native __extern_get_idx. Module must
-    // validate and leak zero object/array host imports.
     const source = `
         export function n(o: any): number {
           const ks: string[] = Object.keys(o);
@@ -261,11 +256,6 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
   });
 
   it("Phase B Blocker B Slice 2: .length on an any value routes to native __extern_length", async () => {
-    // `(ks.length)` on an `any`-typed value previously fell through to
-    // __extern_get("length") (returns 0 / mis-handled by the native string-key
-    // __extern_get). Slice 2 routes a standalone `.length` on an any/unknown
-    // receiver to the native __extern_length (the $ObjVec length reader). Module
-    // validates, leaks no host imports, and emits __extern_length as a defined fn.
     const source = `
         export function m(o: any): number {
           const ks: any = Object.keys(o);
@@ -360,6 +350,38 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(WebAssembly.validate(r.binary)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(30);
+  });
+
+  it("Phase B Blocker A Half 2: Object.freeze/seal/preventExtensions lower native SET path (no host imports)", async () => {
+    // #1472 Phase B Blocker A Half 2 — the freeze/seal WRITE path.
+    const source = `
+        export function run(o: any): any {
+          Object.preventExtensions(o);
+          Object.seal(o);
+          return Object.freeze(o);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_freeze\b/);
+    expect(wat).toMatch(/\(func \$__object_seal\b/);
+    expect(wat).toMatch(/\(func \$__object_preventExtensions\b/);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
+  it("Phase B Blocker A Half 2: gc-mode Object.freeze still routes to the JS-host import", async () => {
+    // Regression guard: standalone-only coercion must NOT disturb the gc target.
+    const source = `
+        export function run(o: any): any {
+          return Object.freeze(o);
+        }
+      `;
+    const r = await compile(source, {}); // default gc target
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_freeze")).toBe(true);
   });
 
   it("Phase B Slice 3: Object.assign copies own enumerable props natively (no host array imports)", async () => {
@@ -490,6 +512,76 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
       expect(joined).toMatch(/#1472 Phase C/);
       assertNoHostObjectImports(r.imports);
     }
+  });
+
+  it("Phase C: Reflect.ownKeys routes to native __object_keys in standalone (no host import)", async () => {
+    // #1472 Phase C — Reflect.ownKeys(o) on an open `any` lowers to the native
+    // __object_keys helper (string own keys of the $Object hash-map). Computed
+    // keys defeat shape inference and force the genuine open-object path.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a"; const kb = "b";
+          o[ka] = 1; o[kb] = 2;
+          const ks: any = Reflect.ownKeys(o);
+          return (ks.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_keys\b/);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(2);
+  });
+
+  it("Phase C: unsupported Reflect.* methods refuse in standalone without leaking __reflect_* imports", async () => {
+    // The descriptor/prototype/integrity/has/apply/construct family has no
+    // native analog yet; each must fail at compile time with the Phase C
+    // message instead of leaking an env::__reflect_* import that traps at
+    // instantiation.
+    const cases: ReadonlyArray<[string, string]> = [
+      ["get", `export function f(o: any): any { return Reflect.get(o, "k"); }`],
+      ["set", `export function f(o: any): boolean { return Reflect.set(o, "k", 1); }`],
+      ["has", `export function f(o: any): boolean { return Reflect.has(o, "k"); }`],
+      ["deleteProperty", `export function f(o: any): boolean { return Reflect.deleteProperty(o, "k"); }`],
+      ["defineProperty", `export function f(o: any): boolean { return Reflect.defineProperty(o, "k", {}); }`],
+      [
+        "getOwnPropertyDescriptor",
+        `export function f(o: any): any { return Reflect.getOwnPropertyDescriptor(o, "k"); }`,
+      ],
+      ["getPrototypeOf", `export function f(o: any): any { return Reflect.getPrototypeOf(o); }`],
+      ["setPrototypeOf", `export function f(o: any, p: any): boolean { return Reflect.setPrototypeOf(o, p); }`],
+      ["apply", `export function f(fn: any, t: any, a: any): any { return Reflect.apply(fn, t, a); }`],
+      ["construct", `export function f(c: any, a: any): any { return Reflect.construct(c, a); }`],
+    ];
+    for (const [method, source] of cases) {
+      const r = await compile(source, { target: "standalone" });
+      expect(r.success, `Reflect.${method} should refuse in standalone`).toBe(false);
+      const joined = r.errors.map((e) => e.message).join("\n");
+      expect(joined, `Reflect.${method} error text`).toMatch(
+        new RegExp(`Reflect\\.${method} not supported in standalone mode`),
+      );
+      expect(joined).toMatch(/#1472 Phase C/);
+      assertNoHostObjectImports(r.imports);
+    }
+  });
+
+  it("default target (gc) still routes Reflect.* through the JS-host __reflect_* imports", async () => {
+    // Regression guard: the standalone Phase C refusal must not disturb the gc
+    // target, which keeps the host Reflect MOP bridge.
+    const r = await compile(
+      `
+        export function f(o: any): boolean {
+          return Reflect.has(o, "k");
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__reflect_has")).toBe(true);
   });
 
   it("default target (gc) still allows Proxy via the JS-host runtime", async () => {
