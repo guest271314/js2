@@ -1650,6 +1650,10 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
 
   // Find __box_number import for numeric boxing (may be undefined)
   const boxNumIdx = ctx.funcMap.get("__box_number");
+  // (#1788) __box_boolean for boolean-branded i32 fields — boxes the stored i32
+  // as a JS boolean so `typeof o.x === "boolean"` and `o.x === true` hold on a
+  // dynamic read, instead of the value boxing as the number 1.
+  const boxBoolIdx = ctx.funcMap.get("__box_boolean");
 
   // Two getter types: one for externref result, one for f64 result
   const getterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$sget_extern_type");
@@ -1662,8 +1666,13 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
     const hasF64 = entries.some((e) => e.fieldType.kind === "f64");
     const hasI32 = entries.some((e) => e.fieldType.kind === "i32");
     const hasRef = entries.some((e) => e.fieldType.kind !== "f64" && e.fieldType.kind !== "i32");
+    // (#1788) A boolean-branded i32 field must box (so the host sees a JS
+    // boolean, not the number 1). The raw-i32 returnMode returns a bare i32,
+    // which the host reads back as a number — so an all-i32 bucket that
+    // contains any boolean field is forced to externref/box mode instead.
+    const hasBool = entries.some((e) => e.fieldType.kind === "i32" && (e.fieldType as { boolean?: true }).boolean);
     const allF64 = hasF64 && !hasI32 && !hasRef;
-    const allI32 = hasI32 && !hasF64 && !hasRef;
+    const allI32 = hasI32 && !hasF64 && !hasRef && !hasBool;
 
     let getterTypeIdx: number;
     let returnMode: "extern" | "f64" | "i32";
@@ -1682,7 +1691,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 1; // first local after params (local 0 = externref param)
 
-    const funcBody = buildNestedIfElse(entries, anyLocal, boxNumIdx, returnMode);
+    const funcBody = buildNestedIfElse(entries, anyLocal, boxNumIdx, returnMode, boxBoolIdx);
 
     mod.functions.push({
       name: funcName,
@@ -4008,6 +4017,7 @@ function buildNestedIfElse(
   anyLocal: number,
   boxNumIdx: number | undefined,
   returnMode: "extern" | "f64" | "i32" = "extern",
+  boxBoolIdx?: number,
 ): Instr[] {
   const body: Instr[] = [];
 
@@ -4035,7 +4045,7 @@ function buildNestedIfElse(
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    const thenBranch = buildGetterExtract(entry, anyLocal, boxNumIdx, returnMode);
+    const thenBranch = buildGetterExtract(entry, anyLocal, boxNumIdx, returnMode, boxBoolIdx);
 
     const ifInstr: Instr = {
       op: "if",
@@ -4061,6 +4071,7 @@ function buildGetterExtract(
   anyLocal: number,
   boxNumIdx: number | undefined,
   returnMode: "extern" | "f64" | "i32" = "extern",
+  boxBoolIdx?: number,
 ): Instr[] {
   const then: Instr[] = [];
 
@@ -4100,6 +4111,11 @@ function buildGetterExtract(
         then.push({ op: "drop" } as Instr);
         then.push({ op: "ref.null.extern" } as Instr);
       }
+    } else if (ft.kind === "i32" && (ft as { boolean?: true }).boolean && boxBoolIdx !== undefined) {
+      // (#1788) Boolean-branded i32 field — box as a JS boolean (not a number)
+      // so `typeof o.x === "boolean"` and `o.x === true` hold on a dynamic read.
+      // The raw i32 is already on the stack; `__box_boolean(i32) -> externref`.
+      then.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
     } else if (ft.kind === "i32") {
       then.push({ op: "f64.convert_i32_s" } as Instr);
       if (boxNumIdx !== undefined) {
@@ -8390,6 +8406,12 @@ function fieldsHashKey(fields: FieldDef[]): string {
     const t = f.type;
     if (t.kind === "ref" || t.kind === "ref_null") {
       parts.push(`${f.name}:${t.kind}:${(t as { typeIdx: number }).typeIdx}`);
+    } else if (t.kind === "i32" && (t as { boolean?: true }).boolean) {
+      // (#1788) Keep boolean-branded i32 fields distinct from numeric i32 in the
+      // structural dedup key — they box differently (`__box_boolean` vs
+      // `__box_number`), so two shapes that differ only in boolean-vs-number must
+      // not collapse to one struct (which would inherit the wrong getter boxing).
+      parts.push(`${f.name}:i32:bool`);
     } else {
       parts.push(`${f.name}:${t.kind}`);
     }
