@@ -181,6 +181,6 @@
     ]
   },
   "worktree": {
-    "bgIsolation": "worktree"
+    "bgIsolation": "none"
   }
 }
