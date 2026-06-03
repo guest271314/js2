@@ -270,6 +270,87 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     await WebAssembly.instantiate(r.binary, {});
   });
 
+  // NOTE on test shape: a `const o: any = {}` whose property *names* are all
+  // statically known (`o.a = 1`) lets the compiler shape-infer `o` into a closed
+  // WasmGC struct, which bypasses the open-object runtime entirely (the writes
+  // become struct.set and Object.keys reads the struct field list). To force the
+  // genuine native $Object open-hash-map path these tests write through
+  // *computed* keys (`o[k] = v`), which defeats shape inference and routes
+  // __new_plain_object / __extern_set / __object_* through object-runtime.ts.
+
+  it("Phase B Slice 3: Object.values(any) lowers native and counts enumerable own values", async () => {
+    // #1472 Phase B Slice 3 — Object.values(o) on an open `any` lowers to the
+    // native __object_values helper (walks the $Object PropMap → fresh $ObjVec of
+    // boxed values). The result is a $ObjVec, so its `.length` reads back through
+    // the native __extern_length. Zero object/array host imports; runs under an
+    // empty import object.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a"; const kb = "b"; const kc = "c";
+          o[ka] = 1; o[kb] = 2; o[kc] = 3;
+          const vs: any = Object.values(o);
+          return (vs.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_values")).toBe(false);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_values\b/);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(3);
+  });
+
+  it("Phase B Slice 3: Object.entries(any) lowers native; entry is a 2-element $ObjVec", async () => {
+    // #1472 Phase B Slice 3 — Object.entries(o) builds a $ObjVec of 2-element
+    // $ObjVecs ([key, value]). `.length` of the outer vec = number of enumerable
+    // own props. Native __object_entries appears as a defined fn; no host imports.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a"; const kb = "b";
+          o[ka] = 10; o[kb] = 20;
+          const es: any = Object.entries(o);
+          return (es.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_entries\b/);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(2);
+  });
+
+  it("Phase B Slice 3: Object.values elements round-trip through a typed for-of consumer", async () => {
+    // The values $ObjVec stores boxed numbers; iterating it as a typed
+    // `number[]` for-of (the Blocker B Slice 2 consumer path) unboxes each
+    // element correctly. Confirms the values helper stores the right *values*
+    // (not just the right count) host-free.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a"; const kb = "b";
+          o[ka] = 10; o[kb] = 20;
+          const vs: number[] = Object.values(o);
+          let s = 0;
+          for (const v of vs) { s = s + v; }
+          return s;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(30);
+  });
+
   it("Phase B Blocker A Half 2: Object.freeze/seal/preventExtensions lower native SET path (no host imports)", async () => {
     // #1472 Phase B Blocker A Half 2 — the freeze/seal WRITE path.
     const source = `
@@ -300,6 +381,81 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     const r = await compile(source, {}); // default gc target
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(r.imports.some((i) => i.module === "env" && i.name === "__object_freeze")).toBe(true);
+  });
+
+  it("Phase B Slice 3: Object.assign copies own enumerable props natively (no host array imports)", async () => {
+    // #1472 Phase B Slice 3 — Object.assign(target, ...sources). The variadic
+    // sources list is built with the native $ObjVec builders (not the JS-host
+    // __js_array_new/__js_array_push), and __object_assign iterates the $ObjVec,
+    // copying each source's enumerable own props into target via the native
+    // __extern_set. Reads back the merged value; runs under empty imports.
+    const source = `
+        export function run(): number {
+          const ka = "a"; const kb = "b";
+          const t: any = {};
+          const s1: any = {}; s1[ka] = 5;
+          const s2: any = {}; s2[kb] = 7; s2[ka] = 11;  // later source wins on 'a'
+          Object.assign(t, s1, s2);
+          return (t[ka] as number) + (t[kb] as number);  // 11 + 7 = 18
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    // The JS-host array builders must NOT leak — standalone builds a $ObjVec.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_new")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_push")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_assign")).toBe(false);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_assign\b/);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(18);
+  });
+
+  it("Phase B Slice 3: object spread {...src} uses native $ObjVec assign in standalone", async () => {
+    // The all-spread object-literal fallback (compileObjectLiteralAsExternref)
+    // also routes the sources list through the native $ObjVec builders. Validates
+    // and instantiates host-free.
+    const source = `
+        export function run(): number {
+          const kx = "x";
+          const src: any = {}; src[kx] = 9;
+          const o: any = { ...src };
+          return (o[kx] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_new")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(9);
+  });
+
+  it("Phase B Slice 3: __extern_has_idx resolves to a native defined function (no host import)", async () => {
+    // __extern_has_idx is the array-like HasProperty(O, ToString(idx)) helper used
+    // by array-method callback loops (filter/map over array-likes) to skip holes.
+    // It mirrors __extern_get_idx exactly over a $ObjVec (present iff
+    // 0 <= i32(idx) < len). An array-method call over an `any` array-like pulls it
+    // in; under standalone it must resolve to the native defined function, never an
+    // env::__extern_has_idx host import. (The `in` operator on an object is a
+    // *different* helper, __extern_has, which is out of scope for this slice; and
+    // the surrounding array-like consumer machinery has independent standalone
+    // gaps, so this asserts the helper resolution, not whole-module validity.)
+    const source = `
+        export function run(o: any): number {
+          const out = Array.prototype.filter.call(o, (x: number) => x > 0);
+          return (out as any).length as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // The helper is provided natively — no env::__extern_has_idx host import leaks.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_has_idx")).toBe(false);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__extern_has_idx\b/);
   });
 
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {

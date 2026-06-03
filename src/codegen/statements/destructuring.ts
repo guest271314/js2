@@ -23,6 +23,7 @@ import {
   buildDestructureNullThrow,
   destructureParamArray,
   destructureParamObject,
+  emitExternrefDestructureGuard,
 } from "../destructuring-params.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { emitWasiErrorConstructor } from "../registry/error-types.js";
@@ -876,13 +877,22 @@ export function compileExternrefObjectDestructuringDecl(
   const tmpLocal = allocLocal(fctx, `__ext_obj_destruct_${fctx.locals.length}`, resultType);
   fctx.body.push({ op: "local.set", index: tmpLocal });
 
-  // Per ECMA-262 §13.15.5.5, an empty ObjectBindingPattern `{}` performs no
-  // property access and therefore no RequireObjectCoercible: `const {} = null`
-  // must NOT throw. `destructureParamObject` emits an unconditional
-  // null/undefined guard for externref sources, so we must short-circuit the
-  // empty pattern here before delegating (the binding-locals pre-pass is a
-  // no-op for an empty pattern). (#1553c — preserves twin behaviour.)
+  // Per ECMA-262 8.6.2 BindingInitialization, the production
+  // `BindingPattern : ObjectBindingPattern` runs `Perform ?
+  // RequireObjectCoercible(value)` as step 1 — BEFORE the inner
+  // `ObjectBindingPattern : { }` rule (which returns unused). So `const {} =
+  // null` / `const {} = undefined` MUST throw a TypeError, while `const {} = 5`
+  // must NOT (a number is object-coercible). The earlier blanket short-circuit
+  // (#846) skipped the coercibility check for empty patterns, silently
+  // accepting null/undefined — observably wrong (test262
+  // dstr-binding/obj-init-null + for-of/dstr/const-obj-init-*). Emit the same
+  // null/undefined RequireObjectCoercible guard that the parameter path
+  // (`destructureParamObject`) and assignment path
+  // (`emitExternrefAssignDestructureGuard`) already use, then short-circuit the
+  // no-property-access empty body. The guard only fires for null/undefined, so
+  // primitive sources still pass through unchanged. (#846)
   if (pattern.elements.length === 0) {
+    emitExternrefDestructureGuard(ctx, fctx, tmpLocal);
     ensureBindingLocals(ctx, fctx, pattern);
     return;
   }

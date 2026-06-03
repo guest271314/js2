@@ -1,16 +1,17 @@
 ---
 id: 846
 title: "assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests)"
-status: ready
+status: in-review
 created: 2026-03-28
-updated: 2026-04-28
+updated: 2026-06-03
 priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: core-semantics
-sprint: Backlog
+sprint: 58
 parent: 779
 test262_fail: 2799
+pr: 1098
 ---
 # #846 -- assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests)
 
@@ -279,3 +280,82 @@ localized fix.
 are the already-dispatched child issues (#1594, #1592, #1553, #820 family).
 The only genuinely new, isolated micro-bucket is array-`length` RangeError
 (~28) — too small to be worth a standalone PR under the ≥200 target.
+
+## Slice landed (sd-1472, 2026-06-03): RequireObjectCoercible for empty/nested object patterns
+
+### Fresh re-profile vs the stale 2026-05-21/05-27 notes
+Most of the overlapping child issues cited above are now **done** on main
+(#1594, #1592, #1553, #1543, #1630), so the residual #846 surface shifted.
+Re-profiling the 2026-05-28 baseline jsonl found **1,282** remaining
+`assert.throws(ErrType,…)`-not-thrown failures (down from 2,799). Within the
+destructuring slice there is one clean, spec-localized root cause worth a
+standalone PR:
+
+**Destructuring a `null`/`undefined` value through an EMPTY object pattern did
+not throw.** Confirmed via probe: `let {} = null`, `let {} = undefined`,
+`const {} = null`, `for (const {} of [null])`, and the nested form
+`{ w: {} } = { w: null }` all silently succeeded; `let {a} = null` (non-empty)
+already threw correctly.
+
+### Root cause (WHY)
+Per **ECMA-262 8.6.2 BindingInitialization**, the production
+`BindingPattern : ObjectBindingPattern` runs `Perform ?
+RequireObjectCoercible(value)` as **step 1** — *before* the inner
+`ObjectBindingPattern : { }` rule (which "Return unused"). So the coercibility
+check fires even for `{}`. The codegen had a confidently-wrong comment
+(introduced under #225 / #1553c) claiming the empty pattern performs "no
+property access and therefore no RequireObjectCoercible", and short-circuited
+the empty object-binding-decl path (`compileExternrefObjectDestructuringDecl`)
+*before* the null/undefined guard. The fixture
+`statements/const/dstr/obj-init-null.js` documents the trap: its `info:` block
+cites `ObjectBindingPattern : { } → Return NormalCompletion(empty)` yet asserts
+a TypeError — because the *outer* `BindingPattern` wrapper does the
+RequireObjectCoercible. The parameter path (`destructureParamObject`, guard at
+the externref branch before its empty short-circuit) and the assignment path
+(`emitExternrefAssignDestructureGuard`, fixed under #1701) were already correct;
+only the binding-declaration + the empty-nested paths were not.
+
+### Changes (2 files, surgical)
+1. `src/codegen/statements/destructuring.ts` —
+   `compileExternrefObjectDestructuringDecl`: emit
+   `emitExternrefDestructureGuard(tmpLocal)` (the existing null + JS-undefined
+   RequireObjectCoercible guard) before the empty-pattern short-circuit. Fixes
+   `let/const/var {} = null|undefined` AND the for-of binding-pattern path
+   (loops.ts routes for-of object binding patterns through this same helper).
+   The guard fires only for null/undefined, so coercible primitives
+   (`{} = 5`, `{} = "s"`) still pass — verified.
+2. `src/codegen/destructuring-params.ts` —
+   `destructureParamObjectExternref` nested-element handler: drop the
+   `element.name.elements.length > 0` gate so the nested coercibility guard
+   also fires for empty nested patterns (`{ w: {} } = { w: null }`). Spec-clean:
+   the guard is null/undefined-only.
+
+### Considered and deliberately deferred (higher risk, separate root cause)
+- **Array-assignment non-iterable** (`for ([] of [1])`, `[] = 5`): needs a
+  `GetIterator` probe (calling `value[Symbol.iterator]()` then IteratorClose)
+  on the empty/elision array path. The empty-array path intentionally skips
+  `__array_from_iter` to avoid advancing generators; adding iterability without
+  that side effect is a distinct change. ~12 for-of + a few assignment tests.
+- **Typed-struct static-`null` nested** (`for (var {w:{x}=d} of [{w:null}])`):
+  the `[{w:null}]` literal is constant-folded and the inner destructure is
+  optimized away before any guard site; chasing this through the
+  `compileForOfDestructuring` typed/vec paths added **3 false "regressions"**
+  in one attempt and zero validated wins, so it was reverted. ~6 tests.
+
+### Validation
+- New equivalence test `tests/equivalence/destructuring-require-object-coercible.test.ts`
+  (10 cases) — all pass.
+- Existing destructuring equivalence suites: 97/97 pass.
+- **Delta**: of 146 baseline-failing dstr-noncoercible candidates, **38 now
+  pass** (object RequireObjectCoercible family across const/let/var binding
+  decls, for-of object binding patterns, nested empty object patterns).
+- **Regressions**: 0 real. Broad sweeps via the test262 runner on
+  baseline-PASSING tests: 400-test dstr sample 392/400 (8 apparent failures all
+  reproduce on clean main HEAD = pre-existing baseline drift, `it.next is not a
+  function` / iterator-elision, unrelated to coercibility), 200/200
+  nested-pattern, 235/238 for-of-nested (the 3 `*-ary-init-iter-no-close` also
+  fail on clean main = drift). `tsc --noEmit` clean; `check:ir-fallbacks` OK.
+
+**Umbrella remains open** — this is one slice. Remaining mergeable buckets:
+array-assignment GetIterator, array-`length` RangeError (~28), and the
+descriptor-model work under #1630.
