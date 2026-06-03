@@ -3,7 +3,7 @@ id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
 status: in-progress
 created: 2026-04-11
-updated: 2026-06-03
+updated: 2026-06-04
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -1330,3 +1330,65 @@ Estimate for the follow-up: ~45 LoC of source + ~120 LoC tests + the
 `async-await.test.ts` assertion migration. The module-wide return-type-flip
 risk is **lower than feared** (compiles clean), but the test-expectation
 migration in #6 is the genuine blast radius.
+
+## Slice 2A — IMPLEMENTED + machinery verified correct, gate stays OFF (senior-dev, 2026-06-03)
+
+The three blockers are fixed and the state machine is **end-to-end correct when
+it runs** (proven with the gate forced on locally — `tests/issue-1042.test.ts`
+`describe.skipIf(!ASYNC_CPS_ENABLED)` block: S1 `return await`, S2 `const x =
+await`, S3 `await; return`, prefix-local capture, param+local capture, literal
+await, and the two legacy controls all resolve to the right value). What
+landed on the branch (all behind `ASYNC_CPS_ENABLED`, gate left **false**):
+
+1. **Blocker 1 (late-import shift) — fixed.** New `collectAsyncCpsImports`
+   detection + finalize in the unified collector (`declarations.ts`): when the
+   gate is on and a CPS-eligible async fn exists, pre-register `__make_callback`
+   + `Promise_then2` + `Promise_resolve` upfront so the driver resolves them via
+   `ctx.funcMap.get(...)` (stable) instead of `ensureLateImport` (which would
+   not shift the outer body's `call` opcodes — the outer `$f` body is not in
+   `ctx.liveBodies`). `emitAsyncStateMachine` now reads the three stable indices
+   and `reportError`s if the prepass didn't run.
+2. **`await V` PromiseResolve (§27.7.5.3) — added.** The driver wraps the awaited
+   value with `Promise_resolve` before `Promise_then2`, so `await <non-thenable>`
+   (e.g. `await 41`) resolves to the value instead of throwing on `(41).then`.
+3. **Blocker 2 (`return await` collapse) — fixed.**
+   `compileSyntheticAsyncContinuation(..., { returnAwaitValue })` emits
+   `local.get 1` (the `__awaitValue` param) as the identity tail instead of
+   `ref.null.extern`, so the chained promise resolves to the awaited value.
+4. **Capture/resume-binding aliasing — fixed.** The resume binding (`const x =
+   await P`) is computed *before* the capture set and excluded from it:
+   `hoistLetConstWithTdz` allocates a same-named outer local, so `liveAfterAwait`
+   listed it, and capturing it snapshotted its uninitialized (0) value and
+   shadowed the resumed value in the continuation. (Found via gate-on probe:
+   `const x = await inner(); return x+1` returned 1 instead of 42.)
+
+### Why the gate ships OFF — synchronous-consumption contract regression
+
+Flipping `ASYNC_CPS_ENABLED` globally regresses **3 equivalence tests**
+(`tests/equivalence/async-function.test.ts` "await expression is identity
+(pass-through)"; `tests/equivalence/promise-chains.test.ts` "await expression
+passes through value" + "nested async calls"). All three consume a single-await
+async fn as a *raw value* — `asyncFn() as any as number` — relying on the legacy
+synchronous fakery (#1313/#1727 "compile away"): the legacy path returns the
+unwrapped value synchronously, so the cast yields a number. With CPS on, that
+async fn returns a real `Promise`, and `Promise as any as number` → **NaN**.
+
+The gate is **per-definition** but the contract is **per-call-site**: a function
+cannot know whether a given caller `await`s it (wants a Promise) or consumes it
+as a raw value (wants the unwrapped T). A global flip cannot satisfy both. The
+existing `asyncResultConsumedAsValue` (expressions.ts:1118) detects the raw-value
+case at the *call site*, but the CPS rewrite changes the *callee's* return type,
+which all call sites then observe. These three patterns are pervasive in test262
+(`async fn` results consumed synchronously), so the global flip would regress
+far more than the 3 local cases.
+
+**What turning CPS on for real needs (architect-level — spec risk #1/#6):** the
+synchronous-consumption call sites must be taught to *drive* the returned
+Promise to its settled value (a synchronous resolve for already-settled
+promises), OR the async-fn return-type rewrite must be gated on whole-program
+consumption analysis (only rewrite fns that are exclusively `await`ed / consumed
+as Promises). Neither is in Slice 2A's linear scope. The machinery is ready and
+correct; the remaining work is reconciling the two consumption contracts. Until
+then the gate stays `false` (byte-identical legacy codegen — the equivalence
+suite and `async-await.test.ts` are unchanged on this branch). Re-route to
+architect for the consumption-contract decision before the next flip attempt.
