@@ -972,6 +972,13 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
+  /**
+   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
+   * Computed read-only by `classifyEvalTier`; downstream optimization gating
+   * (#1262–#1265) consumes it. Optional because not every context constructs
+   * from a full source file.
+   */
+  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };
