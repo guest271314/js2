@@ -1621,6 +1621,26 @@ export function compileNativeStringMethodCall(
     return nativeStringType(ctx);
   }
 
+  // concat: native helper. ECMA-262 §22.1.3.4 — coerce each argument with
+  // ToString and append, left to right, to the receiver. `__str_concat(a, b)`
+  // joins two AnyString refs; chain it across the (possibly variadic) argument
+  // list so standalone mode never reaches the host `string_concat` import.
+  if (method === "concat") {
+    const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+    // Receiver is the running accumulator.
+    compileExpression(ctx, fctx, propAccess.expression);
+    if (expr.arguments.length === 0) {
+      // `"x".concat()` returns the receiver unchanged.
+      return nativeStringType(ctx);
+    }
+    for (const arg of expr.arguments) {
+      // Accumulator is already on the stack; push the next operand and join.
+      compileExpression(ctx, fctx, arg, nativeStringType(ctx));
+      fctx.body.push({ op: "call", funcIdx: concatIdx });
+    }
+    return nativeStringType(ctx);
+  }
+
   // substring: native helper
   if (method === "substring") {
     compileExpression(ctx, fctx, propAccess.expression);
