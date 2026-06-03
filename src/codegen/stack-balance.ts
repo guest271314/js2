@@ -1572,7 +1572,7 @@ function fixCallArgTypesInBody(
     // the SAME externref→GC-ref coercion once per link. Without this, the
     // backward walk re-coerces the one value 4× and the 2nd `any.convert_extern`
     // receives an already-cast `(ref null $AnyString)` operand → invalid Wasm
-    // (#1791). The forward pass-through scan (below) collapses each chain to a
+    // (#1797). The forward pass-through scan (below) collapses each chain to a
     // single `insertPos`, so deduping by that position is exact.
     const queuedInsertPositions = new Set<number>();
     // Track whether we've traversed through a sub-expression consumer.

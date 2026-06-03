@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #1791 — native Error `.name` / `.message` read into a native string op
+// #1797 — native Error `.name` / `.message` read into a native string op
 // emitted invalid Wasm.
 //
 // After #1536 materialized the `$name` field, reading `e.name` (or
@@ -38,7 +38,7 @@ async function runStandalone(src: string): Promise<number> {
   return (instance.exports as { test?: () => number }).test!();
 }
 
-describe("#1791 — native Error `.name`/`.message` read into string ops", () => {
+describe("#1797 — native Error `.name`/`.message` read into string ops", () => {
   it('`new TypeError(x).name === "TypeError"` evaluates to true (valid Wasm)', async () => {
     const got = await runStandalone(
       `export function test(): number { const e = new TypeError("oops"); return e.name === "TypeError" ? 1 : 0; }`,

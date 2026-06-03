@@ -2771,6 +2771,149 @@ export function compileArrowAsCallback(
   return { kind: "externref" };
 }
 
+/** A captured local that must flow into an async continuation. */
+export interface AsyncCapture {
+  readonly name: string;
+  readonly type: ValType;
+  readonly localIdx: number;
+}
+
+/** Result of synthesizing an async continuation `__cb_N` function. */
+export interface SyntheticContinuation {
+  /** Callback id — the host dispatches `__cb_${cbId}(captures, awaitValue)`. */
+  readonly cbId: number;
+  /** Capture struct type index (field i holds capture[i]), or -1 if no captures. */
+  readonly capStructTypeIdx: number;
+  /** The captures, in struct-field order. */
+  readonly captures: readonly AsyncCapture[];
+}
+
+/**
+ * (#1042) Synthesize an async-continuation function for the CPS state machine.
+ *
+ * Unlike {@link compileArrowAsCallback} this is driven by an explicit statement
+ * list + capture set (not an arrow AST node). It emits an exported
+ * `__cb_${cbId}(captures: externref, awaitValue: externref) -> externref`
+ * function compatible with the `__make_callback` host bridge: the host invokes
+ * it with the settled promise value as `awaitValue`. The function restores
+ * captured locals from the capture struct, binds the awaited result to
+ * `resumeBinding` (if any), runs `segmentStmts`, and returns `ref.null.extern`
+ * (the host ignores a continuation's result).
+ *
+ * Returns the cbId + capture-struct info so the caller emits the creation site
+ * (`i32.const cbId` + capture struct + `extern.convert_any` + `__make_callback`).
+ *
+ * Captures are immutable snapshots (value-copied into the struct) — async
+ * continuations don't write back to the suspended frame, so no ref cells.
+ */
+export function compileSyntheticAsyncContinuation(
+  ctx: CodegenContext,
+  outerFctx: FunctionContext,
+  segmentStmts: readonly ts.Statement[],
+  captures: readonly AsyncCapture[],
+  resumeBinding: { name: string; type: ValType } | null,
+): SyntheticContinuation {
+  const cbId = ctx.callbackCounter++;
+  const cbName = `__cb_${cbId}`;
+
+  // 1. Capture struct: field i = captures[i].type (immutable snapshot).
+  let capStructTypeIdx = -1;
+  if (captures.length > 0) {
+    const fields: FieldDef[] = captures.map((c) => ({ name: c.name, type: c.type, mutable: false }));
+    capStructTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({ kind: "struct", name: `__cb_cap_${cbId}`, fields } as StructTypeDef);
+  }
+
+  // 2. Function signature: (externref captures, externref awaitValue) -> externref.
+  const cbParams: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
+  const cbResults: ValType[] = [{ kind: "externref" }];
+  const cbTypeIdx = addFuncType(ctx, cbParams, cbResults, `${cbName}_type`);
+
+  const cbFctx: FunctionContext = {
+    name: cbName,
+    params: [
+      { name: "__captures", type: { kind: "externref" } },
+      { name: "__awaitValue", type: { kind: "externref" } },
+    ],
+    locals: [],
+    localMap: new Map(),
+    returnType: { kind: "externref" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+    enclosingClassName: outerFctx.enclosingClassName ?? resolveEnclosingClassName(outerFctx),
+    isStaticContext: outerFctx.isStaticContext,
+    readsCurrentThis: true,
+  };
+  for (let i = 0; i < cbFctx.params.length; i++) cbFctx.localMap.set(cbFctx.params[i]!.name, i);
+
+  // (#1384) track body for late-import index shifting before any emission.
+  ctx.liveBodies.add(cbFctx.body);
+
+  // 3. Restore captured locals from the captures struct.
+  //    __captures is externref; convert to anyref + cast to the cap struct.
+  if (captures.length > 0) {
+    const capLocal = allocLocal(cbFctx, "__cap_struct", { kind: "ref", typeIdx: capStructTypeIdx });
+    cbFctx.body.push({ op: "local.get", index: 0 }); // __captures (externref)
+    cbFctx.body.push({ op: "any.convert_extern" } as Instr);
+    cbFctx.body.push({ op: "ref.cast", typeIdx: capStructTypeIdx } as Instr);
+    cbFctx.body.push({ op: "local.set", index: capLocal });
+    for (let i = 0; i < captures.length; i++) {
+      const cap = captures[i]!;
+      const localIdx = allocLocal(cbFctx, cap.name, cap.type);
+      cbFctx.body.push({ op: "local.get", index: capLocal });
+      cbFctx.body.push({ op: "struct.get", typeIdx: capStructTypeIdx, fieldIdx: i });
+      cbFctx.body.push({ op: "local.set", index: localIdx });
+    }
+  }
+
+  // 4. Bind the awaited result. `__awaitValue` arrives as externref; coerce to
+  //    the binding's declared wasm type (e.g. f64 via __unbox_number).
+  if (resumeBinding) {
+    const bindIdx = allocLocal(cbFctx, resumeBinding.name, resumeBinding.type);
+    cbFctx.body.push({ op: "local.get", index: 1 }); // __awaitValue
+    if (resumeBinding.type.kind === "externref") {
+      // already externref — store as-is
+    } else {
+      coerceType(ctx, cbFctx, { kind: "externref" }, resumeBinding.type);
+    }
+    cbFctx.body.push({ op: "local.set", index: bindIdx });
+  }
+
+  // 5. Compile the post-await segment statements.
+  const savedFunc = ctx.currentFunc;
+  if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
+  if (savedFunc) ctx.funcStack.push(savedFunc);
+  ctx.currentFunc = cbFctx;
+  for (const stmt of segmentStmts) compileStatement(ctx, cbFctx, stmt);
+  if (savedFunc) ctx.funcStack.pop();
+  if (savedFunc) ctx.parentBodiesStack.pop();
+  ctx.currentFunc = savedFunc;
+
+  // 6. Fall-through return — continuation result is ignored by the host.
+  const last = cbFctx.body[cbFctx.body.length - 1];
+  if (!last || last.op !== "return") cbFctx.body.push({ op: "ref.null.extern" });
+
+  // 7. Register + export the continuation (the __make_callback host bridge
+  //    dispatches by the exported `__cb_${cbId}` name).
+  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.mod.functions.push({
+    name: cbName,
+    typeIdx: cbTypeIdx,
+    locals: cbFctx.locals,
+    body: cbFctx.body,
+    exported: true,
+  });
+  ctx.liveBodies.delete(cbFctx.body);
+  ctx.funcMap.set(cbName, cbFuncIdx);
+  ctx.mod.exports.push({ name: cbName, desc: { kind: "func", index: cbFuncIdx } });
+
+  return { cbId, capStructTypeIdx, captures };
+}
+
 /**
  * Look up a function's parameter and result types from its index.
  */

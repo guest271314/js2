@@ -1114,7 +1114,7 @@ export function compilePropertyAccess(
       // type. Otherwise the externref result flows into native string ops
       // (`=== `, `.length`, concat, interpolation) that expect `(ref null
       // $AnyString)`, and the per-consumer externref→string coercion either
-      // misfires or is skipped → invalid Wasm (#1791).
+      // misfires or is skipped → invalid Wasm (#1797).
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
         const nativeRef: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
         coerceType(ctx, fctx, { kind: "externref" }, nativeRef);
@@ -2341,9 +2341,9 @@ export function compilePropertyAccess(
     if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
       // The receiver must be a `$AnyString` ref before reading its `len`
       // field. Some string producers (e.g. the native Error `.name`/`.message`
-      // reader, #1104/#1791) hand back an `externref`; coerce it to the GC
+      // reader, #1104/#1797) hand back an `externref`; coerce it to the GC
       // string ref first, otherwise `struct.get $AnyString` validates against
-      // an externref operand → invalid Wasm (#1791).
+      // an externref operand → invalid Wasm (#1797).
       if (recvType && recvType.kind === "externref") {
         coerceType(ctx, fctx, recvType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
       }

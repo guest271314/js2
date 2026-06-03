@@ -1,5 +1,5 @@
 ---
-id: 1791
+id: 1797
 title: "Native Error `.name` / `.message` read → string-op coercion double-convert defect"
 status: done
 created: 2026-06-03
@@ -14,8 +14,9 @@ goal: standalone-wasm
 sprint: 58
 owner: dev-1575
 related: [1536, 1104, 1473, 1470]
+note: "originally filed as #1791, but #1791 is the canonical node:path issue; renumbered to 1797 to resolve the duplicate-ID collision"
 ---
-# #1791 — Native Error `.name` read into a native string op emits invalid Wasm
+# #1797 — Native Error `.name` read into a native string op emits invalid Wasm
 
 ## Problem
 
