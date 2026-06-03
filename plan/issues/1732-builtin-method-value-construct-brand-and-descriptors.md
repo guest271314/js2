@@ -508,3 +508,31 @@ named like a namespace all still work. Closes
 `built-ins/Math/prop-desc.js` (+ JSON/Reflect/Atomics `prop-desc.js` "no
 [[Call]]" arms). S3 (unified `$FuncObj`) and S4 (standalone parity) remain open
 under this tracking issue — status stays `ready`.
+
+## Symbol-coercion sub-fix — Math.* ToNumber(Symbol) throws TypeError (2026-06-03)
+
+Distinct from the [[Construct]]-brand and namespace-call work above: a separate
+spec-conformance gap surfaced while investigating `Math.*` argument handling.
+`Math.abs/floor/ceil/sqrt/round/sign/max/min/pow/clz32/...` run **ToNumber** on
+their arguments (§21.3.2.x → §7.1.4 *ToNumber*). ToNumber of a **Symbol** MUST
+throw a `TypeError` (§7.1.4 step 5). Compiled `Math.abs(Symbol())` instead
+returned a garbage number.
+
+**Root cause.** `compileSymbolCall` (`src/codegen/literals.ts`) lowers a Symbol
+to an **i32 id** (the symbol counter). `compileMathCall` compiles each argument
+with an `f64Hint`, and an i32 symbol id coerces straight to f64 — the raw
+counter leaks as the result, never routing through `__unbox_number` (which *does*
+throw on a real boxed Symbol, hence `const s: any = Symbol(); Math.abs(s)`
+already threw correctly — only the statically-symbol-typed argument slipped).
+
+**Fix** (`src/codegen/expressions/builtins.ts::compileMathCall`): before the
+method-specific lowering, scan the arguments for a `symbol`-typed one
+(`isSymbolType`). If found, evaluate every argument up to and including it for
+side effects in source order, then `emitThrowTypeError(..., "Cannot convert a
+Symbol value to a number")` — exactly mirroring the existing `Number(Symbol())`
+guard at `calls.ts:7506`. Override-free numeric Math paths are untouched
+(`Math.abs(-5)`, `Math.max(1,2,3)`, NaN propagation all verified intact).
+
+Tests: `tests/issue-1732-math-symbol-coercion.test.ts` (18) — 12 Symbol-throw
+cases across the unary/variadic/binary Math methods + 6 numeric regression
+guards (incl. `Math.max(NaN,1)` NaN propagation). All green; tsc clean.

@@ -3,7 +3,7 @@
  * Host built-in compilation: console, Date, Math, and WASI output.
  */
 import { ts } from "../../ts-api.js";
-import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import { isBooleanType, isNumberType, isStringType, isSymbolType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
@@ -14,6 +14,7 @@ import { ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { compileExpression, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
+import { emitThrowTypeError } from "./helpers.js";
 import { isStaticNaN, tryStaticToNumber } from "./misc.js";
 
 // ── Builtins ─────────────────────────────────────────────────────────
@@ -1985,6 +1986,21 @@ function compileMathCall(
   };
 
   const f64Hint: ValType = { kind: "f64" };
+
+  // ToNumber(Symbol) must throw TypeError (§7.1.4 step 5). Symbols lower to i32
+  // ids, so the f64Hint coercion path would silently leak the id as a number
+  // (e.g. `Math.abs(Symbol())` returned the raw counter). Detect a symbol-typed
+  // argument, evaluate every argument up to and including it for side effects in
+  // source order, then throw — matching how `Number(Symbol())` is handled.
+  const symbolArgIdx = expr.arguments.findIndex((a) => isSymbolType(ctx.checker.getTypeAtLocation(a)));
+  if (symbolArgIdx >= 0) {
+    for (let i = 0; i <= symbolArgIdx; i++) {
+      const t = compileExpression(ctx, fctx, expr.arguments[i]!);
+      if (t !== null) fctx.body.push({ op: "drop" });
+    }
+    emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+    return { kind: "f64" };
+  }
 
   if (method === "round" && expr.arguments.length >= 1) {
     // JS Math.round: compare frac = x - floor(x) to 0.5.
