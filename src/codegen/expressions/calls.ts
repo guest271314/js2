@@ -1867,6 +1867,45 @@ function compileCallExpression(
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
+  // (#1732) Calling a built-in non-constructor namespace — `Math()`, `JSON()`,
+  // `Reflect()`, `Atomics()` — must throw TypeError ("no [[Call]]"). These
+  // namespace objects have neither a [[Call]] nor [[Construct]] internal
+  // method (§sec-math-object etc.). The `new`-site already throws via the
+  // mirror guard in new-super.ts (NAMESPACE_NON_CONSTRUCTORS); this closes the
+  // call-as-function form (built-ins/Math/prop-desc.js "no [[Call]]"). Unwrap
+  // paren/as/!-assertion wrappers so `(Math as any)()` also fires.
+  {
+    let unwrapped: ts.Expression = expr.expression;
+    while (
+      ts.isParenthesizedExpression(unwrapped) ||
+      ts.isAsExpression(unwrapped) ||
+      ts.isNonNullExpression(unwrapped) ||
+      ts.isTypeAssertionExpression(unwrapped)
+    ) {
+      unwrapped = ts.isParenthesizedExpression(unwrapped)
+        ? unwrapped.expression
+        : ts.isAsExpression(unwrapped)
+          ? unwrapped.expression
+          : ts.isNonNullExpression(unwrapped)
+            ? unwrapped.expression
+            : (unwrapped as ts.TypeAssertion).expression;
+    }
+    if (ts.isIdentifier(unwrapped)) {
+      const NAMESPACE_NON_CALLABLE = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+      if (NAMESPACE_NON_CALLABLE.has(unwrapped.text)) {
+        // Evaluate arguments for their side effects (spec: argument list is
+        // evaluated before the [[Call]] check would normally run), then throw.
+        for (const arg of expr.arguments) {
+          const t = compileExpression(ctx, fctx, arg);
+          if (t !== null && t !== undefined) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, `${unwrapped.text} is not a function`);
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+    }
+  }
+
   // (#1540) JSX runtime call intercept — `_jsx(type, props, key?)` /
   // `_jsxs(type, props, key?)` / `_jsxDEV(...)`. TypeScript emits these
   // automatically when `jsx: react-jsx` is set; preprocessImports recorded
@@ -3668,8 +3707,28 @@ function compileCallExpression(
       }
 
       // Compile the argument — returns the object itself (freeze/seal return their arg)
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
+      let argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (!argType) return null;
+
+      // #1472 Phase B Blocker A Half 2 — open-`any` receiver normalization.
+      // The open-object representation is a $Object wrapped to externref, but a
+      // variable reference (`Object.freeze(o)` where `o: any`) can compile to a
+      // ref/ref_null/anyref rather than externref, which would fall through to
+      // the return-arg no-op and never reach the native __object_freeze (the
+      // $flags would never be set). In standalone, coerce a non-externref
+      // ref/anyref receiver to externref first (extern.convert_any) so the
+      // native SET helper fires and the integrity bits actually get written.
+      // JS-host mode is unchanged (it already routes externref args to the host
+      // import; non-externref args there are typed objects with no dynamic
+      // freeze semantics).
+      if (
+        ctx.standalone &&
+        argType.kind !== "externref" &&
+        (argType.kind === "ref" || argType.kind === "ref_null" || argType.kind === "anyref")
+      ) {
+        coerceType(ctx, fctx, argType, { kind: "externref" });
+        argType = { kind: "externref" };
+      }
 
       // For externref objects, delegate to host import for runtime enforcement
       if (argType.kind === "externref") {
@@ -4835,6 +4894,64 @@ function compileCallExpression(
 
       const externRef: ValType = { kind: "externref" };
       const i32Ty: ValType = { kind: "i32" };
+
+      // ── #1472 Phase C — Reflect.* under --target standalone ───────────────
+      //
+      // The host-dispatch path below registers an env::__reflect_* import for
+      // every Reflect method. There is no JS host in standalone mode, so any
+      // such import would leak into the binary and fail at instantiation with
+      // an opaque "unknown import" linker error. Route the one method backed by
+      // a native helper through it, and refuse the rest with a clear compile
+      // error rather than emitting a half-working module.
+      //
+      // - Reflect.ownKeys(target) → native __object_keys (string own keys of
+      //   the $Object hash-map, insertion order). The native runtime tracks
+      //   only string keys; Symbol/non-enumerable keys are out of scope for the
+      //   standalone object runtime (consistent approximation across #1472
+      //   Phase B). __object_keys is in OBJECT_RUNTIME_HELPER_NAMES, so
+      //   ensureLateImport auto-routes it to the in-module native func.
+      // - Reflect.has needs a *keyed* HasProperty over the hash-map; the native
+      //   __extern_has_idx is an *indexed* (array-like) helper, so it cannot
+      //   stand in here without being semantically wrong — refuse instead.
+      //   Reflect.apply/construct require host call machinery with no native
+      //   analog — refuse. The descriptor/prototype/integrity methods all rely
+      //   on the JS descriptor sidecar — refuse.
+      if (ctx.standalone) {
+        if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
+          emitReflectArgs(1);
+          const funcIdx = ensureLateImport(ctx, "__object_keys", [externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(1, "extern-null");
+        }
+        // Boolean-returning methods need an i32 on the stack; the rest return
+        // externref. Pick the fallback shape per method so the surrounding
+        // expression still type-checks even though the module is already marked
+        // failed by reportError.
+        const booleanReflect = new Set([
+          "set",
+          "has",
+          "deleteProperty",
+          "defineProperty",
+          "setPrototypeOf",
+          "isExtensible",
+          "preventExtensions",
+        ]);
+        reportError(
+          ctx,
+          expr,
+          `Codegen error: Reflect.${reflectMethod} not supported in standalone mode (#1472 Phase C).`,
+        );
+        if (booleanReflect.has(reflectMethod)) {
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
 
       // Reflect.get(target, key, [receiver]) — returns externref.
       if (reflectMethod === "get" && expr.arguments.length >= 2) {

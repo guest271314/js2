@@ -90,16 +90,39 @@ describe("#681 standalone iterator protocol slice", () => {
     expectNoIteratorHostImports(result);
   });
 
-  it("refuses Array.prototype.values() in standalone without registering array iterator helpers", async () => {
-    const result = await expectIteratorRefused(`
+  it("drives Array.prototype.values() for-of natively in standalone (no host import)", async () => {
+    // `for (x of arr.values())` is semantically identical to `for (x of arr)`,
+    // so the array index loop drives it directly — no __array_values import.
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const value of [1, 2, 3, 4].values()) {
+            sum = sum + value;
+          }
+          return sum;
+        }
+      `,
+      { target: "standalone" },
+    );
+
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(result);
+
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(10);
+  });
+
+  it("still refuses Array.prototype.keys()/entries() in standalone (out of #681 .values() slice)", async () => {
+    const keysResult = await expectIteratorRefused(`
       export function f(): number {
         let sum: number = 0;
-        for (const value of [1, 2, 3].values()) {
-          sum = sum + value;
+        for (const index of [1, 2, 3].keys()) {
+          sum = sum + index;
         }
         return sum;
       }
     `);
-    expect(result.errors.some((e) => /Array\.prototype\.values/.test(e.message))).toBe(true);
+    expect(keysResult.errors.some((e) => /Array\.prototype\.keys/.test(e.message))).toBe(true);
   });
 });
