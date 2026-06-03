@@ -1659,6 +1659,41 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
 
   if (fieldMap.size === 0) return;
 
+  // (#1320) A getter that returns a numeric/boolean field as externref boxes it
+  // via __box_number / __box_boolean. Those helpers are registered lazily at
+  // boxing call-sites during expression compilation — but a module whose only
+  // numeric/boolean struct field is read *exclusively through the host* (e.g. a
+  // function returns `{ value, done }` to JS, which then reads `.done`) never
+  // hits such a call-site, so the helpers are still absent here. Without them
+  // the getter fell through to `drop; ref.null.extern` and `__sget_done`
+  // returned null (and `__sget_<num>` would have boxed as a number — #1788).
+  // Register the union helpers (which include __box_number / __box_boolean)
+  // BEFORE any getter funcIdx is computed, so the emitted getters reference the
+  // final post-shift indices. addUnionImports is idempotent (hasUnionImports
+  // guard), uses the immediate finalize-phase index shift, and in
+  // standalone/WASI mode routes to the Wasm-native helper bodies (no env::*
+  // import). We only call it when at least one field bucket would emit a box
+  // call (an extern-mode bucket carrying a numeric/boolean field), so a module
+  // with no such fields stays byte-identical.
+  let needsBox = false;
+  for (const entries of fieldMap.values()) {
+    const hasF64 = entries.some((e) => e.fieldType.kind === "f64");
+    const hasI32 = entries.some((e) => e.fieldType.kind === "i32");
+    const hasRef = entries.some((e) => e.fieldType.kind !== "f64" && e.fieldType.kind !== "i32");
+    const hasBool = entries.some((e) => e.fieldType.kind === "i32" && (e.fieldType as { boolean?: true }).boolean);
+    const allF64 = hasF64 && !hasI32 && !hasRef;
+    const allI32 = hasI32 && !hasF64 && !hasRef && !hasBool;
+    // f64-only / i32-only buckets return the raw value (no box call). Only a
+    // mixed/boolean (extern-mode) bucket carrying a numeric or boolean field
+    // emits a __box_number / __box_boolean call.
+    if (allF64 || allI32) continue;
+    if (hasF64 || hasI32 || hasBool) {
+      needsBox = true;
+      break;
+    }
+  }
+  if (needsBox) addUnionImports(ctx);
+
   // Find __box_number import for numeric boxing (may be undefined)
   const boxNumIdx = ctx.funcMap.get("__box_number");
   // (#1788) __box_boolean for boolean-branded i32 fields — boxes the stored i32
