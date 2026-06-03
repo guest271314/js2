@@ -45,9 +45,11 @@ categories file, then emit the two summary tables (step 8).
 1. Fetch the latest detailed results JSONL for the lane **from the baselines
    repo** (do not trust local committed copies — see "Data source" above):
    - **Default lane** — use the existing helper, which downloads + caches to
-     `.test262-cache/test262-current.jsonl` (gitignored):
+     `.test262-cache/test262-current.jsonl` (gitignored). Use `--force` alone
+     (it prints the resolved path after downloading); **do not** add
+     `--print-path`, which short-circuits and exits *before* downloading:
      ```bash
-     node scripts/fetch-baseline-jsonl.mjs --force --print-path
+     node scripts/fetch-baseline-jsonl.mjs --force   # prints cache path when done
      ```
    - **Standalone lane** — fetch directly from the baselines repo (the helper
      only covers the default lane):
@@ -73,16 +75,19 @@ categories file, then emit the two summary tables (step 8).
    - **Compile errors**: group by pattern (undefined .kind, stack underflow, local.set mismatch, struct error, call mismatch, missing import, stack fallthrough, unsupported, missing property, yield outside gen, await outside async, etc.)
    - **Runtime failures**: group by pattern (returned wrong with assert info, null pointer deref, timeout, illegal cast, array OOB, unreachable, uncaught exception)
    - **Standalone lane only — bucket on `host_import_leak_class`** (this is the
-     primary signal for standalone, ahead of the compile/runtime split):
-     - `proxy` → #1472 (Proxy without host)
-     - `regexp` → #1474 (RegExp literals/constructor refused standalone)
-     - `json` → #1599 (standalone JSON parser/stringifier)
-     - `dynamic-object-property` → dynamic property access lowering
-     - `bigint` → BigInt standalone path (#1349/#1644 family)
-     - `generic-iterator` → standalone iterator protocol
-     - `host-import-refusal` → the #1524 host-import gate refusing a feature with
-       no standalone fallback yet (catch-all; route to the most specific
-       sub-bucket above before falling back to this)
+     primary signal for standalone, ahead of the compile/runtime split). The
+     actual field values emitted today (verify against the live data — they
+     evolve) and where they route:
+     - `host_import` → generic host-import-gate refusal (#1524 gate); the
+       catch-all when no more specific class applies. Largest bucket.
+     - `dynamic_object_property` → dynamic property access lowering without host.
+     - `iterator_protocol` → standalone iterator protocol (#1471 boxing family).
+     - `regexp` → RegExp literals/constructor refused standalone (#1474).
+     - `dynamic_code` → eval/dynamic-import (deferred; wont-fix family).
+     Note: most standalone `compile_error` records do **not** carry a leak class
+     — they surface as `wasm_compile` ("invalid Wasm binary") instead, which is
+     the standalone codegen emitting invalid Wasm for constructs the host lane
+     would route through an import. Sub-bucket those by error signature too.
    - For each pattern, count occurrences and collect 3 sample file paths
 
 3. Cross-reference with existing issues:
