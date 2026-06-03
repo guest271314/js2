@@ -92,6 +92,7 @@ import {
   nativeStringType,
   nativeStringTypeNullable,
 } from "./native-strings.js";
+import { emitJsonQuoteString } from "./json-runtime.js";
 
 // ── Re-exports for public API compatibility ─────────────────────────────────
 export {
@@ -5571,6 +5572,21 @@ function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.Sourc
       if (isNumberType(receiverType) && methodName === "toString") {
         needed.add("number_toString");
       }
+      // (#1599 Phase 2) JSON.stringify(<string>) in standalone/WASI lowers to
+      // the pure-Wasm `__json_quote_string` helper. Pre-register it here (before
+      // body compilation) so its defined-function index is stable.
+      if (
+        (ctx.standalone || ctx.wasi) &&
+        ts.isIdentifier(prop.expression) &&
+        prop.expression.text === "JSON" &&
+        methodName === "stringify" &&
+        node.arguments.length === 1
+      ) {
+        const jsonArgT = ctx.checker.getTypeAtLocation(node.arguments[0]!);
+        if ((jsonArgT.flags & ts.TypeFlags.StringLike) !== 0) {
+          needed.add("__json_quote_string");
+        }
+      }
       if (isNumberType(receiverType) && methodName === "toFixed") {
         needed.add("number_toFixed");
       }
@@ -5683,6 +5699,10 @@ function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.Sourc
     // In native strings mode, __str_compare Wasm helper handles this — no host import needed
     const t = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     addImport(ctx, "env", "string_compare", { kind: "func", typeIdx: t });
+  }
+  if (needed.has("__json_quote_string")) {
+    // (#1599 Phase 2) emit the pure-Wasm runtime JSON string quoter up-front.
+    emitJsonQuoteString(ctx);
   }
 }
 
