@@ -55,6 +55,7 @@ import {
 } from "../index.js";
 import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
+import { emitJsonQuoteString } from "../json-runtime.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -452,7 +453,28 @@ function tryEmitJsonStringifyPrimitive(
     return resultType;
   }
 
-  // string / bigint / unhandled — fall through to the host import. Full
+  // string / String — standalone/WASI have no JSON_stringify host import.
+  // Emit the pure-Wasm `__json_quote_string` runtime helper (#1599 Phase 2):
+  // it scans the runtime string's UTF-16 code units and produces a
+  // JSON-quoted $NativeString per §25.5.4.3 QuoteJSONString. In JS-host mode
+  // we fall through to the JSON_stringify import (it observes replacer/space
+  // and toJSON, which the helper does not).
+  if ((ctx.standalone || ctx.wasi) && flags & ts.TypeFlags.StringLike) {
+    const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
+    if (argResult === null) return undefined;
+    if (argResult.kind !== "externref") {
+      coerceType(ctx, fctx, argResult, { kind: "externref" });
+    }
+    const quoteIdx = emitJsonQuoteString(ctx);
+    flushLateImportShifts(ctx, fctx);
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_quote_string") ?? quoteIdx } as Instr);
+    // __json_quote_string returns a native string ref (matches compileStringLiteral
+    // in nativeStrings mode), so downstream string ops (===, return) see the same
+    // type they expect rather than an over-wrapped externref.
+    return nativeStringType(ctx);
+  }
+
+  // bigint / unhandled — fall through to the host import. Full
   // pure-Wasm support tracked under #1353.
   return undefined;
 }

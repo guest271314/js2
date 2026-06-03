@@ -305,3 +305,65 @@ standalone/WASI while keeping unsupported dynamic JSON on the existing clear
 
 - `pnpm exec vitest run tests/issue-1599.test.ts tests/issue-1599-json-standalone-refuse.test.ts`
   — 20 tests passed.
+
+## Status — Phase 2 Slice (a): runtime `JSON.stringify(string)` (pure-Wasm)
+
+The first **runtime** (value-dependent) Phase 2 slice landed: `JSON.stringify(s)`
+where `s` is a runtime string value now lowers to a pure-Wasm helper in
+`--target standalone` / `--target wasi`, with **no** `env::JSON_stringify` host
+import.
+
+### What changed
+
+- `src/codegen/json-runtime.ts` (new) — `emitJsonQuoteString(ctx)` emits
+  `__json_quote_string(s: externref) -> ref $NativeString`: flattens the input
+  `$AnyString`, two-pass (size then fill) over its `[off, off+len)` UTF-16 code
+  units into a fresh `$__str_data` buffer, applying ECMA-262 §25.5.4.3
+  `QuoteJSONString` escaping — `"`→`\"`, `\`→`\\`, the short escapes
+  `\b \t \n \f \r`, and every other control char U+0000–U+001F as `\u00XX`.
+  Returns the result as a **native string ref** (matching `compileStringLiteral`
+  in nativeStrings mode) so downstream string ops (`===`, return) see the type
+  they expect rather than an over-wrapped externref.
+- `src/codegen/index.ts` — `collectPrimitiveMethodImports` pre-pass detects
+  `JSON.stringify(<string-typed arg>)` under standalone/wasi and pre-registers
+  `__json_quote_string` up-front (stable defined-function index, no mid-body
+  shift).
+- `src/codegen/expressions/calls.ts` — `tryEmitJsonStringifyPrimitive` now
+  handles the `StringLike` case for standalone/wasi via `__json_quote_string`;
+  JS-host mode still falls through to `JSON_stringify` (it observes
+  replacer/space/toJSON, which the helper does not).
+- `tests/issue-1599-runtime.test.ts` (new) — 6 wasmtime/WebAssembly round-trip
+  tests: plain string, quote+backslash, short control escapes, `\u00XX`
+  control escapes, empty runtime string, and "no `env::JSON_stringify` import".
+- `tests/issue-1599-json-standalone-refuse.test.ts` — the obsolete
+  "rejects JSON.stringify of a dynamic string" case flipped to
+  `expectAccepted` (string stringify is now implemented).
+
+### Spec anchors
+
+- ECMA-262 §25.5.4 `JSON.stringify`, §25.5.4.3 `QuoteJSONString`.
+
+### Validation — 2026-06-03
+
+- `pnpm exec vitest run tests/issue-1599.test.ts tests/issue-1599-json-standalone-refuse.test.ts tests/issue-1599-runtime.test.ts`
+  — 26 tests passed.
+
+### Phase 2 remaining (follow-ups — NOT in this slice)
+
+1. **Runtime `JSON.parse(s)` → primitive `$AnyValue`** (number/bool/null):
+   feasible now via the host-free `$AnyValue` tagged union
+   (`src/codegen/any-helpers.ts`). Carved as a dev follow-up.
+2. **Runtime `JSON.parse(s)` → string**: blocked on a cross-cutting change —
+   the shared `$AnyValue` strict-equals helper (`__any_strict_eq` in
+   `any-helpers.ts`) degrades the tag-5 (string) branch to `i32.const 0` when
+   the wasm:js-string `equals` import is absent (i.e. standalone), so a parsed
+   string returned as `$AnyValue` compares unequal. Needs a native
+   `__str_equals` (exists, `native-strings.ts`) fallback in that branch, storing
+   the parsed string in `refval`. **Senior-dev owned** (edits shared runtime
+   equality semantics).
+3. **Object/array graphs** (parse→objects, stringify of object/array graphs):
+   blocked on the Wasm-native open-object runtime (#1472 Phase B). Sequence
+   after it lands.
+
+`status` stays `ready` because Phase 2 (full dynamic codec) is not complete;
+this slice only adds runtime string stringify.

@@ -1,9 +1,10 @@
 ---
 id: 1776
 title: "standalone test262 isSameValue emits invalid Wasm for externref operands"
-status: ready
+status: done
 created: 2026-06-01
 updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,6 +13,7 @@ area: codegen, testing
 language_feature: equality
 goal: standalone-mode
 sprint: 58
+owner: Tesla
 related: [1228, 1472]
 ---
 # #1776 - standalone test262 isSameValue emits invalid Wasm for externref operands
@@ -183,3 +185,48 @@ focused unit test, but it did not retire the broader standalone SameValue /
 dynamic equality typing bug in the test262 harness. Keep this issue open until
 the standalone artifact has zero `isSameValue` validator failures, including
 the `f64.eq ... found call of type i32` variant.
+
+## Completion - 2026-06-03 (residual fix)
+
+Root cause of the residual 1,436 rows: the externref dynamic-equality fallback
+in `src/codegen/binary-ops.ts` delegated to the JS-host imports `__host_eq` /
+`__host_loose_eq` even under `--target standalone` / `--target wasi`. Neither
+helper has a Wasm-native implementation, so:
+
+1. an unsatisfiable `env::__host_eq` import leaked into the standalone module —
+   `WebAssembly.instantiate(module, {})` failed with
+   `Import #0 "env": module is not an object or function`; and
+2. the lazily-built numeric fallback referenced helper indices that, combined
+   with the late-import shift, produced the
+   `f64.eq[0] expected type f64, found call of type i32` and
+   `call[0] expected type i32, found local.get of type externref` validator
+   signatures.
+
+The test262 harness helper `isSameValue(a: any, b: any)` compiles both params
+to `externref`, so every `a === b` / `a !== a` in it took this path — masking
+the whole harness for the affected categories.
+
+Fix: in no-JS-host mode (`ctx.standalone` / `ctx.wasi`), lower externref
+`===`/`!==` to a self-contained Wasm-native tag dispatch on the two boxed
+operands — both typeof number → unbox f64 + compare (recovers equal numbers in
+distinct boxes AND makes NaN self-comparison work), both typeof boolean →
+unbox i32 + compare, otherwise reference identity via
+`any.convert_extern` + `ref.test`/`ref.eq` on the WasmGC `eq` heap type
+(non-eqref or tag-mismatch → unequal, per §7.2.16). No host import; no externref
+is ever fed into an f64/i32 helper signature. The JS-host path is untouched.
+
+Regression coverage: `tests/issue-1776.test.ts` now asserts (a) zero leaked
+`env::*` imports + successful `WebAssembly.instantiate(binary, {})` in standalone,
+(b) correct isSameValue results for number / NaN / +0 / boolean, (c) object
+reference identity preserved, (d) the `f64.eq`/`!==` variant validates, (e) the
+wasi target also has no host-eq leak, and (f) JS-host equality is unchanged.
+
+Validation:
+
+```bash
+pnpm exec vitest run tests/issue-1776.test.ts          # 6 pass
+pnpm exec vitest run tests/equivalence/strict-equality-edge-cases.test.ts \
+  tests/equivalence/loose-equality.test.ts \
+  tests/equivalence/equality-mixed-types.test.ts \
+  tests/equivalence/comparison-coercion.test.ts        # 65 pass, no regressions
+```

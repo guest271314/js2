@@ -618,3 +618,34 @@ UTF-16 comparison and never needs a JS host.
 - Prototype chain is already walked by `__extern_get`; `__getPrototypeOf` /
   `instanceof` / `isPrototypeOf` helpers are a thin follow-up over the `$proto`
   field.
+
+## Phase B Slice 2 — IMPLEMENTED 2026-06-03 (senior-dev, stacked on Slice 1)
+
+`delete o.k` now lowers to a native `__delete_property` over the `$Object`
+hash-map instead of refusing. Tombstones the matching `$PropEntry`
+(`flags |= TOMBSTONE`), decrements `count`, increments `tombstones`, and
+returns 1 — including a no-op success when the key is absent (matches the host
+import and ECMA-262 §13.5.1.2 OrdinaryDelete, which returns true for a missing
+own property). The TOMBSTONE bit was already reserved in Slice 1, and
+`__obj_find` already skips tombstoned slots, so a deleted key reads as missing
+and its slot is reused on the next `__obj_insert` with the same key.
+
+- `src/codegen/object-runtime.ts`: `__delete_property` helper + added to
+  `OBJECT_RUNTIME_HELPER_NAMES`. No value-nulling needed — the tombstone flag is
+  the single source of truth (`__obj_find`/`__extern_get` never read a
+  tombstoned entry), which sidesteps emitting an `anyref` null.
+- `tests/issue-1472.test.ts`: a run-test (`delete a; re-add a; delete missing`
+  → 46) validates tombstone + slot-reuse + no-op-on-missing end-to-end under
+  Node's WasmGC engine, with zero `env::__delete_property` import.
+
+**Deferred from this slice — `__hasOwnProperty` / `__object_hasOwn` /
+`__propertyIsEnumerable`:** these were prototyped but pulled out. Root cause:
+`o.hasOwnProperty("x")` on an `any`-typed open object does **not** route to the
+`__hasOwnProperty` host import even today — `compilePropertyIntrospection` only
+fires when the receiver's static wasm type is `externref`, and the open-object
+`any` receiver takes a different method-dispatch path that returns a falsy
+result (the program compiles clean but the call never reaches the helper). So a
+native `__hasOwnProperty` func alone is dead code. This is a **call-site
+method-dispatch gap**, not a runtime gap, and belongs with the
+`__extern_method_call` / `__get_builtin` dispatch slice (Slice "6"), which will
+route `obj.m(...)` through the prototype vtable. Tracked there.

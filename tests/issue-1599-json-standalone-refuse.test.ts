@@ -50,8 +50,8 @@ describe("#1599 --target standalone refuses dynamic unsupported JSON shapes", ()
     await expectRefused(`export function f(a: number[]): string { return JSON.stringify(a); }`);
   });
 
-  it("rejects JSON.stringify of a dynamic string", async () => {
-    await expectRefused(`export function f(s: string): string { return JSON.stringify(s); }`);
+  it("compiles JSON.stringify of a dynamic string (#1599 Phase 2 — pure-Wasm __json_quote_string)", async () => {
+    await expectAccepted(`export function f(s: string): string { return JSON.stringify(s); }`);
   });
 
   it("compiles JSON.stringify of a dynamic number", async () => {

@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -92,6 +93,7 @@ import {
   nativeStringType,
   nativeStringTypeNullable,
 } from "./native-strings.js";
+import { emitJsonQuoteString } from "./json-runtime.js";
 
 // ── Re-exports for public API compatibility ─────────────────────────────────
 export {
@@ -120,9 +122,8 @@ export {
  * undefined/null, or a unary minus on a numeric literal. Returns undefined otherwise.
  */
 /**
- * TypedArray constructor names that lower to a `(ref null $Vec[f64])` Wasm
- * type (#1700). Shared between `resolveWasmType` and `classifyTypedArrayType`
- * so the export-signature side table and the codegen lowering stay in sync.
+ * TypedArray constructor names. Most still lower to `(ref null $Vec[f64])`;
+ * native Uint8Array lowers to packed byte storage.
  */
 export const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
   "Int8Array",
@@ -139,6 +140,12 @@ export const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
 function typedArrayNameFromTypeNode(node: ts.TypeNode): string | null {
   if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) return null;
   return TYPED_ARRAY_NAMES.has(node.typeName.text) ? node.typeName.text : null;
+}
+
+function typedArrayVecStorage(ctx: CodegenContext, name: string): { key: string; type: ValType } {
+  return (ctx.wasi || ctx.standalone) && name === "Uint8Array"
+    ? { key: "i8_byte", type: { kind: "i8" } }
+    : { key: "f64", type: { kind: "f64" } };
 }
 
 /**
@@ -182,6 +189,28 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
   function walk(node: ts.Node): void {
     if (found) return;
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      found = true;
+      return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * #1623 — true when the source contains any object/array binding pattern
+ * (destructuring) in a parameter, variable declaration, or assignment target.
+ * Used to decide whether to pre-emit the WASI/standalone TypeError constructor
+ * before user functions compile, so the destructuring null-throw guard's
+ * `emitWasiErrorConstructor` call doesn't run mid-prologue and clobber a
+ * reserved user-function slot.
+ */
+function sourceContainsBindingPattern(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (ts.isObjectBindingPattern(node) || ts.isArrayBindingPattern(node)) {
       found = true;
       return;
     }
@@ -449,9 +478,10 @@ function resolvePositionType(
       // TypedArray<TArrayBuffer> (TS 5.7+) carries an ArrayBufferLike type
       // argument that is erased at runtime. Lower it exactly like the bare
       // typed-array annotation.
-      if (typedArrayNameFromTypeNode(node)) {
-        const elemWasm: ValType = { kind: "f64" };
-        const vecIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
+      const typedArrayName = typedArrayNameFromTypeNode(node);
+      if (typedArrayName) {
+        const storage = typedArrayVecStorage(ctx, typedArrayName);
+        const vecIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
         return irVal({ kind: "ref_null", typeIdx: vecIdx });
       }
       // Slice 6 part 2 (#1181) — `Array<T>` TypeReferenceNode resolves
@@ -996,6 +1026,20 @@ export function generateModule(
 
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
+
+    // #1623 — pre-emit the WASI/standalone error constructors BEFORE any user
+    // function compiles. The destructuring null-throw path
+    // (`buildDestructureNullThrow`) lazily calls `emitWasiErrorConstructor`
+    // mid-prologue while a user function's own array slot is reserved-but-not-
+    // yet-pushed; the constructor then takes that reserved slot and the user
+    // function clobbers it on its own push, leaving a dangling funcMap index
+    // (observed as `throw expected externref, found call of type f64` and
+    // `Invalid global index`). Emitting the constructor here gives it a stable
+    // slot ahead of user-function compilation. The emitter is idempotent, so
+    // this is a no-op when no binding patterns exist.
+    if ((ctx.wasi || ctx.standalone) && sourceContainsBindingPattern(ast.sourceFile)) {
+      emitWasiErrorConstructor(ctx, "TypeError", 1);
+    }
 
     // #1121: Pre-compute return-type inference for recursive numeric kernels
     // (e.g. unannotated `function fib(n) { ... }`). This runs BEFORE
@@ -3491,7 +3535,11 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       if (arrTypeIdx < 0) continue;
       // Skip numeric element types if __box_number is not available
-      if ((elemKey === "f64" || elemKey === "i32" || elemKey === "i32_byte") && boxNumIdx === undefined) continue;
+      if (
+        (elemKey === "f64" || elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i8_byte") &&
+        boxNumIdx === undefined
+      )
+        continue;
 
       // Inline boxing: avoid calling addUnionImports late
       let boxInstrs: Instr[];
@@ -3501,7 +3549,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         boxInstrs = [{ op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
-      } else if (elemKey === "i32_byte" && boxNumIdx !== undefined) {
+      } else if ((elemKey === "i32_byte" || elemKey === "i8_byte") && boxNumIdx !== undefined) {
         // ArrayBuffer/DataView byte elements (i32, unsigned 0-255) — convert unsigned then box
         boxInstrs = [{ op: "f64.convert_i32_u" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i64") {
@@ -3521,7 +3569,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
         { op: "local.get", index: 1 } as Instr, // index
-        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        { op: elemKey === "i8_byte" ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
         ...boxInstrs,
         { op: "return" } as Instr,
       ];
@@ -5081,34 +5129,36 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
 }
 
 /**
- * #1617/#1651: Ensure __wasi_write_uint8array(arr: ref __vec_f64) -> void
+ * #1617/#1651: Ensure __wasi_write_uint8array(arr: ref __vec_*) -> void
  * exists and return its function index (lazy).
  *
  * Writes raw bytes from a typed-array (Uint8Array) GC object to fd=1 (stdout)
  * or fd=2 (stderr) with NO trailing newline. Backs the
  * `process.stdout.write(new Uint8Array([...]))` path (the standard Node API
- * that supersedes the bespoke `writeStdout` builtin from #1617). A Uint8Array
- * compiles to a "vec" struct:
+ * that supersedes the bespoke `writeStdout` builtin from #1617). A native
+ * Uint8Array compiles to a "vec" struct:
  *   field 0: length (i32)
- *   field 1: data    (ref array<f64>) — each element is a byte value
+ *   field 1: data    (ref array<i8>) — each element is a byte value
  *
- * We truncate each f64 element to its byte and stage it in linear memory at
- * WASI_WRITE_SCRATCH_START, then issue a single fd_write. This is what the
- * Native Messaging host (#1530) needs to emit the 4-byte little-endian length
- * prefix that console.log (UTF-8 + "\n") cannot.
+ * Legacy f64-backed typed arrays are still accepted; each element is converted
+ * to a byte before staging in linear memory at WASI_WRITE_SCRATCH_START.
  */
 export function ensureWasiWriteUint8ArrayHelper(
   ctx: CodegenContext,
   vecTypeIdx: number,
   useStderr: boolean = false,
 ): number {
-  const helperName = useStderr ? "__wasi_write_uint8array_stderr" : "__wasi_write_uint8array";
-  const existing = ctx.funcMap.get(helperName);
-  if (existing !== undefined) return existing;
-
   if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  const elemKind = arrDef?.kind === "array" ? arrDef.element.kind : "f64";
+  const helperSuffix = elemKind === "i8" ? "_i8" : elemKind === "i32" ? "_i32" : "_f64";
+  const helperName = useStderr
+    ? `__wasi_write_uint8array_stderr${helperSuffix}`
+    : `__wasi_write_uint8array${helperSuffix}`;
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
 
   const fd = useStderr ? 2 : 1;
 
@@ -5193,11 +5243,11 @@ export function ensureWasiWriteUint8ArrayHelper(
             { op: "local.get", index: I } as Instr,
             { op: "i32.add" } as Instr,
 
-            // value = (i32) data[i] — low byte kept by i32.store8
+            // value = data[i] — low byte kept by i32.store8
             { op: "local.get", index: DATA } as Instr,
             { op: "local.get", index: I } as Instr,
-            { op: "array.get", typeIdx: arrTypeIdx } as Instr,
-            { op: "i32.trunc_sat_f64_s" } as Instr,
+            { op: elemKind === "i8" ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
+            ...(elemKind === "f64" ? ([{ op: "i32.trunc_sat_f64_s" } as Instr] as Instr[]) : []),
 
             { op: "i32.store8", align: 0, offset: 0 },
 
@@ -5571,6 +5621,21 @@ function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.Sourc
       if (isNumberType(receiverType) && methodName === "toString") {
         needed.add("number_toString");
       }
+      // (#1599 Phase 2) JSON.stringify(<string>) in standalone/WASI lowers to
+      // the pure-Wasm `__json_quote_string` helper. Pre-register it here (before
+      // body compilation) so its defined-function index is stable.
+      if (
+        (ctx.standalone || ctx.wasi) &&
+        ts.isIdentifier(prop.expression) &&
+        prop.expression.text === "JSON" &&
+        methodName === "stringify" &&
+        node.arguments.length === 1
+      ) {
+        const jsonArgT = ctx.checker.getTypeAtLocation(node.arguments[0]!);
+        if ((jsonArgT.flags & ts.TypeFlags.StringLike) !== 0) {
+          needed.add("__json_quote_string");
+        }
+      }
       if (isNumberType(receiverType) && methodName === "toFixed") {
         needed.add("number_toFixed");
       }
@@ -5683,6 +5748,10 @@ function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.Sourc
     // In native strings mode, __str_compare Wasm helper handles this — no host import needed
     const t = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
     addImport(ctx, "env", "string_compare", { kind: "func", typeIdx: t });
+  }
+  if (needed.has("__json_quote_string")) {
+    // (#1599 Phase 2) emit the pure-Wasm runtime JSON string quoter up-front.
+    emitJsonQuoteString(ctx);
   }
 }
 
@@ -8153,12 +8222,13 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       return { kind: "externref" }; // bare Promise without type arg
     }
 
-    // TypedArray types → vec struct with f64 elements (same representation as number[])
+    // TypedArray types → vec struct. Native Uint8Array uses packed-byte
+    // storage; other typed arrays keep the legacy f64 representation.
     // Covers: Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
     //         Int32Array, Uint32Array, Float32Array, Float64Array
     if (sym?.name && TYPED_ARRAY_NAMES.has(sym.name)) {
-      const elemWasm: ValType = { kind: "f64" };
-      const vecIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
+      const storage = typedArrayVecStorage(ctx, sym.name);
+      const vecIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
       return { kind: "ref_null", typeIdx: vecIdx };
     }
 

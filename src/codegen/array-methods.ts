@@ -198,7 +198,7 @@ function shouldReturnUndefinedCapableResult(
 }
 
 function arrayElementToExternrefInstrs(ctx: CodegenContext, fctx: FunctionContext, elemType: ValType): Instr[] {
-  if (elemType.kind === "i16") {
+  if (elemType.kind === "i8" || elemType.kind === "i16") {
     return coercionInstrs(ctx, { kind: "i32" }, { kind: "externref" }, fctx);
   }
   if (elemType.kind === "f32") {
@@ -256,10 +256,14 @@ export function emitBoundsCheckedArrayGet(
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
   // Build the "then" branch: in-bounds -> array.get
+  const packedLoad =
+    elementType.kind === "i8" ? "array.get_u" : elementType.kind === "i16" ? "array.get_s" : "array.get";
+  const valueType: ValType = elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
+
   const thenInstrs: Instr[] = [
     { op: "local.get", index: arrLocal } as Instr,
     { op: "local.get", index: idxLocal } as Instr,
-    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    { op: packedLoad, typeIdx: arrTypeIdx } as Instr,
   ];
 
   // Build the "else" branch: out-of-bounds -> default value (or JS undefined
@@ -267,15 +271,15 @@ export function emitBoundsCheckedArrayGet(
   const elseInstrs: Instr[] =
     undefinedFuncIdx !== undefined
       ? [{ op: "call", funcIdx: undefinedFuncIdx } as Instr]
-      : defaultValueInstrs(elementType);
+      : defaultValueInstrs(valueType);
 
   // When the element type is a non-null ref, the else branch produces ref.null
   // which is ref_null. Use ref_null as the block type so both branches validate,
   // then narrow back to ref with ref.as_non_null.
-  const needsNullableBlock = elementType.kind === "ref";
+  const needsNullableBlock = valueType.kind === "ref";
   const blockType: ValType = needsNullableBlock
-    ? { kind: "ref_null", typeIdx: (elementType as { typeIdx: number }).typeIdx }
-    : elementType;
+    ? { kind: "ref_null", typeIdx: (valueType as { typeIdx: number }).typeIdx }
+    : valueType;
 
   fctx.body.push({
     op: "if",
@@ -1834,7 +1838,7 @@ function compileArrayPrototypeIndexOf(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use the `equals` string import (JS ===) for comparison
   // For ref/ref_null elements, use ref.eq for reference identity comparison
@@ -1949,7 +1953,7 @@ function compileArrayPrototypeIncludes(
   fctx.body.push({ op: "local.set", index: iTmp });
 
   const eqOp = elemType.kind === "f64" ? "f64.eq" : "i32.eq";
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // Use a result local instead of `return` to avoid returning from the
   // enclosing function when includes is inlined.
@@ -2049,7 +2053,7 @@ function compileArrayPrototypeEvery(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const numParams = closureInfo.paramTypes.length;
 
   // Use a result local instead of `return` to avoid returning from the
@@ -2181,7 +2185,7 @@ function compileArrayPrototypeSome(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const numParams = closureInfo.paramTypes.length;
 
   // Use a result local instead of `return` to avoid returning from the
@@ -2303,7 +2307,7 @@ function compileArrayPrototypeForEach(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const numParams = closureInfo.paramTypes.length;
 
@@ -2753,7 +2757,7 @@ function compileArrayToReversed(
   fctx.body.push({ op: "local.set", index: jTmp });
 
   const swapTmp = allocLocal(fctx, `__arr_trev_sw_${fctx.locals.length}`, elemType);
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
@@ -3278,7 +3282,7 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
@@ -3445,7 +3449,7 @@ function compileArrayIncludes(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // SameValueZero comparison for includes:
   // - For f64: a === b OR (isNaN(a) AND isNaN(b))
@@ -3607,7 +3611,7 @@ function compileArrayReverse(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
@@ -3810,7 +3814,7 @@ function compileArrayPop(
   const newLenTmp = allocLocal(fctx, `__arr_pop_nl_${fctx.locals.length}`, { kind: "i32" });
   const resultTmp = allocLocal(fctx, `__arr_pop_res_${fctx.locals.length}`, resultType);
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const lenTmp = allocLocal(fctx, `__arr_pop_len_${fctx.locals.length}`, { kind: "i32" });
 
   // ECMA-262 §23.1.3.22: when length is 0, pop sets length to +0 and
@@ -3884,7 +3888,7 @@ function compileArrayShift(
   const newLenTmp = allocLocal(fctx, `__arr_sft_nl_${fctx.locals.length}`, { kind: "i32" });
   const resultTmp = allocLocal(fctx, `__arr_sft_res_${fctx.locals.length}`, resultType);
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // ECMA-262 §23.1.3.27 mirrors pop's empty-array branch for shift.
   if (resultType.kind === "externref" || resultType.kind === "anyref") {
@@ -4343,7 +4347,7 @@ function compileArrayJoin(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // Build element-to-string instructions (use dataTmp instead of arrTmp)
   const elemToStr: Instr[] = [
@@ -4641,7 +4645,7 @@ function setupArrayLoop(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   return { vecTmp, dataTmp, lenTmp, iTmp, getOp };
 }
 
@@ -5194,7 +5198,10 @@ function compileArrayReduce(
     } as Instr);
     fctx.body.push({ op: "local.get", index: loop.dataTmp });
     fctx.body.push({ op: "i32.const", value: 0 });
-    fctx.body.push({ op: elemType.kind === "i16" ? "array.get_s" : "array.get", typeIdx: arrTypeIdx });
+    fctx.body.push({
+      op: elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get",
+      typeIdx: arrTypeIdx,
+    });
     fctx.body.push({ op: "local.set", index: accTmp });
     fctx.body.push({ op: "i32.const", value: 1 });
     fctx.body.push({ op: "local.set", index: loop.iTmp });
@@ -5312,7 +5319,7 @@ function compileArrayReduceRight(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, { kind: numKind as any });
 
   // Compile initial value or use arr[length-1] as default
@@ -6046,10 +6053,8 @@ function compileTypedArraySet(
  * Load one element from a vec's backing array (`array.get` + signedness).
  */
 function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
-  // i32-element arrays are stored unsigned-or-signed; array.get is fine for f64
-  // bridge purposes since we immediately convert. Use array.get for ref/f64,
-  // array.get for i32 (sign chosen by the convert step).
-  return [{ op: "array.get", typeIdx: arrTypeIdx } as Instr];
+  const op = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  return [{ op, typeIdx: arrTypeIdx } as Instr];
 }
 
 /**
@@ -6058,6 +6063,10 @@ function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
  */
 function numericElemConvert(from: ValType, to: ValType): Instr[] {
   if (from.kind === to.kind) return [];
+  if (from.kind === "i8" && to.kind === "f64") return [{ op: "f64.convert_i32_u" } as Instr];
+  if (from.kind === "i8" && to.kind === "i32") return [];
+  if (from.kind === "i32" && to.kind === "i8") return [];
+  if (from.kind === "f64" && to.kind === "i8") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
   if (from.kind === "i32" && to.kind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
   if (from.kind === "f64" && to.kind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
   return [];
@@ -6278,7 +6287,7 @@ function compileArrayLastIndexOf(
   compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type, and string comparisons follow spec. The

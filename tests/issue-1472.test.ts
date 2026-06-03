@@ -121,6 +121,30 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(24);
   });
 
+  it("Phase B S2: delete operator removes own property natively (tombstone)", async () => {
+    // #1472 Phase B Slice 2 — `delete o.k` lowers to the native __delete_property
+    // helper (tombstones the $PropEntry); the slot is reusable on re-add and a
+    // subsequent read of the deleted key misses. Zero host object imports.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o.a = 3; o.b = 5;
+          delete o.a;        // tombstone a
+          o.a = 41;          // reuse the tombstoned slot
+          delete o.zzz;      // no-op delete of a missing key (spec: succeeds)
+          // o.a re-added = 41, o.b untouched = 5  → 46
+          return (o.a as number) + (o.b as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__delete_property")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(46);
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `
