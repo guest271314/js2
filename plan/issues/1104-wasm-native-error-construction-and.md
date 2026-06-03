@@ -1,9 +1,10 @@
 ---
 id: 1104
 title: "Wasm-native Error construction and stack traces without JS host"
-status: ready
+status: done
 created: 2026-04-12
-updated: 2026-05-08
+updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -278,3 +279,38 @@ Land Phase 1 alone first behind a smoke-test that confirms WASI module
 instantiation. Phases 2-3 should follow in separate PRs to keep blast
 radius small. Architect available to refine Phase 2 surgery in detail once
 Phase 1 lands.
+
+## Completion (sd-1665, 2026-06-03)
+
+**Status: done.** All acceptance criteria (Phases 1-3) are satisfied on main;
+Phase 4 (stack traces) is explicitly deferred per the issue (`error.stack`
+returns `undefined` is acceptable).
+
+Phases 1-3 landed under the #1473 standalone-error-ops umbrella (the
+host-independence sprint), not a dedicated #1104 PR — which is why this issue
+sat at `status: ready` despite being implemented:
+
+- **Phase 1 (construction):** `src/codegen/registry/error-types.ts`
+  (`emitWasiErrorConstructor`, `isWasiErrorName`, `getOrRegisterErrorStructType`,
+  `WASI_ERROR_NAMES` incl. AggregateError) + `declarations.ts:1351` gate
+  `(ctx.wasi || ctx.standalone) && isWasiErrorName(name)` → emits native
+  `__new_<Name>` building `$Error_struct {tag i32, name, message}` instead of
+  the `env.__new_<Name>` host import. `tests/issue-1104-phase1.test.ts` (passes).
+- **Phase 2 (.message / .name):** `property-access.ts:1042-1064` emits direct
+  `struct.get $Error_struct <field>` in WASI mode. `tests/issue-1104-phase2.test.ts`
+  (passes).
+- **Phase 3 (instanceof + throw/catch):** `expressions/identifiers.ts:1049-1067`
+  (`compileHostInstanceOf`) discriminates `$Error_struct` by `$tag` and walks the
+  #1325 `BUILTIN_PARENT` chain; the externref exception payload already round-trips
+  the struct ref through `throw`/`catch`. Verified instanceof (same/parent/sibling)
+  and throw/catch all compile in WASI mode with **zero env imports** and return
+  spec-correct values. Locked by the new **`tests/issue-1104-phase3.test.ts`**
+  (6 cases, this PR) — the one missing test for already-shipped behaviour.
+
+Acceptance checklist: `new <Error>("msg")` standalone-instantiates ✅; all 8
+constructors compile ✅; `.name`/`.message` correct ✅; `instanceof` correct ✅;
+throw/catch with Error subclasses works ✅. Phase 4 deferred.
+
+Follow-ups (out of scope, not blocking done): `Error.prototype.toString()`
+(`"name: message"`), `AggregateError.errors` field access, and option-2 stack
+traces remain for a future PR if needed.
