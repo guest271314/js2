@@ -1,0 +1,87 @@
+# #1081 — Weekly retention prune for the commit-hash-indexed test262 run cache.
+#
+# The promote-baseline job (test262-sharded.yml) writes runs/<sha>.{json,jsonl}
+# into the loopdive/js2wasm-baselines repo on every push to main. Without
+# pruning, that directory grows unbounded (~1.5 MB per run). This workflow
+# applies the retention policy from plan/issues/1081-index-test262-runs-by-commit.md:
+#   - keep sprint-tagged commits forever
+#   - keep entries newer than 30 days
+#   - evict older non-tagged entries
+#   - LRU-evict oldest survivors once total exceeds the 500 MB cap
+#
+# Runs weekly (and on demand). Commits the cleanup back to the baselines repo.
+name: test262 run-cache prune (#1081)
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List evictions without deleting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main repo (for sprint tags + prune script)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # need tags to derive sprint-tagged SHAs
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Clone baselines repo
+        env:
+          BASELINE_DEPLOY_KEY: ${{ secrets.BASELINE_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          echo "$BASELINE_DEPLOY_KEY" | ssh-add -
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone --depth=1 git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+
+      - name: Derive sprint-tagged SHAs (kept forever)
+        id: keep
+        run: |
+          # Collect the full 40-char SHA for every sprint/* tag. These run-cache
+          # entries are immune to eviction so historical sprint comparisons and
+          # retroactive bisect stay possible.
+          KEEP=$(git tag -l 'sprint/*' 'sprint-*/begin' | while read -r t; do
+            git rev-parse "$t^{commit}" 2>/dev/null
+          done | sort -u | paste -sd, -)
+          echo "shas=$KEEP" >> "$GITHUB_OUTPUT"
+          echo "Sprint-tagged SHAs to keep: ${KEEP:-<none>}"
+
+      - name: Prune run cache
+        run: |
+          DRY="${{ inputs.dry_run }}"
+          ARGS="--runs-dir /tmp/js2wasm-baselines/runs --keep-shas '${{ steps.keep.outputs.shas }}'"
+          if [ "$DRY" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          eval node scripts/prune-run-cache.mjs $ARGS
+
+      - name: Commit and push cleanup
+        if: ${{ inputs.dry_run != true }}
+        env:
+          BASELINE_DEPLOY_KEY: ${{ secrets.BASELINE_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          echo "$BASELINE_DEPLOY_KEY" | ssh-add -
+          cd /tmp/js2wasm-baselines
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No run-cache entries pruned."
+          else
+            git commit -m "chore(test262): prune commit-hash run cache (#1081)"
+            git push
+          fi
