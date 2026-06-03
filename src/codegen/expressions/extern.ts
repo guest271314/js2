@@ -9,7 +9,8 @@ import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, ExternClassInfo, FunctionContext, RestParamInfo } from "../context/types.js";
-import { getArrTypeIdxFromVec } from "../index.js";
+import { addUnionImports, getArrTypeIdxFromVec } from "../index.js";
+import { tryCompileNativeMapMethodCall } from "../map-runtime.js";
 import { addStringConstantGlobal } from "../registry/imports.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
@@ -45,6 +46,22 @@ function compileExternMethodCall(
   const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
   const className = receiverType.getSymbol()?.name;
   const methodName = propAccess.name.text;
+
+  // (#1103a) Native Map method dispatch in standalone / nativeStrings mode.
+  // `Map` is registered as an externClass via the lib .d.ts scan, so without
+  // this interception `m.set(...)` etc. would emit `Map_set` host imports the
+  // standalone runtime can't satisfy. Route to the WasmGC-native Map runtime
+  // (src/codegen/map-runtime.ts) instead. Mirrors the RegExp construction
+  // interception in calls.ts. Falls through (undefined) for unsupported
+  // methods so the generic extern/host path still applies in JS-host mode.
+  if (className === "Map" && ctx.nativeStrings) {
+    // Register box/unbox helpers up front (as native funcs in standalone mode)
+    // so the Map dispatch never adds an import mid-body — a late import would
+    // retrigger the #1677 native-string finalize-shift and corrupt __str_flatten.
+    addUnionImports(ctx);
+    const mapResult = tryCompileNativeMapMethodCall(ctx, fctx, propAccess, callExpr);
+    if (mapResult !== undefined) return mapResult;
+  }
 
   if (!className) return null;
 

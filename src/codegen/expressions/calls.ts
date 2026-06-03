@@ -1901,6 +1901,11 @@ function compileCallExpression(
     }
   }
 
+  // (#1103a) Note: `new Map()` is a NewExpression handled in
+  // expressions/new-super.ts (compileNewExpression), not here. Bare `Map(...)`
+  // without `new` is not valid for Map, so there is no call-expression
+  // interception to add.
+
   // `Object(x)` called without `new` — ECMAScript §20.1.1.1 / §7.1.18 ToObject.
   // Per spec: Object() / Object(null) / Object(undefined) → fresh empty object;
   // Object(number)  → new Number wrapper (typeof === "object");

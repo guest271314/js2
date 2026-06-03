@@ -23,9 +23,12 @@
  * Everything here is emitted lazily and only when the native-collections path
  * is active (`ctx.standalone || ctx.wasi`). The JS-host path is untouched.
  */
+import { ts } from "../ts-api.js";
 import type { Instr, StructTypeDef, ArrayTypeDef, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import type { InnerResult } from "./shared.js";
+import { compileExpression, VOID_RESULT } from "./shared.js";
 
 /** WasmGC `eq` abstract heap type, signed-LEB `0x6d` = -19. Used for ref.eq on
  *  object keys (only GC eqrefs can be compared by identity). */
@@ -900,6 +903,160 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       body,
     );
   }
+}
+
+/**
+ * (#1103a) Coerce a freshly-compiled Map key/value argument to `anyref` — the
+ * uniform slot type the runtime stores. Numbers arrive as `f64` and are boxed
+ * via `__box_number` (the contract `__same_value_zero` / `__hash_anyref`
+ * assume); native strings and other GC refs are already anyref subtypes;
+ * externrefs externalize via `any.convert_extern`.
+ */
+function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValType | null): void {
+  if (t === null) {
+    // Absent value (e.g. compileExpression produced nothing) — push a null
+    // `none`-typed ref (subtype of anyref), matching the runtime's ABSENT.
+    fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP });
+    return;
+  }
+  // __box_number must already be registered (the call sites call
+  // addUnionImports before dispatching — see the #1103a note in
+  // tryCompileNativeMapMethodCall). Looking it up (vs ensureLateImport) avoids
+  // adding an import mid-function-body, which would retrigger the #1677
+  // native-string finalize-shift and corrupt __str_flatten.
+  switch (t.kind) {
+    case "f64": {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      return;
+    }
+    case "i32": {
+      // boolean / small int → box as number for now (slice 1 number/string).
+      fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      return;
+    }
+    case "externref":
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      return;
+    default:
+      // GC struct refs (native strings, $Map, etc.) and anyref/eqref are
+      // already anyref subtypes — no conversion needed.
+      return;
+  }
+}
+
+/**
+ * (#1103a) Intercept a `Map.prototype.*` method call in standalone /
+ * `nativeStrings` mode and route it to the WasmGC-native Map runtime
+ * (`ensureMapHelpers`). Mirrors the RegExp pre-externClass interception in
+ * `expressions/calls.ts`: returns the result `InnerResult` when handled, or
+ * `undefined` to let the generic extern/host path proceed.
+ *
+ * Slice 1 covers `set` / `get` / `has` / `delete` / `clear` for number and
+ * string keys/values. `forEach` / `for-of` and `new Map(iterable)` are slice 2
+ * (need the `$MapIter` drive + `__map_new_from_arr`).
+ *
+ * Receiver and arguments are compiled here (the caller has not pushed them).
+ */
+export function tryCompileNativeMapMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.nativeStrings) return undefined;
+  const methodName = propAccess.name.text;
+  const handled =
+    methodName === "set" ||
+    methodName === "get" ||
+    methodName === "has" ||
+    methodName === "delete" ||
+    methodName === "clear";
+  if (!handled) return undefined;
+
+  ensureMapHelpers(ctx);
+  const helperName = `__map_${methodName}`;
+  const helperIdx = ctx.mapHelpers.get(helperName);
+  if (helperIdx === undefined || ctx.mapTypeIdx < 0) return undefined;
+
+  // Receiver → `ref $Map`. compileExpression yields the receiver's ValType;
+  // it must be the native Map struct (recorded by the `new Map()` site / a
+  // `Map`-typed binding). If it comes through as externref/anyref, cast it.
+  const recvType = compileExpression(ctx, fctx, propAccess.expression);
+  if (recvType === null) return undefined;
+  if (recvType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+  } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+  } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
+    // Wrong struct — not our Map; bail so the generic path can try.
+    return undefined;
+  }
+
+  const args = callExpr.arguments;
+  switch (methodName) {
+    case "get":
+    case "has":
+    case "delete": {
+      const kt = args.length > 0 ? compileExpression(ctx, fctx, args[0]!) : null;
+      coerceArgToAnyref(ctx, fctx, kt);
+      fctx.body.push({ op: "call", funcIdx: helperIdx });
+      // get → anyref value; has/delete → i32 (boolean).
+      return methodName === "get" ? ({ kind: "anyref" } as ValType) : ({ kind: "i32" } as ValType);
+    }
+    case "set": {
+      const kt = args.length > 0 ? compileExpression(ctx, fctx, args[0]!) : null;
+      coerceArgToAnyref(ctx, fctx, kt);
+      const vt = args.length > 1 ? compileExpression(ctx, fctx, args[1]!) : null;
+      coerceArgToAnyref(ctx, fctx, vt);
+      fctx.body.push({ op: "call", funcIdx: helperIdx });
+      // __map_set returns `ref $Map` (the map itself) — chainable.
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx } as ValType;
+    }
+    case "clear": {
+      fctx.body.push({ op: "call", funcIdx: helperIdx });
+      // __map_clear is void → undefined result.
+      return VOID_RESULT;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * (#1103a) Intercept the `Map.prototype.size` accessor in standalone /
+ * `nativeStrings` mode → `__map_size` (returns i32). Receiver is compiled
+ * here. Returns the result ValType when handled, else `undefined`.
+ */
+export function tryCompileNativeMapSizeGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: ts.Expression,
+): InnerResult | undefined {
+  if (!ctx.nativeStrings) return undefined;
+  ensureMapHelpers(ctx);
+  const sizeIdx = ctx.mapHelpers.get("__map_size");
+  if (sizeIdx === undefined || ctx.mapTypeIdx < 0) return undefined;
+  const recvType = compileExpression(ctx, fctx, receiver);
+  if (recvType === null) return undefined;
+  if (recvType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+  } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+  } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
+    return undefined;
+  }
+  fctx.body.push({ op: "call", funcIdx: sizeIdx });
+  return { kind: "i32" } as ValType;
 }
 
 /**
