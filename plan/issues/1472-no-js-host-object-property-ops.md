@@ -552,3 +552,69 @@ When `ctx.standalone` is set:
   before Phase B so the open-object runtime can `throw` real
   TypeErrors on `Object.freeze`-violation, etc.
 - #1474 is independent.
+
+## Phase B Slice 1 — IMPLEMENTED 2026-06-03 (senior-dev)
+
+The Wasm-native open-object runtime core (object creation + own/proto property
+get/set) now lowers `--target standalone` open objects to a pure-WasmGC
+open-hash-map. No more refuse-and-document for the `__new_plain_object` /
+`__extern_get` / `__extern_set` triad — the top-3 standalone failure helpers
+(15,597 + 5,008 + 5,414 raw mentions).
+
+### What landed
+- `src/codegen/object-runtime.ts` (NEW, ~570 LOC of emitter): registers the
+  `$Object` / `$PropMap` / `$PropEntry` WasmGC types and the helper functions
+  `__obj_hash`, `__obj_find`, `__obj_insert`, `__obj_grow` (internal) plus the
+  three externref-signatured public helpers `__new_plain_object`,
+  `__extern_get`, `__extern_set`. Open addressing with linear probing, FNV-1a
+  hash over the flattened string's UTF-16 code units, 0.7 load-factor grow +
+  rehash, tombstone bit reserved for the delete slice.
+- `src/codegen/expressions/late-imports.ts`: `ensureLateImport` routes the three
+  public names through `ensureObjectRuntime(ctx)` under `ctx.standalone`,
+  mirroring the #1471 `UNION_NATIVE_HELPER_NAMES` boxing-helper pattern. Sits
+  BEFORE the Phase A `refuseStandaloneObjectImport` gate so those names compile
+  instead of refusing. WASI is intentionally NOT routed yet.
+- `src/codegen/context/types.ts`: `objectRuntimeTypes?: ObjectRuntimeTypes`
+  caches the type indices for later slices.
+
+### Why this design (root-cause, not symptom)
+The decisive insight is that the entire existing JS-host object machinery treats
+objects as **externref** and looks helpers up by NAME via `ensureLateImport`
+then emits a plain `call funcIdx`. By giving the native helpers the **exact same
+name + externref-based signature** as the host imports and wrapping the
+`$Object` struct to externref via `extern.convert_any` (a no-op at the engine
+level, the same trick `__box_number` uses), EVERY existing call site in
+`object-ops.ts` / `property-access.ts` / `literals.ts` resolves to the native
+function with **zero per-call-site retargeting**. This avoids the fragile
+per-site `if (ctx.standalone) … else …` edits the original plan sketched, and
+it sidesteps the late-import index-shift machinery entirely: the helpers are
+emitted as DEFINED functions (no imports added), so their funcIdx sits above
+every existing function and no shift is required (same invariant as
+`addUnionImportsAsNativeFuncs`).
+
+Keys arrive as externref holding a `$NativeString` (standalone auto-enables
+nativeStrings). The runtime reuses the existing `__str_flatten` (cons→flat) and
+`__str_equals` native string helpers for keying, so it inherits correct
+UTF-16 comparison and never needs a JS host.
+
+### Validation
+- `tests/issue-1472.test.ts` (9 tests, all green): the Phase A "open object
+  refuses" assertion is replaced by two Phase B end-to-end tests that
+  `WebAssembly.instantiate(r.binary, {})` (empty imports) and execute under
+  Node's WasmGC engine: new/set/get returns 42; property update + 15-key
+  grow/rehash returns 24. Closed-shape struct + class-instance + Proxy-refusal +
+  default-GC regression guards still pass. `assertNoHostObjectImports` confirms
+  zero leaked `env::__extern_*` / `__new_plain_object` imports.
+- `npx tsc --noEmit` clean; `biome lint` clean on the three changed files.
+- `tests/wasi.test.ts` (24 tests) green — WASI path untouched (not routed).
+
+### Follow-up slices (still refuse under standalone)
+- `__extern_get_idx` / `__extern_length` (indexed/array-like access)
+- `__delete_property` (tombstone is already reserved in `$PropEntry.flags`)
+- `__hasOwnProperty` / `__object_keys|values|entries` / `__object_assign`
+- `__for_in_*` (for-in enumeration over `$PropMap`, insertion order)
+- `__defineProperty_*` + descriptor reflection (flags field is in place)
+- `__get_builtin` / `__extern_method_call` (vtable dispatch)
+- Prototype chain is already walked by `__extern_get`; `__getPrototypeOf` /
+  `instanceof` / `isPrototypeOf` helpers are a thin follow-up over the `$proto`
+  field.

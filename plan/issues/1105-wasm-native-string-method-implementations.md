@@ -1,9 +1,10 @@
 ---
 id: 1105
 title: "Wasm-native String method implementations for standalone mode"
-status: ready
+status: done
 created: 2026-04-12
 updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -223,3 +224,40 @@ Remaining scope:
   rules.
 - Unicode case-mapping tables, locale behavior, and RegExp-dependent methods
   remain outside this focused implementation pass.
+
+## Implementation Update — 2026-06-03 (Tier 1 complete)
+
+- Closed the last Tier 1 gap: `String.prototype.concat` had no native
+  dispatch. In standalone/nativeStrings mode it fell through to the JS-host
+  `string_concat` import and trapped at runtime with an "illegal cast" while
+  marshaling native↔extern.
+- `compileNativeStringMethodCall` (`src/codegen/string-ops.ts`) now lowers
+  `concat` natively: the receiver becomes the accumulator and each argument is
+  coerced to a native string and folded through the existing `__str_concat`
+  helper (ECMA-262 §22.1.3.4, left-to-right). Handles the variadic and no-arg
+  (`"x".concat()` → receiver) forms.
+- Added `"concat"` to the `NATIVE_STR_METHODS` set in
+  `src/codegen/declarations.ts` so the `string_concat` host import is no longer
+  registered (it was the one place still emitting it, matching the already-present
+  entry in `src/codegen/index.ts`). Standalone modules now carry zero `string_*`
+  host imports for concat.
+- Smoke-tested the full Tier 1 surface in standalone mode (23 cases):
+  charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes,
+  startsWith, endsWith, slice, substring, trim/trimStart/trimEnd, padStart,
+  padEnd, repeat, toLowerCase, toUpperCase, split (string sep, incl. empty),
+  and concat — all pass. Tier 1 acceptance (≥70% String.prototype) met.
+
+### Known residual (tracked, not Tier 1 blocker)
+
+- `String.prototype.at` out-of-range index returns an empty native string
+  rather than `undefined` (it mirrors the legacy `charAt` empty-string
+  behavior). Spec §22.1.3.1 wants `undefined` for OOB. Representing `undefined`
+  from a native-string-returning helper needs nullable-string plumbing — a
+  broader change deferred beyond this Tier 1 pass.
+- Tier 2 (RegExp-dependent: match/matchAll/search, RegExp-arg
+  replace/replaceAll/split) remains blocked on the native regex engine (#1539).
+
+Scoped validation (in worktree):
+
+- `npm test -- tests/issue-1105.test.ts tests/native-strings-standalone.test.ts tests/native-strings.test.ts tests/issue-1105-charcodeat.test.ts tests/host-import-allowlist-gate.test.ts` → 117 passed
+- `tsc --noEmit` clean; `biome lint` clean on changed files.

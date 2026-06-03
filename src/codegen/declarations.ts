@@ -1030,6 +1030,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
       "padEnd",
       "toLowerCase",
       "toUpperCase",
+      "concat",
       "replace",
       "replaceAll",
       "split",
