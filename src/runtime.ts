@@ -7879,6 +7879,31 @@ assert._isSameValue = isSameValue;
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      // (#1042) async/await CPS scheduling primitives. The state machine
+      // allocates one pending outer Promise per async function, then settles
+      // it from a continuation that runs as a microtask. We stash the
+      // resolve/reject capabilities on the promise object so the settle
+      // imports can fire them by reference.
+      if (name === "Promise_new_pending")
+        return () => {
+          let r: (v: any) => void = () => {};
+          let j: (e: any) => void = () => {};
+          const p: any = new Promise((res, rej) => {
+            r = res;
+            j = rej;
+          });
+          p.__r = r;
+          p.__j = j;
+          return p;
+        };
+      if (name === "Promise_settle_resolve")
+        return (p: any, val: any) => {
+          if (p && typeof p.__r === "function") p.__r(val);
+        };
+      if (name === "Promise_settle_reject")
+        return (p: any, reason: any) => {
+          if (p && typeof p.__j === "function") p.__j(reason);
+        };
       // (#1382) `executor` is called as `executor(resolve, reject)` — arity 2.
       if (name === "Promise_new") return (executor: any) => new Promise(_maybeWrapCallable(executor, 2, callbackState));
       // (#1382) `onFulfilled` / `onRejected` callbacks are arity-1 (the value or reason).

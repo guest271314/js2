@@ -24,7 +24,16 @@
 import { ts, forEachChild } from "../ts-api.js";
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { collectReferencedIdentifiers, collectBindingPatternNames } from "./closures.js";
+import type { Instr, ValType } from "../ir/types.js";
+import {
+  collectReferencedIdentifiers,
+  collectBindingPatternNames,
+  compileSyntheticAsyncContinuation,
+  type AsyncCapture,
+} from "./closures.js";
+import { compileExpression, compileStatement, coerceType, ensureLateImport } from "./shared.js";
+import { allocLocal } from "./context/locals.js";
+import { resolveWasmType } from "./index.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
@@ -111,24 +120,150 @@ export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclar
 
 /**
  * Emit a CPS-lowered async function body into `fctx`, replacing the normal
- * statement loop. Drives the entire body; the caller skips its own loop.
+ * statement loop. Drives the entire body and leaves the result Promise
+ * (externref) on the stack as the function's return value; the caller skips
+ * its own statement loop.
  *
- * PR1: INERT. The activation hook (function-body.ts) is not wired and
- * {@link ASYNC_CPS_ENABLED} is false, so this is never reached in normal
- * compilation. If it is somehow invoked, fail loudly rather than emit a
- * half-formed body — the full lowering lands in a follow-up PR.
+ * PR1 scope — a single tail-position await in one of the canonical shapes
+ * (`return await P`, `const x = await P; rest`, `await P; rest`). The
+ * function result type must already have been rewritten to `externref` by the
+ * activation hook (the function returns a Promise object, not the unwrapped
+ * value). Everything is gated behind {@link ASYNC_CPS_ENABLED} + the
+ * function-body activation gate, so this never runs in default compilation
+ * until that gate is flipped.
+ *
+ * Strategy (no funcref table, no manual settle):
+ *   1. Emit the synchronous prefix into `fctx`.
+ *   2. Compile the awaited expression → externref (the promise we suspend on).
+ *   3. Synthesize an exported `__cb_N(captures, awaitValue) -> externref`
+ *      continuation whose body is the post-await suffix; its `return X`
+ *      naturally produces `X` as the cb's externref result.
+ *   4. At the suspension point emit the creation site:
+ *        push cbId; build+push captures struct; `__make_callback` → contCb;
+ *        `Promise_then2(awaited, contCb, null)` → the chained result Promise.
+ *      `.then`'s own returned promise resolves to the continuation's return
+ *      value, so it IS this async function's result promise. A null reject
+ *      callback lets rejections propagate (default rethrow).
+ *
+ * Returns nothing; on an unsupported shape it `reportError`s and leaves the
+ * caller to fall back (the activation hook only calls this for shapes
+ * `splitBodyAtAwait` accepts, so that path is defensive).
  */
 export function emitAsyncStateMachine(
   ctx: CodegenContext,
-  _fctx: FunctionContext,
+  fctx: FunctionContext,
   fn: ts.FunctionLikeDeclaration,
-  _plan: AsyncCpsPlan,
+  plan: AsyncCpsPlan,
 ): void {
-  reportError(
+  const split = splitBodyAtAwait(fn, plan);
+  if (split === null) {
+    reportError(ctx, fn, "internal: async CPS activated on an unsupported body shape (#1042 PR1)");
+    return;
+  }
+
+  // 1. Synchronous prefix — runs before suspension, in the outer frame.
+  for (const stmt of split.prefix) compileStatement(ctx, fctx, stmt);
+
+  // 2. Awaited expression → externref. `await P` suspends on `P`'s value; the
+  //    operand is compiled in the outer frame (it executes synchronously,
+  //    before the continuation).
+  const awaitedType = compileExpression(ctx, fctx, split.awaitedExpr);
+  if (awaitedType !== null && awaitedType !== undefined) {
+    // Coerce whatever the awaited expression produced to externref (a thenable
+    // / Promise object). Non-promise values are wrapped by Promise_then2's
+    // host side (it calls `.then` — a non-thenable would throw, matching spec
+    // ToPromise semantics for the JS-host path).
+    coerceType(ctx, fctx, awaitedType as ValType, { kind: "externref" });
+  } else {
+    // void awaited expression — await undefined; push undefined sentinel.
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  // Stash the awaited promise so the continuation-creation site can re-push it
+  // after building the captures struct (struct.new consumes stack values).
+  const awaitedLocal = allocLocal(fctx, "__awaited", { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: awaitedLocal } as Instr);
+
+  // 3. Build the capture set: the live locals carried across the await.
+  const liveNames = plan.liveAfterAwait.get(plan.awaitPoints[0]!) ?? new Set<string>();
+  const captures: AsyncCapture[] = [];
+  for (const name of liveNames) {
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx === undefined) continue; // not a real outer local (shouldn't happen — analyzeAsyncBody filters)
+    const localDef = fctx.locals[localIdx - fctx.params.length] ?? fctx.params[localIdx];
+    const capType: ValType = localDef ? localDef.type : { kind: "externref" };
+    captures.push({ name, type: capType, localIdx });
+  }
+
+  // 4. Resume binding type (the `const x = await P` binding), if any.
+  let resumeBinding: { name: string; type: ValType } | null = null;
+  if (split.resumeBinding) {
+    const t: ValType = split.resumeBinding.type
+      ? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(split.resumeBinding.type))
+      : { kind: "externref" };
+    resumeBinding = { name: split.resumeBinding.name, type: t };
+  }
+
+  // 5. Synthesize the continuation: an exported `__cb_N(captures, awaitValue)`
+  //    whose body is the suffix. For `return await P` the suffix is empty and
+  //    the resolved value flows straight through `.then` — the continuation
+  //    just returns its awaitValue.
+  const suffixStmts = split.isReturnAwait ? [] : split.suffix;
+  const cont = compileSyntheticAsyncContinuation(ctx, fctx, suffixStmts, captures, resumeBinding);
+
+  // 6. Creation site (back in the outer frame):
+  //    awaited.then(makeCallback(cbId, captures), null)
+  // 6a. re-push the awaited promise.
+  fctx.body.push({ op: "local.get", index: awaitedLocal } as Instr);
+  // 6b. build the continuation callback: makeCallback(cbId, capturesStruct).
+  emitMakeContinuationCallback(ctx, fctx, cont);
+  // 6c. null reject callback (default rethrow / unhandled rejection).
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  // 6d. Promise_then2(promise, onFulfilled, onRejected) -> result Promise.
+  const then2Idx = ensureLateImport(
     ctx,
-    fn,
-    "internal: async CPS state-machine lowering not yet implemented (#1042 PR1 is skeleton-only; lowering lands in a follow-up PR)",
+    "Promise_then2",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
   );
+  fctx.body.push({ op: "call", funcIdx: then2Idx } as Instr);
+  // The chained Promise is on the stack — it is the async function's result.
+  fctx.body.push({ op: "return" } as Instr);
+}
+
+/**
+ * Emit the continuation-callback creation site into `fctx`: build the captures
+ * struct (or null when there are none), then
+ * `__make_callback(cbId, extern.convert_any(capStruct)) -> externref`.
+ * Leaves the resulting JS callback (externref) on the stack.
+ */
+function emitMakeContinuationCallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  cont: { cbId: number; capStructTypeIdx: number; captures: readonly AsyncCapture[] },
+): void {
+  // arg0: the callback id (i32) — __make_callback dispatches exports[`__cb_${id}`].
+  fctx.body.push({ op: "i32.const", value: cont.cbId } as Instr);
+
+  // arg1: the captures, as an externref. With captures, struct.new the cap
+  // struct from the live locals (in field order) and extern.convert_any it;
+  // with none, pass a null externref.
+  if (cont.captures.length > 0 && cont.capStructTypeIdx >= 0) {
+    for (const cap of cont.captures) {
+      fctx.body.push({ op: "local.get", index: cap.localIdx } as Instr);
+    }
+    fctx.body.push({ op: "struct.new", typeIdx: cont.capStructTypeIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+  } else {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+
+  const makeCbIdx = ensureLateImport(
+    ctx,
+    "__make_callback",
+    [{ kind: "i32" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  fctx.body.push({ op: "call", funcIdx: makeCbIdx } as Instr);
 }
 
 /**
@@ -156,6 +291,119 @@ export function compileNestedAwait(ctx: CodegenContext, _fctx: FunctionContext, 
  */
 export function emitAsyncStateMachineFromIr(): boolean {
   return false;
+}
+
+/**
+ * One segment boundary produced by {@link splitBodyAtAwait}.
+ *
+ * PR1 handles a body with **exactly one** top-level await appearing as the
+ * initializer/operand of one of three canonical statement shapes. The split
+ * yields:
+ *   - `prefix`: statements that run synchronously before suspension (the
+ *     await's own statement is NOT included here; its awaited expression is
+ *     surfaced separately as `awaitedExpr`).
+ *   - `awaitedExpr`: the operand of the await (the thing we suspend on).
+ *   - `resumeBinding`: the `{name,type}` the resolved value binds to on resume
+ *     (for `const x = await P`), or `null` for a bare `await P;` /
+ *     `return await P`.
+ *   - `suffix`: statements that run after resumption (the continuation body).
+ *   - `isReturnAwait`: true for `return await P` — the continuation's value IS
+ *     the awaited value, so `suffix` is empty and the resolved value settles
+ *     the outer promise directly.
+ */
+export interface AwaitSplit {
+  readonly prefix: readonly ts.Statement[];
+  readonly awaitedExpr: ts.Expression;
+  readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
+  readonly suffix: readonly ts.Statement[];
+  readonly isReturnAwait: boolean;
+}
+
+/**
+ * Split a single-await async function body into a prefix / awaited-expr /
+ * suffix triple for the canonical PR1 shapes. Returns `null` if the body does
+ * not match one of the three supported shapes (caller falls back to legacy).
+ *
+ * Supported shapes (the await must be the *sole* top-level await and appear at
+ * statement top-level, not nested inside an expression sub-tree):
+ *
+ *   1. `return await P;`                      → isReturnAwait, no suffix
+ *   2. `const x = await P; <rest>`            → resumeBinding=x, suffix=rest
+ *      (also `let`/`var`; single declarator only)
+ *   3. `await P; <rest>`                      → no binding, suffix=rest
+ *
+ * Pure: no `ctx`/`fctx` mutation. The shape gate keeps PR1 small and provably
+ * correct; richer control flow (awaits in loops/branches, multiple awaits in
+ * one segment) is deferred to follow-up slices.
+ */
+export function splitBodyAtAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): AwaitSplit | null {
+  // PR1 contract: exactly one await, no try-across-await, JS-host only.
+  if (plan.awaitPoints.length !== 1) return null;
+  if (plan.hasTryAcrossAwait) return null;
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+
+  const stmts = body.statements;
+  const awaitNode = plan.awaitPoints[0]!;
+
+  // Find the index of the top-level statement that textually contains the
+  // await. The await must be DIRECTLY one of the canonical positions in that
+  // statement (return-arg, single var-init, or expression-statement expr) —
+  // not buried deeper (e.g. `f(await x)` is rejected for PR1).
+  for (let i = 0; i < stmts.length; i++) {
+    const stmt = stmts[i]!;
+    if (!statementContainsNode(stmt, awaitNode)) continue;
+
+    const prefix = stmts.slice(0, i);
+    const suffix = stmts.slice(i + 1);
+
+    // Shape 1: `return await P;`
+    if (ts.isReturnStatement(stmt) && stmt.expression && stmt.expression === awaitNode) {
+      if (suffix.length !== 0) return null; // dead code after return; reject for PR1
+      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix: [], isReturnAwait: true };
+    }
+
+    // Shape 2: `const x = await P;` (single declarator, identifier name)
+    if (ts.isVariableStatement(stmt)) {
+      const decls = stmt.declarationList.declarations;
+      if (decls.length !== 1) return null;
+      const decl = decls[0]!;
+      if (decl.initializer !== awaitNode || !ts.isIdentifier(decl.name)) return null;
+      return {
+        prefix,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: { name: decl.name.text, type: decl.type },
+        suffix,
+        isReturnAwait: false,
+      };
+    }
+
+    // Shape 3: `await P;` (bare expression statement)
+    if (ts.isExpressionStatement(stmt) && stmt.expression === awaitNode) {
+      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix, isReturnAwait: false };
+    }
+
+    // The await sits inside an unsupported position within this statement.
+    return null;
+  }
+
+  return null;
+}
+
+/** True if `node` appears anywhere within `stmt`'s subtree (not crossing fn scopes). */
+function statementContainsNode(stmt: ts.Node, node: ts.Node): boolean {
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found) return;
+    if (n === node) {
+      found = true;
+      return;
+    }
+    if (isNestedFunctionScope(n) && n !== stmt) return;
+    forEachChild(n, walk);
+  };
+  walk(stmt);
+  return found;
 }
 
 // ---------------------------------------------------------------------------
