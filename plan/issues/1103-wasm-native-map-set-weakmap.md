@@ -1,7 +1,7 @@
 ---
 id: 1103
 title: "Wasm-native Map, Set, WeakMap, WeakSet using WasmGC structs and arrays"
-status: in-progress
+status: in-review
 created: 2026-04-12
 updated: 2026-06-03
 priority: high
