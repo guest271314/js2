@@ -14,7 +14,11 @@ import { allocLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
 import { addStringImports, addUnionImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
-import { ensureNativeStringExternBridge, stringConstantExternrefInstrs } from "./native-strings.js";
+import {
+  ensureNativeStringExternBridge,
+  nativeStringTypeNullable,
+  stringConstantExternrefInstrs,
+} from "./native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -1613,12 +1617,33 @@ export function compileNativeStringMethodCall(
         { op: "local.set", index: idxTmp },
       ],
     } as Instr);
-    // Call charAt helper with adjusted index
-    fctx.body.push({ op: "local.get", index: strTmp });
+    // ECMA-262 §22.1.3.1 String.prototype.at: after resolving a relative
+    // index, an out-of-range position (idx < 0 || idx >= len) yields
+    // `undefined`, NOT the empty string that `charAt` returns. Represent that
+    // `undefined` as a null native-string ref; the strict-equality path treats
+    // a null AnyString-typed ref as undefined-equal (binary-ops.ts).
+    const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt")!;
     fctx.body.push({ op: "local.get", index: idxTmp });
-    const funcIdx = ctx.nativeStrHelpers.get("__str_charAt")!;
-    fctx.body.push({ op: "call", funcIdx });
-    return nativeStringType(ctx);
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.lt_s" });
+    fctx.body.push({ op: "local.get", index: idxTmp });
+    fctx.body.push({ op: "local.get", index: lenTmp });
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "i32.or" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: nativeStringTypeNullable(ctx) },
+      then: [
+        // Out of range → undefined (null AnyString ref).
+        { op: "ref.null", typeIdx: ctx.anyStrTypeIdx },
+      ],
+      else: [
+        { op: "local.get", index: strTmp },
+        { op: "local.get", index: idxTmp },
+        { op: "call", funcIdx: charAtIdx },
+      ],
+    } as Instr);
+    return nativeStringTypeNullable(ctx);
   }
 
   // concat: native helper. ECMA-262 §22.1.3.4 — coerce each argument with

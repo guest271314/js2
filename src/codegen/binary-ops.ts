@@ -444,7 +444,15 @@ export function compileBinaryExpression(
       // Strict: refs can be null but never undefined
       // Loose: null == undefined, so ref.is_null covers both
       if (valType.kind === "ref" || valType.kind === "ref_null") {
-        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId) {
+        // #1105: a nullable native-string ref models `string | undefined`
+        // (e.g. String.prototype.at out-of-range → undefined). For that ONE
+        // type, a null ref IS the `undefined` value, so `x === undefined`
+        // must reduce to ref.is_null rather than the always-false struct rule
+        // below. Gate strictly on the AnyString type index so class-instance
+        // struct refs keep `struct === undefined → false` semantics.
+        const isNullableNativeString =
+          valType.kind === "ref_null" && ctx.nativeStrings && valType.typeIdx === ctx.anyStrTypeIdx;
+        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId && !isNullableNativeString) {
           // struct === undefined → always false; struct !== undefined → always true
           fctx.body.push({ op: "drop" });
           fctx.body.push({ op: "i32.const", value: isStrictNeqOp ? 1 : 0 });
