@@ -12,7 +12,7 @@
 - **NEVER force-push or rewrite published history on public `main`** — append-only; fix forward via revert PRs (it already broke guest271314's pull). See [feedback_public_main_append_only.md](feedback_public_main_append_only.md).
 - **NEVER merge an external-contributor PR without a recorded affirmative CLA acceptance** — `cla-check.yml` is a placeholder stub; hold guest271314's #589 until a real CLA accept. See [feedback_cla_gate.md](feedback_cla_gate.md).
 - **Mimic standard Node.js / Web Worker APIs; never invent bespoke compiler builtins** (no `readStdin`/`writeStdout`). See [feedback_mimic_node_worker_apis.md](feedback_mimic_node_worker_apis.md).
-- **PR titles and Codex commits use repo convention** — PR titles are `type(scope): concise summary` without `[codex]`; Codex-authored commits include `Co-authored-by: Codex <codex@openai.com>`. See [feedback_pr_title_coauthor_conventions.md](feedback_pr_title_coauthor_conventions.md).
+- **PR titles, Codex branches, and Codex commits use repo convention** — PR titles are `type(scope): concise summary` without `[codex]`; Codex issue branches are `codex/<issue-id>-<slug>`; Codex-authored commits include `Co-authored-by: Codex <codex@openai.com>`. See [feedback_pr_title_coauthor_conventions.md](feedback_pr_title_coauthor_conventions.md).
 
 ## Single source of truth
 - Team setup, memory budget, spawn config, communication protocol: **`plan/method/team-setup.md`**
