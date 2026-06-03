@@ -16,7 +16,7 @@ import {
   findUnresolvableInObjectPattern,
   isStrictContext,
 } from "../expressions/assignment.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
+import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
 import { shiftLateImportIndices } from "../expressions/late-imports.js";
 import {
   addIteratorImports,
@@ -1278,7 +1278,19 @@ function compileForOfDestructuring(
         syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
         return;
       }
-      // Non-ref, non-externref (f64, i32): assign defaults or undefined sentinels
+      // #846: A non-ref, non-externref element (f64/i32 ⇒ number/boolean) is a
+      // primitive that lacks [Symbol.iterator]. ArrayBindingPattern initialization
+      // (§8.5.2 BindingInitialization → §8.5.3 IteratorBindingInitialization)
+      // first performs GetIterator(elem), which throws TypeError for a non-iterable
+      // primitive. This applies even to an EMPTY pattern (`for ([] of [1])`) because
+      // GetIterator runs before any binding element is read. Previously this branch
+      // silently assigned undefined sentinels and never threw. Strings are iterable
+      // but lower to a string ref / externref, so they take a different branch and
+      // are unaffected.
+      //
+      // The binding locals are still declared (allocated) so later references in
+      // the loop body type-check, but the throw makes the code after it
+      // unreachable in this iteration.
       for (const element of pattern.elements) {
         if (ts.isOmittedExpression(element)) continue;
         if (!ts.isBindingElement(element)) continue;
@@ -1286,27 +1298,9 @@ function compileForOfDestructuring(
         const localName = element.name.text;
         const bindingTsType = ctx.checker.getTypeAtLocation(element);
         const bindingType = resolveWasmType(ctx, bindingTsType);
-        const localIdx = allocLocal(fctx, localName, bindingType);
-        if (element.initializer) {
-          const instrs = collectInstrs(fctx, () => {
-            compileExpression(ctx, fctx, element.initializer!, bindingType);
-            fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-          });
-          fctx.body.push(...instrs);
-        } else {
-          if (bindingType.kind === "f64") {
-            fctx.body.push({ op: "f64.const", value: NaN });
-          } else if (bindingType.kind === "i32") {
-            fctx.body.push({ op: "i32.const", value: 0 });
-          } else if (bindingType.kind === "ref_null" || bindingType.kind === "ref") {
-            const refTypeIdx = (bindingType as { typeIdx: number }).typeIdx;
-            fctx.body.push({ op: "ref.null", typeIdx: refTypeIdx });
-          } else {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
-          fctx.body.push({ op: "local.set", index: localIdx });
-        }
+        allocLocal(fctx, localName, bindingType);
       }
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       return;
     }
 
@@ -2343,6 +2337,16 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
+  // #681: `for (x of arr.values())` is semantically identical to `for (x of arr)`
+  // — Array.prototype.values() walks the element list in order. Recognize the
+  // CallExpression subject and drive the existing index loop over the inner
+  // receiver, so standalone/WASI iterate natively instead of hard-erroring in
+  // compileArrayIteratorMethod. JS-host mode benefits too (no __array_values).
+  const valuesReceiver = arrayValuesReceiverForForOf(ctx, fctx, stmt);
+  if (valuesReceiver && compileForOfArrayTentative(ctx, fctx, stmt, valuesReceiver)) {
+    return;
+  }
+
   // The TS type resolving to `Array` is necessary but NOT sufficient to use the
   // fast vec-struct array path: an Array-typed iterable can still lower to a
   // non-vec value (a Symbol.iterator whose declared return widens to Array, an
@@ -2353,6 +2357,37 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
     compileForOfIterator(ctx, fctx, stmt);
   }
+}
+
+/**
+ * #681: detect `for (… of <recv>.values())` and return `<recv>` when it is a
+ * zero-argument `.values()` call whose receiver resolves to a Wasm vec struct.
+ * `Array.prototype.values()` yields each element in order, so iterating the
+ * iterator is identical to iterating the array directly. `.keys()`/`.entries()`
+ * have a different element shape (index / `[i, v]` pair) and are NOT handled
+ * here — they keep falling through to compileForOfIterator (and hard-error in
+ * standalone for now, a tracked follow-up). Returns undefined when the subject
+ * is not a recognizable `.values()` call.
+ */
+function arrayValuesReceiverForForOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+): ts.Expression | undefined {
+  const subject = stmt.expression;
+  if (!ts.isCallExpression(subject) || subject.arguments.length !== 0) return undefined;
+  const callee = subject.expression;
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "values") return undefined;
+
+  // Confirm the receiver lowers to a vec struct without leaving any code behind.
+  const bodyLenBefore = fctx.body.length;
+  const localsLenBefore = fctx.locals.length;
+  const recvType = compileExpression(ctx, fctx, callee.expression);
+  fctx.body.length = bodyLenBefore;
+  fctx.locals.length = localsLenBefore;
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return undefined;
+  if (getArrTypeIdxFromVec(ctx, recvType.typeIdx) < 0) return undefined;
+  return callee.expression;
 }
 
 /** Compile for...of over a string — iterate characters using __str_charAt */
@@ -2532,11 +2567,17 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
  * and if so delegates to compileForOfArray (which re-compiles the expression).
  * Returns true if the array path was used, false if caller should fall back.
  */
-function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): boolean {
+function compileForOfArrayTentative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): boolean {
+  const iterableExpr = iterableOverride ?? stmt.expression;
   // Tentatively compile just the expression to discover its Wasm type
   const bodyLenBefore = fctx.body.length;
   const localsLenBefore = fctx.locals.length;
-  const exprType = compileExpression(ctx, fctx, stmt.expression);
+  const exprType = compileExpression(ctx, fctx, iterableExpr);
 
   // Check if it compiled to a ref to a vec struct (not just any struct —
   // a class instance is also a struct but not iterable via array access).
@@ -2548,7 +2589,7 @@ function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, 
       // full array path (which compiles the expression again with proper setup)
       fctx.body.length = bodyLenBefore;
       fctx.locals.length = localsLenBefore;
-      compileForOfArray(ctx, fctx, stmt);
+      compileForOfArray(ctx, fctx, stmt, iterableOverride);
       return true;
     }
   }
@@ -2560,10 +2601,16 @@ function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /** Compile for...of over an array using index-based loop (existing behavior) */
-function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
-  // Compile the iterable expression (vec struct ref)
+function compileForOfArray(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): void {
+  // Compile the iterable expression (vec struct ref). `iterableOverride` is the
+  // inner receiver of a `.values()` call (#681) when present.
   const bodyLenBefore = fctx.body.length;
-  const vecType = compileExpression(ctx, fctx, stmt.expression);
+  const vecType = compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
   if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
     fctx.body.length = bodyLenBefore;
     reportError(ctx, stmt, "for-of requires an array expression");

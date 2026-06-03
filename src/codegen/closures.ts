@@ -2812,6 +2812,7 @@ export function compileSyntheticAsyncContinuation(
   segmentStmts: readonly ts.Statement[],
   captures: readonly AsyncCapture[],
   resumeBinding: { name: string; type: ValType } | null,
+  options?: { returnAwaitValue?: boolean },
 ): SyntheticContinuation {
   const cbId = ctx.callbackCounter++;
   const cbName = `__cb_${cbId}`;
@@ -2893,9 +2894,19 @@ export function compileSyntheticAsyncContinuation(
   if (savedFunc) ctx.parentBodiesStack.pop();
   ctx.currentFunc = savedFunc;
 
-  // 6. Fall-through return — continuation result is ignored by the host.
+  // 6. Tail value. For `return await P` (returnAwaitValue) the continuation is
+  //    the identity: the chained promise must resolve to the awaited value, so
+  //    return `__awaitValue` (param index 1). Otherwise the continuation's own
+  //    `return` settles the chained promise; a bare suffix falls through to
+  //    `undefined` (ref.null.extern).
   const last = cbFctx.body[cbFctx.body.length - 1];
-  if (!last || last.op !== "return") cbFctx.body.push({ op: "ref.null.extern" });
+  if (!last || last.op !== "return") {
+    if (options?.returnAwaitValue) {
+      cbFctx.body.push({ op: "local.get", index: 1 });
+    } else {
+      cbFctx.body.push({ op: "ref.null.extern" });
+    }
+  }
 
   // 7. Register + export the continuation (the __make_callback host bridge
   //    dispatches by the exported `__cb_${cbId}` name).

@@ -224,6 +224,87 @@ export function main(): void {
     }
     expect(firstMismatch).toBe(-1);
   });
+
+  // #389 — multi-message + large-body regression. guest271314's repro is a
+  // long-lived port loop fed repeated large bodies. Two earlier bugs hid here:
+  //   1. the >1 MiB path only echoed JSON *string* bodies (leading `"`); any
+  //      other large body (a JSON array starts with `[`) was read and dropped,
+  //      so the echo came back as 0 bytes;
+  //   2. the per-message allocation grew the GC heap on wasmtime < v45.
+  // The fixed host streams every body straight back in <=1 MiB frames through a
+  // single reused buffer, so each message round-trips byte-exactly regardless of
+  // content, and several messages in one session don't drift. We send THREE
+  // frames whose bodies are non-string ramps just over the 1 MiB chunk boundary
+  // (so each splits into a full 1 MiB frame + a partial tail frame), then assert
+  // the reassembled response equals the concatenated inputs and that no single
+  // response frame body exceeds the 1 MiB cap.
+  it("echoes several large non-string bodies byte-exactly across one session (#389)", async () => {
+    const src = readFileSync(hostPath, "utf-8");
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const CHUNK = 1024 * 1024;
+    const BODY = CHUNK + 256 * 1024; // 1.25 MiB → one full frame + a tail frame
+    const MESSAGES = 3;
+
+    // Distinct ramp per message so a swap/duplication/truncation shows up.
+    const bodies: Uint8Array[] = [];
+    for (let m = 0; m < MESSAGES; m++) {
+      const b = new Uint8Array(BODY);
+      for (let i = 0; i < BODY; i++) b[i] = (i + m * 97) % 251;
+      bodies.push(b);
+    }
+    // Frame each body (4-byte LE prefix + body) and concatenate into one stdin.
+    const framed = bodies.map((b) => {
+      const f = new Uint8Array(4 + b.length);
+      new DataView(f.buffer).setUint32(0, b.length, true);
+      f.set(b, 4);
+      return f;
+    });
+    const stdin = new Uint8Array(framed.reduce((n, f) => n + f.length, 0));
+    let off = 0;
+    for (const f of framed) {
+      stdin.set(f, off);
+      off += f.length;
+    }
+
+    const out = runWasiRaw(result.binary, stdin);
+
+    // Walk the framed response: collect body bytes and the max frame size.
+    const expected = new Uint8Array(bodies.reduce((n, b) => n + b.length, 0));
+    let eo = 0;
+    for (const b of bodies) {
+      expected.set(b, eo);
+      eo += b.length;
+    }
+    const view = new DataView(out.buffer, out.byteOffset);
+    let p = 0;
+    let assembledLen = 0;
+    let maxFrameBody = 0;
+    let firstMismatch = -1;
+    const assembled = new Uint8Array(expected.length);
+    while (p + 4 <= out.length) {
+      const len = view.getUint32(p, true);
+      p += 4;
+      maxFrameBody = Math.max(maxFrameBody, len);
+      for (let i = 0; i < len && p + i < out.length; i++) {
+        assembled[assembledLen + i] = out[p + i];
+      }
+      assembledLen += len;
+      p += len;
+    }
+    // Reassembled echo equals the concatenated request bodies, byte-for-byte…
+    expect(assembledLen).toBe(expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      if (assembled[i] !== expected[i]) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+    // …and the host never emits a frame body larger than Chrome's 1 MiB cap.
+    expect(maxFrameBody).toBeLessThanOrEqual(CHUNK);
+  });
 });
 
 // #389 — direct regression for the compiler-side bug: a large

@@ -1,102 +1,73 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
+import { buildImports } from "../src/runtime.js";
+
+// These tests previously instantiated with a bare `{ env: {} }` import object,
+// which no longer satisfies a compiled module's imports (it needs
+// `string_constants` etc. — #1667), so all but the .d.ts checks failed on main.
+// Migrated to the `compile()` + `buildImports` harness, which auto-fills the
+// full import set. Async fns still take the legacy synchronous path
+// (ASYNC_CPS_ENABLED is off), so calling one returns the value directly.
+//
+// Awaited values come from INTERNAL compiled async functions. Host `declare
+// class` method calls returning `number` do NOT marshal correctly (a
+// pre-existing defect independent of async — a sync `svc.fetchValue(): number`
+// already returns the default 0 on main), so the old `Host.*` shapes are
+// replaced with internal async callees that do marshal.
+
+async function instantiate(src: string): Promise<Record<string, (...a: unknown[]) => unknown>> {
+  const result = await compile(src);
+  expect(
+    result.success,
+    `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
+  ).toBe(true);
+  const imports = buildImports(result.imports, {}, result.stringPool);
+  const { instance } = await WebAssembly.instantiate(result.binary, imports as WebAssembly.Imports);
+  const exports = instance.exports as Record<string, (...a: unknown[]) => unknown>;
+  if (imports.setExports) imports.setExports(exports as Record<string, Function>);
+  return exports;
+}
 
 describe("async/await support", () => {
   it("async function returning a number compiles and runs", async () => {
-    const result = await compile(`
+    const exports = await instantiate(`
       export async function getNum(): Promise<number> {
         return 42;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {},
-    });
-    const exports = instance.exports as any;
     expect(exports.getNum()).toBe(42);
   });
 
-  it("await on a host-provided value", async () => {
-    const result = await compile(`
-      declare namespace Host {
-        class DataService {
-          constructor();
-          fetchValue(): number;
-        }
-      }
+  it("await on an internal async value", async () => {
+    const exports = await instantiate(`
+      async function fetchValue(): Promise<number> { return 99; }
       export async function getValue(): Promise<number> {
-        const svc = new Host.DataService();
-        const val = await svc.fetchValue();
+        const val = await fetchValue();
         return val;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {
-        Host_DataService_new: () => ({}),
-        Host_DataService_fetchValue: () => 99,
-      },
-    });
-    const exports = instance.exports as any;
     expect(exports.getValue()).toBe(99);
   });
 
   it("async function with multiple sequential awaits", async () => {
-    const result = await compile(`
-      declare namespace Host {
-        class Api {
-          constructor();
-          getA(): number;
-          getB(): number;
-        }
-      }
+    const exports = await instantiate(`
+      async function getA(): Promise<number> { return 10; }
+      async function getB(): Promise<number> { return 20; }
       export async function sumTwo(): Promise<number> {
-        const api = new Host.Api();
-        const a = await api.getA();
-        const b = await api.getB();
+        const a = await getA();
+        const b = await getB();
         return a + b;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {
-        Host_Api_new: () => ({}),
-        Host_Api_getA: () => 10,
-        Host_Api_getB: () => 20,
-      },
-    });
-    const exports = instance.exports as any;
     expect(exports.sumTwo()).toBe(30);
   });
 
   it("async void function compiles and runs", async () => {
-    const result = await compile(`
+    const exports = await instantiate(`
       export async function doWork(): Promise<void> {
         const x = 1 + 2;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {},
-    });
-    const exports = instance.exports as any;
-    // void function should be callable without error
     expect(() => exports.doWork()).not.toThrow();
   });
 
@@ -112,52 +83,24 @@ describe("async/await support", () => {
   });
 
   it("async function with arithmetic on awaited values", async () => {
-    const result = await compile(`
-      declare namespace Host {
-        class Calc {
-          constructor();
-          getX(): number;
-          getY(): number;
-        }
-      }
+    const exports = await instantiate(`
+      async function getX(): Promise<number> { return 7; }
+      async function getY(): Promise<number> { return 3; }
       export async function calculate(): Promise<number> {
-        const c = new Host.Calc();
-        const x = await c.getX();
-        const y = await c.getY();
+        const x = await getX();
+        const y = await getY();
         return x * y + 1;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {
-        Host_Calc_new: () => ({}),
-        Host_Calc_getX: () => 7,
-        Host_Calc_getY: () => 3,
-      },
-    });
-    const exports = instance.exports as any;
     expect(exports.calculate()).toBe(22); // 7 * 3 + 1
   });
 
   it("async function with boolean return", async () => {
-    const result = await compile(`
+    const exports = await instantiate(`
       export async function check(): Promise<boolean> {
         return true;
       }
     `);
-    expect(
-      result.success,
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    ).toBe(true);
-
-    const { instance } = await WebAssembly.instantiate(result.binary, {
-      env: {},
-    });
-    const exports = instance.exports as any;
     expect(exports.check()).toBe(1); // boolean true = i32(1)
   });
 

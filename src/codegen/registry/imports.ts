@@ -232,6 +232,23 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   shiftMap(ctx.funcClosureGlobals); // (#1340) — cached per-function closure globals
   shiftMap(ctx.tdzGlobals);
 
+  // (#1749) The CPR proto-override records (Array.prototype[@@iterator] /
+  // .values) root each lifted override closure in a module-defined `mut
+  // externref` global; the recorded absolute `globalIdx` must shift exactly
+  // like every other module-global index when a late string-constant import is
+  // inserted. Without this, the read-drive site (`arrayIteratorOverrideGlobalIdx`
+  // → `global.get`) reads a stale slot — e.g. a spread `[...arr]` whose result
+  // is later indexed (`a[0]`) adds a "Cannot access property" string global,
+  // shifting the override slot out from under the captured index → the drive
+  // reads null and the override is silently ignored.
+  for (const inner of ctx.protoOverrides.values()) {
+    for (const entry of inner.values()) {
+      if (entry.globalIdx !== undefined && entry.globalIdx >= threshold) {
+        entry.globalIdx += delta;
+      }
+    }
+  }
+
   for (const entry of ctx.staticInitExprs) {
     if (entry.globalIdx !== undefined && entry.globalIdx >= threshold) {
       entry.globalIdx += delta;

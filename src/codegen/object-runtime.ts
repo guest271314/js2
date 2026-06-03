@@ -561,12 +561,31 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 7 },
               { op: "array.get", typeIdx: propMapTypeIdx },
               { op: "local.tee", index: 8 },
-              // empty slot → create new entry here
+              // empty slot → create new entry here, UNLESS the object is
+              // non-extensible (#1472 Phase B Blocker A Half 2). A
+              // sealed/preventExtensions/frozen object refuses NEW keys per ES
+              // §10.4.7 [[DefineOwnProperty]] extensibility check — sloppy no-op
+              // (strict throw deferred to #1473). Updates of existing keys are
+              // unaffected (they take the update-in-place branch below). A
+              // frozen object never reaches __obj_insert via __extern_set (the
+              // FROZEN gate there returns first), but __obj_insert is also
+              // called during __obj_grow rehash — where the table is rebuilt
+              // from existing live entries, all of which take the empty-slot
+              // branch. We must NOT refuse those, so the gate is keyed on the
+              // OBJECT's NON_EXTENSIBLE bit, which during a grow only matters
+              // when a non-extensible object grows (it can't — no new key was
+              // accepted, so load never rises to force a grow). Safe.
               { op: "ref.is_null" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
+                  // if o.flags & NON_EXTENSIBLE → refuse new key (return)
+                  { op: "local.get", index: 0 },
+                  { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+                  { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+                  { op: "i32.and" },
+                  { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
                   // arr[i] = struct.new $PropEntry { keyStr, value, flags }
                   { op: "local.get", index: 4 },
                   { op: "local.get", index: 7 },
@@ -785,6 +804,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 6 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.set", index: 3 },
+      // #1472 Phase B Blocker A Half 2 — FROZEN write gate. A frozen object
+      // refuses ALL data writes (update AND new key) per ES §10.4.7 / the
+      // [[Set]] invariant on non-writable own data properties. Sloppy-mode
+      // no-op here (strict-mode TypeError throw is deferred to the error
+      // machinery slice, #1473). Sealed/non-extensible objects still allow
+      // updates of existing keys — that new-key refusal lives in __obj_insert's
+      // empty-slot branch (gated on NON_EXTENSIBLE), so it is NOT gated here.
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_FROZEN },
+      { op: "i32.and" },
+      { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
       // load = o.count + o.tombstones ; cap = o.props.len
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
@@ -1755,6 +1786,125 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __defineProperty_value (#1629 S6 — native data-descriptor define) ─────
+  //
+  // `Object.defineProperty(obj, key, { value, writable?, enumerable?,
+  // configurable? })` and `Reflect.defineProperty` for a DATA descriptor under
+  // `--target standalone`. In JS-host mode this is the `env::__defineProperty_value`
+  // host import backed by the JS descriptor sidecar; standalone has no host, so we
+  // store the value + attribute flags directly into the `$Object`/`$PropEntry`
+  // runtime that the native `__extern_get` already reads back.
+  //
+  // The compiler passes `flags` as an f64 in the host encoding
+  // (`computeRuntimeFlags`, object-ops.ts):
+  //   bit 0: writable          bit 3: writable specified
+  //   bit 1: enumerable        bit 4: enumerable specified
+  //   bit 2: configurable      bit 5: configurable specified
+  //   bit 6: is accessor       bit 7: has value
+  // We translate to the native `$PropEntry.flags` bits (FLAG_WRITABLE / _ENUMERABLE
+  // / _CONFIGURABLE). Per CompletePropertyDescriptor (ES §6.2.6.4) a NEW
+  // property's omitted attributes default to false — and the host f64 encoding
+  // already reflects that (an unspecified attr has neither its specified-bit nor
+  // its value-bit set, so the `& value-bit` test yields 0 → false). So the
+  // translation is a straight per-attribute mask of bits 0/1/2 onto the native
+  // bit positions, which happen to coincide (native WRITABLE=0x1, ENUMERABLE=0x2,
+  // CONFIGURABLE=0x4 == host value bits 0,1,2). The only divergence from
+  // __extern_set is the explicit flag word instead of FLAG_DEFAULT.
+  //
+  // Accessor descriptors (`{ get, set }`, host flag bit 6) are NOT handled here —
+  // they stay refused under standalone (deferred S6 follow-up: accessor slots +
+  // call_ref invocation). The accessor path keeps emitting __defineProperty_accessor,
+  // which remains in STANDALONE_REFUSED_IMPORT.
+  //
+  // params: 0=obj 1=key 2=value 3=flagsF64
+  // locals: 4=o(ref null $Object) 5=any(anyref) 6=cap 7=load 8=nflags(i32) 9=hf(i32)
+  {
+    const NATIVE_ATTR_MASK = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE; // 0x07
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return obj (lenient no-op,
+      // matches the host import returning O unchanged)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 5 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 4 },
+      // hf = trunc_s(flagsF64)  (the host encoding is a small non-negative int)
+      { op: "local.get", index: 3 },
+      { op: "i32.trunc_f64_s" },
+      { op: "local.set", index: 9 },
+      // nflags = hf & (WRITABLE|ENUMERABLE|CONFIGURABLE)
+      // Host value bits 0/1/2 line up with native FLAG_* bit positions, so a
+      // direct mask is the translation. (Specified/hasValue/accessor bits 3-7
+      // are dropped.)
+      { op: "local.get", index: 9 },
+      { op: "i32.const", value: NATIVE_ATTR_MASK },
+      { op: "i32.and" },
+      { op: "local.set", index: 8 },
+      // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      { op: "i32.add" },
+      { op: "local.set", index: 7 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 6 },
+      // if (load + 1) * 10 >= cap * 7 → grow
+      { op: "local.get", index: 7 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "i32.const", value: 10 },
+      { op: "i32.mul" },
+      { op: "local.get", index: 6 },
+      { op: "i32.const", value: 7 },
+      { op: "i32.mul" },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 4 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
+      },
+      // __obj_insert(o, key, any.convert_extern(value), nflags)
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 2 },
+      { op: "any.convert_extern" },
+      { op: "local.get", index: 8 },
+      { op: "call", funcIdx: objInsertIdx },
+      // return obj (host import returns O)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__defineProperty_value",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "load", type: { kind: "i32" } },
+        { name: "nflags", type: { kind: "i32" } },
+        { name: "hf", type: { kind: "i32" } },
+      ],
+      body,
+    );
+  }
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -1793,6 +1943,62 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   emitIntegrityPredicate("__object_isFrozen", OBJ_FLAG_FROZEN, false, 1);
   emitIntegrityPredicate("__object_isSealed", OBJ_FLAG_SEALED, false, 1);
   emitIntegrityPredicate("__object_isExtensible", OBJ_FLAG_NONEXTENSIBLE, true, 0);
+
+  // ── Object integrity SET path (#1472 Phase B Blocker A Half 2) ────────────
+  //
+  // __object_preventExtensions / __object_seal / __object_freeze set the
+  // object-level `$Object.flags` (field 4) integrity bits and return the
+  // ORIGINAL externref (identity preserved — these return their argument per
+  // ES §20.5.2.{5,18,6}). freeze ⊃ seal ⊃ preventExtensions, so each sets a
+  // cumulative bit-mask:
+  //   preventExtensions → NONEXTENSIBLE
+  //   seal              → NONEXTENSIBLE | SEALED
+  //   freeze            → NONEXTENSIBLE | SEALED | FROZEN
+  // The write gates in __extern_set (FROZEN → refuse all) and __obj_insert
+  // empty-slot (NONEXTENSIBLE → refuse new key) read these bits to enforce
+  // immutability. Non-$Object receiver: returned unchanged (primitives are
+  // already non-extensible; the predicate readers handle their query side).
+  //
+  // params: 0=obj(externref) ; locals: 1=any(anyref) 2=o(ref null $Object)
+  const emitSetFlags = (name: string, bits: number): void => {
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // o = cast<$Object>(any) ; o.flags |= bits
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.tee", index: 2 },
+          { op: "local.get", index: 2 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+          { op: "i32.const", value: bits },
+          { op: "i32.or" },
+          { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 4 },
+        ],
+      },
+      // return the original externref unchanged (identity preserved)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      name,
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+      ],
+      body,
+    );
+  };
+  emitSetFlags("__object_preventExtensions", OBJ_FLAG_NONEXTENSIBLE);
+  emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED);
+  emitSetFlags("__object_freeze", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN);
 
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
@@ -1851,4 +2057,13 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_isFrozen",
   "__object_isSealed",
   "__object_isExtensible",
+  // #1472 Phase B Blocker A Half 2 — object integrity SET path.
+  "__object_preventExtensions",
+  "__object_seal",
+  "__object_freeze",
+  // #1629 S6 — native data-descriptor define (Object.defineProperty /
+  // Reflect.defineProperty with a { value, writable?, enumerable?, configurable? }
+  // descriptor). Accessor descriptors stay refused (see the __defineProperty_value
+  // note in ensureObjectRuntime).
+  "__defineProperty_value",
 ]);

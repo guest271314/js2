@@ -31,18 +31,30 @@ import {
   compileSyntheticAsyncContinuation,
   type AsyncCapture,
 } from "./closures.js";
-import { compileExpression, compileStatement, coerceType, ensureLateImport } from "./shared.js";
+import { compileExpression, compileStatement, coerceType } from "./shared.js";
 import { allocLocal } from "./context/locals.js";
 import { resolveWasmType } from "./index.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
  *
- * Hardcoded `false` for PR1 (#1042) — exactly like #1373b Slice 1's
- * `supportsAsyncIr` flag. While false, `function-body.ts` never activates the
- * state machine and async functions take the unchanged legacy direct-codegen
- * path, so the emitted module is byte-identical. Subsequent slices flip this on
- * incrementally once the lowering is parity-tested against the legacy path.
+ * Slice 2A (#1042) built the linear single-tail-await state machine and made it
+ * *correct when it runs* (verified end-to-end in `tests/issue-1042.test.ts` with
+ * the gate forced on locally): the three canonical shapes resolve to the right
+ * value through `Promise_resolve` → `Promise_then2` → continuation, captures and
+ * the `return await` identity tail are handled, and the late-import shift hazard
+ * is removed by the `collectAsyncCpsImports` prepass.
+ *
+ * It stays **OFF** because flipping it globally regresses the *synchronous
+ * consumption* contract: a single-await async fn consumed as a raw value
+ * (`asyncFn() as any as number`, the #1313/#1727 "compile away" pattern) relies
+ * on the legacy path returning the unwrapped value synchronously. With CPS on,
+ * that fn returns a real Promise and the cast yields NaN — see the 3 regressed
+ * `tests/equivalence/{async-function,promise-chains}.test.ts` cases. The gate is
+ * per-definition but the contract is per-call-site, so a global flip cannot
+ * preserve both. Turning CPS on for real needs the synchronous-consumption call
+ * sites taught to drive the Promise (architect-level; risk #1/#6 in the spec).
+ * See the "Slice 2A — gate-flip regression" finding in the #1042 issue file.
  */
 export const ASYNC_CPS_ENABLED = false;
 
@@ -164,37 +176,50 @@ export function emitAsyncStateMachine(
   // 1. Synchronous prefix — runs before suspension, in the outer frame.
   for (const stmt of split.prefix) compileStatement(ctx, fctx, stmt);
 
-  // 2. Awaited expression → externref. `await P` suspends on `P`'s value; the
-  //    operand is compiled in the outer frame (it executes synchronously,
-  //    before the continuation).
+  // Resolve the three host imports the driver emits. All are pre-registered by
+  // the `collectAsyncCpsImports` prepass (index.ts) when the gate is on and a
+  // CPS-eligible async fn exists, so they carry STABLE funcMap indices — never
+  // `ensureLateImport` here. The outer `$f` body is not in `ctx.liveBodies`
+  // during this emission, so a late import added mid-body would not have its
+  // `call` opcodes shifted (the classic #1384 hazard); the prepass removes that
+  // hazard at its source. See #1042 "Slice 2A runtime-validated blockers".
+  const resolveIdx = ctx.funcMap.get("Promise_resolve");
+  const makeCbIdx = ctx.funcMap.get("__make_callback");
+  const then2Idx = ctx.funcMap.get("Promise_then2");
+  if (resolveIdx === undefined || makeCbIdx === undefined || then2Idx === undefined) {
+    reportError(
+      ctx,
+      fn,
+      "internal: async CPS imports not pre-registered (collectAsyncCpsImports prepass missing) (#1042)",
+    );
+    return;
+  }
+
+  // 2. Awaited expression → externref, then `Promise.resolve(V)` so the value
+  //    is always a real promise. `await V` is `PromiseResolve(%Promise%, V)`
+  //    (§27.7.5.3): a thenable/promise passes through unchanged, a plain value
+  //    is wrapped. Without this, `Promise_then2`'s host `p.then(...)` would
+  //    throw on a non-thenable awaited value (e.g. `await 99`).
   const awaitedType = compileExpression(ctx, fctx, split.awaitedExpr);
   if (awaitedType !== null && awaitedType !== undefined) {
-    // Coerce whatever the awaited expression produced to externref (a thenable
-    // / Promise object). Non-promise values are wrapped by Promise_then2's
-    // host side (it calls `.then` — a non-thenable would throw, matching spec
-    // ToPromise semantics for the JS-host path).
     coerceType(ctx, fctx, awaitedType as ValType, { kind: "externref" });
   } else {
     // void awaited expression — await undefined; push undefined sentinel.
     fctx.body.push({ op: "ref.null.extern" } as Instr);
   }
+  fctx.body.push({ op: "call", funcIdx: resolveIdx } as Instr);
   // Stash the awaited promise so the continuation-creation site can re-push it
   // after building the captures struct (struct.new consumes stack values).
   const awaitedLocal = allocLocal(fctx, "__awaited", { kind: "externref" });
   fctx.body.push({ op: "local.set", index: awaitedLocal } as Instr);
 
-  // 3. Build the capture set: the live locals carried across the await.
-  const liveNames = plan.liveAfterAwait.get(plan.awaitPoints[0]!) ?? new Set<string>();
-  const captures: AsyncCapture[] = [];
-  for (const name of liveNames) {
-    const localIdx = fctx.localMap.get(name);
-    if (localIdx === undefined) continue; // not a real outer local (shouldn't happen — analyzeAsyncBody filters)
-    const localDef = fctx.locals[localIdx - fctx.params.length] ?? fctx.params[localIdx];
-    const capType: ValType = localDef ? localDef.type : { kind: "externref" };
-    captures.push({ name, type: capType, localIdx });
-  }
-
-  // 4. Resume binding type (the `const x = await P` binding), if any.
+  // 4. Resume binding (the `const x = await P` binding), if any. Computed
+  //    BEFORE captures so its name is excluded from the capture set: the
+  //    resume binding does not exist at suspension time (it is assigned from
+  //    `__awaitValue` inside the continuation). `hoistLetConstWithTdz` already
+  //    allocated a same-named outer local, so `liveAfterAwait` lists it — but
+  //    capturing it would snapshot its uninitialized (zero) value and shadow
+  //    the real resumed value in the continuation. (#1042 Slice 2A defect.)
   let resumeBinding: { name: string; type: ValType } | null = null;
   if (split.resumeBinding) {
     const t: ValType = split.resumeBinding.type
@@ -203,28 +228,38 @@ export function emitAsyncStateMachine(
     resumeBinding = { name: split.resumeBinding.name, type: t };
   }
 
+  // 3. Build the capture set: the live locals carried across the await,
+  //    excluding the resume binding (bound fresh in the continuation).
+  const liveNames = plan.liveAfterAwait.get(plan.awaitPoints[0]!) ?? new Set<string>();
+  const captures: AsyncCapture[] = [];
+  for (const name of liveNames) {
+    if (resumeBinding && name === resumeBinding.name) continue;
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx === undefined) continue; // not a real outer local (shouldn't happen — analyzeAsyncBody filters)
+    const localDef = fctx.locals[localIdx - fctx.params.length] ?? fctx.params[localIdx];
+    const capType: ValType = localDef ? localDef.type : { kind: "externref" };
+    captures.push({ name, type: capType, localIdx });
+  }
+
   // 5. Synthesize the continuation: an exported `__cb_N(captures, awaitValue)`
   //    whose body is the suffix. For `return await P` the suffix is empty and
   //    the resolved value flows straight through `.then` — the continuation
   //    just returns its awaitValue.
   const suffixStmts = split.isReturnAwait ? [] : split.suffix;
-  const cont = compileSyntheticAsyncContinuation(ctx, fctx, suffixStmts, captures, resumeBinding);
+  const cont = compileSyntheticAsyncContinuation(ctx, fctx, suffixStmts, captures, resumeBinding, {
+    returnAwaitValue: split.isReturnAwait,
+  });
 
   // 6. Creation site (back in the outer frame):
   //    awaited.then(makeCallback(cbId, captures), null)
   // 6a. re-push the awaited promise.
   fctx.body.push({ op: "local.get", index: awaitedLocal } as Instr);
   // 6b. build the continuation callback: makeCallback(cbId, capturesStruct).
-  emitMakeContinuationCallback(ctx, fctx, cont);
+  emitMakeContinuationCallback(ctx, fctx, cont, makeCbIdx);
   // 6c. null reject callback (default rethrow / unhandled rejection).
   fctx.body.push({ op: "ref.null.extern" } as Instr);
   // 6d. Promise_then2(promise, onFulfilled, onRejected) -> result Promise.
-  const then2Idx = ensureLateImport(
-    ctx,
-    "Promise_then2",
-    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
+  //     `then2Idx` is the stable pre-registered index (see step 2 comment).
   fctx.body.push({ op: "call", funcIdx: then2Idx } as Instr);
   // The chained Promise is on the stack — it is the async function's result.
   fctx.body.push({ op: "return" } as Instr);
@@ -240,6 +275,7 @@ function emitMakeContinuationCallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
   cont: { cbId: number; capStructTypeIdx: number; captures: readonly AsyncCapture[] },
+  makeCbIdx: number,
 ): void {
   // arg0: the callback id (i32) — __make_callback dispatches exports[`__cb_${id}`].
   fctx.body.push({ op: "i32.const", value: cont.cbId } as Instr);
@@ -257,12 +293,8 @@ function emitMakeContinuationCallback(
     fctx.body.push({ op: "ref.null.extern" } as Instr);
   }
 
-  const makeCbIdx = ensureLateImport(
-    ctx,
-    "__make_callback",
-    [{ kind: "i32" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
+  // `makeCbIdx` is the stable pre-registered index (collectAsyncCpsImports
+  // prepass), passed by the driver — never a late import here.
   fctx.body.push({ op: "call", funcIdx: makeCbIdx } as Instr);
 }
 

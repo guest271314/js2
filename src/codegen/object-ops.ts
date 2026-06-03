@@ -19,6 +19,7 @@ import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { compileNativeStringLiteral, compileStringLiteral } from "./string-ops.js";
 import { getVecInfo } from "./type-coercion.js";
 
@@ -312,14 +313,20 @@ function emitNonObjectArgGuard(
 function emitObjectArgNullGuard(ctx: CodegenContext, fctx: FunctionContext, localIdx: number): void {
   const message = "TypeError: Object method called on null or undefined";
   addStringConstantGlobal(ctx, message);
-  const strIdx = ctx.stringGlobalMap.get(message)!;
   const tagIdx = ensureExnTag(ctx);
+  // Materialize the message via stringConstantExternrefInstrs so it works in
+  // both backends: a host `string_constants` global, OR — under nativeStrings
+  // (auto-on for --target standalone/wasi) — an inline-built `$NativeString`.
+  // The previous `global.get` of `stringGlobalMap.get(message)` emitted index
+  // -1 (the nativeStrings sentinel) → "Invalid global index: 4294967295" at
+  // instantiate. This surfaced once #1629 S6 let Object.defineProperty reach
+  // this guard under standalone instead of refusing at compile time.
   fctx.body.push({ op: "local.get", index: localIdx });
   fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr],
+    then: [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr],
     else: [],
   });
 }

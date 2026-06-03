@@ -19,6 +19,7 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait } from "./async-cps.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import { collectFunctionOwnLocals, collectReferencedIdentifiers } from "./closures.js";
 import { reportError } from "./context/errors.js";
@@ -104,6 +105,13 @@ interface UnifiedCollectorState {
   // -- collectCallbackImports --
   callbackFound: boolean;
   getterCallbackFound: boolean; // Object.defineProperty accessor descriptors (#929)
+  // -- collectAsyncCpsImports (#1042) --
+  // A CPS-eligible async function (single tail-await, no try-across-await) needs
+  // __make_callback + Promise_then2 + Promise_resolve registered UPFRONT so the
+  // outer-body driver gets stable funcMap indices (the outer body is not in
+  // ctx.liveBodies during emission, so a late import would not have its `call`
+  // opcodes shifted — the #1384 hazard). Only set when ASYNC_CPS_ENABLED.
+  asyncCpsFound: boolean;
   // -- collectFunctionalArrayImports --
   funcArrayNeed1: boolean;
   funcArrayNeed2: boolean;
@@ -190,6 +198,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     jsonNeedParse: false,
     callbackFound: false,
     getterCallbackFound: false,
+    asyncCpsFound: false,
     funcArrayNeed1: false,
     funcArrayNeed2: false,
     unionFound: false,
@@ -594,6 +603,26 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   if (!state.callbackFound) {
     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
       state.callbackFound = true;
+    }
+  }
+
+  // ── collectAsyncCpsImports (#1042) ──
+  // Detect a CPS-eligible async function so the host imports the driver emits
+  // (__make_callback / Promise_then2 / Promise_resolve) are registered upfront
+  // with STABLE funcMap indices. Mirrors the function-body.ts activation gate
+  // exactly (single tail-await canonical shape, no try-across-await, JS-host).
+  if (
+    ASYNC_CPS_ENABLED &&
+    !state.asyncCpsFound &&
+    !ctx.wasi &&
+    !ctx.standalone &&
+    ts.isFunctionDeclaration(node) &&
+    node.body !== undefined &&
+    hasAsyncModifier(node)
+  ) {
+    const plan = analyzeAsyncBody(ctx, node);
+    if (plan.awaitPoints.length === 1 && !plan.hasTryAcrossAwait && splitBodyAtAwait(node, plan) !== null) {
+      state.asyncCpsFound = true;
     }
   }
   // (#1239) Object literals carrying get/set accessor declarations also
@@ -1215,15 +1244,37 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectCallbackImports finalize ──
-  if (state.callbackFound || state.getterCallbackFound) {
+  if (state.callbackFound || state.getterCallbackFound || state.asyncCpsFound) {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
-    if (state.callbackFound) {
+    if ((state.callbackFound || state.asyncCpsFound) && !ctx.funcMap.has("__make_callback")) {
       addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
     }
     if (state.getterCallbackFound) {
       // __make_getter_callback: same signature — wraps a function so 'this' is bound (#929)
       // Used for Object.defineProperty accessor descriptors (getter/setter callbacks).
       addImport(ctx, "env", "__make_getter_callback", { kind: "func", typeIdx });
+    }
+  }
+
+  // ── collectAsyncCpsImports finalize (#1042) ──
+  // The CPS driver (emitAsyncStateMachine) emits `Promise_resolve` (wrap the
+  // awaited value) and `Promise_then2` (chain the continuation) by stable
+  // funcMap index. Register both upfront so the outer async body never takes
+  // the late-import path (its `call` opcodes would not be shifted — #1384).
+  // `__make_callback` is registered above. Idempotent via funcMap guard so a
+  // module that also uses `.then(cb1,cb2)` / `Promise.resolve` is unaffected.
+  if (state.asyncCpsFound) {
+    if (!ctx.funcMap.has("Promise_resolve")) {
+      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "Promise_resolve", { kind: "func", typeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_then2")) {
+      const typeIdx = addFuncType(
+        ctx,
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      addImport(ctx, "env", "Promise_then2", { kind: "func", typeIdx });
     }
   }
 
