@@ -122,6 +122,41 @@ function _installBuiltinMethod(
 }
 
 /**
+ * Install a static helper (e.g. `Iterator.zip`) with spec-correct property
+ * descriptors. The function's own `length` and `name` are reset to the
+ * spec-mandated values with attributes `{writable:false, enumerable:false,
+ * configurable:true}` (§17 — built-in function `length`/`name`), and the
+ * property on `target` itself is `{writable:true, enumerable:false,
+ * configurable:true}` (§17 default data-property attributes). TS optional
+ * params (`options?`) inflate `fn.length`, so we override it explicitly.
+ */
+function _installStaticHelper(
+  target: object,
+  name: string,
+  length: number,
+  impl: (this: any, ...args: any[]) => any,
+): void {
+  Object.defineProperty(impl, "length", {
+    value: length,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(impl, "name", {
+    value: name,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(target, name, {
+    value: impl,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/**
  * Build `%IteratorPrototype%` (spec §27.1.2). Its sole own property is
  * `[Symbol.iterator]()` which returns `this`. `%GeneratorPrototype%` inherits
  * from it so generators are iterable. (#1639) We build it explicitly rather
@@ -553,12 +588,8 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   if (typeof I.from !== "function") {
-    Object.defineProperty(I, "from", {
-      value: function from(iterable: any) {
-        return _getFlattenable(iterable);
-      },
-      writable: true,
-      configurable: true,
+    _installStaticHelper(I, "from", 1, function from(iterable: any) {
+      return _getFlattenable(iterable);
     });
   }
 
@@ -829,194 +860,182 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   if (typeof I.zip !== "function") {
-    Object.defineProperty(I, "zip", {
-      value: function zip(iterables: any, options?: any) {
-        if (iterables == null) {
-          throw new TypeError("Iterator.zip: iterables required");
+    _installStaticHelper(I, "zip", 1, function zip(iterables: any, options?: any) {
+      if (iterables == null) {
+        throw new TypeError("Iterator.zip: iterables required");
+      }
+      const mode: string = (options && options.mode) || "shortest";
+      if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+        throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+      }
+      const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
+      const iters: any[] = [];
+      // Open all iterators eagerly; on failure, close already-opened ones.
+      try {
+        for (const iterable of iterables) {
+          iters.push(_getFlattenable(iterable));
         }
-        const mode: string = (options && options.mode) || "shortest";
-        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-          throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+      } catch (e) {
+        for (const it of iters) {
+          try {
+            it.return?.();
+          } catch {}
         }
-        const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
-        const iters: any[] = [];
-        // Open all iterators eagerly; on failure, close already-opened ones.
-        try {
-          for (const iterable of iterables) {
-            iters.push(_getFlattenable(iterable));
-          }
-        } catch (e) {
-          for (const it of iters) {
+        throw e;
+      }
+      const closed: boolean[] = iters.map(() => false);
+      let exhausted = false;
+
+      function closeAllExcept(except: number): void {
+        for (let i = 0; i < iters.length; i++) {
+          if (i !== except && !closed[i]) {
+            closed[i] = true;
             try {
-              it.return?.();
+              iters[i].return?.();
             } catch {}
           }
-          throw e;
         }
-        const closed: boolean[] = iters.map(() => false);
-        let exhausted = false;
+      }
 
-        function closeAllExcept(except: number): void {
+      return _makeHelperIterator(
+        function next() {
+          if (exhausted || iters.length === 0) return { value: undefined, done: true };
+          const tuple: any[] = new Array(iters.length);
+          let liveCount = 0;
           for (let i = 0; i < iters.length; i++) {
-            if (i !== except && !closed[i]) {
-              closed[i] = true;
-              try {
-                iters[i].return?.();
-              } catch {}
+            if (closed[i]) {
+              tuple[i] = padding[i];
+              continue;
             }
-          }
-        }
-
-        return _makeHelperIterator(
-          function next() {
-            if (exhausted || iters.length === 0) return { value: undefined, done: true };
-            const tuple: any[] = new Array(iters.length);
-            let liveCount = 0;
-            for (let i = 0; i < iters.length; i++) {
-              if (closed[i]) {
-                tuple[i] = padding[i];
-                continue;
-              }
-              let r: any;
-              try {
-                r = iters[i].next();
-              } catch (e) {
+            let r: any;
+            try {
+              r = iters[i].next();
+            } catch (e) {
+              exhausted = true;
+              closeAllExcept(i);
+              throw e;
+            }
+            if (r && r.done) {
+              closed[i] = true;
+              if (mode === "shortest") {
                 exhausted = true;
                 closeAllExcept(i);
-                throw e;
+                return { value: undefined, done: true };
               }
-              if (r && r.done) {
-                closed[i] = true;
-                if (mode === "shortest") {
-                  exhausted = true;
-                  closeAllExcept(i);
-                  return { value: undefined, done: true };
-                }
-                if (mode === "strict") {
-                  // Strict: every other iterator must also be done.
-                  for (let j = 0; j < iters.length; j++) {
-                    if (j === i || closed[j]) continue;
-                    let r2: any;
-                    try {
-                      r2 = iters[j].next();
-                    } catch (e) {
-                      closeAllExcept(-1);
-                      throw e;
-                    }
-                    if (r2 && !r2.done) {
-                      closeAllExcept(-1);
-                      throw new RangeError("Iterator.zip strict mode: length mismatch");
-                    }
-                    closed[j] = true;
+              if (mode === "strict") {
+                // Strict: every other iterator must also be done.
+                for (let j = 0; j < iters.length; j++) {
+                  if (j === i || closed[j]) continue;
+                  let r2: any;
+                  try {
+                    r2 = iters[j].next();
+                  } catch (e) {
+                    closeAllExcept(-1);
+                    throw e;
                   }
-                  exhausted = true;
-                  return { value: undefined, done: true };
+                  if (r2 && !r2.done) {
+                    closeAllExcept(-1);
+                    throw new RangeError("Iterator.zip strict mode: length mismatch");
+                  }
+                  closed[j] = true;
                 }
-                tuple[i] = padding[i];
-              } else {
-                tuple[i] = r.value;
-                liveCount++;
+                exhausted = true;
+                return { value: undefined, done: true };
               }
+              tuple[i] = padding[i];
+            } else {
+              tuple[i] = r.value;
+              liveCount++;
             }
-            if (mode === "longest" && liveCount === 0) {
-              exhausted = true;
-              return { value: undefined, done: true };
-            }
-            return { value: tuple, done: false };
-          },
-          function returnFn() {
+          }
+          if (mode === "longest" && liveCount === 0) {
             exhausted = true;
-            closeAllExcept(-1);
             return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+          }
+          return { value: tuple, done: false };
+        },
+        function returnFn() {
+          exhausted = true;
+          closeAllExcept(-1);
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
   if (typeof I.zipKeyed !== "function") {
-    Object.defineProperty(I, "zipKeyed", {
-      value: function zipKeyed(iterables: any, options?: any) {
-        if (iterables == null || typeof iterables !== "object") {
-          throw new TypeError("Iterator.zipKeyed: iterables must be an object");
-        }
-        const keys = Object.keys(iterables);
-        const iterArr: any[] = keys.map((k) => iterables[k]);
-        const zipped = (I as any).zip(iterArr, options);
-        return _makeHelperIterator(
-          function next() {
-            const r = zipped.next();
-            if (r.done) return { value: undefined, done: true };
-            const out: any = {};
-            for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
-            return { value: out, done: false };
-          },
-          function returnFn() {
-            try {
-              zipped.return?.();
-            } catch {}
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+    _installStaticHelper(I, "zipKeyed", 1, function zipKeyed(iterables: any, options?: any) {
+      if (iterables == null || typeof iterables !== "object") {
+        throw new TypeError("Iterator.zipKeyed: iterables must be an object");
+      }
+      const keys = Object.keys(iterables);
+      const iterArr: any[] = keys.map((k) => iterables[k]);
+      const zipped = (I as any).zip(iterArr, options);
+      return _makeHelperIterator(
+        function next() {
+          const r = zipped.next();
+          if (r.done) return { value: undefined, done: true };
+          const out: any = {};
+          for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
+          return { value: out, done: false };
+        },
+        function returnFn() {
+          try {
+            zipped.return?.();
+          } catch {}
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
   if (typeof I.concat !== "function") {
-    Object.defineProperty(I, "concat", {
-      value: function concat(...iterables: any[]) {
-        // Eagerly validate the iterable-ness of each argument; open lazily.
-        for (const iterable of iterables) {
-          if (iterable == null) {
-            throw new TypeError("Iterator.concat: argument is null or undefined");
-          }
-          const sym = iterable[Symbol.iterator];
-          if (typeof sym !== "function" && typeof iterable.next !== "function") {
-            throw new TypeError("Iterator.concat: argument is not iterable");
-          }
+    _installStaticHelper(I, "concat", 0, function concat(...iterables: any[]) {
+      // Eagerly validate the iterable-ness of each argument; open lazily.
+      for (const iterable of iterables) {
+        if (iterable == null) {
+          throw new TypeError("Iterator.concat: argument is null or undefined");
         }
-        let idx = 0;
-        let current: any = null;
-        return _makeHelperIterator(
-          function next() {
-            while (true) {
-              if (current == null) {
-                if (idx >= iterables.length) return { value: undefined, done: true };
-                current = _getFlattenable(iterables[idx++]);
-              }
-              let r: any;
-              try {
-                r = current.next();
-              } catch (e) {
-                current = null;
-                idx = iterables.length;
-                throw e;
-              }
-              if (r && r.done) {
-                current = null;
-                continue;
-              }
-              return r;
+        const sym = iterable[Symbol.iterator];
+        if (typeof sym !== "function" && typeof iterable.next !== "function") {
+          throw new TypeError("Iterator.concat: argument is not iterable");
+        }
+      }
+      let idx = 0;
+      let current: any = null;
+      return _makeHelperIterator(
+        function next() {
+          while (true) {
+            if (current == null) {
+              if (idx >= iterables.length) return { value: undefined, done: true };
+              current = _getFlattenable(iterables[idx++]);
             }
-          },
-          function returnFn() {
-            if (current != null) {
-              try {
-                current.return?.();
-              } catch {}
+            let r: any;
+            try {
+              r = current.next();
+            } catch (e) {
+              current = null;
+              idx = iterables.length;
+              throw e;
             }
-            idx = iterables.length;
-            current = null;
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+            if (r && r.done) {
+              current = null;
+              continue;
+            }
+            return r;
+          }
+        },
+        function returnFn() {
+          if (current != null) {
+            try {
+              current.return?.();
+            } catch {}
+          }
+          idx = iterables.length;
+          current = null;
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
