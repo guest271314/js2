@@ -3003,6 +3003,7 @@ function compileExternPropertyGet(
   // `__map_size` instead of the `Map_get_size` host import. Mirrors the method
   // interception in expressions/extern.ts.
   if (className === "Map" && propName === "size" && ctx.nativeStrings) {
+    addUnionImports(ctx);
     const sizeResult = tryCompileNativeMapSizeGet(ctx, fctx, expr.expression);
     if (sizeResult !== undefined) return sizeResult as ValType;
   }

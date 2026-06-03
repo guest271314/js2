@@ -56,7 +56,6 @@ import {
 import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
 import { emitJsonQuoteString } from "../json-runtime.js";
-import { ensureMapHelpers } from "../map-runtime.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -1902,29 +1901,10 @@ function compileCallExpression(
     }
   }
 
-  // (#1103a) Native Map construction in standalone / nativeStrings mode.
-  // `Map` is registered as an externClass via the lib .d.ts scan, so without
-  // this interception `new Map()` would emit a `Map_new` host import that
-  // standalone modules can't satisfy. Route to the WasmGC-native Map runtime
-  // (src/codegen/map-runtime.ts) instead. Result is `ref $Map` so member-call
-  // dispatch (compileExternMethodCall) recognizes the receiver. Slice 1:
-  // no-arg `new Map()` only — the iterable-constructor form needs
-  // `__map_new_from_arr` (not yet in the runtime core), so a `new Map(iter)`
-  // falls through to the host path (host mode) / refusal (standalone) for now.
-  if (
-    !expr.questionDotToken &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Map" &&
-    ctx.nativeStrings &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    ensureMapHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
-    }
-  }
+  // (#1103a) Note: `new Map()` is a NewExpression handled in
+  // expressions/new-super.ts (compileNewExpression), not here. Bare `Map(...)`
+  // without `new` is not valid for Map, so there is no call-expression
+  // interception to add.
 
   // `Object(x)` called without `new` — ECMAScript §20.1.1.1 / §7.1.18 ToObject.
   // Per spec: Object() / Object(null) / Object(undefined) → fresh empty object;

@@ -28,7 +28,7 @@ import type { Instr, StructTypeDef, ArrayTypeDef, ValType } from "../ir/types.js
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
-import { compileExpression, ensureLateImport, VOID_RESULT } from "./shared.js";
+import { compileExpression, VOID_RESULT } from "./shared.js";
 
 /** WasmGC `eq` abstract heap type, signed-LEB `0x6d` = -19. Used for ref.eq on
  *  object keys (only GC eqrefs can be compared by identity). */
@@ -158,13 +158,6 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
   if (ctx.mapHelpersEmitted) return;
   ctx.mapHelpersEmitted = true;
   ensureMapRuntimeTypes(ctx);
-
-  // (#1103a) The runtime and the call-site wiring box/unbox numeric keys &
-  // values through `__box_number` / `__unbox_number`. Import them up front
-  // (at module-setup time, before any function body is compiled) so the
-  // per-call wiring never triggers a mid-expression late-import index shift.
-  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-  ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
 
   const anyref: ValType = { kind: "anyref" };
   const i32: ValType = { kind: "i32" };
@@ -926,19 +919,28 @@ function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValTyp
     fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP });
     return;
   }
+  // __box_number must already be registered (the call sites call
+  // addUnionImports before dispatching — see the #1103a note in
+  // tryCompileNativeMapMethodCall). Looking it up (vs ensureLateImport) avoids
+  // adding an import mid-function-body, which would retrigger the #1677
+  // native-string finalize-shift and corrupt __str_flatten.
   switch (t.kind) {
     case "f64": {
-      const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-      fctx.body.push({ op: "call", funcIdx: boxIdx });
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
       return;
     }
     case "i32": {
       // boolean / small int → box as number for now (slice 1 number/string).
       fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-      const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-      fctx.body.push({ op: "call", funcIdx: boxIdx });
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
       return;
     }
     case "externref":
