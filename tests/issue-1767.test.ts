@@ -17,6 +17,8 @@ const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts
 const ONE_MIB = 1024 * 1024;
 const ARRAY_ELEMENTS_PER_MIB = 209715;
 const REPORTED_ARRAY_ELEMENTS = ARRAY_ELEMENTS_PER_MIB * 64;
+const REPORTED_STRING_BYTES = 64 * ONE_MIB;
+const LARGE_STRING_MEMORY_CAP_BYTES = 512 * ONE_MIB;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -214,6 +216,162 @@ type NullArrayRun = {
   remainingFrameBodyBytes: number;
 };
 
+function createLargeStringFrameSource(contentBytes: number): StdinSource {
+  const declaredLen = contentBytes + 2;
+  const header = Uint8Array.from([
+    declaredLen & 0xff,
+    (declaredLen >> 8) & 0xff,
+    (declaredLen >> 16) & 0xff,
+    (declaredLen >> 24) & 0xff,
+  ]);
+  let offset = 0;
+  const totalBytes = 4 + declaredLen;
+
+  const byteAt = (pos: number): number => {
+    if (pos < 4) return header[pos];
+    if (pos === 4 || pos === totalBytes - 1) return 34;
+    return 97;
+  };
+
+  return {
+    readInto(buffer: ArrayBuffer, ptr: number, len: number): number {
+      const out = new Uint8Array(buffer, ptr, len);
+      const n = Math.min(len, totalBytes - offset);
+      for (let i = 0; i < n; i++) out[i] = byteAt(offset + i);
+      offset += n;
+      return n;
+    },
+  };
+}
+
+type LargeStringRun = {
+  frameLengths: number[];
+  responseStringBytes: number;
+  invalidStringFrames: number;
+  maxFrameBodyBytes: number;
+  memoryBytes: number;
+  partialHeaderBytes: number;
+  remainingFrameBodyBytes: number;
+};
+
+function runHostWithLargeStringInput(binary: Uint8Array, contentBytes: number): LargeStringRun {
+  const source = createLargeStringFrameSource(contentBytes);
+  const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
+  const header = new Uint8Array(4);
+  let headerOffset = 0;
+  let bodyRemaining = 0;
+  let currentFrameIndex = 0;
+  let currentFrameLength = 0;
+  let currentFrameInvalid = false;
+  let responseStringBytes = 0;
+  let invalidStringFrames = 0;
+  const frameLengths: number[] = [];
+  let maxFrameBodyBytes = 0;
+
+  const finishStringFrame = () => {
+    if (currentFrameInvalid || currentFrameLength < 2) invalidStringFrames++;
+  };
+
+  const scanStringBytes = (chunk: Uint8Array, offset: number, length: number) => {
+    for (let i = 0; i < length; i++) {
+      const index = currentFrameIndex;
+      const byte = chunk[offset + i];
+      if (index === 0 || index === currentFrameLength - 1) {
+        if (byte !== 34) currentFrameInvalid = true;
+      } else {
+        if (byte !== 97) currentFrameInvalid = true;
+        responseStringBytes++;
+      }
+      currentFrameIndex++;
+    }
+  };
+
+  const consumeStdout = (chunk: Uint8Array) => {
+    let offset = 0;
+    while (offset < chunk.length) {
+      if (bodyRemaining > 0) {
+        const n = Math.min(bodyRemaining, chunk.length - offset);
+        scanStringBytes(chunk, offset, n);
+        bodyRemaining -= n;
+        offset += n;
+        if (bodyRemaining === 0) finishStringFrame();
+        continue;
+      }
+
+      const n = Math.min(4 - headerOffset, chunk.length - offset);
+      header.set(chunk.subarray(offset, offset + n), headerOffset);
+      headerOffset += n;
+      offset += n;
+
+      if (headerOffset === 4) {
+        const len = header[0] + header[1] * 256 + header[2] * 65536 + header[3] * 16777216;
+        frameLengths.push(len);
+        maxFrameBodyBytes = Math.max(maxFrameBodyBytes, len);
+        bodyRemaining = len;
+        currentFrameLength = len;
+        currentFrameIndex = 0;
+        currentFrameInvalid = false;
+        headerOffset = 0;
+        if (len === 0) finishStringFrame();
+      }
+    }
+  };
+
+  const wasi = {
+    fd_read(_fd: number, iovs: number, iovsLen: number, nread: number): number {
+      const view = new DataView(ref.mem!.buffer);
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const ptr = view.getUint32(iovs + i * 8, true);
+        const len = view.getUint32(iovs + i * 8 + 4, true);
+        const n = source.readInto(ref.mem!.buffer, ptr, len);
+        total += n;
+        if (n < len) break;
+      }
+      view.setUint32(nread, total, true);
+      return 0;
+    },
+    fd_write(fd: number, iovs: number, iovsLen: number, nwritten: number): number {
+      const view = new DataView(ref.mem!.buffer);
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const ptr = view.getUint32(iovs + i * 8, true);
+        const len = view.getUint32(iovs + i * 8 + 4, true);
+        if (fd === 1) consumeStdout(new Uint8Array(ref.mem!.buffer, ptr, len));
+        total += len;
+      }
+      view.setUint32(nwritten, total, true);
+      return 0;
+    },
+    proc_exit(code: number): void {
+      throw new Error(`proc_exit(${code})`);
+    },
+    random_get(): number {
+      return 0;
+    },
+    clock_time_get(): number {
+      return 0;
+    },
+  };
+
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+    wasi_snapshot_preview1: wasi,
+    env: {},
+  });
+  ref.mem = inst.exports.memory as WebAssembly.Memory;
+  (inst.exports.main as () => void)();
+
+  return {
+    frameLengths,
+    responseStringBytes,
+    invalidStringFrames,
+    maxFrameBodyBytes,
+    memoryBytes: ref.mem.buffer.byteLength,
+    partialHeaderBytes: headerOffset,
+    remainingFrameBodyBytes: bodyRemaining,
+  };
+}
+
 function runHostWithNullArrayInput(binary: Uint8Array, elements: number): NullArrayRun {
   const source = createNullArrayFrameSource(elements, ONE_MIB);
   const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
@@ -395,5 +553,16 @@ describe("#1767 Native Messaging bounded large-response frames", () => {
     expect(run.partialHeaderBytes).toBe(0);
     expect(run.remainingFrameBodyBytes).toBe(0);
     expect(run.memoryBytes).toBeLessThanOrEqual(8 * ONE_MIB);
+  }, 180_000);
+
+  it("streams a single 64 MiB JSON string frame without exceeding the 512 MiB memory cap", async () => {
+    const run = runHostWithLargeStringInput(await compileHost(), REPORTED_STRING_BYTES);
+    expect(run.responseStringBytes).toBe(REPORTED_STRING_BYTES);
+    expect(run.frameLengths.every((len) => len <= ONE_MIB)).toBe(true);
+    expect(run.maxFrameBodyBytes).toBe(ONE_MIB);
+    expect(run.partialHeaderBytes).toBe(0);
+    expect(run.remainingFrameBodyBytes).toBe(0);
+    expect(run.invalidStringFrames).toBe(0);
+    expect(run.memoryBytes).toBeLessThanOrEqual(LARGE_STRING_MEMORY_CAP_BYTES);
   }, 180_000);
 });

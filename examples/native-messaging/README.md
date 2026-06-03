@@ -47,27 +47,31 @@ Request bodies larger than 1 MiB can be streamed into the host as successive
 a drop-in Chrome host for byte-exact request/response framing; the only
 external dependency is a WASI preview1 runtime to launch it (see "Run it"
 below).
+The host also accepts the reported single-frame 64 MiB JSON string shape and
+streams it back as <=1 MiB JSON string response chunks, so the compiled module
+does not need to allocate the full request body at once.
 
 ## The host source
 
-[`nm_js2wasm.ts`](./nm_js2wasm.ts) follows the **3-symbol shape** the reference hosts use
-across runtimes:
+[`nm_js2wasm.ts`](./nm_js2wasm.ts) follows the reference-host shape
+guest271314 uses across runtimes:
 
-- **`getMessage()`** — reads the 4-byte little-endian length header, then
-  exactly that many body bytes, via `process.stdin.read` read-until loops (a
-  `readExact` helper handles short reads). It returns the first body frame as a
-  raw **`Uint8Array`** (a zero-length buffer signals EOF / a truncated or
-  oversized frame). The body is **never** decoded to a JS string, so messages
-  round-trip byte-exactly and large responses can be chunked without a lossy
-  string bridge (#389, #1753).
+- **`readMessageLength()` / `readFrameBody()`** — read the 4-byte
+  little-endian length header, then exactly that many body bytes via
+  `process.stdin.read` read-until loops (a `readExact` helper handles short
+  reads). Bodies up to 1 MiB stay raw **`Uint8Array`** values and round-trip
+  byte-exactly (#389, #1753).
 - **`sendMessage(message)`** — frames a `Uint8Array` body: writes the 4-byte LE
   length prefix, then the body bytes, to stdout with no trailing newline. Bodies
   up to 1 MiB are echoed byte-for-byte.
+- **`sendLargeStringChunks(declaredLen)`** — handles the large single-frame
+  JSON string stress shape by reading the string body incrementally and writing
+  each chunk as its own valid JSON string Native Messaging response frame.
 - **`main()`** — the continuous port loop:
-  `const m = getMessage(); sendMessage(m);`, looping until `getMessage()`
-  returns an empty body. A full 1 MiB body is a complete Native Messaging frame,
-  so the host writes its response immediately instead of waiting for a possible
-  continuation header.
+  read a length, stream large strings when needed, otherwise
+  `sendMessage(readFrameBody(len))`. A full 1 MiB body is a complete Native
+  Messaging frame, so the host writes its response immediately instead of
+  waiting for a possible continuation header.
 
 Diagnostics go to **stderr** (so they never corrupt the stdout protocol
 stream). The application logic — here, a byte-exact echo for one request frame
@@ -182,6 +186,10 @@ frame-budget stress rather than a logical 64 MiB JSON response assertion.
 `--max-request-frame-bytes` and `--max-response-frame-bytes` can tighten the
 frame budgets; `--allow-large-response-frame` remains only for measuring older
 wasm builds that predate the chunked writer.
+
+The unit tests also cover the single-frame 64 MiB JSON string case. That path
+streams the string back as multiple valid JSON string response frames and keeps
+the compiled module's linear memory below a 512 MiB cap.
 
 > If you don't have a WASI runtime installed, you can still confirm the module
 > is valid the same way the [`../wasi/README.md`](../wasi/README.md) Node
