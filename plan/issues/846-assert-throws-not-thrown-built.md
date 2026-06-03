@@ -11,7 +11,7 @@ goal: core-semantics
 sprint: 58
 parent: 779
 test262_fail: 2799
-pr: PENDING
+pr: 1098
 ---
 # #846 -- assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests)
 
