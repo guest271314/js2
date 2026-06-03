@@ -44,7 +44,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
-import { addImport, addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
+import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
@@ -1460,6 +1460,58 @@ export function generateModule(
   return { module: mod, errors: ctx.errors };
 }
 
+/**
+ * (#1789) Ensure `__module_init` runs before any exported function in WASI
+ * mode. Two steps, both idempotent:
+ *   1. Add a fresh `__init_done` i32 global (0) and prepend a self-guard to
+ *      `__module_init`: `if (__init_done) return; __init_done = 1; …`.
+ *   2. Prepend `call __module_init` to every exported function's body except
+ *      `__module_init` itself (and `_start`, which is created later by
+ *      addWasiStartExport and already calls `__module_init`).
+ * Runs once — guarded by `ctx.moduleInitGuardApplied`.
+ */
+function applyModuleInitGuard(ctx: CodegenContext): void {
+  if (ctx.moduleInitGuardApplied) return;
+
+  // Locate __module_init.
+  let initArrayIdx = -1;
+  for (let i = 0; i < ctx.mod.functions.length; i++) {
+    if (ctx.mod.functions[i]!.name === "__module_init") {
+      initArrayIdx = i;
+      break;
+    }
+  }
+  if (initArrayIdx < 0) return; // no module init — nothing to guard
+  const initFuncIdx = ctx.numImportFuncs + initArrayIdx;
+
+  // 1. __init_done global + self-guard prologue on __module_init.
+  const doneGlobalIdx = nextModuleGlobalIdx(ctx);
+  ctx.mod.globals.push({
+    name: "__init_done",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }],
+  });
+  const initFn = ctx.mod.functions[initArrayIdx]!;
+  initFn.body = [
+    { op: "global.get", index: doneGlobalIdx } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "global.set", index: doneGlobalIdx } as Instr,
+    ...initFn.body,
+  ];
+
+  // 2. Prepend `call __module_init` to every exported function (except
+  //    __module_init itself). Idempotency makes repeated entry calls safe.
+  for (const fn of ctx.mod.functions) {
+    if (!fn.exported) continue;
+    if (fn.name === "__module_init") continue;
+    fn.body = [{ op: "call", funcIdx: initFuncIdx } as Instr, ...fn.body];
+  }
+
+  ctx.moduleInitGuardApplied = true;
+}
+
 /** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122).
  *  When the async microtask queue was registered (#1326c Phase 1C-A), append a
  *  call to `__drain_microtasks` after the entry function so any scheduled
@@ -1488,6 +1540,21 @@ function addWasiStartExport(ctx: CodegenContext): void {
         }
       }
     }
+  }
+
+  // (#1789) Make module init run before ANY exported function, not just
+  // `_start`. The test262 standalone harness calls exports (e.g. `test()`)
+  // directly without invoking `_start`, so a module-level `const`/`let`
+  // object initializer would never run and a read of that binding would trip
+  // its TDZ guard global → trap before init. We make `__module_init`
+  // idempotent (self-guarded by a fresh `__init_done` i32 global) and prepend
+  // `call __module_init` to every exported user function. The first entry
+  // called — `_start` or a direct export — runs init exactly once; later calls
+  // no-op. Observable top-level side effects (console.log/stdout) therefore
+  // still fire on whichever entry runs first (for WASI hosts that's `_start`,
+  // preserving existing stdout behaviour) and never run twice.
+  if (ctx.wasi) {
+    applyModuleInitGuard(ctx);
   }
 
   if (targetIdx !== undefined) {
