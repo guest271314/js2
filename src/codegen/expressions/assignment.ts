@@ -1217,8 +1217,13 @@ function compileArrayDestructuringAssignment(
     // the primitive via __box_number and recursed; the lenient runtime then
     // silently produced an empty array. Drop the value and throw directly.
     if (resultType.kind === "f64" || resultType.kind === "i32") {
+      // #846: emit a REAL TypeError instance (not a bare string) so the
+      // test262 `assert.throws(TypeError, …)` callbacks — which check
+      // `e instanceof TypeError` inside the compiled program — observe the
+      // correct error type. `emitThrowString` produced an opaque
+      // string-payload exception that failed the instanceof check.
       fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "TypeError: value is not iterable");
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       fctx.body.push({ op: "ref.null.extern" } as Instr);
       return { kind: "externref" };
     }
