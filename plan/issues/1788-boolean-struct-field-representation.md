@@ -1,5 +1,5 @@
 ---
-id: 1784
+id: 1788
 title: "boolean i32 struct fields boxed as number — typeof/=== mismatch on dynamic read"
 status: ready
 created: 2026-06-03
