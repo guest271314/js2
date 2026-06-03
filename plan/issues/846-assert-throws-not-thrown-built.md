@@ -359,3 +359,71 @@ only the binding-declaration + the empty-nested paths were not.
 **Umbrella remains open** — this is one slice. Remaining mergeable buckets:
 array-assignment GetIterator, array-`length` RangeError (~28), and the
 descriptor-model work under #1630.
+
+## Slice 2 landed (sd-1472, 2026-06-03): array-pattern GetIterator on non-iterable primitives
+
+### Root cause (WHY, not just WHAT)
+ArrayAssignmentPattern (§13.15.5.2) and array BindingPattern
+initialization (§8.5.2/§8.5.3) BOTH begin with `GetIterator(value)`. A
+primitive number/boolean has no `[Symbol.iterator]`, so GetIterator throws a
+**TypeError**. The compiler had two distinct gaps here, and crucially the
+test262 `assert.throws(TypeError, fn)` callbacks run **inside the compiled
+program** and check `e instanceof TypeError` — so the thrown value has to be a
+real `__new_TypeError` *instance*, not an opaque string-payload exception.
+
+1. **`[a] = 5` (array-assignment destructuring, f64/i32 RHS)** —
+   `src/codegen/expressions/assignment.ts:~1219`. It already threw, but via
+   `emitThrowString("TypeError: value is not iterable")`, which produces a bare
+   string-payload Wasm exception. The runtime classifies that to a host
+   TypeError for the OUTER `assert.throws`, but an INNER `e instanceof
+   TypeError` (the common test262 shape) sees only a string ref and fails →
+   the test took the "wrong error type" branch. Fixed by switching to
+   `emitThrowTypeError` (emits the real `__new_TypeError` instance; has a
+   standalone in-module fallback via `emitWasiErrorConstructor` in no-JS-host
+   mode).
+
+2. **`for (let [x] of [1])` / `for ([] of [1])` (for-of array binding
+   pattern over numeric elements)** —
+   `src/codegen/statements/loops.ts`, the f64/i32 element branch of
+   `compileForOfDestructuring`'s ArrayBindingPattern case. This branch
+   **silently assigned `undefined` sentinels and never threw** — the worst
+   failure mode (no throw at all, the assertion's callback returns normally).
+   The element value (a number) is non-iterable, so GetIterator must throw.
+   The throw is now emitted **unconditionally before the element loop** so the
+   EMPTY-pattern form (`for ([] of [1])`) also throws — per spec GetIterator
+   runs before any binding element is read. Binding locals are still
+   `allocLocal`'d (so later body references type-check) but no longer assigned;
+   the throw makes the remainder of the iteration unreachable.
+
+### Why these are spec-safe (no false positives)
+- **Strings are iterable** and lower to a string ref / externref, so they take
+  a different branch — confirmed unaffected (`[c] = "ab"` and
+  `for ([c] of ["ab"])` still work).
+- **Object patterns** use RequireObjectCoercible, NOT GetIterator — numbers ARE
+  object-coercible, so `for ({x} of [1,2])` must NOT throw. The object-pattern
+  branch is untouched; verified it still no-throws.
+- f64/i32 element type only arises when the iterable yields numbers/booleans,
+  which are genuinely non-iterable, so throwing is never a false positive.
+- Stack-balanced: `emitThrowTypeError` is net-zero (push message externref →
+  `__new_TypeError` → `throw` consumes it).
+
+### Deliberately NOT touched (heeding the prior reverted attempt)
+The typed-struct static-`null` nested case remains out of scope — the prior
+attempt produced 3 false regressions and was reverted. The `any`-typed
+externref for-of path already routes through `__array_from_iter_n` (host
+GetIterator) and throws correctly, so it needed no change.
+
+### Validation
+- `tests/issue-846-slice2.test.ts` — 11 cases, all pass (real-TypeError-instance
+  assertions for `[a]=5`/null/undefined; string/array no-throw; for-of
+  array-pattern + empty-pattern throw; for-of object-pattern + tuples + arrays +
+  plain binding no-throw).
+- `tsc --noEmit` clean; `biome lint` clean on changed files.
+- Existing iterator-override / dstr suites (#1701, #1592, #1431, #1719 CPR/S1,
+  #1128 TDZ, generator-method-destructuring) — all green.
+- **Regressions: 0 real.** A 1,688-file dstr+for-of sweep showed 24 apparent
+  `compile_error` flips, but ALL reproduce as `pass` when run standalone — they
+  are single-process batch-state-pollution artifacts of the runner (shared
+  string pool / import caches across files), not regressions. Spot-checked 7
+  standalone: all pass. The 9 apparent "flips to pass" are stale-baseline drift
+  (already pass on clean HEAD too).

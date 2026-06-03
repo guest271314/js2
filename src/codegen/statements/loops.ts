@@ -16,7 +16,7 @@ import {
   findUnresolvableInObjectPattern,
   isStrictContext,
 } from "../expressions/assignment.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
+import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
 import { shiftLateImportIndices } from "../expressions/late-imports.js";
 import {
   addIteratorImports,
@@ -1278,7 +1278,19 @@ function compileForOfDestructuring(
         syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
         return;
       }
-      // Non-ref, non-externref (f64, i32): assign defaults or undefined sentinels
+      // #846: A non-ref, non-externref element (f64/i32 ⇒ number/boolean) is a
+      // primitive that lacks [Symbol.iterator]. ArrayBindingPattern initialization
+      // (§8.5.2 BindingInitialization → §8.5.3 IteratorBindingInitialization)
+      // first performs GetIterator(elem), which throws TypeError for a non-iterable
+      // primitive. This applies even to an EMPTY pattern (`for ([] of [1])`) because
+      // GetIterator runs before any binding element is read. Previously this branch
+      // silently assigned undefined sentinels and never threw. Strings are iterable
+      // but lower to a string ref / externref, so they take a different branch and
+      // are unaffected.
+      //
+      // The binding locals are still declared (allocated) so later references in
+      // the loop body type-check, but the throw makes the code after it
+      // unreachable in this iteration.
       for (const element of pattern.elements) {
         if (ts.isOmittedExpression(element)) continue;
         if (!ts.isBindingElement(element)) continue;
@@ -1286,27 +1298,9 @@ function compileForOfDestructuring(
         const localName = element.name.text;
         const bindingTsType = ctx.checker.getTypeAtLocation(element);
         const bindingType = resolveWasmType(ctx, bindingTsType);
-        const localIdx = allocLocal(fctx, localName, bindingType);
-        if (element.initializer) {
-          const instrs = collectInstrs(fctx, () => {
-            compileExpression(ctx, fctx, element.initializer!, bindingType);
-            fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-          });
-          fctx.body.push(...instrs);
-        } else {
-          if (bindingType.kind === "f64") {
-            fctx.body.push({ op: "f64.const", value: NaN });
-          } else if (bindingType.kind === "i32") {
-            fctx.body.push({ op: "i32.const", value: 0 });
-          } else if (bindingType.kind === "ref_null" || bindingType.kind === "ref") {
-            const refTypeIdx = (bindingType as { typeIdx: number }).typeIdx;
-            fctx.body.push({ op: "ref.null", typeIdx: refTypeIdx });
-          } else {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
-          fctx.body.push({ op: "local.set", index: localIdx });
-        }
+        allocLocal(fctx, localName, bindingType);
       }
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       return;
     }
 
