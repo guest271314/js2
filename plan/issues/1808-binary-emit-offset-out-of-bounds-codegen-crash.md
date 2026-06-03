@@ -113,6 +113,35 @@ spurious `Cannot create property 'declaredType' on number` for ~192 tests; that
 proved to be cross-test state contamination in the long-lived scan harness, not
 a per-test defect — each file run in a fresh process compiles/runs cleanly.)
 
+### Why 292 failures bunched into a single ~30s window (burst mechanism)
+
+The baselines-repo JSONL (`f52502e9`, 2026-06-04) records all 292 failures
+inside one ~30s timestamp window (`00:25:27`→`00:25:57`, 36 unique timestamps)
+with normal `compile_ms` (9–382 ms, median 121). That is not a per-input
+codegen bug — it is **one poisoned `compiler-fork-worker.mjs` process**. The
+worker reuses a single long-lived `createIncrementalCompiler()` instance across
+up to `RECREATE_INTERVAL=500` files and only recreated it on that fixed
+interval. Once the shared state (or the V8 heap, capped at
+`--max-old-space-size=512`) degraded, **every** subsequent compile in that
+worker emitted the identical emit-class error result until its scheduled
+recycle — producing the dense identical-message burst. (The prior batched scan
+hitting `Cannot create property 'declaredType' on number` for ~192 tests is the
+same poisoned-state phenomenon surfacing a different message; fresh-process runs
+are clean.) This is consistent with the cluster being absent on direct,
+deterministic re-runs at both the baseline commit and HEAD.
+
+### Harness hardening (recurrence prevention)
+
+`scripts/compiler-fork-worker.mjs` now **recreates the incremental compiler
+immediately** when a compile produces an emit/allocation-class error
+(`POISON_ERROR_RE`: `Binary emit error`, `offset is out of bounds`,
+`out of memory`, `Array buffer allocation failed`, `Maximum call stack size
+exceeded`, `Invalid array length`) — both for error *results* and thrown
+exceptions — instead of waiting for the 500-file `RECREATE_INTERVAL`. This caps
+the blast radius of a poisoned worker at one file, so a transient degraded state
+can no longer cascade into hundreds of false `Binary emit error` results in the
+recorded baseline.
+
 ### Guard
 
 `tests/issue-1808.test.ts` pins one representative per affected directory and
