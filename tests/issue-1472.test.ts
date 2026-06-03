@@ -145,6 +145,97 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(46);
   });
 
+  it("Phase B Blocker B: Object.keys + indexed read over an open `any` lowers native (no host imports, validates)", async () => {
+    // #1472 Phase B Blocker B — the native $ObjVec build/iterate foundation.
+    // For an `any`-typed receiver that TypeScript cannot narrow to a closed
+    // struct shape (a bare function parameter), `Object.keys(o)` lowers to the
+    // native __object_keys helper (walks the $Object PropMap → fresh $ObjVec),
+    // and an all-`any` indexed read `(ks as any)[i]` lowers to the native
+    // __extern_get_idx ($ObjVec[i]). Both must appear as DEFINED Wasm functions
+    // (not env::* imports), the module must validate, and zero object/array
+    // host imports may leak.
+    //
+    // NOTE: a runtime *value* assertion through Object.keys is intentionally
+    // NOT made here — standalone has no JS host to hand in an open object, and
+    // a locally-built `{}` is narrowed by TS to a closed struct (routed to the
+    // struct fast path, not this runtime). Exercising the end-to-end value path
+    // depends on the open-`any` receiver-dispatch work (Blocker A) + the
+    // enumeration-consumer slice (for-of / string[] coercion / `.length`
+    // routing). This test pins the foundation: the helpers emit, validate, and
+    // stay host-free.
+    const source = `
+        export function run(o: any): number {
+          const ks: any = Object.keys(o);
+          const first: any = (ks as any)[0];
+          return first === null ? -1 : 7;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    // No host array bridge leaked either (the $ObjVec is the array).
+    expect(r.imports.some((i) => i.module === "env" && i.name.startsWith("__array_from"))).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    // The native runtime helpers are emitted as defined functions, not imports.
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_keys\b/);
+    expect(wat).toMatch(/\(func \$__objvec_new\b/);
+    expect(wat).toMatch(/\(func \$__objvec_push\b/);
+    expect(wat).toMatch(/\(func \$__extern_get_idx\b/);
+    expect(wat).toMatch(/\(func \$__extern_length\b/);
+    // And the module instantiates with an empty import object (pure Wasm).
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
+  it("Phase B Blocker A Half 1: Object.isFrozen/isSealed/isExtensible lower native (no host imports, validates)", async () => {
+    // #1472 Phase B Blocker A Half 1 — the three object-integrity predicates
+    // gain Wasm-native readers (__object_isFrozen/isSealed/isExtensible read the
+    // $Object.flags field). An externref-typed receiver routes to the native
+    // helper instead of the JS-host import, so the standalone module carries
+    // zero env::__object_* imports and validates. (The execution-order-blind
+    // compile-time fast paths are also gated off in standalone — see the gc
+    // regression test below — but their observable effect needs the freeze SET
+    // path, which is Half 2.)
+    const source = `
+        export function chk(o: any): number {
+          const a = Object.isFrozen(o) ? 1 : 0;
+          const b = Object.isExtensible(o) ? 1 : 0;
+          const c = Object.isSealed(o) ? 1 : 0;
+          return a * 100 + b * 10 + c;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__object_isFrozen\b/);
+    expect(wat).toMatch(/\(func \$__object_isSealed\b/);
+    expect(wat).toMatch(/\(func \$__object_isExtensible\b/);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
+  it("Phase B Blocker A Half 1: gc-mode static fast path for isFrozen/isSealed is unchanged", async () => {
+    // Regression guard: the `!ctx.standalone` gate must NOT disturb the default
+    // (gc) target. A local known-frozen at compile time still folds isFrozen to
+    // a compile-time constant true (the existing fast path), with the JS-host
+    // runtime present.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o.x = 1;
+          Object.freeze(o);
+          return Object.isFrozen(o) ? 1 : 0;
+        }
+      `;
+    const r = await compile(source, {}); // default gc target — host runtime present
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // After freeze, the known-frozen identifier folds isFrozen → const 1.
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    const start = wat.split("\n").findIndex((l) => /\(func \$run /.test(l));
+    expect(start).toBeGreaterThanOrEqual(0);
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `

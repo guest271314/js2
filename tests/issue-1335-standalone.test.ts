@@ -64,3 +64,35 @@ describe("#1335 Phase 1 — standalone Number.prototype.toString(radix)", () => 
     expect(await formatStandalone("(31).toString(16)", "standalone")).toBe("1f");
   });
 });
+
+describe("#1335 — number toString result is consumable by chained string ops", () => {
+  // The native number_toString[_radix] helpers return an externref wrapping a
+  // $NativeString. Before this fix the call site reported the result type as
+  // `externref`, so a consumer that unwrapped it (.charAt, +, etc.) applied a
+  // SECOND any.convert_extern to the already-native ref and the module failed
+  // Wasm validation ("any.convert_extern expected externref, found native
+  // ref"). The call site now unwraps once and reports the native string type.
+  async function validatesStandalone(src: string): Promise<void> {
+    const r = await compile(src, { fileName: "issue-1335-chain.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    await expect(WebAssembly.compile(r.binary)).resolves.toBeDefined();
+  }
+
+  it("(255).toString(16).charAt(0) validates and is consumable", async () => {
+    const r = await compile(`export function test(): number { return (255).toString(16).charCodeAt(0); }`, {
+      fileName: "issue-1335-chain.ts",
+      target: "standalone",
+    });
+    expect(r.success).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { test(): number }).test()).toBe(102); // 'f'
+  });
+
+  it("no-arg (42).toString() chained into a string method validates", async () => {
+    await validatesStandalone(`export function test(): number { return (42).toString().charCodeAt(0); }`);
+  });
+
+  it("number toString result concatenated with a string literal validates", async () => {
+    await validatesStandalone(`export function test(): number { return ((255).toString(16) + "!").length; }`);
+  });
+});

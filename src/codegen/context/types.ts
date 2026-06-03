@@ -742,6 +742,9 @@ export interface CodegenContext {
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
   anyHelpersEmitted: boolean;
+  /** (#1789) Whether the WASI module-init guard (idempotent __module_init +
+   *  prepended init call on exports) has been applied. */
+  moduleInitGuardApplied: boolean;
   /** Shape-inferred array-like variables */
   shapeMap: Map<string, { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType }>;
   /** Set of function names that failed during hoisting pre-pass */
