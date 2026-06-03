@@ -47,27 +47,25 @@ describe("JSON.stringify", () => {
     expect(exports.test()).toBe("0");
   });
 
-  // Note: booleans are represented as i32 (0/1) in Wasm and coerced to numbers
-  // via __box_number before reaching JSON.stringify, so true becomes "1" and
-  // false becomes "0". This is a boolean externref coercion limitation, not a
-  // JSON.stringify issue.
-  it("stringifies true (coerced to number)", async () => {
+  // (#1788) Booleans are i32 in Wasm, but the i32 ValType is now branded
+  // `boolean` so the externref coercion path boxes via `__box_boolean`, not
+  // `__box_number`. JSON.stringify(true) now correctly produces "true" / "false"
+  // instead of the previous "1" / "0".
+  it("stringifies true", async () => {
     const exports = await compileToWasm(`
       export function test(): string {
         return JSON.stringify(true);
       }
     `);
-    // true is coerced to 1 via __box_number path
-    expect(exports.test()).toBe("1");
+    expect(exports.test()).toBe("true");
   });
 
-  it("stringifies false (coerced to number)", async () => {
+  it("stringifies false", async () => {
     const exports = await compileToWasm(`
       export function test(): string {
         return JSON.stringify(false);
       }
     `);
-    // false is coerced to 0 via __box_number path
-    expect(exports.test()).toBe("0");
+    expect(exports.test()).toBe("false");
   });
 });
