@@ -117,3 +117,37 @@ Regression guards (all green):
 - `tests/issue-1719-cpr.test.ts`, `tests/issue-1719-s1.test.ts`,
   `tests/issue-1320.test.ts`, `tests/symbol-iterator-protocol.test.ts` — 26/26
 - full `tests/equivalence/` suite — exit 0 (byte-identical for override-free)
+
+## PR #1102 CI "50 oob regressions" — confirmed stale-baseline drift (2026-06-03)
+
+CI run 26902102882 reported net -14 pass with 48 `oob` + 1 `other` + 1
+`negative_test_fail` "regressions". Investigation proves these are NOT caused
+by this PR — they are drift against a 136h-old baseline (commit 9ee8e92,
+2026-05-29) vs current main HEAD (5258a136, 2026-06-03). The report itself
+warns the baseline is stale.
+
+Evidence (each of the 50 regressed test paths compiled through the exact CI
+incremental path — `createIncrementalCompiler` + `wrapTest`, the
+`compiler-fork-worker.mjs` contract):
+- **Branch HEAD (post merge of origin/main): 50/50 compile clean, 0 fail.**
+- **origin/main HEAD: 50/50 compile clean, 0 fail** (identical — so neither tip
+  produces the `compile_error` the stale baseline recorded).
+- **No cross-test state leakage**: compiling an override-spread test first
+  (exercises the new `emitArrayProtoIteratorDrive` path) then all 50 regressed
+  tests in the SAME incremental compiler instance → still 50/50 clean. The
+  `protoOverrides` index-shift + driver-reservation do not corrupt subsequent
+  modules.
+- The 48 regressed tests (Math.tan, Date, RegExp, String, Set, …) contain no
+  array spread and no `Array.prototype[@@iterator]` override, so the gated new
+  path (`arrayIteratorMaybeOverridden && overrideGlobalIdx!==undefined`) never
+  fires for them.
+
+The `tests/spread-rest.test.ts` unit failures (`Import #0 "string_constants":
+module is not an object or function`) are a pre-existing test-harness bug on
+`main` (hand-rolled import object omits `string_constants`); origin/main emits
+the identical imports for `[...arr]`, so this is not introduced here and the
+file is not in the CI quality gate.
+
+Resolution: merged origin/main into the branch and re-pushed to trigger a fresh
+CI run against the freshly-promoted baseline. No code fix required — the PR diff
+is correct and index-shift-safe.
