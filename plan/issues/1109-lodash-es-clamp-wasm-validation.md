@@ -11,7 +11,6 @@ reasoning_effort: high
 goal: compilable
 sprint: 45
 depends_on: [1107]
-pr: 49
 merged: 2026-04-27
 ---
 # #1109 — lodash-es clamp: Wasm validation error in toNumber codegen

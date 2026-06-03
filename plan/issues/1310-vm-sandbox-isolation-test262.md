@@ -15,7 +15,6 @@ goal: test262-conformance
 sprint: 50
 related: [1160]
 ---
-
 # #1310 — vm.createContext sandbox isolation for test262 global contamination
 
 ## Background

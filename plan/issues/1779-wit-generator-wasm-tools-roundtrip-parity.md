@@ -11,12 +11,10 @@ task_type: test
 area: wit-generator
 language_feature: wit
 goal: platform
-related: [389, 600, 639, 1751]
-depends_on: []
 sprint: Backlog
+related: [389, 600, 639, 1751]
 origin: "Follow-up to #1751 stretch goal: wasm-tools round-trip parity check was not implemented because wasm-tools was unavailable in the workspace."
 ---
-
 # #1779 - WIT generator wasm-tools round-trip parity check
 
 ## Problem

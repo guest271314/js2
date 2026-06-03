@@ -11,12 +11,10 @@ task_type: feature
 area: runtime
 language_feature: web-api
 goal: platform
-related: [389, 1588, 1655, 1752]
-depends_on: []
 sprint: Backlog
+related: [389, 1588, 1655, 1752]
 origin: "Follow-up to #1752 stretch goal: TextEncoder.encodeInto was explicitly not implemented."
 ---
-
 # #1780 - TextEncoder.encodeInto support for standalone and WASI
 
 ## Problem

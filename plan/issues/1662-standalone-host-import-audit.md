@@ -14,7 +14,6 @@ goal: standalone-mode
 sprint: Backlog
 related: [1535, 1471, 1472, 1473, 1474, 1103, 1335, 1470, 1599, 682, 1598, 1387, 1781]
 ---
-
 # #1662 — Standalone (`--target wasi`) host-import audit
 
 ## Problem

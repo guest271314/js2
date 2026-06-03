@@ -13,7 +13,6 @@ language_feature: generators
 goal: spec-completeness
 sprint: 44
 closed: 2026-04-23
-pr: 11
 net_improvement: 882
 ---
 # #1162 — `yield*` async: undefined AST node crash (~161 tests)

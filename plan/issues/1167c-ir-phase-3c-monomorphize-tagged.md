@@ -16,7 +16,6 @@ sprint: 44
 depends_on: [1167b, 1168]
 required_by: [1169]
 closed: 2026-04-24
-pr: 13
 net_improvement: 0
 ---
 # #1167c — IR Phase 3c: monomorphize + tagged-unions

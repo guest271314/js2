@@ -13,7 +13,6 @@ sprint: 44
 closed: 2026-04-23
 test262_fail: 3585
 root_cause_confirmed: 2026-04-21
-pr: 246
 net_improvement: 2351
 ---
 ## Implementation Summary

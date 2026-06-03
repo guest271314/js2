@@ -13,7 +13,6 @@ area: testing
 language_feature: strings
 goal: platform
 sprint: 46
-pr: 94
 es_edition: n/a
 related: [1183, 1186]
 origin: surfaced during #1183 implementation — equivalence tests for native-strings string-typed params couldn't pass JS strings to Wasm exports, forcing inline-literal workarounds and skipping legacy↔IR dual-run.

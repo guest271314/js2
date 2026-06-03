@@ -14,7 +14,6 @@ language_feature: n/a
 goal: ci-hardening
 sprint: 46
 required_by: [1216]
-pr: 108
 es_edition: n/a
 related: [1213, 1170]
 origin: surfaced after #1213 fixed the snapshot step — the `refresh-benchmarks` workflow now reaches the regression gate, which fires on every PR because the committed baseline (generated locally) is 4× faster than CI candidates (shared runners).

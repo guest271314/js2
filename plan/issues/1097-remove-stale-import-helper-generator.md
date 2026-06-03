@@ -13,7 +13,6 @@ language_feature: compiler-internals
 goal: maintainability
 sprint: 42
 closed: 2026-04-12
-pr: 142
 es_edition: n/a
 ---
 # #1097 — Remove stale import-helper generator in output.ts

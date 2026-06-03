@@ -13,7 +13,6 @@ area: codegen
 language_feature: class, class-fields-private, private-accessors
 goal: spec-completeness
 sprint: Backlog
-pr: 721
 fix_commit: 9ffbb1a52
 related: [1456, 1365, 1591]
 test262_fail: 132

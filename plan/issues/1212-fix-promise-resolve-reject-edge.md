@@ -13,7 +13,6 @@ area: codegen
 language_feature: promises
 goal: async-model
 sprint: 46
-pr: 103
 origin: surfaced by test262 regression-gate on PR #95 (#1211 codegen fix)
 ---
 ## Investigation finding (2026-04-30, senior-dev-1210): fixed by attrition

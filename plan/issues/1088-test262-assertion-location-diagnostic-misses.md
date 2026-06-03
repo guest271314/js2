@@ -12,7 +12,6 @@ task_type: bugfix
 goal: property-model
 sprint: 42
 closed: 2026-04-12
-pr: 143
 ---
 # #1088 — Assertion location diagnostic misses `verifyProperty` / `verifyEqualTo`
 

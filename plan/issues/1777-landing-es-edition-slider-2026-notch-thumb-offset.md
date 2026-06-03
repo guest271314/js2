@@ -11,9 +11,9 @@ task_type: bugfix
 area: landing-page
 language_feature: n/a
 goal: developer-experience
+sprint: 59
 es_edition: n/a
 related: [925, 959, 1201, 1398]
-sprint: 59
 origin: "Project lead report on 2026-06-02: landing page ES edition slider added 2026 as a notch, and the knob sits increasingly right of tick marks when dragged right."
 ---
 # #1777 - landing page ES edition slider shows ES2026 notch and thumb drifts off ticks

@@ -14,7 +14,6 @@ language_feature: compiler-internals
 goal: async-model
 sprint: 45
 depends_on: [1169e]
-pr: 84
 merged: 2026-04-28
 ---
 # #1169h — IR Phase 4 Slice 9: try/catch/finally and throw through IR

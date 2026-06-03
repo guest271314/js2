@@ -12,7 +12,6 @@ goal: npm-library-support
 sprint: 45
 parent: 1033
 required_by: [1033]
-pr: 40
 merged: 2026-04-26
 ---
 # #1043 — `process.env.NODE_ENV` compile-time constant + DCE

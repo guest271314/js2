@@ -14,7 +14,6 @@ language_feature: strings
 goal: performance
 sprint: 46
 depends_on: [1178]
-pr: 96
 origin: surfaced by competitive-benchmark run 2026-04-29
 ---
 # #1210 — js2wasm string-hash: 20s timeout in Wasmtime due to WasmGC GC pressure

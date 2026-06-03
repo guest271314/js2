@@ -14,7 +14,6 @@ language_feature: n/a
 goal: async-model
 sprint: 46
 required_by: [1204]
-pr: 104
 es_edition: n/a
 related: [1202, 1203, 1204]
 origin: credibility infrastructure sprint — the aggregate 59.9% pass rate is insufficient for Bytecode Alliance reviewers and academic partners. The infrastructure to display per-edition scores already exists (test262-editions.json feeds t262-edition-timeline on the landing page); what is missing is the per-path category breakdown and its wiring into the feature rows.

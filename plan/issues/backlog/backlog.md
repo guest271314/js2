@@ -71,6 +71,10 @@ only one new root-cause issue was needed.
 
 - [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
 
+## IR / allowJs parity follow-ups (2026-06-03)
+
+- [#1783](../1783-ir-js-ts-native-messaging-wasm-parity.md) — IR inference parity: native-messaging `.js` and `.ts` emit divergent WASI Wasm; JS path boxes numeric values and loses numeric template interpolation despite valid WASI output — medium, medium, **ready (backlog)**; follow-up to #1768/#389.
+
 ## Sprint 55 — repo structure / website (2026-05-24)
 
 - [#1656](../1656-group-website-files-into-website-dir.md) — Consolidate all website/frontend files under `website/` (components, dashboard, playground, index.html, public, frame-nav-sync.js, images, vite.config.ts, CNAME) — medium, medium, **ready (sprint 55)**. Needs architect spec (`arch(#1656)`) before dev; lands as one PR. Related: #1583, #1590.

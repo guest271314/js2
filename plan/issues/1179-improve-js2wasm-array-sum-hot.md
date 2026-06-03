@@ -13,10 +13,8 @@ area: codegen
 language_feature: arrays
 goal: platform
 sprint: 45
-pr: 62
 merged: 2026-04-27
 origin: surfaced by competitive-benchmark refresh after #1173/#1174/#1175 landed (2026-04-27)
-pr: 62
 ---
 # #1179 — `array-sum` hot-runtime is ~9× slower than Node and ~14% slower than Javy
 
