@@ -67,6 +67,7 @@
 - [feedback_document_findings.md](feedback_document_findings.md) — Document agent findings in issue files before closing
 - [feedback_update_backlog.md](feedback_update_backlog.md) — Always update backlog.md when creating/completing issues
 - [feedback_po_boundary.md](feedback_po_boundary.md) — PO only writes to plan/
+- [feedback_bare_numbers_are_plan_tasks.md](feedback_bare_numbers_are_plan_tasks.md) — Bare numbers refer to local plan issues/tasks unless user explicitly says GitHub issue or PR
 
 ### Testing
 - [feedback_trigger_deploy_pages.md](feedback_trigger_deploy_pages.md) — After any [skip ci] baseline refresh, manually trigger deploy-pages.yml so GitHub Pages shows the new pass rate

@@ -27,6 +27,7 @@ function parseArgs(argv) {
     workflow: DEFAULT_WORKFLOW,
     once: false,
     dryRun: false,
+    resumeInProgress: false,
     sprint: null,
     max: null,
     status: false,
@@ -49,6 +50,7 @@ function parseArgs(argv) {
     if (a === "--workflow") args.workflow = path.resolve(argv[++i]);
     else if (a === "--once") args.once = true;
     else if (a === "--dry-run") args.dryRun = true;
+    else if (a === "--resume-in-progress" || a === "--resume-claimed") args.resumeInProgress = true;
     else if (a === "--sprint") args.sprint = argv[++i];
     else if (a === "--max") args.max = Number(argv[++i]);
     else if (a === "--status") args.status = true;
@@ -88,6 +90,8 @@ Options:
   --workflow PATH   Workflow contract path (default: WORKFLOW.md)
   --once            Run one poll/dispatch cycle and wait for launched workers
   --dry-run         Show dispatch plan without creating worktrees or agents
+  --resume-in-progress
+                  Treat stale in-progress sprint issues as dispatch candidates
   --sprint N        Override tracker.sprint
   --max N           Override agent.max_concurrent_agents
   --status          Print latest runtime state snapshot
@@ -437,8 +441,9 @@ function loadMarkdownIssues(config) {
 }
 
 class MarkdownTracker {
-  constructor(config) {
+  constructor(config, options = {}) {
     this.config = config;
+    this.resumeInProgress = Boolean(options.resumeInProgress);
     this.activeStates = new Set(asArray(get(config, "tracker.active_states"), ACTIVE_DEFAULT).map(normalizeState));
     this.claimableStates = new Set(
       asArray(get(config, "tracker.claimable_states"), ACTIVE_DEFAULT).map(normalizeState),
@@ -458,9 +463,12 @@ class MarkdownTracker {
   fetchCandidateIssues() {
     const issues = this.allIssues();
     const sprint = issues[0]?.selected_sprint ?? "latest";
+    const candidateStates = this.resumeInProgress
+      ? new Set([...this.claimableStates, ...this.activeStates])
+      : this.claimableStates;
     return issues
       .filter((issue) => String(issue.sprint) === String(sprint))
-      .filter((issue) => this.claimableStates.has(issue.state))
+      .filter((issue) => candidateStates.has(issue.state))
       .filter((issue) => !activeDispatchClaim(issue.id))
       .filter((issue) => !this.isBlocked(issue, issues))
       .sort(compareIssues);
@@ -873,7 +881,7 @@ class Orchestrator {
     if (Number.isFinite(options.max))
       this.config.agent = { ...(this.config.agent || {}), max_concurrent_agents: options.max };
     this.logger = new Logger(this.config, options.dryRun);
-    this.tracker = new MarkdownTracker(this.config);
+    this.tracker = new MarkdownTracker(this.config, options);
     this.workspaceManager = new WorkspaceManager(this.config, this.logger, options);
     this.runner = new AgentRunner(this.config, this.logger);
     this.lanes = buildAgentLanes(this.config);
@@ -925,6 +933,10 @@ class Orchestrator {
       return;
     }
     if (action === "resume") {
+      if (this.stopping || this.shouldExit) {
+        this.logger.event("control_ignored", { error: "resume ignored: daemon is stopping" });
+        return;
+      }
       this.paused = false;
       this.draining = false;
       this.stopping = false;
@@ -1043,6 +1055,7 @@ class Orchestrator {
         draining: this.draining,
         stopping: this.stopping,
         should_exit: this.shouldExit,
+        resume_in_progress: this.options.resumeInProgress,
       },
       lanes: this.lanes.map((lane) => ({
         name: lane.name,
