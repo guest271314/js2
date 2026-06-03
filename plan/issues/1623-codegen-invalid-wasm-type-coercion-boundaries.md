@@ -1,9 +1,10 @@
 ---
 id: 1623
 title: "codegen: invalid Wasm binary at type-boundary coercion (extern/anyref + struct ref types)"
-status: in-review
+status: done
 created: 2026-05-20
-updated: 2026-06-02
+updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -169,3 +170,59 @@ ToPrimitive/trampoline, late global, struct-ref, and boxed-value joins. Treat
 the 2,351-row bucket as the current standalone invalid-Wasm budget to reduce,
 while continuing to carve tightly-scoped sub-clusters when a validator message
 has a single codegen site.
+
+
+## Fix 2026-06-03 (issue-1623-standalone-typecoerce / dev-1623) — standalone dstr null-throw
+
+Targets the dominant standalone invalid-Wasm sub-cluster: `Invalid global
+index: 4294967295` (and the `throw expected externref, found call of type
+f64` it masks) emitted at the destructuring null-throw guard under
+`--target standalone` / `--target wasi` (nativeStrings mode).
+
+**Two stacked root causes**, both in the destructuring null-throw path:
+
+1. **nativeStrings `-1` global-index sentinel.** In nativeStrings mode
+   `stringGlobalMap` maps each literal to `-1` (no real `string_constants`
+   import global is emitted). `destructuring-params.ts` pushed the
+   "Cannot destructure 'null' or 'undefined'" message and the `__extern_get`
+   property-name keys via a bare `{ op: "global.get", index: strIdx }` where
+   `strIdx === -1`. `-1` serialises to u32 `0xFFFFFFFF` (4294967295) →
+   "Invalid global index". Fixed by routing all three sites through
+   `stringConstantExternrefInstrs` (native-strings.ts), which materialises the
+   NativeString struct inline and `extern.convert_any`s it in nativeStrings
+   mode, and emits the plain `global.get` only when a real import global
+   exists.
+
+2. **`__new_TypeError` mid-prologue emission clobber.**
+   `buildDestructureNullThrow` lazily called `emitWasiErrorConstructor` while
+   compiling a user function's *prologue* — at which point the user function's
+   own array slot is reserved but not yet pushed. The constructor took that
+   reserved slot, the user function clobbered it on its own push, and the
+   funcMap `__new_TypeError` index ended up pointing at the user function
+   (which returns f64) → "throw expected externref, found call of type f64".
+   Fixed by a pre-pass in `index.ts` that emits the WASI/standalone error
+   constructor BEFORE any user function compiles, when the source contains a
+   binding pattern (`sourceContainsBindingPattern`). The emitter is
+   idempotent, so the later `buildDestructureNullThrow` call is a no-op
+   resolve.
+
+**Impact (500-file random sample of standalone `compile_error` rows,
+harness-wrapped, measured via `WebAssembly.compile`):** 15 modules that
+previously failed Wasm validation now validate. The destructuring null-throw
+sub-cluster is eliminated. 54 unrelated invalid-Wasm rows remain (extern-arg
+coercion, `any.convert_extern` on `ref.cast`, `f64.eq`-on-call, …) — separate
+sub-clusters tracked by the same umbrella.
+
+**Files:**
+- `src/codegen/destructuring-params.ts` — `stringConstantExternrefInstrs` at
+  the 3 string-push sites in `buildDestructureNullThrow` and
+  `destructureParamObjectExternref`; `__new_TypeError` resolved via
+  `ensureLateImport` + `flushLateImportShifts`.
+- `src/codegen/index.ts` — `sourceContainsBindingPattern` helper + pre-pass
+  emitting the error constructor ahead of user functions.
+- `tests/issue-1623.test.ts` — 3 standalone regression tests (object-param
+  dstr, typed-struct dstr stays valid).
+
+**Known residual (out of scope):** array-PARAM destructuring (`[a,b]: any`)
+in standalone still emits `call expected externref, found array.get of type
+f64` — a distinct array-dstr coercion bug, not the null-throw path.

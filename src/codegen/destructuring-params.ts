@@ -18,6 +18,7 @@ import {
 } from "./index.js";
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
@@ -221,7 +222,13 @@ function boxToExternref(ctx: CodegenContext, elemKey: string): Instr[] {
 export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionContext): Instr[] {
   const msg = "Cannot destructure 'null' or 'undefined'";
   addStringConstantGlobal(ctx, msg);
-  const strIdx = ctx.stringGlobalMap.get(msg)!;
+  // #1623 — in nativeStrings mode (wasi / standalone) `stringGlobalMap` holds a
+  // `-1` sentinel rather than a real import-global index, so a bare
+  // `global.get strIdx` lowers to `global.get 0xFFFFFFFF` ("Invalid global
+  // index"). `stringConstantExternrefInstrs` materializes the NativeString
+  // struct inline (and externref-converts) in that mode, and emits the plain
+  // `global.get` only when a real import global exists.
+  const pushMsg = () => stringConstantExternrefInstrs(ctx, msg);
   // #1473 — no JS host (wasi / standalone): build a TypeError INSTANCE via the
   // in-module `__new_TypeError` constructor so `e instanceof TypeError`
   // works under wasmtime, with no `__throw_type_error` host import. The
@@ -229,17 +236,23 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   // ensureLateImport resolves it without adding an import (no index shift).
   if (ctx.wasi || ctx.standalone) {
     emitWasiErrorConstructor(ctx, "TypeError", 1);
-    const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+    // #1623 — resolve `__new_TypeError` through ensureLateImport (NOT a raw
+    // `funcMap.get`). The constructor is an in-module function whose index is
+    // computed eagerly; later import additions shift every function index, and
+    // only the ensureLateImport / flushLateImportShifts bookkeeping keeps an
+    // already-emitted `call` index in sync. A raw `funcMap.get` snapshot goes
+    // stale and lowered to `call <wrong-fn>` (e.g. the enclosing function,
+    // observed as "throw expected externref, found call of type f64"). This
+    // mirrors the proven path in `emitThrowTypeError` (expressions/helpers.ts).
+    const newTypeErrorIdx = ensureLateImport(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
     const tagIdx = ensureExnTag(ctx);
-    if (newTypeErrorIdx !== undefined) {
-      return [
-        { op: "global.get", index: strIdx } as Instr,
-        { op: "call", funcIdx: newTypeErrorIdx } as Instr,
-        { op: "throw", tagIdx } as Instr,
-      ];
+    if (newTypeErrorIdx !== undefined && fctx) {
+      flushLateImportShifts(ctx, fctx);
+      const funcIdx = ctx.funcMap.get("__new_TypeError")!;
+      return [...pushMsg(), { op: "call", funcIdx } as Instr, { op: "throw", tagIdx } as Instr];
     }
     // Degrade to throwing the raw string with the same tag.
-    return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+    return [...pushMsg(), { op: "throw", tagIdx } as Instr];
   }
   // JS-host: prefer the host import so the caller sees a genuine JS TypeError
   // (constructor-matching tests such as `({constructor}) => constructor ===
@@ -249,14 +262,10 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   if (throwIdx !== undefined && fctx) {
     flushLateImportShifts(ctx, fctx);
     const funcIdx = ctx.funcMap.get("__throw_type_error")!;
-    return [
-      { op: "global.get", index: strIdx } as Instr,
-      { op: "call", funcIdx } as Instr,
-      { op: "unreachable" } as Instr,
-    ];
+    return [...pushMsg(), { op: "call", funcIdx } as Instr, { op: "unreachable" } as Instr];
   }
   const tagIdx = ensureExnTag(ctx);
-  return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+  return [...pushMsg(), { op: "throw", tagIdx } as Instr];
 }
 
 /**
@@ -338,7 +347,9 @@ export function destructureParamObjectExternref(
       const excludedStrIdx = ctx.stringGlobalMap.get(excludedStr);
       if (excludedStrIdx === undefined) continue;
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "global.get", index: excludedStrIdx });
+      // #1623 — nativeStrings has a -1 sentinel global index; materialize the
+      // key string inline as externref instead of `global.get -1`.
+      for (const instr of stringConstantExternrefInstrs(ctx, excludedStr)) fctx.body.push(instr);
       fctx.body.push({ op: "call", funcIdx: restObjIdx });
       fctx.body.push({ op: "local.set", index: restIdx });
       if (isDecl) emitLocalTdzInit(fctx, restName);
@@ -364,7 +375,9 @@ export function destructureParamObjectExternref(
     if (getIdx === undefined) continue;
 
     fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "global.get", index: strGlobalIdx });
+    // #1623 — nativeStrings has a -1 sentinel global index; materialize the
+    // key string inline as externref instead of `global.get -1`.
+    for (const instr of stringConstantExternrefInstrs(ctx, propNameText)) fctx.body.push(instr);
     fctx.body.push({ op: "call", funcIdx: getIdx });
 
     const elemType: ValType = { kind: "externref" };

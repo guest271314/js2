@@ -1,10 +1,9 @@
 ---
 id: 1461
 title: "spec gap: Array.prototype.* called on array-like / exotic receivers"
-status: done
+status: ready
 created: 2026-05-20
 updated: 2026-06-03
-completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: array-methods
 goal: spec-completeness
-sprint: 52
+sprint: 58
 related: [1154]
 ---
 # #1461 - spec gap: Array.prototype.* called on array-like / exotic receivers
@@ -142,22 +141,3 @@ In `src/codegen/array-methods.ts`:
 - The "ctors is not defined" 60 tests use a TypedArray harness
   fixture — those should be classified as a separate harness gap, not
   part of this issue's success count.
-
-## Resolution (2026-06-03)
-
-The generic array-like / exotic-receiver algorithm (acceptance bullets 1-8)
-landed in **PR #354** (`__extern_length` / `__extern_get_idx` /
-`__extern_has_idx` driven loops, `ToLength`, `HasProperty` hole-skipping,
-`reduce`/`reduceRight` no-initial scan, `StrictEqualityComparison` /
-`SameValueZero`, original-receiver callback 3rd arg). `tests/issue-1461.test.ts`
-covers them; 22/23 pass on main.
-
-The single residual failure —
-`Array.prototype.indexOf.call({1:true, length:2}, true)` returning `-1` instead
-of `1` — is **not** a defect in this issue's generic-receiver algorithm. It is a
-distinct, cross-cutting WasmGC **struct-field boolean-representation** gap: a
-boolean object-literal field lowers to a bare i32 struct field, and the
-`__sget_N` struct getter boxes it via `__box_number`, so the stored `true`
-reads back as the number `1` (and `typeof obj.x` reports the string number). Carved to
-**#1784** (`boolean-struct-field-representation`), routed to architect. The
-`indexOf({1:true,length:2}, true)` case in the test is tracked there.
