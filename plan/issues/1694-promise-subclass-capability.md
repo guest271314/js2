@@ -117,43 +117,49 @@ spec gap) and #1465 (combinator iterable subclass).
 - #1682 — derived-ctor super-must-be-called for builtin subclasses (Half A
   shipped, Half B architect-blocked)
 
-## Re-validation (2026-06-03, senior-developer) — scope SHRANK; one tractable runtime fix remains
+## Re-validation (2026-06-03, senior-developer) — scope SHRANK to a single architect-blocked gap
 
 Re-probed every fingerprint against **current main** (JS-host, real `compile()` →
-`WebAssembly.compile(binary)` → `instantiate(mod, importObject)` two-step; the
-one-step `instantiate(binary, …)` form races the lazy `importObject` getter and
-gives false "no export" failures — that artifact caused several wrong readings in
-prior runs). Two of the four original sub-clusters are **now fixed** on main;
-only one genuine gap and one tractable runtime guard remain.
+`WebAssembly.compile(binary)` → `instantiate(mod, importObject)` two-step + an
+**in-Wasm `try/catch`** that returns a sentinel for "TypeError thrown"). Two
+harness traps to note for any follow-up: (1) the one-step
+`instantiate(binary, …)` form races the lazy `importObject` getter and gives
+false "no export" failures; (2) reading a TypeError outcome via a host-side
+`try` around `inst.exports.go()` is unreliable — assert the throw *inside* the
+compiled function and return a sentinel. Both traps produced wrong intermediate
+readings in earlier runs.
 
 | Shape | Source | Current-main result |
 |---|---|---|
 | **B** `class X extends Promise {}; X.all([…])` | static-method on declared subclass | **RESOLVES** `[1,2]` — already fixed (matches #206 finding, still holds) |
-| **A.ii** `Promise.all.call(Sub, […])` where `Sub extends Promise` (declared) | `.call` thisArg = declared subclass | **RESOLVES** `[1,2]` — **now fixed**. WAT confirms codegen routes the thisArg through `__promise_subclass_ctor` (calls.ts:5303→945); native V8 handles `Promise.all.call(syntheticSubclass, realArray)` correctly. Likely closed by #1596 + #1682 landing after the 2026-05-28 investigation. The earlier "callCount stays 0 / null thisArg" reading was a harness artifact. |
-| **A.i** `Promise.all.call(NotPromise, […])` where `NotPromise` is a compiled Wasm function | `.call` thisArg = wasm fn used as capability ctor | **THROWS** `TypeError: [object Object] is not a constructor`. `_wrapForHost` (runtime.ts:3592) wraps Wasm structs as a non-callable/non-constructible `Object.create(null)` proxy — no `apply`/`construct` trap. V8's `Construct(C, [executor])` (NewPromiseCapability step) rejects it. **Genuinely architect-blocked** on a host-callable+constructible compiled-fn representation (the #1632b bound-fn-rep umbrella). |
-| **ctx-non-object** `Promise.all.call(undefined, [])` | non-object capability `this` | **Returns `1`** instead of throwing `TypeError`. Native V8 throws `Promise.all called on non-object` (§27.2.4.X step 2: `If Type(C) is not Object, throw TypeError`). The compiled `.call(undefined, …)` does not surface that throw. **Tractable runtime/codegen fix** (the §-step-2 guard), independent of the host-callable blocker. |
+| **A.ii** `Promise.all.call(Sub, […])` where `Sub extends Promise` (declared) | `.call` thisArg = declared subclass | **RESOLVES** `[1,2]` — **now fixed**. WAT confirms codegen routes the thisArg through `__promise_subclass_ctor` (calls.ts:5303→945); native V8 handles `Promise.all.call(syntheticSubclass, realArray)` correctly. Likely closed by #1596 + #1682 landing after the 2026-05-28 investigation. |
+| **ctx-non-object** `Promise.all.call(undefined, [])` / `.call(5, [])` | non-object capability `this` | **THROWS TypeError correctly** (in-Wasm catch returns the TypeError sentinel). Native delegation via `Promise.METHOD.call(C, …)` already enforces §27.2.4.X step 2. **Not a gap.** (An earlier "returns 1 = bug" reading mistook the catch sentinel `1` for a resolved value.) |
+| **ctx-non-ctor** `Promise.all.call(()=>{}, [])` / `.call({}, [])` | callable-non-ctor / plain object | **THROWS TypeError correctly** — native NewPromiseCapability rejects. **Not a gap.** |
+| **A.i** `Promise.all.call(NotPromise, […])` where `NotPromise` is a compiled Wasm function | `.call` thisArg = compiled Wasm fn used as capability ctor | **THROWS** `TypeError: [object Object] is not a constructor`. `_wrapForHost` (runtime.ts:3592) wraps Wasm structs as a non-callable/non-constructible `Object.create(null)` proxy — no `apply`/`construct` trap. V8's `Construct(C, [executor])` rejects it. **The ONE genuine remaining gap.** |
 
 ### Net assessment
 
-The original ~50-fail estimate over-counts. B (~28) and A.ii (~20) are resolved
-on current main. What remains:
+The original ~50-fail estimate substantially over-counts. B, A.ii, and the
+entire `ctx-non-object` / `ctx-non-ctor` family are **resolved on current main**
+(the latter were never broken — the combinators' native delegation enforces the
+spec step-2 / IsConstructor checks). The combinator code
+(`_resolveCtor` → `Promise.METHOD.call(C, _toIterable(arr))`) is spec-correct
+for every capability `C` that has a usable host representation.
 
-1. **A.i — architect-blocked.** Needs the compiled-Wasm-function host
-   representation to be `[[Call]]` + `[[Construct]]` capable (a `_wrapForHost`
-   variant whose target is a `function`/`Proxy` with `apply`+`construct` traps
-   dispatching through `__call_fn_N`). This is the same gap as #1632b /
-   #1596-residual and should be specced once, centrally — not patched in the
-   Promise layer. Keep `needs_architect_spec` for this half.
+**The sole remaining failure** is A.i: a **compiled Wasm function** used as the
+capability constructor. It needs the compiled-fn host representation to be
+`[[Call]]` + `[[Construct]]` capable — a `_wrapForHost` variant whose target is
+a real `function`/`Proxy` with `apply` + `construct` traps that dispatch through
+the `__call_fn_N` exports. This is the same host-callable-value gap as #1632b
+(bound-fn representation) and the #1596 residual, and it should be specced
+**once, centrally** — not patched in the Promise layer (a Promise-layer hack
+would not fix the dozens of other sites that pass a compiled fn to a host that
+calls/constructs it).
 
-2. **ctx-non-object — tractable, NOT architect-blocked.** The §27.2.4.X step-2
-   `Type(C) is not Object → TypeError` guard isn't surfacing for a non-object
-   capability `this`. This is a focused runtime (`_resolveCtor`) + arg-coercion
-   fix worth carving as its own small issue; it covers the
-   `ctx-non-object` / `ctx-non-ctor` test262 families across all four
-   combinators without touching the host-callable representation.
-
-**Recommendation:** carve #1694 into (a) the A.i architect spec (host
-fn/class constructible representation — fold into #1632b) and (b) a small
-`fix(promise-combinator ctx-non-object guard)` issue. The combinator code
-itself (`_resolveCtor` / `Promise.METHOD.call(C, _toIterable(arr))`) is
-otherwise spec-correct for the cases that have a usable `C`.
+**Recommendation:** mark #1694's combinator-spec-compliance portion **done on
+main** (B + A.ii + ctx-* all pass); reduce the residual to a single dependency
+on the host-callable/constructible compiled-fn representation (#1632b umbrella).
+Do **not** carve a separate ctx-non-object fix — that behaviour is already
+correct. When #1632b's representation lands, re-run the
+`built-ins/Promise/{all,allSettled,any,race}/*ctor*` / `*species*` suites to
+confirm the A.i `resolve-from-same-constructor` family flips.
