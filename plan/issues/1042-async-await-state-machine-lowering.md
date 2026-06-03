@@ -1,7 +1,7 @@
 ---
 id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
-status: ready
+status: in-progress
 created: 2026-04-11
 updated: 2026-06-02
 priority: high
@@ -873,3 +873,82 @@ after any await).
 6. Pre-merge: run `tests/equivalence.test.ts` + `tests/issue-1042.test.ts`.
    Open PR, monitor `.claude/ci-status/pr-<N>.json` per the standard
    `dev-self-merge` skill.
+
+---
+
+## In-progress work (sd-1665, 2026-06-03) — PR1 foundation
+
+Branch: `issue-1042-async-cps` (worktree
+`/workspace/.claude/worktrees/issue-1042-cps`, off origin/main 837b1b394).
+Lead-confirmed PR1 scope: single + sequential await, JS-host only, behind the
+`fctx.asyncCpsActive` gate (kept off by default so emitted Wasm is unchanged);
+try/catch-across-await + nested await + async arrows/methods → explicit
+`reportError` + legacy fallback.
+
+### Done so far (uncommitted in worktree)
+- `src/runtime.ts` (~line 7836): added the 3 JS-host scheduling primitives the
+  state machine needs — `Promise_new_pending` (allocate pending Promise,
+  stash `__r`/`__j` resolve/reject capabilities on it), `Promise_settle_resolve`
+  (`p.__r(val)`), `Promise_settle_reject` (`p.__j(reason)`).
+- Issue → `status: in-progress`.
+
+### Verified wiring points (current line numbers, post-merge of origin/main)
+- `AwaitExpression` no-op: `src/codegen/expressions.ts:1165` (pass-through).
+- async dispatch: `src/codegen/function-body.ts:569` (`isAsync` →
+  `effectiveRetType = unwrapPromiseType`); statement loop at `:894`/`:966`.
+- `compileArrowAsClosure`: `src/codegen/closures.ts:1247` — the continuation
+  template (large: closure-id, param/return-type resolution, capture analysis
+  with ref-cell boxing, struct synthesis, lifted-func emission).
+- `collectReferencedIdentifiers` (closures.ts:185), `collectBindingPatternNames`
+  (closures.ts:384) — reused by `analyzeAsyncBody`.
+- `fctx.asyncCpsActive` field already present (context/types.ts:204).
+- Promise host imports present in runtime.ts: `Promise_resolve/reject/new/then/
+  then2/catch/finally` + `_maybeWrapCallable` callback bridge.
+- `analyzeAsyncBody` (async-cps.ts:66) is real: await collection (no nested-fn
+  descent) + conservative whole-remainder live-vars + try-across-await /
+  uncaught-throw detection. `emitAsyncStateMachine`/`compileNestedAwait` are
+  `reportError` stubs (gated off by `ASYNC_CPS_ENABLED = false`).
+
+### Remaining (the bulk — ~550 LoC, one PR)
+1. `compileSyntheticAsyncContinuation` in closures.ts — mirror
+   `compileArrowAsClosure` but take an explicit param list
+   `[capturesParam:externref, awaitValueParam:externref]` + a statement list
+   (no AST FunctionExpression), reusing the closure-struct + funcref-table +
+   lifted-func emission unchanged. Uniform result `externref`.
+2. `splitBodyAtAwait` + `computeLiveAfterEach` in async-cps.ts (segment the body
+   at each tail-await; live = referenced-after minus declared-after).
+3. `emitAsyncStateMachine`: alloc outer pending Promise (`Promise_new_pending`);
+   compile prefix segment; build capture struct; compile awaited expr; wrap
+   continuations via `__make_callback`; `Promise_then2(awaited, contCb,
+   rejectCb)`; return outer Promise. Continuation settles outer Promise via
+   `Promise_settle_resolve`. `return await X` collapse per spec §6.2.
+   Wrap each continuation in `try/catch_all` → `Promise_settle_reject` on escape.
+4. function-body.ts hook (~after fctx built, before stmt loop): `analyzeAsyncBody`;
+   if `awaitPoints.length>0` AND JS-host AND no try-across-await/nested →
+   `rewriteFuncResultType(externref)`, set `asyncCpsActive`, drive
+   `emitAsyncStateMachine`, skip stmt loop. Else legacy path.
+5. AwaitExpression gate (expressions.ts:1165): `!asyncCpsActive` → legacy
+   pass-through; else `compileNestedAwait` (reportError in PR1).
+6. late-import decls for `Promise_new_pending` / `Promise_settle_resolve` /
+   `Promise_settle_reject` / `Promise_then2`.
+7. `rewriteFuncResultType(ctx, typeIdx, ret)` in registry/types.ts (mutate
+   `.results` only).
+8. `tests/issue-1042.test.ts` — 5 canonical cases (identity await=42, sequential
+   side-effect ordering, try/catch reject, Promise.all interleave, return-await).
+9. Flip `ASYNC_CPS_ENABLED`/the function-body gate on for JS-host async-with-await.
+
+### Continuation-synthesis primitive (key finding, 2026-06-03)
+Reuse the existing **`__make_callback` host bridge** (closures.ts:2351
+`compileArrowAsHostCallback`, creation site ~:2701 — pushes `cbId` + captures
+externref, calls `__make_callback` → JS-callable externref) rather than
+hand-rolling funcref-table plumbing. `Promise_then2(awaited, contCb,
+rejectCb)` takes those externref callbacks directly; the JS host invokes them
+arity-1 with the settled value (via `_maybeWrapCallable`, already wired in
+runtime.ts). So `compileSyntheticAsyncContinuation` = assign a `cbId`,
+synthesize a lifted fn `(captures, awaitValue) → externref` that restores
+locals from the capture struct (struct.get) then runs the post-await segment,
+register it in the same cbId dispatch table `__make_callback`/`__call_fn_N`
+use, and at the state-machine site emit `cbId` + captures-struct +
+`call __make_callback`. Source from a statement list + explicit capture set
+instead of an arrow AST node. Branch merged with latest origin/main (incl.
+#1103a Map) — clean.
