@@ -61,10 +61,10 @@ codegen (`src/codegen/`). Companion document to
 | `NoSubstitutionTemplateLiteral`   | ir-owned    | Treated as `StringLiteral`.                                            | —                |
 | `TemplateExpression`              | mixed       | Only constant-prefix patterns; complex interpolation throws.           | #1374            |
 | `TrueKeyword` / `FalseKeyword`    | ir-owned    | —                                                                      | —                |
-| `NullKeyword`                     | mixed       | Allowed only inside `=== / !==` comparisons; bare `null` throws.       | #1131            |
+| `NullKeyword`                     | mixed       | `=== / !==` comparisons + bare `null` in a reference-shaped (externref) context. Non-reference (f64/i32) null context throws. | #1131 |
 | `ThisKeyword`                     | mixed       | Method bodies via #1370. Top-level `this` rejected.                    | #1370            |
 | `RegularExpressionLiteral`        | ir-owned    | Dispatches to dual RegExp backend.                                     | —                |
-| `BinaryExpression`                | mixed       | Arithmetic / comparison / `&& \|\|` / bitwise lowered. `%`, `**`, `??`, `in`, `instanceof` throw. | #1131 |
+| `BinaryExpression`                | mixed       | Arithmetic / comparison / `&& \|\|` / bitwise lowered. `??` lowered over same-typed reference operands (else throws). `%`, `**`, `in`, `instanceof` throw. | #1131 |
 | `PrefixUnaryExpression`           | mixed       | `-`, `+`, `!`, `++`, `--` lowered. `~` and `typeof` partial.           | #1131            |
 | `PostfixUnaryExpression`          | ir-owned    | `++`, `--`.                                                            | —                |
 | `ConditionalExpression`           | ir-owned    | Ternary.                                                               | —                |
