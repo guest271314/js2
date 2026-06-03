@@ -1,16 +1,16 @@
 ---
 id: 1103
 title: "Wasm-native Map, Set, WeakMap, WeakSet using WasmGC structs and arrays"
-status: ready
+status: in-progress
 created: 2026-04-12
-updated: 2026-04-12
+updated: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: collections
 goal: iterator-protocol
-sprint: Backlog
+sprint: 58
 es_edition: ES2015
 note: "Verified 2026-05-21: builtinCtors moved from runtime.ts L872-897 to L1856"
 ---

@@ -711,6 +711,20 @@ export interface CodegenContext {
   testRuntime: boolean;
   /** Map from native string helper name → function index */
   nativeStrHelpers: Map<string, number>;
+  /** #1103a: Wasm-native Map runtime (standalone / WASI). All -1 / empty until
+   *  `ensureMapRuntimeTypes` / `ensureMapHelpers` run; only used when the
+   *  native-collections path is active (gated on nativeStrings/standalone). */
+  mapTypeIdx: number;
+  mapEntryTypeIdx: number;
+  mapEntriesTypeIdx: number;
+  mapBucketsTypeIdx: number;
+  mapIterTypeIdx: number;
+  /** Shared {value, done} iterator-result struct for native collections. */
+  mapIterResultTypeIdx: number;
+  /** Map from native Map helper name → function index. */
+  mapHelpers: Map<string, number>;
+  /** Whether the Map runtime helper functions have been emitted. */
+  mapHelpersEmitted: boolean;
   /** #1677: import-function count captured the instant the native-string
    *  helpers were first emitted (mid-finalize). Used by
    *  `reconcileNativeStrFinalizeShift` to shift the helper bodies + map by the
