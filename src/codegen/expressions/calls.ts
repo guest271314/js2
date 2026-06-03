@@ -3653,8 +3653,14 @@ function compileCallExpression(
       const method = propAccess.name.text;
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be frozen/sealed at compile time
-      if (ts.isIdentifier(arg0)) {
+      // Compile-time fast path: identifier known to be frozen/sealed at compile
+      // time. This is execution-order-blind (Object.freeze(o) populates
+      // ctx.frozenVars during codegen, so an *earlier* Object.isFrozen(o) would
+      // wrongly fold to const 1). In standalone mode the Wasm-native
+      // __object_isFrozen/__object_isSealed read the live $Object.flags, so we
+      // skip the static fold and let the runtime answer correctly (#1472
+      // Phase B Blocker A Half 1).
+      if (!ctx.standalone && ts.isIdentifier(arg0)) {
         const isKnown =
           (method === "isFrozen" && ctx.frozenVars.has(arg0.text)) ||
           (method === "isSealed" && ctx.sealedVars.has(arg0.text));
@@ -3698,8 +3704,11 @@ function compileCallExpression(
     ) {
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time fast path: identifier known to be non-extensible
-      if (ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
+      // Compile-time fast path: identifier known to be non-extensible.
+      // Skipped in standalone (execution-order-blind, same reason as
+      // isFrozen/isSealed above) — the native __object_isExtensible reads the
+      // live $Object.flags instead (#1472 Phase B Blocker A Half 1).
+      if (!ctx.standalone && ts.isIdentifier(arg0) && ctx.nonExtensibleVars.has(arg0.text)) {
         const argType = compileExpression(ctx, fctx, arg0);
         if (argType) fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: 0 });

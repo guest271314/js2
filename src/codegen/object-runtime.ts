@@ -73,6 +73,19 @@ const FLAG_TOMBSTONE = 0x80;
 const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
 
 /**
+ * `$Object.flags` (field 4) object-level integrity bits. Set by the
+ * Object.freeze/seal/preventExtensions SET path (#1472 Phase B Blocker A
+ * Half 2, not yet landed); read by the __object_isFrozen/isSealed/isExtensible
+ * helpers (Half 1). On a never-frozen object the field is 0, so isFrozen /
+ * isSealed read false and isExtensible reads true — the correct ES default.
+ * `FROZEN` implies `SEALED` implies `NONEXTENSIBLE` (freeze ⊇ seal ⊇
+ * preventExtensions); the read helpers test the most-specific bit each needs.
+ */
+const OBJ_FLAG_NONEXTENSIBLE = 0x01;
+const OBJ_FLAG_SEALED = 0x02;
+const OBJ_FLAG_FROZEN = 0x04;
+
+/**
  * Type indices for the open-object runtime structs/arrays, allocated once per
  * module by `ensureObjectRuntime`. Stored on the context so subsequent slices
  * (keys/values/delete/for-in) can reference the same types.
@@ -865,6 +878,63 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── Object integrity predicates (#1472 Phase B Blocker A Half 1) ──────────
+  //
+  // __object_isFrozen / __object_isSealed / __object_isExtensible read the
+  // object-level `$Object.flags` (field 4). These replace the JS-host imports
+  // of the same name under --target standalone, and — crucially — let the
+  // Object.isFrozen/isSealed/isExtensible call sites drop their compile-time
+  // `frozenVars`/`sealedVars`/`nonExtensibleVars` static fast paths in
+  // standalone (those are execution-order-blind: `Object.freeze(o)` populates
+  // the set at compile time, which made an *earlier* `Object.isFrozen(o)`
+  // wrongly fold to const 1). The runtime read is the correct, order-respecting
+  // answer.
+  //
+  // ES §20.5.2.13/14: isFrozen/isSealed on a NON-object argument return TRUE.
+  // ES §20.5.2.12: isExtensible on a non-object returns FALSE. The non-`$Object`
+  // branch here mirrors that (a non-`$Object` externref reaching these helpers
+  // is treated as "not one of our extensible objects").
+  //
+  // On a never-frozen `$Object` the flags field is 0 → isFrozen/isSealed read
+  // false, isExtensible reads true (the correct ES default). The freeze/seal
+  // SET path that sets these bits is Half 2 (stacked follow-up).
+  const emitIntegrityPredicate = (name: string, flagBit: number, invert: boolean, nonObjResult: number): void => {
+    // params: 0=obj(externref) ; locals: 1=any(anyref)
+    const testExpr: Instr[] = [
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: flagBit },
+      { op: "i32.and" },
+    ];
+    // For isExtensible: result = (flags & NONEXTENSIBLE) == 0 → i32.eqz.
+    // For isFrozen/isSealed: result = (flags & BIT) != 0 → i32.ne 0 (i.e. !eqz).
+    if (invert) {
+      testExpr.push({ op: "i32.eqz" });
+    } else {
+      testExpr.push({ op: "i32.const", value: 0 }, { op: "i32.ne" });
+    }
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: testExpr,
+        else: [{ op: "i32.const", value: nonObjResult }],
+      },
+    ];
+    registerNative(name, [{ kind: "externref" }], [{ kind: "i32" }], [{ name: "any", type: { kind: "anyref" } }], body);
+  };
+  // isFrozen: (flags & FROZEN) != 0 ; non-object → true (1).
+  emitIntegrityPredicate("__object_isFrozen", OBJ_FLAG_FROZEN, false, 1);
+  // isSealed: (flags & SEALED) != 0 ; non-object → true (1).
+  emitIntegrityPredicate("__object_isSealed", OBJ_FLAG_SEALED, false, 1);
+  // isExtensible: (flags & NONEXTENSIBLE) == 0 ; non-object → false (0).
+  emitIntegrityPredicate("__object_isExtensible", OBJ_FLAG_NONEXTENSIBLE, true, 0);
+
   return types;
 }
 
@@ -882,4 +952,8 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__extern_get",
   "__extern_set",
   "__delete_property",
+  // #1472 Phase B Blocker A Half 1 — object integrity predicates (read $Object.flags).
+  "__object_isFrozen",
+  "__object_isSealed",
+  "__object_isExtensible",
 ]);
