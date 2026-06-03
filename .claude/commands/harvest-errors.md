@@ -72,8 +72,27 @@ categories file, then emit the two summary tables (step 8).
        (writes `test262-standalone-categories.json`).
 
 2. Parse all results and categorize errors:
+   - **Extract embedded `#NNNN` issue citations from EVERY failing record's
+     `error`, in BOTH lanes** (dedupe per record, rank by record count). Our
+     codegen self-cites the tracking issue in many error strings — even
+     regressions name the culprit (e.g. `… shift walker missed this entry
+     (#1525b regression)`). This is the single highest-signal cross-reference
+     and must run first. (Doing this only for standalone missed a 157-test
+     default-lane crash on 2026-06-03 — run it for both.)
+   - **Always sub-bucket the `other` / uncategorized error_category — do NOT
+     skip it.** "other" is where genuinely new patterns hide (it held the
+     157-test `pendingMethodTrampolines … shift walker missed this` codegen
+     crash that the named-category pass skipped). Sub-bucket it by normalized
+     error signature exactly like the named categories.
+   - **Inspect `negative_test_fail`** (tests that should throw an early/parse
+     error but compiled+ran, or vice-versa) — these are real conformance bugs,
+     not noise (e.g. import-attributes duplicate-key early-error not enforced).
    - **Compile errors**: group by pattern (undefined .kind, stack underflow, local.set mismatch, struct error, call mismatch, missing import, stack fallthrough, unsupported, missing property, yield outside gen, await outside async, etc.)
    - **Runtime failures**: group by pattern (returned wrong with assert info, null pointer deref, timeout, illegal cast, array OOB, unreachable, uncaught exception)
+   - Note: non-official proposal tests (e.g. `built-ins/Temporal/*`, marked
+     `official: false` in the runner) still appear as `fail`/`other` in the raw
+     JSONL (`Temporal is not defined`, ~2k records) but do NOT count against the
+     official total — don't file issues for them; they are excluded by design.
    - **Standalone lane — PRIMARY signal is the `#NNNN` issue number embedded in
      the error string.** Standalone codegen refusals self-cite their tracking
      issue, e.g. `Codegen error: Proxy not supported in standalone mode

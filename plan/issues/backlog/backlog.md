@@ -71,9 +71,10 @@ only one new root-cause issue was needed.
 
 - [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
 
-## Harvest 2026-06-03 (default-lane codegen crash from baselines-repo run)
+## Harvest 2026-06-03 (default-lane codegen crashes from baselines-repo run)
 
 - [#1784](../1784-binary-emit-offset-out-of-bounds-codegen-crash.md) — `Binary emit error: offset is out of bounds`: `emitBinary()` crashes identically on **276** default-lane tests (Array/String/TypedArray/Temporal/DataView/eval-code) — one emit-layer back-patch/offset overflow, not 276 distinct bugs. High, medium, **ready (backlog)**. Distinct from done #203 (varint overflow). Surfaced harvesting the fresh `loopdive/js2wasm-baselines` data (gitHash f52502e9).
+- [#1785](../1785-method-trampoline-shift-walker-misses-import-funcidx.md) — `pendingMethodTrampolines … shift walker missed this (#1525b regression)`: late-import index-shift walker fails to rewrite a method-trampoline funcIdx pointing at an import (e.g. resizable-buffer `resizeTo`) — **157** default-lane compile errors. High, medium, **ready (backlog)**. Regression of done #1525b; distinct from done #1669. Was hiding in the `other` category (missed by the first harvest pass).
 
 ## IR / allowJs parity follow-ups (2026-06-03)
 
