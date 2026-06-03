@@ -236,23 +236,42 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(start).toBeGreaterThanOrEqual(0);
   });
 
+  it("Phase B Blocker B Slice 2: Object.keys(any) for-of consumer is host-free (no __array_from_iter)", async () => {
+    // #1472 Phase B Blocker B Slice 2 — the typed enumeration consumer chain.
+    const source = `
+        export function n(o: any): number {
+          const ks: string[] = Object.keys(o);
+          let c = 0;
+          for (const k of ks) { c = c + 1; }
+          return c;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name.startsWith("__array_from"))).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
+  it("Phase B Blocker B Slice 2: .length on an any value routes to native __extern_length", async () => {
+    const source = `
+        export function m(o: any): number {
+          const ks: any = Object.keys(o);
+          return (ks.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__extern_length\b/);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
   it("Phase B Blocker A Half 2: Object.freeze/seal/preventExtensions lower native SET path (no host imports)", async () => {
-    // #1472 Phase B Blocker A Half 2 — the freeze/seal WRITE path. The three
-    // mutators gain Wasm-native SET helpers that set the $Object.flags
-    // integrity bits (NONEXTENSIBLE / SEALED / FROZEN) and return the original
-    // externref; the write gates in __extern_set (FROZEN → refuse all) and
-    // __obj_insert empty-slot (NONEXTENSIBLE → refuse new key) enforce them. An
-    // open-`any` receiver is coerced to externref at the freeze handler so the
-    // native helper actually fires. Module must validate, leak zero object host
-    // imports, and emit the three SET helpers as defined funcs.
-    //
-    // (A runtime *value* assertion through freeze→write→read is not made here:
-    // standalone has no host to hand in an open object, and a locally-built `{}`
-    // is narrowed by TS to a closed struct that bypasses the open-$Object
-    // runtime entirely — the same TS-narrowing limit documented for the read
-    // predicates and $ObjVec. This pins the foundation: helpers emit, validate,
-    // host-free; write-gate enforcement is unit-covered by the runtime once an
-    // open receiver reaches it.)
+    // #1472 Phase B Blocker A Half 2 — the freeze/seal WRITE path.
     const source = `
         export function run(o: any): any {
           Object.preventExtensions(o);
@@ -272,9 +291,7 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
   });
 
   it("Phase B Blocker A Half 2: gc-mode Object.freeze still routes to the JS-host import", async () => {
-    // Regression guard: the standalone-only receiver coercion must NOT disturb
-    // the default (gc) target. An externref freeze arg there still routes to the
-    // host __object_freeze import.
+    // Regression guard: standalone-only coercion must NOT disturb the gc target.
     const source = `
         export function run(o: any): any {
           return Object.freeze(o);
@@ -282,7 +299,6 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
       `;
     const r = await compile(source, {}); // default gc target
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
-    // gc mode binds the host import (no native $Object runtime present).
     expect(r.imports.some((i) => i.module === "env" && i.name === "__object_freeze")).toBe(true);
   });
 

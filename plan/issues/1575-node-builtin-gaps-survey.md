@@ -1,9 +1,10 @@
 ---
 id: 1575
 title: "Node.js built-in module support — gap survey (js2wasm → npm)"
-status: in-review
+status: done
 created: 2026-05-20
-updated: 2026-06-02
+updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 area: runtime, host-imports
 goal: npm-library-support
@@ -152,7 +153,7 @@ Ranking by (a) number of distinct target packages blocked, (b) breadth of
 the package class they unlock, (c) implementation effort needed for a
 **Tier 0** (smoke test — minimal surface) milestone.
 
-### 1. `node:path` — pure compute, blocks ESLint/prettier/axios/TS
+### 1. `node:path` — pure compute, blocks ESLint/prettier/axios/TS — child issue #1791
 
 - Why: every CLI assembles paths; `path.join`/`path.resolve`/`path.dirname`
   fire in every module loader. Pure-string functions — no I/O — so a
@@ -165,7 +166,7 @@ the package class they unlock, (c) implementation effort needed for a
   to medium.
 - Cross-ref: blocks #1400 (ESLint), #1032 (axios), TypeScript survey.
 
-### 2. `node:url` — URL/URLSearchParams, blocks ESLint/prettier/axios
+### 2. `node:url` — URL/URLSearchParams, blocks ESLint/prettier/axios — child issue #1792
 
 - Why: `new URL(...)`, `URL.fileURLToPath`, `URLSearchParams` are
   *constructor* shapes — not method calls on a require()'d object — so
@@ -182,7 +183,7 @@ the package class they unlock, (c) implementation effort needed for a
 - Cross-ref: ESLint module loader (file:// paths), axios request
   serialization.
 
-### 3. `node:buffer` + global `Buffer` — required by axios + crypto + zlib
+### 3. `node:buffer` + global `Buffer` — required by axios + crypto + zlib — child issue #1793
 
 - Why: Buffer underlies every `node:http` body, every `node:fs` non-utf8
   read, every `node:crypto` digest. Compiled code that touches *any* of
@@ -200,7 +201,7 @@ the package class they unlock, (c) implementation effort needed for a
   long-tail).
 - Cross-ref: #1032 (axios), zlib consumers, anything talking to fs binary.
 
-### 4. `node:events` / global `EventEmitter` — universal Node primitive
+### 4. `node:events` / global `EventEmitter` — universal Node primitive — child issue #1794
 
 - Why: every Node IO API (`fs.createReadStream`, `http.IncomingMessage`,
   `process` itself) is an `EventEmitter`. Subscribing from compiled code
@@ -223,7 +224,7 @@ the package class they unlock, (c) implementation effort needed for a
 - Cross-ref: unlocks #1032 (axios uses streams under the hood), prepares
   #640 (WASI HTTP) by exercising the same callback wiring.
 
-### 5. `node:http` (+ `node:https`) — direct unblocker for axios
+### 5. `node:http` (+ `node:https`) — direct unblocker for axios — child issue #1795
 
 - Why: axios is the highest-value real-world target on the backlog
   (#1032 high priority). HTTP is also a natural place to land **the
@@ -309,3 +310,40 @@ The four packages this work unblocks split cleanly along the matrix:
   alongside #1535 / #1470–#1474.
 - Web-platform globals (fetch, Web Streams, TextEncoder); see
   #1500/#1501 in the browser-host track.
+
+## Completion Summary (2026-06-03)
+
+Survey verified against current `main` and finalized.
+
+**Verification:**
+- `NODE_BUILTIN_MODULES` (`src/import-resolver.ts:16-50`) still has the same
+  33 entries the survey documented.
+- `registerNodeBuiltinImports` (`src/codegen/index.ts:9801`) still emits a
+  single opaque `__node_<module>: () -> externref` per builtin and binds it as
+  a declared global — confirming every "None" row.
+- `NODE_BUILTIN_FN_TYPED_STUBS` (`src/import-resolver.ts:68`) still only wires
+  `crypto.randomBytes` / `crypto.randomUUID`; `fs.readFileSync`/`writeFileSync`
+  remain the other typed-fn exception. No new builtin gained dedicated function
+  imports since 2026-06-02, so the Partial-vs-None classification in the matrix
+  is unchanged. No matrix rows needed upgrading.
+
+**Child issues filed** (top-5 highest-leverage `None`/`Partial` builtins from
+the "Top 5 highest-leverage builtins" section, ranked by blocked-package
+signal):
+
+| Child | Builtin | Why |
+|-------|---------|-----|
+| #1791 | `node:path` | pure compute; blocks ESLint/prettier/axios/TS; standalone-feasible |
+| #1792 | `node:url` | URL/URLSearchParams host constructors; ESLint/prettier/axios |
+| #1793 | `node:buffer` + global `Buffer` | underlies http/fs/crypto bodies; axios/zlib |
+| #1794 | `node:events` / `EventEmitter` | universal Node IO primitive; closure-callback contract |
+| #1795 | `node:http` (+https) | axios GET round-trip; depends_on #1793 + #1794 |
+
+Each child carries problem + Tier 0 acceptance criteria + a concrete
+implementation approach, mirroring the survey's per-builtin analysis. #1795 is
+explicitly `depends_on: [1793, 1794]` since the http response stream chain
+needs both Buffer and EventEmitter.
+
+Honourable-mention builtins (`util.promisify`, `assert`, `os.*`,
+`querystring`) are documented above but not filed as child issues yet — they
+are lower-leverage fast-follows once the top 5 land.

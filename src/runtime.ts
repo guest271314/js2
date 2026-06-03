@@ -122,6 +122,41 @@ function _installBuiltinMethod(
 }
 
 /**
+ * Install a static helper (e.g. `Iterator.zip`) with spec-correct property
+ * descriptors. The function's own `length` and `name` are reset to the
+ * spec-mandated values with attributes `{writable:false, enumerable:false,
+ * configurable:true}` (§17 — built-in function `length`/`name`), and the
+ * property on `target` itself is `{writable:true, enumerable:false,
+ * configurable:true}` (§17 default data-property attributes). TS optional
+ * params (`options?`) inflate `fn.length`, so we override it explicitly.
+ */
+function _installStaticHelper(
+  target: object,
+  name: string,
+  length: number,
+  impl: (this: any, ...args: any[]) => any,
+): void {
+  Object.defineProperty(impl, "length", {
+    value: length,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(impl, "name", {
+    value: name,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(target, name, {
+    value: impl,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/**
  * Build `%IteratorPrototype%` (spec §27.1.2). Its sole own property is
  * `[Symbol.iterator]()` which returns `this`. `%GeneratorPrototype%` inherits
  * from it so generators are iterable. (#1639) We build it explicitly rather
@@ -529,6 +564,16 @@ function _installIteratorHelperPolyfills(): void {
     return it;
   }
 
+  // ES2025 GetOptionsObject (iterator-sequencing / joint-iteration proposal):
+  // undefined → fresh null-proto object; Object → returned as-is; any other
+  // value (null, boolean, number, string, symbol, bigint) throws TypeError.
+  function _getOptionsObject(options: any): any {
+    if (options === undefined) return Object.create(null);
+    if (typeof options === "object" && options !== null) return options;
+    if (typeof options === "function") return options;
+    throw new TypeError("Iterator options must be undefined or an object");
+  }
+
   function _makeHelperIterator(nextFn: () => any, returnFn: (v?: any) => any): any {
     const obj: any = Object.create(Iproto);
     obj.next = nextFn;
@@ -553,12 +598,8 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   if (typeof I.from !== "function") {
-    Object.defineProperty(I, "from", {
-      value: function from(iterable: any) {
-        return _getFlattenable(iterable);
-      },
-      writable: true,
-      configurable: true,
+    _installStaticHelper(I, "from", 1, function from(iterable: any) {
+      return _getFlattenable(iterable);
     });
   }
 
@@ -829,194 +870,183 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   if (typeof I.zip !== "function") {
-    Object.defineProperty(I, "zip", {
-      value: function zip(iterables: any, options?: any) {
-        if (iterables == null) {
-          throw new TypeError("Iterator.zip: iterables required");
+    _installStaticHelper(I, "zip", 1, function zip(iterables: any, options?: any) {
+      if (iterables == null) {
+        throw new TypeError("Iterator.zip: iterables required");
+      }
+      options = _getOptionsObject(options);
+      const mode: string = options.mode || "shortest";
+      if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+        throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+      }
+      const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
+      const iters: any[] = [];
+      // Open all iterators eagerly; on failure, close already-opened ones.
+      try {
+        for (const iterable of iterables) {
+          iters.push(_getFlattenable(iterable));
         }
-        const mode: string = (options && options.mode) || "shortest";
-        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-          throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+      } catch (e) {
+        for (const it of iters) {
+          try {
+            it.return?.();
+          } catch {}
         }
-        const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
-        const iters: any[] = [];
-        // Open all iterators eagerly; on failure, close already-opened ones.
-        try {
-          for (const iterable of iterables) {
-            iters.push(_getFlattenable(iterable));
-          }
-        } catch (e) {
-          for (const it of iters) {
+        throw e;
+      }
+      const closed: boolean[] = iters.map(() => false);
+      let exhausted = false;
+
+      function closeAllExcept(except: number): void {
+        for (let i = 0; i < iters.length; i++) {
+          if (i !== except && !closed[i]) {
+            closed[i] = true;
             try {
-              it.return?.();
+              iters[i].return?.();
             } catch {}
           }
-          throw e;
         }
-        const closed: boolean[] = iters.map(() => false);
-        let exhausted = false;
+      }
 
-        function closeAllExcept(except: number): void {
+      return _makeHelperIterator(
+        function next() {
+          if (exhausted || iters.length === 0) return { value: undefined, done: true };
+          const tuple: any[] = new Array(iters.length);
+          let liveCount = 0;
           for (let i = 0; i < iters.length; i++) {
-            if (i !== except && !closed[i]) {
-              closed[i] = true;
-              try {
-                iters[i].return?.();
-              } catch {}
+            if (closed[i]) {
+              tuple[i] = padding[i];
+              continue;
             }
-          }
-        }
-
-        return _makeHelperIterator(
-          function next() {
-            if (exhausted || iters.length === 0) return { value: undefined, done: true };
-            const tuple: any[] = new Array(iters.length);
-            let liveCount = 0;
-            for (let i = 0; i < iters.length; i++) {
-              if (closed[i]) {
-                tuple[i] = padding[i];
-                continue;
-              }
-              let r: any;
-              try {
-                r = iters[i].next();
-              } catch (e) {
+            let r: any;
+            try {
+              r = iters[i].next();
+            } catch (e) {
+              exhausted = true;
+              closeAllExcept(i);
+              throw e;
+            }
+            if (r && r.done) {
+              closed[i] = true;
+              if (mode === "shortest") {
                 exhausted = true;
                 closeAllExcept(i);
-                throw e;
+                return { value: undefined, done: true };
               }
-              if (r && r.done) {
-                closed[i] = true;
-                if (mode === "shortest") {
-                  exhausted = true;
-                  closeAllExcept(i);
-                  return { value: undefined, done: true };
-                }
-                if (mode === "strict") {
-                  // Strict: every other iterator must also be done.
-                  for (let j = 0; j < iters.length; j++) {
-                    if (j === i || closed[j]) continue;
-                    let r2: any;
-                    try {
-                      r2 = iters[j].next();
-                    } catch (e) {
-                      closeAllExcept(-1);
-                      throw e;
-                    }
-                    if (r2 && !r2.done) {
-                      closeAllExcept(-1);
-                      throw new RangeError("Iterator.zip strict mode: length mismatch");
-                    }
-                    closed[j] = true;
+              if (mode === "strict") {
+                // Strict: every other iterator must also be done.
+                for (let j = 0; j < iters.length; j++) {
+                  if (j === i || closed[j]) continue;
+                  let r2: any;
+                  try {
+                    r2 = iters[j].next();
+                  } catch (e) {
+                    closeAllExcept(-1);
+                    throw e;
                   }
-                  exhausted = true;
-                  return { value: undefined, done: true };
+                  if (r2 && !r2.done) {
+                    closeAllExcept(-1);
+                    throw new RangeError("Iterator.zip strict mode: length mismatch");
+                  }
+                  closed[j] = true;
                 }
-                tuple[i] = padding[i];
-              } else {
-                tuple[i] = r.value;
-                liveCount++;
+                exhausted = true;
+                return { value: undefined, done: true };
               }
+              tuple[i] = padding[i];
+            } else {
+              tuple[i] = r.value;
+              liveCount++;
             }
-            if (mode === "longest" && liveCount === 0) {
-              exhausted = true;
-              return { value: undefined, done: true };
-            }
-            return { value: tuple, done: false };
-          },
-          function returnFn() {
+          }
+          if (mode === "longest" && liveCount === 0) {
             exhausted = true;
-            closeAllExcept(-1);
             return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+          }
+          return { value: tuple, done: false };
+        },
+        function returnFn() {
+          exhausted = true;
+          closeAllExcept(-1);
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
   if (typeof I.zipKeyed !== "function") {
-    Object.defineProperty(I, "zipKeyed", {
-      value: function zipKeyed(iterables: any, options?: any) {
-        if (iterables == null || typeof iterables !== "object") {
-          throw new TypeError("Iterator.zipKeyed: iterables must be an object");
-        }
-        const keys = Object.keys(iterables);
-        const iterArr: any[] = keys.map((k) => iterables[k]);
-        const zipped = (I as any).zip(iterArr, options);
-        return _makeHelperIterator(
-          function next() {
-            const r = zipped.next();
-            if (r.done) return { value: undefined, done: true };
-            const out: any = {};
-            for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
-            return { value: out, done: false };
-          },
-          function returnFn() {
-            try {
-              zipped.return?.();
-            } catch {}
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+    _installStaticHelper(I, "zipKeyed", 1, function zipKeyed(iterables: any, options?: any) {
+      if (iterables == null || typeof iterables !== "object") {
+        throw new TypeError("Iterator.zipKeyed: iterables must be an object");
+      }
+      const keys = Object.keys(iterables);
+      const iterArr: any[] = keys.map((k) => iterables[k]);
+      const zipped = (I as any).zip(iterArr, options);
+      return _makeHelperIterator(
+        function next() {
+          const r = zipped.next();
+          if (r.done) return { value: undefined, done: true };
+          const out: any = {};
+          for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
+          return { value: out, done: false };
+        },
+        function returnFn() {
+          try {
+            zipped.return?.();
+          } catch {}
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
   if (typeof I.concat !== "function") {
-    Object.defineProperty(I, "concat", {
-      value: function concat(...iterables: any[]) {
-        // Eagerly validate the iterable-ness of each argument; open lazily.
-        for (const iterable of iterables) {
-          if (iterable == null) {
-            throw new TypeError("Iterator.concat: argument is null or undefined");
-          }
-          const sym = iterable[Symbol.iterator];
-          if (typeof sym !== "function" && typeof iterable.next !== "function") {
-            throw new TypeError("Iterator.concat: argument is not iterable");
-          }
+    _installStaticHelper(I, "concat", 0, function concat(...iterables: any[]) {
+      // Eagerly validate the iterable-ness of each argument; open lazily.
+      for (const iterable of iterables) {
+        if (iterable == null) {
+          throw new TypeError("Iterator.concat: argument is null or undefined");
         }
-        let idx = 0;
-        let current: any = null;
-        return _makeHelperIterator(
-          function next() {
-            while (true) {
-              if (current == null) {
-                if (idx >= iterables.length) return { value: undefined, done: true };
-                current = _getFlattenable(iterables[idx++]);
-              }
-              let r: any;
-              try {
-                r = current.next();
-              } catch (e) {
-                current = null;
-                idx = iterables.length;
-                throw e;
-              }
-              if (r && r.done) {
-                current = null;
-                continue;
-              }
-              return r;
+        const sym = iterable[Symbol.iterator];
+        if (typeof sym !== "function" && typeof iterable.next !== "function") {
+          throw new TypeError("Iterator.concat: argument is not iterable");
+        }
+      }
+      let idx = 0;
+      let current: any = null;
+      return _makeHelperIterator(
+        function next() {
+          while (true) {
+            if (current == null) {
+              if (idx >= iterables.length) return { value: undefined, done: true };
+              current = _getFlattenable(iterables[idx++]);
             }
-          },
-          function returnFn() {
-            if (current != null) {
-              try {
-                current.return?.();
-              } catch {}
+            let r: any;
+            try {
+              r = current.next();
+            } catch (e) {
+              current = null;
+              idx = iterables.length;
+              throw e;
             }
-            idx = iterables.length;
-            current = null;
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+            if (r && r.done) {
+              current = null;
+              continue;
+            }
+            return r;
+          }
+        },
+        function returnFn() {
+          if (current != null) {
+            try {
+              current.return?.();
+            } catch {}
+          }
+          idx = iterables.length;
+          current = null;
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
@@ -1366,6 +1396,21 @@ function _isWasmStruct(obj: any): boolean {
 /** Check if a value can be used as a WeakMap/WeakSet key (must be object or function). */
 function _canBeWeakKey(obj: any): boolean {
   return obj != null && (typeof obj === "object" || typeof obj === "function");
+}
+
+/**
+ * IsConcatSpreadable (§23.1.3.1.1) for an opaque WasmGC struct receiver: true
+ * iff `Symbol.isConcatSpreadable` resolves to a truthy value. The flag is stored
+ * in the sidecar under both the real symbol and the `@@isConcatSpreadable`
+ * string mirror (see `_symbolIdToKeys`). Returns false when the property is
+ * absent or falsy, so a plain array-like is NOT spread unless explicitly tagged.
+ */
+function _isConcatSpreadable(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  const v = _safeGet(obj, Symbol.isConcatSpreadable, callbackState) ?? _sidecarGet(obj, "@@isConcatSpreadable");
+  return v !== undefined && v !== null && !!v;
 }
 
 /**
@@ -7834,6 +7879,31 @@ assert._isSameValue = isSameValue;
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      // (#1042) async/await CPS scheduling primitives. The state machine
+      // allocates one pending outer Promise per async function, then settles
+      // it from a continuation that runs as a microtask. We stash the
+      // resolve/reject capabilities on the promise object so the settle
+      // imports can fire them by reference.
+      if (name === "Promise_new_pending")
+        return () => {
+          let r: (v: any) => void = () => {};
+          let j: (e: any) => void = () => {};
+          const p: any = new Promise((res, rej) => {
+            r = res;
+            j = rej;
+          });
+          p.__r = r;
+          p.__j = j;
+          return p;
+        };
+      if (name === "Promise_settle_resolve")
+        return (p: any, val: any) => {
+          if (p && typeof p.__r === "function") p.__r(val);
+        };
+      if (name === "Promise_settle_reject")
+        return (p: any, reason: any) => {
+          if (p && typeof p.__j === "function") p.__j(reason);
+        };
       // (#1382) `executor` is called as `executor(resolve, reject)` — arity 2.
       if (name === "Promise_new") return (executor: any) => new Promise(_maybeWrapCallable(executor, 2, callbackState));
       // (#1382) `onFulfilled` / `onRejected` callbacks are arity-1 (the value or reason).
@@ -8321,15 +8391,72 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const vecLen = exports?.__vec_len;
           const vecGet = exports?.__vec_get;
+          // §23.1.3.1 step 5.b / IsConcatSpreadable: an argument that is not a
+          // native Array is still spread when its Symbol.isConcatSpreadable
+          // property is truthy. Native concat reads that flag for plain JS
+          // objects already, but for an opaque WasmGC struct array-like (e.g.
+          // `{0:'a', length:2}` with the flag set in the sidecar) it sees a
+          // single opaque object and appends it whole — so spread those here.
+          const concatLen = (x: any): number => {
+            let raw = _safeGet(x, "length", callbackState);
+            // `length` on a struct-backed array-like is a real WasmGC field, not
+            // a sidecar entry — read it via the __sget_length getter export, the
+            // same path __extern_length uses.
+            if (raw === undefined) {
+              const getter = exports?.__sget_length;
+              if (typeof getter === "function") {
+                try {
+                  raw = (getter as (o: any) => unknown)(x);
+                } catch {
+                  /* not a field on this struct variant */
+                }
+              }
+            }
+            const n = typeof raw === "number" ? raw : Number(raw);
+            if (Number.isNaN(n) || n <= 0) return 0;
+            return Math.min(Math.trunc(n), 0x1fffffffffffff);
+          };
+          const applyConcat = (out: any[], xs: any[]): any[] => {
+            for (const x of xs) {
+              if (
+                x != null &&
+                typeof x === "object" &&
+                !Array.isArray(x) &&
+                _isWasmStruct(x) &&
+                _isConcatSpreadable(x, callbackState)
+              ) {
+                const n = concatLen(x);
+                for (let i = 0; i < n; i++) {
+                  let v = _safeGet(x, i, callbackState);
+                  // Indexed struct fields ("0", "1", …) live in WasmGC fields, not
+                  // the sidecar — fall back to the __sget_<i> getter export.
+                  if (v === undefined) {
+                    const idxGetter = exports?.[`__sget_${i}`];
+                    if (typeof idxGetter === "function") {
+                      try {
+                        v = (idxGetter as (o: any) => unknown)(x);
+                      } catch {
+                        /* not a field on this struct variant */
+                      }
+                    }
+                  }
+                  out.push(v);
+                }
+              } else {
+                out.push(x);
+              }
+            }
+            return out;
+          };
           if (typeof vecLen !== "function" || typeof vecGet !== "function") {
-            return ([] as any[]).concat(...args);
+            return applyConcat([], args);
           }
           const len = vecLen(arr) as number;
           const jsArr: any[] = new Array(len);
           for (let i = 0; i < len; i++) {
             jsArr[i] = vecGet(arr, i);
           }
-          return jsArr.concat(...args);
+          return applyConcat(jsArr, args);
         };
       // Array.prototype.join(sep?) fallback for externref receivers (#1286).
       // When the receiver is a JS array (e.g., from Object.keys host import),

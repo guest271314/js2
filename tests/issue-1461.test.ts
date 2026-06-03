@@ -135,14 +135,11 @@ describe("#1461 — Array.prototype.* on array-like / exotic receivers", () => {
       ).toBe(1);
     });
 
-    // Deferred to #1784 (boolean-struct-field-representation): a boolean
-    // object-literal field on a struct-backed receiver reads back as the
-    // number 1 via the __sget_N getter (__box_number), so indexOf(true)
-    // returns -1 instead of 1. This is a cross-cutting WasmGC struct-field
-    // representation gap, not the #1461 generic-receiver algorithm. `it.fails`
-    // asserts the *current* (wrong) behaviour so the suite stays green and
-    // flips loud the moment #1784 lands the boolean tag.
-    it.fails("indexOf({1: true, length: 2}, true) returns 1 (hole at 0) — deferred to #1784", async () => {
+    // Fixed by #1788 (boolean-struct-field-representation): the boolean i32
+    // ValType is now branded, so the `__sget_N` getter boxes the field via
+    // `__box_boolean` instead of `__box_number`. indexOf(true) now finds the
+    // boolean `true` at index 1 (hole at 0).
+    it("indexOf({1: true, length: 2}, true) returns 1 (hole at 0) — fixed by #1788", async () => {
       expect(
         await runWasm(`
           export function test(): number {
@@ -321,6 +318,63 @@ describe("#1461 — Array.prototype.* on array-like / exotic receivers", () => {
         threw = true;
       }
       expect(threw).toBe(true);
+    });
+  });
+
+  describe("Acceptance bullet 6: concat honours Symbol.isConcatSpreadable", () => {
+    // §23.1.3.1.1 IsConcatSpreadable: a non-Array argument is spread when its
+    // Symbol.isConcatSpreadable property is truthy. An opaque WasmGC struct
+    // array-like reaches the host concat path as a single opaque object, so the
+    // flag has to be honoured in __array_concat_any.
+    it("spreads array-like when Symbol.isConcatSpreadable is true", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", 1: "b", length: 2 };
+            obj[Symbol.isConcatSpreadable] = true;
+            const r: any = Array.prototype.concat.call([], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(2);
+    });
+
+    it("spread preserves the array-like's element values", async () => {
+      expect(
+        await runWasm(`
+          export function test(): any {
+            const obj: any = { 0: "x", 1: "y", length: 2 };
+            obj[Symbol.isConcatSpreadable] = true;
+            const r: any = Array.prototype.concat.call([], obj);
+            return r[1];
+          }
+        `),
+      ).toBe("y");
+    });
+
+    it("does NOT spread an array-like without the flag (appended whole)", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", 1: "b", length: 2 };
+            const r: any = Array.prototype.concat.call([], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(1);
+    });
+
+    it("does NOT spread when Symbol.isConcatSpreadable is false", async () => {
+      expect(
+        await runWasm(`
+          export function test(): number {
+            const obj: any = { 0: "a", length: 1 };
+            obj[Symbol.isConcatSpreadable] = false;
+            const r: any = Array.prototype.concat.call([1], obj);
+            return r.length as number;
+          }
+        `),
+      ).toBe(2);
     });
   });
 

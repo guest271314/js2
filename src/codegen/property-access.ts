@@ -1009,6 +1009,37 @@ export function compilePropertyAccess(
     }
   }
 
+  // #1780 — `TextEncoder.encodeInto(...).read` / `.written` under no-host
+  // targets. The call lowers to a native helper returning a
+  // `TextEncoderEncodeIntoResult` WasmGC struct; read its fields with a direct
+  // `struct.get` (fields: 0 = read, 1 = written, both f64) instead of the
+  // generic `__extern_get` host import, which is unavailable standalone/WASI.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "read" || propName === "written") &&
+    objType.getSymbol()?.name === "TextEncoderEncodeIntoResult"
+  ) {
+    // Compile the receiver first: the `encodeInto(...)` call registers the
+    // `TextEncoderEncodeIntoResult` struct and returns it as a ref, so the
+    // struct type index is only known *after* the call is lowered.
+    const recvType = compileExpression(ctx, fctx, expr.expression);
+    const resultTypeIdx = ctx.structMap.get("TextEncoderEncodeIntoResult");
+    if (
+      resultTypeIdx !== undefined &&
+      recvType &&
+      (recvType.kind === "ref" || recvType.kind === "ref_null") &&
+      recvType.typeIdx === resultTypeIdx
+    ) {
+      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+      return { kind: "f64" };
+    }
+    // Receiver didn't lower to the result struct — undo nothing (we already
+    // emitted it); coerce/return a sensible f64 fallback.
+    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
+  }
+
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
   // generic `__extern_get` host-import path: the standalone WASI module has
   // no `process` global, and even with a JS polyfill the generic extern lookup
@@ -2121,6 +2152,37 @@ export function compilePropertyAccess(
       }
       // Undo the compiled expression if it didn't match
       fctx.body.length = savedLen;
+    }
+    // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
+    // receiver. None of the vec fast-paths matched, so the receiver is an opaque
+    // externref at runtime (e.g. the $ObjVec result of `Object.keys(o)` stored
+    // in an `any`). In standalone, `__extern_length` is the native $ObjVec
+    // reader (Blocker B Slice 1), so routing here keeps `.length` host-free and
+    // correct instead of falling through to `__extern_get("length")` (which the
+    // native `__extern_get` would mis-handle by casting "length" → key lookup,
+    // yielding 0). JS-host mode is unchanged (this gate is standalone-only; the
+    // host path's generic `__extern_get("length")` already works there).
+    if (ctx.standalone) {
+      const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      if (isAnyOrUnknown) {
+        const exprResult = compileExpression(ctx, fctx, expr.expression);
+        if (exprResult) {
+          if (exprResult.kind !== "externref") {
+            coerceType(ctx, fctx, exprResult, { kind: "externref" });
+          }
+          const lenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (lenFn !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
+            if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+          }
+          // No helper available — drop and yield 0.
+          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+          return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+        }
+      }
     }
   }
 

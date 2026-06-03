@@ -26,7 +26,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -43,9 +43,24 @@ import { detectStringBuilders } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait, emitAsyncStateMachine } from "./async-cps.js";
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
+
+/**
+ * (#1042) Re-point a function to a func type with the same params but a new
+ * result list. Func types are interned/shared, so we cannot mutate the existing
+ * one in place (that would corrupt every other function with the same shape);
+ * instead intern a fresh type and reassign `func.typeIdx`. Used by the async
+ * CPS hook to switch an async function's result from its unwrapped value type
+ * to `externref` (it returns a Promise object).
+ */
+function rewriteFuncResultType(ctx: CodegenContext, func: WasmFunction, result: ValType): void {
+  const ft = ctx.mod.types[func.typeIdx];
+  if (!ft || ft.kind !== "func") return;
+  func.typeIdx = addFuncType(ctx, ft.params.slice(), [result]);
+}
 
 /** Set of instruction ops that disqualify a function body from inlining */
 export const INLINE_DISALLOWED_OPS = new Set([
@@ -962,8 +977,35 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // Hoist function declarations: JS semantics require function declarations
       // to be available before their textual position in the enclosing scope.
       hoistFunctionDeclarations(ctx, fctx, bodyStatements);
-      for (const stmt of bodyStatements) {
-        compileStatement(ctx, fctx, stmt);
+
+      // (#1042) Async/await CPS state-machine activation hook. Gated behind
+      // ASYNC_CPS_ENABLED (off by default → byte-identical legacy codegen).
+      // Eligible only for a JS-host async function whose body matches a single
+      // tail-await canonical shape with no try-across-await / nested await. On
+      // a match we rewrite the result type to externref (the fn returns a
+      // Promise object), drive emitAsyncStateMachine, and skip the normal loop.
+      let asyncCpsHandled = false;
+      if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+        const asyncPlan = analyzeAsyncBody(ctx, decl);
+        if (
+          asyncPlan.awaitPoints.length === 1 &&
+          !asyncPlan.hasTryAcrossAwait &&
+          splitBodyAtAwait(decl, asyncPlan) !== null
+        ) {
+          // The async function returns a Promise object (externref), not the
+          // unwrapped value. Rewrite the registered signature's result + fctx.
+          rewriteFuncResultType(ctx, func, { kind: "externref" });
+          fctx.returnType = { kind: "externref" };
+          fctx.asyncCpsActive = true;
+          emitAsyncStateMachine(ctx, fctx, decl, asyncPlan);
+          asyncCpsHandled = true;
+        }
+      }
+
+      if (!asyncCpsHandled) {
+        for (const stmt of bodyStatements) {
+          compileStatement(ctx, fctx, stmt);
+        }
       }
     }
 
