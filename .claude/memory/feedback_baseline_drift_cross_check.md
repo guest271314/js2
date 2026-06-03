@@ -31,3 +31,13 @@ pattern explicitly after dev-1047 saw the same DataView cluster on PR #100.
 them blindly against the ratio. Sample them locally; if they pass, they're
 drift and the PR is safe to merge. Mention the cross-check in the self-merge
 report so the team-lead can audit the reasoning.
+
+**Fast drift signal (2026-06-03):** the `test262-regressions.txt` artifact
+now prints its own age warning, e.g. "⚠️ baseline is 125h 44m old (commit
+9ee8e92) — consider force-refresh before trusting these numbers." A
+baseline more than a day or two old + a cross-domain cluster (e.g. 78x `oob`
+on a String.prototype.concat/at PR) is drift; the gate is non-required so
+the merge queue lands the PR regardless. Confirmed on PR #1058 — team-lead
+agreed it was stale-baseline drift, not the change. Download the artifact
+(`gh run download <run> -n test262-regressions-report`) to read the age line
+and category breakdown.

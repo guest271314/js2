@@ -20,7 +20,7 @@
  *
  * Backing-store representation:
  *   ArrayBuffer / DataView  → vec "i32_byte"  (one i32 per byte, 0..255)
- *   Uint8Array (write path) → vec "f64"       (process.stdout.write helper)
+ *   Uint8Array (native)     → vec "i8_byte"   (packed bytes, unsigned reads)
  *
  * The receiver (`this`) of a DataView accessor is an externref holding the
  * i32_byte vec; we `any.convert_extern` + `ref.cast` to recover the struct.

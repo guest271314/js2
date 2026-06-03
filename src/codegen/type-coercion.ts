@@ -956,6 +956,20 @@ export function coerceType(
   toPrimitiveHint?: "number" | "string" | "default",
   compileStringLiteralFn?: CompileStringLiteralFn,
 ): void {
+  const fromKind = from.kind === "i8" || from.kind === "i16" ? "i32" : from.kind;
+  const toKind = to.kind === "i8" || to.kind === "i16" ? "i32" : to.kind;
+  if (from.kind !== fromKind || to.kind !== toKind) {
+    if (fromKind === toKind) return;
+    if (fromKind === "i32" && toKind === "f64") {
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      return;
+    }
+    if (fromKind === "f64" && toKind === "i32") {
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      return;
+    }
+  }
+
   if (from.kind === to.kind) {
     // Same kind but check if ref typeIdx differs (e.g. ref $AnyValue vs ref $SomeStruct)
     if ((from.kind === "ref" || from.kind === "ref_null") && (to.kind === "ref" || to.kind === "ref_null")) {
@@ -2319,6 +2333,8 @@ export function defaultValueInstrs(vt: ValType): Instr[] {
     case "f32":
       return [{ op: "f32.const", value: 0 } as Instr];
     case "i32":
+    case "i8":
+    case "i16":
       return [{ op: "i32.const", value: 0 } as Instr];
     case "i64":
       return [{ op: "i64.const", value: 0n } as Instr];
@@ -2348,6 +2364,13 @@ export function defaultValueInstrs(vt: ValType): Instr[] {
  * Returns an empty array if no coercion is needed.
  */
 export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, fctx?: FunctionContext): Instr[] {
+  const fromKind = from.kind === "i8" || from.kind === "i16" ? "i32" : from.kind;
+  const toKind = to.kind === "i8" || to.kind === "i16" ? "i32" : to.kind;
+  if (from.kind !== fromKind || to.kind !== toKind) {
+    if (fromKind === toKind) return [];
+    if (fromKind === "i32" && toKind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
+    if (fromKind === "f64" && toKind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
+  }
   if (from.kind === to.kind) return [];
   // f64 → externref: box number
   if (from.kind === "f64" && to.kind === "externref") {

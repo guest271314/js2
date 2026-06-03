@@ -35,6 +35,7 @@ benchmarks/results/test262-results.jsonl
 .claude/settings.local.json
 .claude/worktrees/
 .claude/agents/
+.claude/agent-status/
 .codex/worktrees/
 .codex/agent-status/
 .codex/agent-context/
