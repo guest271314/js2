@@ -30,6 +30,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "./expressions/proto-override.js";
+import { ensureObjVecBuilders } from "./object-runtime.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { collectInstrs } from "./statements/shared.js";
@@ -181,9 +182,19 @@ function compileObjectLiteralAsExternref(
         if (srcType.kind !== "externref") {
           coerceType(ctx, fctx, srcType, { kind: "externref" });
         }
-        // Wrap source in a single-element JS array for __object_assign(target, sources[])
-        const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-        const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        // Wrap source in a single-element sources list for __object_assign(target,
+        // sources). Host mode → JS array; standalone → native $ObjVec (#1472
+        // Phase B Slice 3 — native __object_assign iterates a $ObjVec).
+        let arrNewIdx: number | undefined;
+        let arrPushIdx: number | undefined;
+        if (ctx.standalone) {
+          const b = ensureObjVecBuilders(ctx);
+          arrNewIdx = b.newIdx;
+          arrPushIdx = b.pushIdx;
+        } else {
+          arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+          arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        }
         const assignIdx = ensureLateImport(
           ctx,
           "__object_assign",
@@ -313,8 +324,16 @@ function compileObjectLiteralWithAccessors(
         if (srcType.kind !== "externref") {
           coerceType(ctx, fctx, srcType, { kind: "externref" });
         }
-        const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-        const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        let arrNewIdx: number | undefined;
+        let arrPushIdx: number | undefined;
+        if (ctx.standalone) {
+          const b = ensureObjVecBuilders(ctx);
+          arrNewIdx = b.newIdx;
+          arrPushIdx = b.pushIdx;
+        } else {
+          arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+          arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        }
         const assignIdx = ensureLateImport(
           ctx,
           "__object_assign",
