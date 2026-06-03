@@ -1184,10 +1184,30 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return lowerTypeOf(expr, cx);
   }
   if (expr.kind === ts.SyntaxKind.NullKeyword) {
-    // Bare `null` is only valid inside `=== null` / `!== null` (handled by
-    // `tryFoldNullCompare` before we recurse into operands). Reaching here
-    // means the selector accepted a context this slice can't lower.
-    throw new Error(`ir/from-ast: bare 'null' outside === / !== is not supported in slice 1 (${cx.funcName})`);
+    // Bare `null` composes only when the consuming context is reference-
+    // shaped (externref / ref_null), because IR Phase 1 has no nullable
+    // union: a `null` flowing into an f64/i32 hint would mismatch the
+    // consumer's Wasm type at validation. The optional-chaining null arm
+    // and the `??` lowering both pass a reference-shaped hint here.
+    //
+    // `=== null` / `!== null` never reach this branch — `tryFoldNullCompare`
+    // intercepts them before operand recursion (the fold is purely static
+    // because there's no runtime null value to compare against).
+    // The null const's `ty` must be a `val`-kind externref/ref_null so the
+    // lowerer emits `ref.null.extern` / `ref.null T` (see lower.ts "null").
+    // An `extern` className hint is null-compatible at the Wasm level
+    // (opaque externref), so we materialize a plain `externref` null for it.
+    const hintVal = asVal(hint);
+    if (hint.kind === "extern") {
+      const ty = irVal({ kind: "externref" });
+      return cx.builder.emitConst({ kind: "null", ty }, ty);
+    }
+    if (hintVal && (hintVal.kind === "externref" || hintVal.kind === "ref_null")) {
+      return cx.builder.emitConst({ kind: "null", ty: hint }, hint);
+    }
+    throw new Error(
+      `ir/from-ast: bare 'null' in non-reference context (${describeIrType(hint)}) is not supported in IR (${cx.funcName})`,
+    );
   }
   if (ts.isPropertyAccessExpression(expr)) {
     return lowerPropertyAccess(expr, cx);
@@ -1261,7 +1281,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return lowerPrefixUnary(expr, cx);
   }
   if (ts.isBinaryExpression(expr)) {
-    return lowerBinary(expr, cx);
+    return lowerBinary(expr, cx, hint);
   }
   if (ts.isConditionalExpression(expr)) {
     return lowerConditional(expr, cx);
@@ -3490,8 +3510,17 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
   }
 }
 
-function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
+function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
+
+  // `??` nullish coalescing — IR-native short-circuit over a reference-
+  // shaped lhs (`lhs ?? rhs`). Handled before the slice-11 early-throw
+  // because, unlike `%` / `**` / `in` / `instanceof`, it has a lowering
+  // when both arms are the same reference type. `lowerNullish` throws
+  // clean fallback for non-reference / mismatched-type operands.
+  if (op === ts.SyntaxKind.QuestionQuestionToken) {
+    return lowerNullish(expr, cx, hint);
+  }
 
   // Slice 11 (#1169n) — early fallback for ops the selector accepts
   // shape-only but the lowerer doesn't yet implement. Throwing BEFORE
@@ -3500,7 +3529,6 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   if (
     op === ts.SyntaxKind.PercentToken ||
     op === ts.SyntaxKind.AsteriskAsteriskToken ||
-    op === ts.SyntaxKind.QuestionQuestionToken ||
     op === ts.SyntaxKind.InKeyword ||
     op === ts.SyntaxKind.InstanceOfKeyword
   ) {
@@ -3697,14 +3725,81 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
       binop = "js.shr_u";
       resultType = irVal({ kind: "f64" });
       break;
-    // Slice 11 (#1169n) — `%`, `**`, `??`, `in`, `instanceof` are
-    // intercepted by the early-fallback check at the top of
-    // `lowerBinary`; if any reach here the early-throw is missing.
+    // Slice 11 (#1169n) — `%`, `**`, `in`, `instanceof` are intercepted by
+    // the early-fallback check at the top of `lowerBinary`; `??` is handled
+    // by `lowerNullish`. If any reach here the early-dispatch is missing.
     default:
       throw new Error(`ir/from-ast: unsupported binary operator ${ts.tokenToString(op)} in ${cx.funcName}`);
   }
 
   return cx.builder.emitBinary(binop, lhs, rhs, resultType);
+}
+
+/**
+ * Lower `lhs ?? rhs` (nullish coalescing) IR-natively.
+ *
+ * Semantics: evaluate `lhs`; if it is `null` OR `undefined`, the result is
+ * `rhs`, else `lhs`. IR Phase 1 has no nullable-union ValType, so the only
+ * representation that can carry "a value that might be null" is a Wasm
+ * reference (externref / ref_null). We therefore lower only when:
+ *   - `lhs` lowers to a reference-shaped IrType (extern / externref / ref_null),
+ *     so `ref.is_null` is a valid test; and
+ *   - `rhs` lowers to the SAME reference type, so both `emitIfElse` arms agree
+ *     on the carrier Wasm type (no union to widen into).
+ *
+ * Anything else (numeric/string lhs, mismatched arm types) throws clean
+ * fallback to legacy — exactly like the optional-chaining null-arm guard in
+ * `lowerOptionalExternPropertyAccess`.
+ *
+ * Note on `undefined`: a reference-shaped lhs that is JS-`undefined` is
+ * represented at the Wasm level as a null externref (the host shim maps
+ * `undefined ↔ ref.null.extern`), so the single `ref.is_null` test covers
+ * both the `null` and `undefined` cases the spec requires.
+ */
+function lowerNullish(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
+  // Lower the lhs with the caller's hint so a reference-shaped consumer
+  // (e.g. an externref slot / return) propagates the right carrier type.
+  const lhs = lowerExpr(expr.left, cx, hint);
+  const lhsType = cx.builder.typeOf(lhs);
+  const lhsVal = asVal(lhsType);
+  const lhsIsRef =
+    lhsType.kind === "extern" || (lhsVal !== null && (lhsVal.kind === "externref" || lhsVal.kind === "ref_null"));
+  if (!lhsIsRef) {
+    throw new Error(
+      `ir/from-ast: '??' on non-reference lhs (${describeIrType(lhsType)}) is not supported in IR (${cx.funcName})`,
+    );
+  }
+
+  // The result carrier type is the lhs reference type. Both arms must land
+  // on it: the rhs is lowered with `lhsType` as its hint and must agree.
+  const resultType: IrType = lhsType;
+
+  const cond = cx.builder.emitRefIsNull(lhs);
+
+  // then-arm (lhs IS null/undefined) → evaluate and yield rhs.
+  let thenValue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    thenValue = lowerExpr(expr.right, cx, resultType);
+  });
+  const rhsType = cx.builder.typeOf(thenValue);
+  if (!irTypeEquals(rhsType, resultType)) {
+    throw new Error(
+      `ir/from-ast: '??' arm type mismatch (lhs ${describeIrType(resultType)} vs rhs ${describeIrType(rhsType)}) is not supported in IR (${cx.funcName})`,
+    );
+  }
+
+  // else-arm (lhs is non-null) → yield `lhs` directly. The lowerer records
+  // `elseValue` as a cross-block use (lower.ts:479 `recordUse(elseValue, -1)`)
+  // so the outer `lhs` SSA value is pre-materialized into a Wasm local before
+  // the `if`, and the empty else arm just `local.get`s it as its carrier.
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue,
+    else: [],
+    elseValue: lhs,
+    resultType,
+  });
 }
 
 function requireF64(isF64: boolean, op: string, fn: string): void {
