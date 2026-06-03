@@ -749,6 +749,25 @@ asserting the getter fires.
 > (non-literal) descriptor objects (`__defineProperty_desc`) and
 > `Object.getOwnPropertyDescriptor` native read-back also remain follow-ups.
 >
+> **Follow-on slice — native `hasOwnProperty`/`propertyIsEnumerable` for struct
+> receivers (from sd-846-slice3's #1591 investigation):**
+> `Object.prototype.hasOwnProperty.call(receiver, key)` (and
+> `propertyIsEnumerable`) currently routes to the JS-host `__proto_method_call`
+> import at `src/codegen/expressions/calls.ts` Case 2a (`typeName === "Object"`),
+> so it refuses under `--target standalone`. With the #1629 native descriptor
+> model in place, this becomes a localized routing slice: at the Case-2a site,
+> when `ctx.standalone && typeName === "Object" && methodName ∈
+> {hasOwnProperty, propertyIsEnumerable}`, lower to a new native helper built
+> on the already-present `$Object`/`$PropEntry` primitives — `hasOwnProperty`
+> reuses `__extern_has_idx` (own-slot probe, tombstone-aware), and
+> `propertyIsEnumerable` reads the matched `$PropEntry.$flags & FLAG_ENUMERABLE`
+> (returning `false` for a missing key rather than throwing). Both take the
+> coerced receiver→`$Object` (lenient: non-object receiver → ToObject already
+> handled upstream) and the key string. No `$PropEntry` layout change needed —
+> the enumerable bit and own-slot probe already exist. This is the natural
+> dispatch-layer extension of S6 and should be cut as its own net-≥0 PR after
+> S6 lands.
+>
 > **Tests:** `tests/issue-1629-S6.test.ts` (6 cases: full-attr define +
 > read-back, omitted-attr defaults, coexist with dynamic set/get, redefine
 > overwrite, null-throw TypeError, table grow/rehash). No-regression: the
