@@ -575,7 +575,8 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       throw new Error(`ir/from-ast: Phase 1 return must have an expression in ${cx.funcName}`);
     }
     const v = lowerExpr(stmt.expression, cx, cx.returnType);
-    cx.builder.terminate({ kind: "return", values: [v] });
+    const vCoerced = coerceReturnValue(v, cx);
+    cx.builder.terminate({ kind: "return", values: [vCoerced] });
     return;
   }
   // Slice 14 (#1228) — void function tail: any non-return statement that
@@ -2718,6 +2719,65 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
     return value;
   }
   return cx.builder.emitCoerceToExternref(value);
+}
+
+/**
+ * #1798 — reconcile a lowered return value with the function's declared
+ * result type before terminating with `return`.
+ *
+ * The return expression is lowered with `cx.returnType` as an *advisory*
+ * hint, but several expression kinds honestly produce their concrete type
+ * regardless of the hint (most notably `new C()` → `IrType.class` (struct
+ * ref), object literals → struct ref). When the function declares `: any`
+ * (which `resolvePositionType` maps to `externref`, see
+ * `src/codegen/index.ts:438`), a `(ref $C) → externref` mismatch would reach
+ * `return` and the emitted body fails Wasm validation
+ * (`return[0] expected externref, got (ref null N)`).
+ *
+ * The legacy return path (`compileReturnStatement` →
+ * `coerceType(exprType, fctx.returnType)`) coerces here; the IR return-tail
+ * previously did not. This mirrors that coercion for the externref case:
+ *
+ *   - Declared result is `externref` and the value is reference-shaped
+ *     (class / object / closure / vec ref / ref_null / native-string) →
+ *     coerce via `coerceYieldValueToExternref` (`extern.convert_any`). This
+ *     is a zero-cost re-tag valid for any anyref subtype, agnostic to the
+ *     exact struct typeIdx (so type compaction cannot break it).
+ *   - Declared result is `externref` but the value is a native scalar
+ *     (`f64` / `i32`) → throw a clean "not in slice" fallback. Boxing a
+ *     number to externref needs `__box_number`; the IR has no box primitive
+ *     yet, and the legacy path boxes correctly. Deferring mirrors the
+ *     existing numeric-throw deferral in `lowerThrowStatement`.
+ *
+ * All other cases (matching kinds, already-externref values, non-externref
+ * declared results) pass through unchanged.
+ */
+function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
+  const declared = cx.returnType;
+  // Only the externref (TS `any`) declared-result case can mismatch here;
+  // native scalar / matching-ref returns already line up via the hint.
+  if (!declared || declared.kind !== "val" || declared.val.kind !== "externref") {
+    return value;
+  }
+  const actual = cx.builder.typeOf(value);
+  // Already externref — nothing to do.
+  if (actual.kind === "val" && actual.val.kind === "externref") {
+    return value;
+  }
+  // Native scalar → externref needs a number-box helper the IR lacks; defer
+  // the whole function to legacy (which boxes via __box_number).
+  const actualVal = asVal(actual);
+  if (actualVal && (actualVal.kind === "f64" || actualVal.kind === "i32" || actualVal.kind === "i64")) {
+    throw new Error(
+      `ir/from-ast: return of numeric ${actualVal.kind} into an 'any' (externref) result ` +
+        `needs the box helper — deferring to legacy in ${cx.funcName}`,
+    );
+  }
+  // Reference-shaped (class / object / closure / vec ref / ref_null /
+  // native-string) → extern.convert_any. `coerceYieldValueToExternref` is a
+  // no-op for host-strings (already externref) and re-tags all anyref
+  // subtypes otherwise.
+  return coerceYieldValueToExternref(value, cx);
 }
 
 /**
