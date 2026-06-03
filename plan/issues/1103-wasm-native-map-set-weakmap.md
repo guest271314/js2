@@ -369,3 +369,42 @@ $miss:
 - #1103c WeakMap: ~250 LOC
 - #1103d WeakSet: ~150 LOC
 - **Total: ~1,500 LOC across 4 PRs.** Single-PR is rejected — split required.
+
+## Progress — 2026-06-03 (dev-1776, #1103a foundation)
+
+**Branch / worktree**: `issue-1103a-map` at
+`/workspace/.claude/worktrees/issue-1103a-map` (off origin/main b96e8f430).
+Commit `4a4735eec` — runtime core, `tsc --noEmit` clean.
+
+### Done (committed)
+- `src/codegen/map-runtime.ts` (NEW): `ensureMapRuntimeTypes` registers
+  `$Map`/`$MapEntry`/`$MapEntries`/`$MapBuckets`/`$MapIter`/`$MapIterResult`;
+  `ensureMapHelpers` emits `__hash_anyref`, `__same_value_zero`,
+  `__map_lookup_idx`, `__map_new`, `__map_get`, `__map_has`, `__map_size`,
+  `__map_set` (append + bucket-link + grow-on-full + load-factor rehash),
+  `__map_delete` (tombstone), `__map_clear`, `__map_iter_new`,
+  `__map_iter_next`. Helper indices recorded in `ctx.mapHelpers`.
+- `src/codegen/context/types.ts` + `create-context.ts`: `mapTypeIdx` &c.,
+  `mapHelpers`, `mapHelpersEmitted` fields + defaults.
+
+### Remaining (same PR, NOT yet wired)
+1. **Emit hook**: call `ensureMapHelpers(ctx)` in `compile()` alongside
+   `ensureNativeStringHelpers` (src/codegen/index.ts:4913 region), gated on
+   `ctx.standalone || ctx.wasi`, only when the source uses Map. Mind the
+   import-shift hazard (`reconcileNativeStrFinalizeShift` pattern) — Map helper
+   funcIdx are baked at emit and must be shifted if imports are added after.
+2. **Gate externClass**: in `index.ts` ~L6411 `if (!ctx.externClasses.has("Map"))`,
+   skip the host-bridge entry when native path active.
+3. **`new Map()` lowering**: `src/codegen/expressions/calls.ts` (~L124 `extern`
+   set) — when className==="Map" && native, emit `call __map_new`
+   (no-arg) / `__map_new_from_arr` (iterable; defer iterable to later).
+4. **Method dispatch**: `src/codegen/property-access.ts` (~L1138, L1477) —
+   branch on native and `call ctx.mapHelpers.get("__map_"+method)`.
+5. **builtin-tag**: `src/codegen/builtin-tags.ts` ~L193 add MAP tag.
+6. **for-of**: recognise `ref $Map` → `__map_iter_new`/`__map_iter_next`.
+7. **Tests**: `tests/issue-1103-map.test.ts` — standalone compile + instantiate,
+   set/get/has/delete/size/iteration order, no leaked host imports.
+
+`__hash_anyref` local layout is fixed post-hoc by `fixHashLocals` (indices
+1=nv,2=bits,3=h,4=i,5=flat,6=data,7=len). `nativeStrDataFieldIdx` reads the
+NativeString struct's last ref field for the i16 backing array.
