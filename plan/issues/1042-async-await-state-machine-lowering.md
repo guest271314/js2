@@ -885,12 +885,33 @@ Lead-confirmed PR1 scope: single + sequential await, JS-host only, behind the
 try/catch-across-await + nested await + async arrows/methods → explicit
 `reportError` + legacy fallback.
 
-### Done so far (uncommitted in worktree)
-- `src/runtime.ts` (~line 7836): added the 3 JS-host scheduling primitives the
-  state machine needs — `Promise_new_pending` (allocate pending Promise,
-  stash `__r`/`__j` resolve/reject capabilities on it), `Promise_settle_resolve`
-  (`p.__r(val)`), `Promise_settle_reject` (`p.__j(reason)`).
+### Done so far (COMMITTED on branch, all inert behind `ASYNC_CPS_ENABLED=false`, tsc clean)
+- **e42882074** — `src/runtime.ts` (~line 7836): the 3 JS-host scheduling
+  primitives — `Promise_new_pending` (allocate pending Promise, stash
+  `__r`/`__j` resolve/reject capabilities), `Promise_settle_resolve`
+  (`p.__r(val)`), `Promise_settle_reject` (`p.__j(reason)`). PLUS
+  `compileSyntheticAsyncContinuation` in `src/codegen/closures.ts:2809` — the
+  continuation synthesizer (item 1 below, DONE): takes explicit
+  `(segmentStmts, captures, resumeBinding)`, emits exported
+  `__cb_${cbId}(externref captures, externref awaitValue) -> externref`
+  compatible with the `__make_callback` host bridge; restores captured locals
+  from a `__cb_cap_${cbId}` struct, binds the awaited result, runs the segment,
+  returns `ref.null.extern`. Returns `{cbId, capStructTypeIdx, captures}`.
+- **c991edc92** — `splitBodyAtAwait` + `AwaitSplit` in `async-cps.ts` (item 2,
+  DONE): pure single-await segmentation into prefix / awaitedExpr /
+  resumeBinding / suffix for the 3 canonical shapes (`return await P`,
+  `const x = await P; rest`, `await P; rest`). Returns `null` outside the shape
+  gate → legacy fallback.
 - Issue → `status: in-progress`.
+
+### `__make_callback` contract (confirmed for the driver)
+`__make_callback: (i32 cbId, externref captures) -> externref` (index.ts:7060).
+The continuation creation site pushes `i32.const cbId` + the captures struct
+(`extern.convert_any` to externref) + `call __make_callback` → yields a JS
+callback. Pass that callback to `Promise_then2(awaited, contCb, rejectCb)`. The
+host dispatches `exports["__cb_${cbId}"](captures, settledValue)` as a microtask
+(runtime.ts ~8759). This is the no-funcref-table path — reuse it; do NOT build a
+separate funcref table.
 
 ### Verified wiring points (current line numbers, post-merge of origin/main)
 - `AwaitExpression` no-op: `src/codegen/expressions.ts:1165` (pass-through).
@@ -909,14 +930,9 @@ try/catch-across-await + nested await + async arrows/methods → explicit
   uncaught-throw detection. `emitAsyncStateMachine`/`compileNestedAwait` are
   `reportError` stubs (gated off by `ASYNC_CPS_ENABLED = false`).
 
-### Remaining (the bulk — ~550 LoC, one PR)
-1. `compileSyntheticAsyncContinuation` in closures.ts — mirror
-   `compileArrowAsClosure` but take an explicit param list
-   `[capturesParam:externref, awaitValueParam:externref]` + a statement list
-   (no AST FunctionExpression), reusing the closure-struct + funcref-table +
-   lifted-func emission unchanged. Uniform result `externref`.
-2. `splitBodyAtAwait` + `computeLiveAfterEach` in async-cps.ts (segment the body
-   at each tail-await; live = referenced-after minus declared-after).
+### Remaining (resume here — `emitAsyncStateMachine` driver is the next + heaviest piece)
+1. ✅ DONE (e42882074) — `compileSyntheticAsyncContinuation` (closures.ts:2809).
+2. ✅ DONE (c991edc92) — `splitBodyAtAwait` + `AwaitSplit` (async-cps.ts).
 3. `emitAsyncStateMachine`: alloc outer pending Promise (`Promise_new_pending`);
    compile prefix segment; build capture struct; compile awaited expr; wrap
    continuations via `__make_callback`; `Promise_then2(awaited, contCb,
