@@ -125,26 +125,18 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(value).toBe(1);
   });
 
-  it("refuses unsupported regexp syntax explicitly", async () => {
-    const r = await compile(`export function test(): boolean { return /\\d+/.test("123"); }`, {
-      fileName: "issue-682.ts",
-      target: "standalone",
-    });
-
-    expect(r.success).toBe(false);
-    expect(r.errors.some((e) => /#682\/#1474/.test(e.message))).toBe(true);
-    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+  // #1539 Phase 2a: `\d+` and the `g` flag now compile to the pure-WasmGC VM
+  // (they were refused under #682's literal-substring backend). These two
+  // cases moved from "refuses" to "runs" — equivalence is covered in
+  // tests/issue-1539-standalone-regex.test.ts.
+  it("runs \\d+ via the native VM (was refused under #682)", async () => {
+    expect(await runStandaloneNumber(`export function test(): number { return /\\d+/.test("a123") ? 1 : 0; }`)).toBe(1);
   });
 
-  it("refuses stateful flags until lastIndex semantics are implemented", async () => {
-    const r = await compile(`export function test(): boolean { return /abc/g.test("abcabc"); }`, {
-      fileName: "issue-682.ts",
-      target: "standalone",
-    });
-
-    expect(r.success).toBe(false);
-    expect(r.errors.some((e) => /flags "g"/.test(e.message) && /#682\/#1474/.test(e.message))).toBe(true);
-    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+  it("runs the g flag via the native VM (was refused under #682)", async () => {
+    expect(await runStandaloneNumber(`export function test(): number { return /abc/g.test("xabcx") ? 1 : 0; }`)).toBe(
+      1,
+    );
   });
 
   it("refuses direct RegExp symbol protocol calls without JS-host imports", async () => {
@@ -183,7 +175,7 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(r.success).toBe(false);
     expect(
       r.errors.some(
-        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#682\/#1474/.test(e.message),
+        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#1539/.test(e.message),
       ),
     ).toBe(true);
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
@@ -207,7 +199,7 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(r.success).toBe(false);
     expect(
       r.errors.some(
-        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#682\/#1474/.test(e.message),
+        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#1539/.test(e.message),
       ),
     ).toBe(true);
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
