@@ -1257,8 +1257,10 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // claims a generator function (#1169f). The helper is idempotent —
   // guards on `ctx.funcMap.has("__gen_create_buffer")` internally.
   if (state.generatorFound) {
-    if (!((ctx.standalone || ctx.wasi) && !sourceNeedsGeneratorHostImports(ctx, state.sourceFile))) {
-      addGeneratorImports(ctx);
+    const needsNoJsHostFallback =
+      (ctx.standalone || ctx.wasi) && sourceNeedsGeneratorHostImports(ctx, state.sourceFile);
+    if (!(ctx.standalone || ctx.wasi) || needsNoJsHostFallback) {
+      addGeneratorImports(ctx, { allowNoJsHost: needsNoJsHostFallback });
     }
   }
 
