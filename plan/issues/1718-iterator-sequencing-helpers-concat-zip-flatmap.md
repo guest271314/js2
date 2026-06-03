@@ -132,7 +132,16 @@ static installs to use it. Runtime iteration behaviour unchanged.
 Result (host-runner tally, this Node which ships only native `flatMap`):
 `zip` 8→9, `zipKeyed` 8→9 (the `length.js` `verifyProperty` cases now pass),
 `concat`/`flatMap` unchanged, **no regressions**. Unit test:
-`tests/issue-1718-static-arity.test.ts` (18 cases).
+`tests/issue-1718-static-arity.test.ts`.
+
+**Also in S2 — GetOptionsObject validation (+2 tests).** `zip`/`zipKeyed`
+silently treated a non-object `options` argument (`null`, boolean, number,
+string, symbol, bigint) as "no options" instead of throwing. Added
+`_getOptionsObject(options)` per the iterator-sequencing/joint-iteration
+proposal (`undefined` → null-proto object; Object → as-is; else TypeError)
+and applied it in `zip` (which `zipKeyed` delegates through). Flips
+`built-ins/Iterator/{zip,zipKeyed}/options.js` → pass; no iteration involved
+so this is independent of the #1320 bridge.
 
 **Remaining (bridge-blocked, NOT this slice):** the dominant residual buckets
 are `Iterator helper: argument is not iterable` (concat ~18, zipKeyed ~16) and

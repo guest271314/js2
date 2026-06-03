@@ -564,6 +564,16 @@ function _installIteratorHelperPolyfills(): void {
     return it;
   }
 
+  // ES2025 GetOptionsObject (iterator-sequencing / joint-iteration proposal):
+  // undefined → fresh null-proto object; Object → returned as-is; any other
+  // value (null, boolean, number, string, symbol, bigint) throws TypeError.
+  function _getOptionsObject(options: any): any {
+    if (options === undefined) return Object.create(null);
+    if (typeof options === "object" && options !== null) return options;
+    if (typeof options === "function") return options;
+    throw new TypeError("Iterator options must be undefined or an object");
+  }
+
   function _makeHelperIterator(nextFn: () => any, returnFn: (v?: any) => any): any {
     const obj: any = Object.create(Iproto);
     obj.next = nextFn;
@@ -864,7 +874,8 @@ function _installIteratorHelperPolyfills(): void {
       if (iterables == null) {
         throw new TypeError("Iterator.zip: iterables required");
       }
-      const mode: string = (options && options.mode) || "shortest";
+      options = _getOptionsObject(options);
+      const mode: string = options.mode || "shortest";
       if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
         throw new TypeError("Iterator.zip: invalid mode " + String(mode));
       }
