@@ -158,6 +158,119 @@ export function emitAsyncStateMachineFromIr(): boolean {
   return false;
 }
 
+/**
+ * One segment boundary produced by {@link splitBodyAtAwait}.
+ *
+ * PR1 handles a body with **exactly one** top-level await appearing as the
+ * initializer/operand of one of three canonical statement shapes. The split
+ * yields:
+ *   - `prefix`: statements that run synchronously before suspension (the
+ *     await's own statement is NOT included here; its awaited expression is
+ *     surfaced separately as `awaitedExpr`).
+ *   - `awaitedExpr`: the operand of the await (the thing we suspend on).
+ *   - `resumeBinding`: the `{name,type}` the resolved value binds to on resume
+ *     (for `const x = await P`), or `null` for a bare `await P;` /
+ *     `return await P`.
+ *   - `suffix`: statements that run after resumption (the continuation body).
+ *   - `isReturnAwait`: true for `return await P` — the continuation's value IS
+ *     the awaited value, so `suffix` is empty and the resolved value settles
+ *     the outer promise directly.
+ */
+export interface AwaitSplit {
+  readonly prefix: readonly ts.Statement[];
+  readonly awaitedExpr: ts.Expression;
+  readonly resumeBinding: { readonly name: string; readonly type: ts.TypeNode | undefined } | null;
+  readonly suffix: readonly ts.Statement[];
+  readonly isReturnAwait: boolean;
+}
+
+/**
+ * Split a single-await async function body into a prefix / awaited-expr /
+ * suffix triple for the canonical PR1 shapes. Returns `null` if the body does
+ * not match one of the three supported shapes (caller falls back to legacy).
+ *
+ * Supported shapes (the await must be the *sole* top-level await and appear at
+ * statement top-level, not nested inside an expression sub-tree):
+ *
+ *   1. `return await P;`                      → isReturnAwait, no suffix
+ *   2. `const x = await P; <rest>`            → resumeBinding=x, suffix=rest
+ *      (also `let`/`var`; single declarator only)
+ *   3. `await P; <rest>`                      → no binding, suffix=rest
+ *
+ * Pure: no `ctx`/`fctx` mutation. The shape gate keeps PR1 small and provably
+ * correct; richer control flow (awaits in loops/branches, multiple awaits in
+ * one segment) is deferred to follow-up slices.
+ */
+export function splitBodyAtAwait(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): AwaitSplit | null {
+  // PR1 contract: exactly one await, no try-across-await, JS-host only.
+  if (plan.awaitPoints.length !== 1) return null;
+  if (plan.hasTryAcrossAwait) return null;
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return null;
+
+  const stmts = body.statements;
+  const awaitNode = plan.awaitPoints[0]!;
+
+  // Find the index of the top-level statement that textually contains the
+  // await. The await must be DIRECTLY one of the canonical positions in that
+  // statement (return-arg, single var-init, or expression-statement expr) —
+  // not buried deeper (e.g. `f(await x)` is rejected for PR1).
+  for (let i = 0; i < stmts.length; i++) {
+    const stmt = stmts[i]!;
+    if (!statementContainsNode(stmt, awaitNode)) continue;
+
+    const prefix = stmts.slice(0, i);
+    const suffix = stmts.slice(i + 1);
+
+    // Shape 1: `return await P;`
+    if (ts.isReturnStatement(stmt) && stmt.expression && stmt.expression === awaitNode) {
+      if (suffix.length !== 0) return null; // dead code after return; reject for PR1
+      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix: [], isReturnAwait: true };
+    }
+
+    // Shape 2: `const x = await P;` (single declarator, identifier name)
+    if (ts.isVariableStatement(stmt)) {
+      const decls = stmt.declarationList.declarations;
+      if (decls.length !== 1) return null;
+      const decl = decls[0]!;
+      if (decl.initializer !== awaitNode || !ts.isIdentifier(decl.name)) return null;
+      return {
+        prefix,
+        awaitedExpr: awaitNode.expression,
+        resumeBinding: { name: decl.name.text, type: decl.type },
+        suffix,
+        isReturnAwait: false,
+      };
+    }
+
+    // Shape 3: `await P;` (bare expression statement)
+    if (ts.isExpressionStatement(stmt) && stmt.expression === awaitNode) {
+      return { prefix, awaitedExpr: awaitNode.expression, resumeBinding: null, suffix, isReturnAwait: false };
+    }
+
+    // The await sits inside an unsupported position within this statement.
+    return null;
+  }
+
+  return null;
+}
+
+/** True if `node` appears anywhere within `stmt`'s subtree (not crossing fn scopes). */
+function statementContainsNode(stmt: ts.Node, node: ts.Node): boolean {
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found) return;
+    if (n === node) {
+      found = true;
+      return;
+    }
+    if (isNestedFunctionScope(n) && n !== stmt) return;
+    forEachChild(n, walk);
+  };
+  walk(stmt);
+  return found;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers (private to async-cps.ts)
 // ---------------------------------------------------------------------------
