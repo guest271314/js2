@@ -200,11 +200,31 @@ export function buildVecFromExternref(
   flushLateImportShifts(ctx, fctx);
   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  // Materialize iterables (generators, custom @@iterator) via Array.from so
-  // the length/indexed-access loop below walks a real array. Throws from
-  // iterator .next() propagate to the caller (#1150).
-  const iterIdx = ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
+  // #1472 Phase B Blocker B Slice 2 — standalone enumeration consumer.
+  //
+  // `__array_from_iter` is a JS-host import (it invokes the Symbol.iterator
+  // protocol via the runtime). In standalone there is no host, and the source
+  // we are coercing here is already an indexable externref — the native
+  // `$ObjVec` produced by `__object_keys`/`values`/`entries` (Slice 1), which
+  // `__extern_length` + `__extern_get_idx` read directly. So under
+  // `ctx.standalone` we SKIP the materialization step (pass the externref
+  // through unchanged) and read it with the native indexed accessor below,
+  // never leaking `env::__array_from_iter`. (Generators / custom @@iterator
+  // standalone materialization is a separate slice — those don't reach an
+  // $ObjVec source.) The JS-host path is unchanged.
+  const useNativeObjVec = ctx.standalone;
+  const iterIdx = useNativeObjVec
+    ? undefined
+    : ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeObjVec) flushLateImportShifts(ctx, fctx);
+  // In standalone, indexed reads go through the native `__extern_get_idx`
+  // (f64 index → element) instead of `__extern_get(obj, boxed-index)` — the
+  // native `__extern_get` casts its key to $AnyString and would trap on a
+  // boxed number. (#1472 Phase B Blocker B Slice 2)
+  const getIdxIdx = useNativeObjVec
+    ? ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }])
+    : undefined;
+  if (useNativeObjVec) flushLateImportShifts(ctx, fctx);
 
   if (lenIdx === undefined || getIdx === undefined) {
     return [{ op: "ref.null", typeIdx: vecTypeIdx } as Instr];
@@ -304,14 +324,25 @@ export function buildVecFromExternref(
             { op: "local.get", index: arrLocal } as Instr,
             { op: "local.get", index: idxLocal } as Instr,
             { op: "local.get", index: matLocal } as Instr,
-            ...(boxIdx !== undefined
+            // Standalone: native __extern_get_idx(obj, f64(idx)) — reads the
+            // $ObjVec element by index without a boxed-string key. JS-host:
+            // __extern_get(obj, boxed-numeric-index) (host handles numeric keys).
+            ...(useNativeObjVec && getIdxIdx !== undefined
               ? [
                   { op: "local.get", index: idxLocal } as Instr,
                   { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: boxIdx } as Instr,
+                  { op: "call", funcIdx: getIdxIdx } as Instr,
                 ]
-              : [{ op: "ref.null.extern" } as Instr]),
-            { op: "call", funcIdx: getIdx } as Instr,
+              : [
+                  ...(boxIdx !== undefined
+                    ? [
+                        { op: "local.get", index: idxLocal } as Instr,
+                        { op: "f64.convert_i32_s" } as Instr,
+                        { op: "call", funcIdx: boxIdx } as Instr,
+                      ]
+                    : [{ op: "ref.null.extern" } as Instr]),
+                  { op: "call", funcIdx: getIdx } as Instr,
+                ]),
             ...buildElemCoerce(),
             { op: "array.set", typeIdx: vecInfo.arrTypeIdx } as Instr,
             { op: "local.get", index: idxLocal } as Instr,
@@ -956,6 +987,20 @@ export function coerceType(
   toPrimitiveHint?: "number" | "string" | "default",
   compileStringLiteralFn?: CompileStringLiteralFn,
 ): void {
+  const fromKind = from.kind === "i8" || from.kind === "i16" ? "i32" : from.kind;
+  const toKind = to.kind === "i8" || to.kind === "i16" ? "i32" : to.kind;
+  if (from.kind !== fromKind || to.kind !== toKind) {
+    if (fromKind === toKind) return;
+    if (fromKind === "i32" && toKind === "f64") {
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      return;
+    }
+    if (fromKind === "f64" && toKind === "i32") {
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      return;
+    }
+  }
+
   if (from.kind === to.kind) {
     // Same kind but check if ref typeIdx differs (e.g. ref $AnyValue vs ref $SomeStruct)
     if ((from.kind === "ref" || from.kind === "ref_null") && (to.kind === "ref" || to.kind === "ref_null")) {
@@ -1603,6 +1648,22 @@ export function coerceType(
     fctx.body.push({ op: "any.convert_extern" } as Instr);
     return;
   }
+  // anyref → f64 (#1103a): a value read out of a native collection (e.g.
+  // `Map.prototype.get` returns anyref) used in numeric context. Numbers are
+  // stored boxed (`__box_number` externref converted to anyref), so externalize
+  // back to externref then unbox. Mirrors the `externref → f64` arm.
+  if (from.kind === "anyref" && to.kind === "f64") {
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      return;
+    }
+    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
+    return;
+  }
   // externref → eqref: any.convert_extern (eqref is subtype of anyref)
   if (from.kind === "externref" && to.kind === "eqref") {
     fctx.body.push({ op: "any.convert_extern" } as Instr);
@@ -1781,9 +1842,16 @@ export function coerceType(
                 fctx.body.push({ op: "f64.const", value: NaN });
               }
             } else if (closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null") {
-              // valueOf returned an object ref — drop and push NaN
+              // (#1525b §7.1.1.1 step 6) valueOf returned an object — must try
+              // toString and throw TypeError if both return non-primitives.
+              // Route through the host __to_primitive helper (same path the
+              // eqref subpath uses at line ~1882, fixed by #1253). Re-push the
+              // ORIGINAL struct so the host sees it; the valueOf result is
+              // already dropped. Pre-#1525b this silently emitted NaN.
               fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "f64.const", value: NaN });
+              fctx.body.push({ op: "local.get", index: structLocal });
+              const hintRefRet = toPrimitiveHint ?? "number";
+              emitToPrimitiveHostCall(ctx, fctx, "f64", hintRefRet);
             }
             // f64 return → value is already on stack
             cleanup();
@@ -1907,9 +1975,21 @@ export function coerceType(
           // function rather than a closure stored in the struct field.
           const standaloneValueOf = ctx.funcMap.get(`${name}_valueOf`);
           if (standaloneValueOf !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: standaloneValueOf });
             const funcType = ctx.mod.types[ctx.mod.functions[standaloneValueOf - ctx.numImportFuncs]?.typeIdx ?? -1];
             const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
+            // (#1525b §7.1.1.1 step 6) For object-ref return, we must re-route
+            // through the host helper using the ORIGINAL struct. Save it before
+            // the call consumes it. For other return kinds the original code
+            // path is unchanged.
+            const needsHostFallback = retKind === "ref" || retKind === "ref_null";
+            let savedStructLocal = -1;
+            if (needsHostFallback) {
+              savedStructLocal = allocLocal(fctx, `__svo_struct_${fctx.locals.length}`, from);
+              // Stack currently has `from` (struct) — duplicate via tee then
+              // restore via local.get so the call sees the same value.
+              fctx.body.push({ op: "local.tee", index: savedStructLocal });
+            }
+            fctx.body.push({ op: "call", funcIdx: standaloneValueOf });
             if (retKind === "i32") {
               fctx.body.push({ op: "f64.convert_i32_s" });
             } else if (retKind === "externref" || retKind === "ref_extern") {
@@ -1922,10 +2002,13 @@ export function coerceType(
                 fctx.body.push({ op: "drop" });
                 fctx.body.push({ op: "f64.const", value: NaN });
               }
-            } else if (retKind === "ref" || retKind === "ref_null") {
-              // valueOf returned an object ref — drop and push NaN
+            } else if (needsHostFallback) {
+              // (#1525b) valueOf returned an object — try toString and throw
+              // TypeError per §7.1.1.1. Mirror the eqref subpath at ~line 1882.
               fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "f64.const", value: NaN });
+              fctx.body.push({ op: "local.get", index: savedStructLocal });
+              const hintSvoRet = toPrimitiveHint ?? "number";
+              emitToPrimitiveHostCall(ctx, fctx, "f64", hintSvoRet);
             }
             return;
           }
@@ -2297,6 +2380,8 @@ export function defaultValueInstrs(vt: ValType): Instr[] {
     case "f32":
       return [{ op: "f32.const", value: 0 } as Instr];
     case "i32":
+    case "i8":
+    case "i16":
       return [{ op: "i32.const", value: 0 } as Instr];
     case "i64":
       return [{ op: "i64.const", value: 0n } as Instr];
@@ -2326,6 +2411,13 @@ export function defaultValueInstrs(vt: ValType): Instr[] {
  * Returns an empty array if no coercion is needed.
  */
 export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, fctx?: FunctionContext): Instr[] {
+  const fromKind = from.kind === "i8" || from.kind === "i16" ? "i32" : from.kind;
+  const toKind = to.kind === "i8" || to.kind === "i16" ? "i32" : to.kind;
+  if (from.kind !== fromKind || to.kind !== toKind) {
+    if (fromKind === toKind) return [];
+    if (fromKind === "i32" && toKind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
+    if (fromKind === "f64" && toKind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
+  }
   if (from.kind === to.kind) return [];
   // f64 → externref: box number
   if (from.kind === "f64" && to.kind === "externref") {

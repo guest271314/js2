@@ -9,11 +9,38 @@ import { getDefaultEnvironment } from "../env.js";
 // which lets embedders import the checker without forcing the whole module
 // graph through async initialization.
 
+type TsLibGlobal = {
+  __js2wasmTsLibFiles?: Record<string, string>;
+  __ts2wasmTsLibFiles?: Record<string, string>;
+};
+
 function getBundledLibFiles(): Record<string, string> | undefined {
-  const files =
-    (globalThis as { __js2wasmTsLibFiles?: unknown; __ts2wasmTsLibFiles?: unknown }).__js2wasmTsLibFiles ??
-    (globalThis as { __ts2wasmTsLibFiles?: unknown }).__ts2wasmTsLibFiles;
+  const globalObject = globalThis as TsLibGlobal;
+  const files = globalObject.__js2wasmTsLibFiles ?? globalObject.__ts2wasmTsLibFiles;
   return files && typeof files === "object" ? (files as Record<string, string>) : undefined;
+}
+
+export function preloadLibFiles(files: Record<string, string>): void {
+  const globalObject = globalThis as TsLibGlobal;
+  globalObject.__js2wasmTsLibFiles = {
+    ...(globalObject.__js2wasmTsLibFiles ?? globalObject.__ts2wasmTsLibFiles ?? {}),
+    ...files,
+  };
+
+  for (const name of Object.keys(files)) {
+    Reflect.deleteProperty(LIB_FILES, name);
+    for (const key of Array.from(LIB_SOURCE_FILES.keys())) {
+      if (key.startsWith(`${name}:`)) {
+        LIB_SOURCE_FILES.delete(key);
+      }
+    }
+  }
+  Reflect.deleteProperty(LIB_FILES, "lib.d.ts");
+  for (const key of Array.from(LIB_SOURCE_FILES.keys())) {
+    if (key.startsWith("lib.d.ts:")) {
+      LIB_SOURCE_FILES.delete(key);
+    }
+  }
 }
 
 function getPath() {

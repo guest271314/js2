@@ -68,30 +68,45 @@ function resolveFixtures(source: string, testFilePath: string): string[] {
 
 // ── Slow-test priority map ─────────────────────────────────────────
 // Maps test path (relative to test262/, e.g. "test/built-ins/Array/.../foo.js")
-// to its measured compile+exec wall time in ms. Used inside `runTest262Chunk`
-// to sort each shard's test list by descending duration so the slow tests run
-// FIRST. This evens out wall time across the 115 shards: a slow test in
-// position 0 finishes while the shard cruises through the fast tests behind
-// it; in position N it pushes the shard's tail past everyone else. Tests
-// absent from the map sort to 0 (they keep their natural order behind the
-// timed ones, since the sort is stable).
+// to its measured compile+exec wall time in ms for the active target. Used
+// inside `runTest262Chunk` to assign tests to weighted shards and then sort
+// each shard's test list by descending duration so the slow tests run FIRST.
+// Tests absent from the map get `DEFAULT_TEST_WEIGHT_MS` for shard assignment
+// and sort behind the timed ones.
 //
-// Source: benchmarks/results/test262-current.jsonl (committed baseline).
-// Refresh by regenerating from a fresh baseline run.
-const SLOW_TESTS_PATH = join(import.meta.dirname ?? ".", "test262-slow-tests.json");
+// Sources: tests/test262-slow-tests.json for JS-host, with target-specific
+// overrides such as tests/test262-slow-tests-standalone.json when available.
+function slowTestPathCandidates(): string[] {
+  const target = process.env.TEST262_TARGET;
+  const dir = import.meta.dirname ?? ".";
+  const candidates: string[] = [];
+  if (target && target !== "gc") candidates.push(join(dir, `test262-slow-tests-${target}.json`));
+  candidates.push(join(dir, "test262-slow-tests.json"));
+  return candidates;
+}
+
 const slowTestDurationMs: Map<string, number> = (() => {
-  try {
-    const raw = readFileSync(SLOW_TESTS_PATH, "utf-8");
-    const doc = JSON.parse(raw) as { tests?: Record<string, number> };
-    const map = new Map<string, number>();
-    for (const [k, v] of Object.entries(doc.tests ?? {})) {
-      if (typeof v === "number" && v > 0) map.set(k, v);
+  for (const path of slowTestPathCandidates()) {
+    if (!existsSync(path)) continue;
+    try {
+      const raw = readFileSync(path, "utf-8");
+      const doc = JSON.parse(raw) as { tests?: Record<string, number> };
+      const map = new Map<string, number>();
+      for (const [k, v] of Object.entries(doc.tests ?? {})) {
+        if (typeof v === "number" && v > 0) map.set(k, v);
+      }
+      return map;
+    } catch {
+      // Try the next candidate; a broken target-specific file should not keep
+      // the runner from falling back to the host timing map.
     }
-    return map;
-  } catch {
-    return new Map();
   }
+  return new Map();
 })();
+const parsedDefaultTestWeightMs = parseInt(process.env.TEST262_DEFAULT_TEST_WEIGHT_MS || "250", 10);
+const DEFAULT_TEST_WEIGHT_MS = Number.isFinite(parsedDefaultTestWeightMs)
+  ? Math.max(1, parsedDefaultTestWeightMs)
+  : 250;
 
 // ── Cache setup (for disk cache side-effect) ───────────────────────
 
@@ -121,8 +136,22 @@ function buildCompilerHash(): string {
 
 const compilerHash = buildCompilerHash();
 
+type Test262CompileTarget = "gc" | "linear" | "wasi" | "standalone";
+
+function parseTest262Target(): Test262CompileTarget | undefined {
+  const raw = process.env.TEST262_TARGET;
+  if (raw === "linear" || raw === "wasi" || raw === "standalone") return raw;
+  return undefined;
+}
+
+const TEST262_TARGET = parseTest262Target();
+
 function getCachePaths(wrappedSource: string): { wasmPath: string; metaPath: string } {
-  const hash = createHash("md5").update(wrappedSource).update(compilerHash).digest("hex");
+  const hash = createHash("md5")
+    .update(wrappedSource)
+    .update(compilerHash)
+    .update(TEST262_TARGET ?? "gc")
+    .digest("hex");
   return {
     wasmPath: join(CACHE_DIR, `${hash}.wasm`),
     metaPath: join(CACHE_DIR, `${hash}.json`),
@@ -167,7 +196,8 @@ mkdirSync(RESULTS_DIR, { recursive: true });
 // Timestamped filename — env var from run-test262-vitest.sh, or generate one
 const RUN_TIMESTAMP =
   process.env.RUN_TIMESTAMP || new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "").slice(0, 15);
-const JSONL_PATH = join(RESULTS_DIR, `test262-results-${RUN_TIMESTAMP}.jsonl`);
+const RESULT_PREFIX = process.env.TEST262_RESULT_PREFIX || (TEST262_TARGET ? `test262-${TEST262_TARGET}` : "test262");
+const JSONL_PATH = join(RESULTS_DIR, `${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl`);
 
 // Open results JSONL — each chunk appends independently
 const jsonlFd = openSync(JSONL_PATH, "a");
@@ -213,6 +243,72 @@ class ConformanceError extends Error {
   }
 }
 
+type RecordMetadata = {
+  imports?: string[];
+  hostImportLeakClass?: string;
+  reachedTest?: boolean;
+};
+
+function normalizeErrorSignature(status: string, errorCategory: string | undefined, error: string | undefined) {
+  if (!error) return undefined;
+  const normalized = error
+    .replace(/\bL\d+:\d+/g, "L#:##")
+    .replace(/\bL\d+\b/g, "L#")
+    .replace(/@\+\d+/g, "@+#")
+    .replace(/0x[0-9a-f]+/gi, "0x#")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  return `${errorCategory ?? status}:${normalized}`;
+}
+
+function summarizeImportName(desc: any): string | undefined {
+  if (!desc || typeof desc !== "object") return undefined;
+  const moduleName = desc.module ?? desc.moduleName ?? desc.module_name ?? "env";
+  const name = desc.name ?? desc.field ?? desc.fieldName ?? desc.importName;
+  return name ? `${moduleName}::${name}` : undefined;
+}
+
+function summarizeImports(imports: any[] | undefined): string[] {
+  if (!Array.isArray(imports)) return [];
+  return [...new Set(imports.map(summarizeImportName).filter((name): name is string => Boolean(name)))].sort();
+}
+
+function classifyHostImportLeak(imports: string[] | undefined): string | undefined {
+  if (!imports || imports.length === 0) return undefined;
+  const joined = imports.join(" ");
+  if (
+    /__extern_|__object_|__defineProperty|__get_builtin|__new_plain_object|__register_|__proto_method_call/.test(joined)
+  ) {
+    return "dynamic_object_property";
+  }
+  if (/__iterator|__array_from_iter|__gen_|generator|async_iterator/.test(joined)) return "iterator_protocol";
+  if (/RegExp_|regexp/i.test(joined)) return "regexp";
+  if (/JSON_/i.test(joined)) return "json";
+  if (/__extern_eval|__dynamic_import|Function_new/.test(joined)) return "dynamic_code";
+  if (/wasm:js-string/.test(joined)) return "js_string";
+  if (/wasi_snapshot_preview1/.test(joined)) return "wasi";
+  return "host_import";
+}
+
+function metadataFromImports(imports: any[] | undefined, reachedTest: boolean): RecordMetadata {
+  const names = summarizeImports(imports);
+  return {
+    ...(names.length > 0 ? { imports: names } : {}),
+    ...(names.length > 0 ? { hostImportLeakClass: classifyHostImportLeak(names) } : {}),
+    reachedTest,
+  };
+}
+
+function metadataFromWorkerResult(result: TestResult, reachedTestFallback = false): RecordMetadata {
+  return {
+    ...(result.imports && result.imports.length > 0 ? { imports: result.imports } : {}),
+    ...(result.hostImportLeakClass ? { hostImportLeakClass: result.hostImportLeakClass } : {}),
+    reachedTest: result.reachedTest ?? reachedTestFallback,
+  };
+}
+
 function recordResult(
   file: string,
   category: string,
@@ -221,6 +317,7 @@ function recordResult(
   timing?: { compileMs?: number; execMs?: number },
   scopeInfo?: { scope: Test262Scope; official: boolean; reason?: string; strict?: "only" | "no" | "both" },
   retryInfo?: { retried?: boolean; retryCount?: number },
+  metadata?: RecordMetadata,
 ) {
   const errorCategory = status === "fail" || status === "compile_error" ? classifyError(error) : undefined;
 
@@ -231,6 +328,10 @@ function recordResult(
     status,
     error: error || undefined,
     error_category: errorCategory,
+    error_signature: normalizeErrorSignature(status, errorCategory, error),
+    imports: metadata?.imports && metadata.imports.length > 0 ? metadata.imports : undefined,
+    host_import_leak_class: metadata?.hostImportLeakClass,
+    reached_test: metadata?.reachedTest ?? false,
     compile_ms: timing?.compileMs !== undefined ? Math.round(timing.compileMs) : undefined,
     exec_ms: timing?.execMs !== undefined ? Math.round(timing.execMs) : undefined,
     scope: scopeInfo?.scope ?? "standard",
@@ -284,6 +385,53 @@ function adjustErrorLines(msg: string, offset: number): string {
 
 const TEST262_ROOT = join(import.meta.dirname ?? ".", "..", "test262");
 
+type Test262ChunkTest = {
+  category: string;
+  durationMs: number;
+  filePath: string;
+  ordinal: number;
+  relPath: string;
+};
+
+type Test262ChunkBin = {
+  tests: Test262ChunkTest[];
+  weightMs: number;
+};
+
+function durationOf(relPath: string): number {
+  return slowTestDurationMs.get(relPath) ?? DEFAULT_TEST_WEIGHT_MS;
+}
+
+function chooseLightestBin(bins: Test262ChunkBin[]): Test262ChunkBin {
+  let best = bins[0]!;
+  for (let i = 1; i < bins.length; i++) {
+    const candidate = bins[i]!;
+    if (
+      candidate.weightMs < best.weightMs ||
+      (candidate.weightMs === best.weightMs && candidate.tests.length < best.tests.length)
+    ) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function assignBalancedChunk(tests: Test262ChunkTest[], chunkIndex: number, totalChunks: number) {
+  const bins = Array.from({ length: totalChunks }, () => ({
+    tests: [] as Test262ChunkTest[],
+    weightMs: 0,
+  }));
+  const weighted = [...tests].sort((a, b) => b.durationMs - a.durationMs || a.ordinal - b.ordinal);
+
+  for (const test of weighted) {
+    const bin = chooseLightestBin(bins);
+    bin.tests.push(test);
+    bin.weightMs += test.durationMs;
+  }
+
+  return bins[chunkIndex]!;
+}
+
 /**
  * Register vitest describe/it blocks for this chunk's share of tests.
  *
@@ -295,29 +443,33 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   // This avoids registering ~5,200 proposal tests that would be skipped anyway,
   // saving ~10% of run time and keeping the statusline total accurate.
   const includeProposals = process.env.TEST262_INCLUDE_PROPOSALS === "1";
-  const allTests: { category: string; filePath: string }[] = [];
+  const allTests: Test262ChunkTest[] = [];
   for (const category of TEST_CATEGORIES) {
     for (const filePath of findTestFiles(category)) {
-      // Skip staging/ and proposal-tagged tests at the file level
-      const relPath = filePath.replace(/.*test262\//, "");
+      // Skip staging/ proposal tests at the file level.
+      const relPath = relative(TEST262_ROOT, filePath);
+      if (!matchesPathFilter(relPath)) continue;
       if (!includeProposals && (relPath.startsWith("test/staging/") || relPath.startsWith("staging/"))) continue;
-      allTests.push({ category, filePath });
+      allTests.push({
+        category,
+        durationMs: durationOf(relPath),
+        filePath,
+        ordinal: allTests.length,
+        relPath,
+      });
     }
   }
 
-  const myTests = allTests.filter((_, i) => i % totalChunks === chunkIndex);
+  const chunk = assignBalancedChunk(allTests, chunkIndex, totalChunks);
+  const myTests = chunk.tests;
 
   // Sort within the shard by descending known duration (slow tests first).
-  // Tests absent from `slowTestDurationMs` get 0 and keep their natural order
-  // behind the timed ones (Array.prototype.sort is stable on Node ≥ 12).
+  // Tests absent from `slowTestDurationMs` keep their natural order behind the
+  // timed ones (Array.prototype.sort is stable on Node ≥ 12).
   // Effect: a shard's worst-case wall time is dominated by max(timed test)
   // rather than max + sum-of-tail. See tests/test262-slow-tests.json for the
   // source of truth and how to refresh.
-  const durationOf = (filePath: string): number => {
-    const relPath = filePath.replace(/.*test262\//, "");
-    return slowTestDurationMs.get(relPath) ?? 0;
-  };
-  myTests.sort((a, b) => durationOf(b.filePath) - durationOf(a.filePath));
+  myTests.sort((a, b) => b.durationMs - a.durationMs || a.ordinal - b.ordinal);
 
   const byCategory = new Map<string, string[]>();
   for (const { category, filePath } of myTests) {
@@ -331,7 +483,9 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
   beforeAll(() => {
     pool = new CompilerPool(POOL_SIZE, "unified");
-    console.log(`Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, ${POOL_SIZE} unified fork workers`);
+    console.log(
+      `Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, est ${Math.round(chunk.weightMs / 1000)}s, ${POOL_SIZE} unified fork workers`,
+    );
   }, 30_000);
 
   afterAll(() => {
@@ -419,21 +573,43 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   vfiles["./" + relative(dirname(filePath), fixPath)] = readFileSync(fixPath, "utf-8");
                 }
                 const multiCompile = await getCompileMulti();
-                const result = multiCompile(vfiles, "./test.ts", {
+                const result = await multiCompile(vfiles, "./test.ts", {
                   skipSemanticDiagnostics: true,
+                  target: TEST262_TARGET,
                 });
+                const compileRecordMetadata = metadataFromImports(result.imports, false);
+                const reachedRecordMetadata = metadataFromImports(result.imports, true);
                 if (!result.success || result.binary.length === 0) {
                   if (isNegative) {
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      compileRecordMetadata,
+                    );
                   } else {
                     const errMsg = result.errors.map((e: any) => `L${e.line}:${e.column} ${e.message}`).join("; ");
-                    recordResult(relPath, category, "compile_error", errMsg, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "compile_error",
+                      errMsg,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      compileRecordMetadata,
+                    );
                   }
                   return;
                 }
                 // Execute the compiled binary in-process (fixture tests are rare,
                 // in-process execution is acceptable for 172 tests).
                 const buildImports = await getBuildImports();
+                let reachedFixtureTest = false;
                 try {
                   const importObj = buildImports(result.imports, undefined, result.stringPool);
                   const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
@@ -449,12 +625,31 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       // compiler is permissive and produces a module without
                       // a `test` export, which we count as the expected
                       // failure outcome — the test module never formed.
-                      recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                      recordResult(
+                        relPath,
+                        category,
+                        "pass",
+                        undefined,
+                        undefined,
+                        scopeInfo,
+                        undefined,
+                        compileRecordMetadata,
+                      );
                     } else {
-                      recordResult(relPath, category, "compile_error", "no test export", undefined, scopeInfo);
+                      recordResult(
+                        relPath,
+                        category,
+                        "compile_error",
+                        "no test export",
+                        undefined,
+                        scopeInfo,
+                        undefined,
+                        compileRecordMetadata,
+                      );
                     }
                     return;
                   }
+                  reachedFixtureTest = true;
                   const ret = testFn();
                   if (isNegative) {
                     // Negative parse/resolution test compiled, instantiated,
@@ -468,6 +663,8 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       `expected ${meta.negative!.phase} ${meta.negative!.type} but compiled, instantiated, and ran (returned ${ret})`,
                       undefined,
                       scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
                     );
                     return;
                   }
@@ -480,19 +677,58 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       `expected runtime ${meta.negative!.type} but execution succeeded`,
                       undefined,
                       scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
                     );
                   } else if (ret === 1 || ret === 1.0) {
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
+                    );
                   } else {
-                    recordResult(relPath, category, "fail", `returned ${ret}`, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "fail",
+                      `returned ${ret}`,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      reachedRecordMetadata,
+                    );
                   }
                 } catch (execErr: any) {
+                  const execRecordMetadata = metadataFromImports(result.imports, reachedFixtureTest);
                   if (isRuntimeNegative || isNegative) {
                     // For isNegative (parse/early/resolution), Wasm validation
                     // or a thrown start-function counts as the expected error.
-                    recordResult(relPath, category, "pass", undefined, undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "pass",
+                      undefined,
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      execRecordMetadata,
+                    );
                   } else {
-                    recordResult(relPath, category, "fail", String(execErr), undefined, scopeInfo);
+                    recordResult(
+                      relPath,
+                      category,
+                      "fail",
+                      String(execErr),
+                      undefined,
+                      scopeInfo,
+                      undefined,
+                      execRecordMetadata,
+                    );
                   }
                 }
               } catch (e: any) {
@@ -504,7 +740,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 // is the only JSONL entry, matching the non-FIXTURE path
                 // which has no outer catch.
                 if (e instanceof ConformanceError) throw e;
-                recordResult(relPath, category, "compile_error", e.message ?? String(e), undefined, scopeInfo);
+                recordResult(
+                  relPath,
+                  category,
+                  "compile_error",
+                  e.message ?? String(e),
+                  undefined,
+                  scopeInfo,
+                  undefined,
+                  { reachedTest: false },
+                );
               }
               return;
             }
@@ -523,6 +768,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 wasmPath,
                 metaPath,
                 label: relPath,
+                target: TEST262_TARGET,
               },
               30_000,
             );
@@ -531,7 +777,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
             // Map worker result to recordResult
             if (r.status === "pass") {
-              recordResult(relPath, category, "pass", undefined, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                "pass",
+                undefined,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, true),
+              );
               return;
             }
 
@@ -554,6 +809,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       wasmPath,
                       metaPath,
                       label: relPath + " [retry]",
+                      target: TEST262_TARGET,
                     },
                     RETRY_TIMEOUT_MS,
                   ),
@@ -562,7 +818,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 const retryInfo = { retried: true, retryCount: 1 };
 
                 if (retry.status === "pass") {
-                  recordResult(relPath, category, "pass", undefined, retryTiming, scopeInfo, retryInfo);
+                  recordResult(
+                    relPath,
+                    category,
+                    "pass",
+                    undefined,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
                   return;
                 }
                 if (retry.status === "fail") {
@@ -570,19 +835,46 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   // fail with the retry error message (preserves the new
                   // signal rather than the timeout-shaped one).
                   const error = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : "fail after retry";
-                  recordResult(relPath, category, "fail", error, retryTiming, scopeInfo, retryInfo);
+                  recordResult(
+                    relPath,
+                    category,
+                    "fail",
+                    error,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
                   return;
                 }
                 // compile_error or another compile_timeout on retry → record
                 // the retry status (with retried flag) so we can distinguish
                 // genuine-slow tests from flakes in baseline analysis.
                 const retryError = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : retry.status;
-                recordResult(relPath, category, retry.status, retryError, retryTiming, scopeInfo, retryInfo);
+                recordResult(
+                  relPath,
+                  category,
+                  retry.status,
+                  retryError,
+                  retryTiming,
+                  scopeInfo,
+                  retryInfo,
+                  metadataFromWorkerResult(retry, false),
+                );
                 return;
               }
 
               const error = r.error ? adjustErrorLines(r.error, lineAdjustOffset) : r.status;
-              recordResult(relPath, category, r.status, error, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                r.status,
+                error,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, false),
+              );
               return;
             }
 
@@ -628,12 +920,30 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 }
               }
 
-              recordResult(relPath, category, "fail", error, timing, scopeInfo);
+              recordResult(
+                relPath,
+                category,
+                "fail",
+                error,
+                timing,
+                scopeInfo,
+                undefined,
+                metadataFromWorkerResult(r, true),
+              );
               return;
             }
 
             // Fallback
-            recordResult(relPath, category, r.status || "fail", r.error || "unknown", timing, scopeInfo);
+            recordResult(
+              relPath,
+              category,
+              r.status || "fail",
+              r.error || "unknown",
+              timing,
+              scopeInfo,
+              undefined,
+              metadataFromWorkerResult(r, false),
+            );
           },
           90_000,
         );

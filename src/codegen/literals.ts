@@ -29,8 +29,11 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.j
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { resolveStructName } from "./expressions/misc.js";
+import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "./expressions/proto-override.js";
+import { ensureObjVecBuilders } from "./object-runtime.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
+import { collectInstrs } from "./statements/shared.js";
 import {
   cacheStringLiterals,
   destructureParamArray,
@@ -179,9 +182,19 @@ function compileObjectLiteralAsExternref(
         if (srcType.kind !== "externref") {
           coerceType(ctx, fctx, srcType, { kind: "externref" });
         }
-        // Wrap source in a single-element JS array for __object_assign(target, sources[])
-        const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-        const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        // Wrap source in a single-element sources list for __object_assign(target,
+        // sources). Host mode → JS array; standalone → native $ObjVec (#1472
+        // Phase B Slice 3 — native __object_assign iterates a $ObjVec).
+        let arrNewIdx: number | undefined;
+        let arrPushIdx: number | undefined;
+        if (ctx.standalone) {
+          const b = ensureObjVecBuilders(ctx);
+          arrNewIdx = b.newIdx;
+          arrPushIdx = b.pushIdx;
+        } else {
+          arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+          arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        }
         const assignIdx = ensureLateImport(
           ctx,
           "__object_assign",
@@ -311,8 +324,16 @@ function compileObjectLiteralWithAccessors(
         if (srcType.kind !== "externref") {
           coerceType(ctx, fctx, srcType, { kind: "externref" });
         }
-        const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-        const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        let arrNewIdx: number | undefined;
+        let arrPushIdx: number | undefined;
+        if (ctx.standalone) {
+          const b = ensureObjVecBuilders(ctx);
+          arrNewIdx = b.newIdx;
+          arrPushIdx = b.pushIdx;
+        } else {
+          arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+          arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+        }
         const assignIdx = ensureLateImport(
           ctx,
           "__object_assign",
@@ -338,16 +359,42 @@ function compileObjectLiteralWithAccessors(
     } else if (ts.isPropertyAssignment(prop) || ts.isShorthandPropertyAssignment(prop)) {
       // __extern_set(obj, key, value)
       let propName: string | undefined;
+      let wellKnownSymId: number | undefined;
       if (ts.isIdentifier(prop.name)) propName = prop.name.text;
       else if (ts.isStringLiteral(prop.name)) propName = prop.name.text;
       else if (ts.isNumericLiteral(prop.name)) propName = prop.name.text;
-      // Computed property names not handled here — fall through silently.
-      if (propName === undefined) continue;
-      addStringConstantGlobal(ctx, propName);
-      const keyGlobal = ctx.stringGlobalMap.get(propName);
-      if (keyGlobal === undefined) continue;
-      fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      else if (ts.isComputedPropertyName(prop.name)) {
+        // (#1695) Symmetric with the MethodDeclaration path below: well-known
+        // `[Symbol.X]: …` keys must be boxed into real JS Symbols via
+        // __box_symbol so host APIs (DisposableStack, `using`, iteration
+        // protocols) find the value under the real Symbol property.
+        const inner = prop.name.expression;
+        if (
+          ts.isPropertyAccessExpression(inner) &&
+          ts.isIdentifier(inner.expression) &&
+          inner.expression.text === "Symbol"
+        ) {
+          wellKnownSymId = getWellKnownSymbolId(inner.name.text);
+        }
+        if (wellKnownSymId === undefined) {
+          propName = resolveComputedKeyExpression(ctx, prop.name.expression);
+        }
+      }
+      if (wellKnownSymId !== undefined) {
+        const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (boxSymIdx === undefined) continue;
+        fctx.body.push({ op: "local.get", index: objLocal });
+        fctx.body.push({ op: "i32.const", value: wellKnownSymId });
+        fctx.body.push({ op: "call", funcIdx: boxSymIdx });
+      } else {
+        if (propName === undefined) continue;
+        addStringConstantGlobal(ctx, propName);
+        const keyGlobal = ctx.stringGlobalMap.get(propName);
+        if (keyGlobal === undefined) continue;
+        fctx.body.push({ op: "local.get", index: objLocal });
+        fctx.body.push({ op: "global.get", index: keyGlobal });
+      }
       // Compile value and coerce to externref.
       let valType: ValType | null;
       if (ts.isShorthandPropertyAssignment(prop)) {
@@ -483,7 +530,11 @@ function compileObjectLiteralWithAccessors(
  */
 function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
   for (const p of expr.properties) {
-    if (!ts.isMethodDeclaration(p)) continue;
+    // (#1695) Catch both MethodDeclaration (`[Symbol.dispose]() {}`) and
+    // PropertyAssignment (`[Symbol.dispose]: () => {}`) shapes — both must
+    // route to the externref/accessor path so the host sees a real Symbol
+    // key on the resulting object.
+    if (!ts.isMethodDeclaration(p) && !ts.isPropertyAssignment(p)) continue;
     if (!ts.isComputedPropertyName(p.name)) continue;
     const inner = p.name.expression;
     if (!ts.isPropertyAccessExpression(inner)) continue;
@@ -2400,6 +2451,146 @@ export function compileArrayLiteral(
         // don't corrupt the running total (i32) that sits underneath.
         fctx.body.push({ op: "drop" });
         continue;
+      }
+      // (#1749 CPR) Array spread `[...arr]` must honor an overridden
+      // `Array.prototype[Symbol.iterator]` / `.values` — §12.2.5.3 spread is a
+      // GetIterator consumer, the same observation boundary the four
+      // destructuring contexts already drive (#1719). When the override brand
+      // is set AND a closure was captured, drive the override on the
+      // spread-source vec to obtain the override-produced iterator externref,
+      // then drain that iterator step-by-step via `__iterator_next` into a
+      // growable WasmGC vec of the result element type. The override generator
+      // compiles to a WasmGC generator whose `.next` is reached through the
+      // wasm-struct dispatch (`__call_next` / `__sget_*`), so it must be stepped
+      // through `__iterator_next` (the only host import that resolves a
+      // wasm-struct iterator) — `__array_from_iter` / `__iterator_rest` only
+      // walk JS-callable `.next` and silently yield an empty array here. The
+      // gate (`arrayIteratorMaybeOverridden && override-captured`) is false in
+      // the common case, so override-free spread stays byte-identical (the vec
+      // fast path below). The brand fires only here at the observation
+      // boundary, so internal array iterations inside the override body stay on
+      // the typed-vec fast path — no re-entrancy.
+      const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
+      if (ctx.arrayIteratorMaybeOverridden && overrideGlobalIdx !== undefined) {
+        const matVecInfo = getVecInfo(ctx, vecTypeIdx);
+        const nextIdx = ensureLateImport(
+          ctx,
+          "__iterator_next",
+          [{ kind: "externref" }],
+          [{ kind: "i32" }, { kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (matVecInfo && nextIdx !== undefined) {
+          const elemType = matVecInfo.elemType;
+          // Growable backing array (doubling capacity) + running length.
+          const capLocal = allocLocal(fctx, `__spread_ovr_cap_${fctx.locals.length}`, { kind: "i32" });
+          const lenLocal = allocLocal(fctx, `__spread_ovr_len_${fctx.locals.length}`, { kind: "i32" });
+          const dataLocal = allocLocal(fctx, `__spread_ovr_data_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: arrTypeIdx,
+          });
+          const doneLocal = allocLocal(fctx, `__spread_ovr_done_${fctx.locals.length}`, { kind: "i32" });
+          const valLocal = allocLocal(fctx, `__spread_ovr_val_${fctx.locals.length}`, { kind: "externref" });
+          const growLocal = allocLocal(fctx, `__spread_ovr_grow_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: arrTypeIdx,
+          });
+          // Build the element-coercion template FIRST: `coerceType` may register
+          // late imports (e.g. `__unbox_number` for an f64 vec). Those imports
+          // shift function indices, so they MUST be registered + flushed BEFORE
+          // `emitArrayProtoIteratorDrive` emits its `call __drive_proto_iterator`
+          // — otherwise the drive's funcIdx is shifted out from under the
+          // already-emitted call and the drive resolves to the wrong function
+          // (returning a null iterator → empty spread). (#1749)
+          const valueCoerce = collectInstrs(fctx, () => {
+            fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+            coerceType(ctx, fctx, { kind: "externref" }, elemType);
+          });
+          flushLateImportShifts(ctx, fctx);
+          // Re-read `__iterator_next`'s funcIdx: any import added by the coerce
+          // template above shifted it (the `nextIdx` captured before the
+          // valueCoerce build is stale). The shift patched emitted calls, but we
+          // haven't emitted the loop's `call` yet — use the post-flush index.
+          const drainNextIdx = ctx.funcMap.get("__iterator_next") ?? nextIdx;
+          // Stack: [vec-ref]. Drive the override → iterator externref local.
+          const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
+          // cap = 4; data = new array[cap]; len = 0.
+          fctx.body.push({ op: "i32.const", value: 4 } as Instr);
+          fctx.body.push({ op: "local.set", index: capLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: capLocal } as Instr);
+          fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+          // Grow when len == cap: cap *= 2; grow = new array[cap];
+          // array.copy grow[0..len] = data[0..len]; data = grow.
+          const growInstrs = collectInstrs(fctx, () => {
+            fctx.body.push({ op: "local.get", index: capLocal } as Instr);
+            fctx.body.push({ op: "i32.const", value: 2 } as Instr);
+            fctx.body.push({ op: "i32.mul" } as Instr);
+            fctx.body.push({ op: "local.set", index: capLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: capLocal } as Instr);
+            fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+            fctx.body.push({ op: "local.set", index: growLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: growLocal } as Instr);
+            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+            fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
+            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+            fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+            fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+            fctx.body.push({ op: "local.get", index: growLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
+          });
+          // loop body: (done, val) = __iterator_next(iter); if done break;
+          // if len == cap grow; data[len] = coerce(val); len++.
+          const loopBody: Instr[] = [];
+          loopBody.push({ op: "local.get", index: iterLocal } as Instr);
+          loopBody.push({ op: "call", funcIdx: drainNextIdx } as Instr);
+          loopBody.push({ op: "local.set", index: valLocal } as Instr); // value (top)
+          loopBody.push({ op: "local.set", index: doneLocal } as Instr); // done (below)
+          loopBody.push({ op: "local.get", index: doneLocal } as Instr);
+          loopBody.push({ op: "br_if", depth: 1 } as Instr); // done → break
+          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
+          loopBody.push({ op: "local.get", index: capLocal } as Instr);
+          loopBody.push({ op: "i32.ge_s" } as Instr);
+          loopBody.push({ op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr);
+          loopBody.push({ op: "local.get", index: dataLocal } as Instr);
+          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
+          for (const instr of valueCoerce) loopBody.push(instr);
+          loopBody.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
+          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
+          loopBody.push({ op: "i32.const", value: 1 } as Instr);
+          loopBody.push({ op: "i32.add" } as Instr);
+          loopBody.push({ op: "local.set", index: lenLocal } as Instr);
+          loopBody.push({ op: "br", depth: 0 } as Instr); // continue
+          // Guard the whole drain on a non-null iterator (an unresolved-override
+          // drive returns null — degrade to an empty contribution, no trap).
+          const drainInstrs = collectInstrs(fctx, () => {
+            fctx.body.push({
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+            } as Instr);
+          });
+          fctx.body.push({ op: "local.get", index: iterLocal } as Instr);
+          fctx.body.push({ op: "ref.is_null" } as Instr);
+          fctx.body.push({ op: "i32.eqz" } as Instr);
+          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: drainInstrs, else: [] } as Instr);
+          // Build the contributed vec { len, data } and accumulate its length
+          // into the running total, exactly like the other spread sources.
+          fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
+          fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+          const srcLocal = allocLocal(fctx, `__spread_ovr_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx: vecTypeIdx,
+          });
+          fctx.body.push({ op: "local.tee", index: srcLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+          fctx.body.push({ op: "i32.add" });
+          spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: vecTypeIdx });
+          continue;
+        }
       }
       const srcVecTypeIdx = (srcType as { typeIdx: number }).typeIdx;
       const srcLocal = allocLocal(fctx, `__spread_src_${fctx.locals.length}`, srcType);

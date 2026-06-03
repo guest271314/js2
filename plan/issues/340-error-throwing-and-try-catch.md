@@ -33,8 +33,7 @@ files:
 ---
 # #340 -- Error throwing and try/catch/finally
 
-## Status: review
-
+## Status: in-review
 ## Implementation Summary
 
 ### What was done

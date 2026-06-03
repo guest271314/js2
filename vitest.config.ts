@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+const forkMaxOldSpaceSize = process.env.VITEST_FORK_MAX_OLD_SPACE_SIZE || "512";
+
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
@@ -12,7 +14,7 @@ export default defineConfig({
         singleFork: false,
         maxForks: 1,
         minForks: 0,
-        execArgv: ["--max-old-space-size=512", "--expose-gc"],
+        execArgv: [`--max-old-space-size=${forkMaxOldSpaceSize}`, "--expose-gc"],
       },
     },
     // Lets describe.concurrent tests run up to 32 at once — CompilerPool limits

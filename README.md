@@ -7,7 +7,7 @@ Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC.
 
 `js2wasm` compiles source code into WasmGC binaries without embedding a JavaScript interpreter or shipping a bundled runtime. That avoids the runtime tax common in the interpreter-based and engine-embedding approaches — where a JavaScript interpreter or full engine is compiled to Wasm and shipped inside every module — and keeps the output aligned with Wasm-native deployment models.
 
-`js2wasm` is the core compiler product of **Loopdive GmbH**, released under **Apache License 2.0 with LLVM Exceptions** — and developed fully in the open, including its agentic engineering workflow. The repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
+`js2wasm` is a free and open-source project developed by **Loopdive GmbH** and released under the **Apache License 2.0 with LLVM Exceptions**. It is a freely-licensed, open-source technical foundation and reusable building block, developed fully in the open, including its agentic engineering workflow. The repository contains the compiler source, the complete planning surface (`plan/`), and the agent coordination infrastructure (`.claude/`) that a small team uses to ship fixes in parallel.
 
 ## Value Proposition
 
@@ -51,11 +51,13 @@ Current Test262 conformance and benchmark numbers are tracked in one place and
 change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
 [Playground](https://loopdive.github.io/js2wasm/playground/), and the
 [Roadmap](./ROADMAP.md). The single auto-updated conformance figure (refreshed
-by CI on every merge) is below; everything else links to STATUS.md rather than
-duplicating numbers that go stale.
+by CI on every merge) is for the JS-host path; everything else links to
+STATUS.md rather than duplicating numbers that go stale. Standalone
+(no-JS-host) pass-rate and benchmark figures are intentionally omitted from the
+README until the current standalone regression is fixed.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
+**test262 conformance**: 30,214 / 43,135 (70.0 %) — baseline 9ee8e921, 2026-05-29T00:58:42Z
 <!-- AUTO:conformance-end -->
 
 ## Current Status
@@ -69,8 +71,8 @@ standalone path are all still hardening. What exists today:
   [STATUS.md](./STATUS.md) for the current figure)
 - a public browser playground
 - continuous conformance and benchmark reporting on every change
-- a standalone (no-JS-host) path that is in progress and not yet the primary
-  conformance target
+- a standalone (no-JS-host) path that is in progress; its public numeric
+  baselines are paused here until the current regression is fixed
 
 Treat it as a tech demo to evaluate the approach, not as something to deploy.
 
@@ -143,10 +145,16 @@ npx js2wasm input.ts -o output.wasm
 
 Programmatic API:
 
+> **Breaking change (#1757):** `compile()` (and `compileMulti`, `compileFiles`,
+> `compileToWat`, `compileProject`, `createIncrementalCompiler().compile`) now
+> return a `Promise` — `await` them. This lets the optional Binaryen optimizer
+> load lazily only when `optimize` is requested, without forcing standalone
+> bundles to embed Binaryen (GH #986).
+
 ```ts
 import { compile } from "js2wasm";
 
-const result = compile(
+const result = await compile(
   `
   export function add(a: number, b: number): number {
     return a + b;
@@ -161,6 +169,25 @@ if (result.success) {
   console.log((instance.exports as any).add(2, 3)); // → 5
 }
 ```
+
+Standalone CLI bundle:
+
+```bash
+pnpm run build:standalone-cli -- --minify
+deno compile -A --no-check -o js2wasm dist/js2wasm-standalone.mjs
+# or:
+bun build --compile --target=node --outfile js2wasm dist/js2wasm-standalone.mjs
+```
+
+`build:standalone-cli` creates a relocatable `dist/js2wasm-standalone.mjs`
+bundle for native-executable workflows. Unlike the normal npm library build, it
+bundles the core compiler dependencies and embeds TypeScript's `lib.*.d.ts`
+declarations, so the generated file does not need to remain next to
+`node_modules/typescript/lib` after it is moved or compiled. The `--ts7`
+preview backend and Binaryen optimizer remain development/optimization opt-ins
+and are not bundled into this standalone artifact. If you use `-O` with the
+standalone CLI, install `binaryen` next to the runner or put `wasm-opt` on PATH;
+you can also run `wasm-opt` directly on the emitted `.wasm` afterward.
 
 ### Compile modes and imports
 
@@ -177,7 +204,7 @@ The imports a module needs depend on the compile target:
   `WebAssembly.instantiate` with no hand-wiring:
 
   ```ts
-  const r = compile(`
+  const r = await compile(`
     export function add(a: number, b: number): number { return a + b; }
   `);
   const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
@@ -274,8 +301,8 @@ arbitrary real-world npm package runs unchanged.
 - standard-library built-ins — many are implemented, but not the full surface;
   some methods are missing or only handle the common overloads
 - `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
-- standalone (no-JS-host) mode — actively in progress; conformance there is
-  lower than the JS-host figure and it is not yet the primary path
+- standalone (no-JS-host) mode — actively in progress; standalone numeric
+  baselines are temporarily omitted here while the current regression is fixed
 - getters/setters and other highly dynamic patterns — limited
 
 **Not yet** (intentionally unsupported or out of scope today):
@@ -306,9 +333,9 @@ Yes, and the live figure is in [STATUS.md](./STATUS.md) and the
 [Test262 report](./benchmarks/results/report.html) rather than rounded up here.
 Two caveats matter more than the number: Test262 measures the ECMAScript
 *language* spec, **not** Web APIs, host/Node.js behavior, or whether an arbitrary
-npm package runs unchanged; and the standalone (no-JS-host) path is less complete
-than the JS-host path. A high pass rate is necessary but not sufficient for "runs
-real JavaScript."
+npm package runs unchanged; and standalone (no-JS-host) figures are omitted here
+until the current regression is fixed. A high pass rate is necessary but not
+sufficient for "runs real JavaScript."
 
 **Won't you eventually re-implement a JavaScript engine?**
 That is the real risk, treated as an empirical question, not a solved one. The
@@ -395,24 +422,8 @@ The document is intended for senior engineers who are skeptical but curious. It 
 
 This repository is licensed under the **Apache License 2.0 with LLVM Exceptions**. See [LICENSE](./LICENSE).
 
-### Community License
-
 - Source code in this repository is available under **Apache-2.0 WITH LLVM-exception**
 - Community contributions are accepted under the contributor terms described in [CONTRIBUTING.md](./CONTRIBUTING.md)
-
-### Commercial Licensing
-
-Loopdive GmbH offers commercial licensing discussions for infrastructure partners that need:
-
-- proprietary integrations
-- closed-source redistribution rights
-- dedicated support or integration work
-- custom backends or hardware-accelerated targets
-- private deployment arrangements for platform partnerships
-
-This is the intended path for infrastructure vendors and strategic partners, including cloud, edge, browser, and silicon platform organizations evaluating deeper integration.
-
-Contact: `hello@loopdive.com`
 
 ## Testing
 
@@ -437,13 +448,6 @@ The foundational design choices behind `js2wasm` — why WasmGC instead of linea
 - [Architecture Decisions](./docs/adr/README.md)
 - [Architecture Notes](./CLAUDE.md)
 - [Contributing](./CONTRIBUTING.md)
-
-## Acknowledgments
-
-We are grateful to the following people for fruitful technical discussions that shaped key design decisions in this project:
-
-- **Chris Fallin** (Cranelift tech lead) — discussions on type inference, IR design, and the performance implications of missing type information at object boundaries.
-- **Luke Wagner** (WebAssembly co-designer, Mozilla / Fastly) — discussions on WasmGC type system design, component model integration, and the long-term direction of WasmGC as a compilation target for typed languages.
 
 ## Trademark Disclaimer
 

@@ -19,7 +19,7 @@ files:
 ---
 # #598 — Typed export signatures: avoid externref at module boundary
 
-## Status: review
+## Status: in-review
 completed: 2026-03-19
 
 All exported functions use `externref` for parameters and return values, forcing boxing/unboxing at every JS↔Wasm call. V8's JS-to-Wasm wrappers are heavily optimized for primitive types; externref forces the slow generic path.

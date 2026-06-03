@@ -37,6 +37,9 @@ export interface TestResult {
   status: "pass" | "fail" | "compile_error" | "compile_timeout" | "compiled" | "skip";
   error?: string;
   errorCodes?: number[];
+  imports?: string[];
+  hostImportLeakClass?: string;
+  reachedTest?: boolean;
   ret?: number;
   compileMs?: number;
   execMs?: number;
@@ -74,6 +77,7 @@ export class CompilerPool {
   private readyResolve: (() => void) | null = null;
   private readyCount = 0;
   private workerPath: string;
+  private shuttingDown = false;
 
   constructor(
     private size = 4,
@@ -87,17 +91,25 @@ export class CompilerPool {
   }
 
   private createFork(): ForkState {
-    const proc = fork(this.workerPath, [], {
+    const state: ForkState = { proc: this.forkProcess(), busy: false, ready: false };
+    this.attachForkHandlers(state, true);
+    return state;
+  }
+
+  private forkProcess(): ChildProcess {
+    return fork(this.workerPath, [], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       execArgv: ["--expose-gc", "--max-old-space-size=512"],
     });
+  }
 
-    const state: ForkState = { proc, busy: false, ready: false };
-
+  private attachForkHandlers(state: ForkState, countInitialReady: boolean) {
+    const proc = state.proc;
     proc.on("message", (msg: any) => {
+      if (this.shuttingDown) return;
       if (msg.type === "ready") {
         state.ready = true;
-        this.readyCount++;
+        if (countInitialReady) this.readyCount++;
         this.dispatch();
         if (this.readyCount === this.size && this.readyResolve) {
           this.readyResolve();
@@ -115,7 +127,11 @@ export class CompilerPool {
         this.pending.delete(msg.id);
         state.busy = false;
         job.resolve(msg);
-        this.dispatch();
+        if (msg.recycle === true) {
+          this.respawnFork(state, msg.recycleReason);
+        } else {
+          this.dispatch();
+        }
       }
     });
 
@@ -126,11 +142,10 @@ export class CompilerPool {
     });
 
     proc.on("exit", () => {
+      if (this.shuttingDown) return;
       if (!state.ready && !state.busy) return;
       this.respawnFork(state);
     });
-
-    return state;
   }
 
   /** Wait for all forks to be ready */
@@ -150,6 +165,7 @@ export class CompilerPool {
     label?: string,
     wasmPath?: string,
     metaPath?: string,
+    target?: "gc" | "linear" | "wasi" | "standalone",
   ): Promise<PoolResult> {
     return this.enqueue(
       {
@@ -157,6 +173,7 @@ export class CompilerPool {
         sourceMapUrl,
         wasmPath,
         metaPath,
+        target,
         execute: false,
       },
       timeoutMs,
@@ -174,6 +191,7 @@ export class CompilerPool {
       wasmPath?: string;
       metaPath?: string;
       label?: string;
+      target?: "gc" | "linear" | "wasi" | "standalone";
     } = {},
     timeoutMs = 30_000,
   ): Promise<TestResult> {
@@ -186,6 +204,7 @@ export class CompilerPool {
         expectedErrorType: opts.expectedErrorType,
         wasmPath: opts.wasmPath,
         metaPath: opts.metaPath,
+        target: opts.target,
       },
       timeoutMs,
       opts.label,
@@ -206,6 +225,7 @@ export class CompilerPool {
   }
 
   private dispatch() {
+    if (this.shuttingDown) return;
     while (this.queue.length > 0) {
       const free = this.forks.find((f) => f.ready && !f.busy);
       if (!free) break;
@@ -258,44 +278,30 @@ export class CompilerPool {
   }
 
   /** Respawn a dead/stuck fork — OS reclaims all memory from the old process */
-  private respawnFork(state: ForkState) {
+  private respawnFork(state: ForkState, reason?: string) {
+    if (this.shuttingDown) return;
+    const oldProc = state.proc;
+    oldProc.removeAllListeners();
+    if (!oldProc.killed) {
+      oldProc.kill("SIGTERM");
+    }
+    if (reason) {
+      console.error(`[pool] recycling worker: ${reason}`);
+    }
     state.busy = false;
     state.ready = false;
-    const newState = this.createFork();
-    state.proc = newState.proc;
-    state.proc.removeAllListeners();
-    state.proc.on("message", (msg: any) => {
-      if (msg.type === "ready") {
-        state.ready = true;
-        this.dispatch();
-        return;
-      }
-      if (msg.ok && msg.binary && typeof msg.binary === "string") {
-        msg.binary = new Uint8Array(Buffer.from(msg.binary, "base64"));
-      }
-      const job = this.pending.get(msg.id);
-      if (job) {
-        this.pending.delete(msg.id);
-        state.busy = false;
-        job.resolve(msg);
-        this.dispatch();
-      }
-    });
-    state.proc.on("error", (err) => {
-      console.error(`Fork respawned after error:`, err.message);
-      state.busy = false;
-      state.ready = false;
-    });
-    state.proc.on("exit", () => {
-      if (!state.ready && !state.busy) return;
-      this.respawnFork(state);
-    });
+    state.proc = this.forkProcess();
+    this.attachForkHandlers(state, false);
   }
 
   /** Shut down all forks — OS reclaims all memory */
   shutdown() {
+    this.shuttingDown = true;
     for (const { proc } of this.forks) {
-      proc.kill("SIGTERM");
+      proc.removeAllListeners();
+      if (!proc.killed) {
+        proc.kill("SIGTERM");
+      }
     }
   }
 }

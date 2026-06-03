@@ -15,7 +15,6 @@ goal: platform
 sprint: 45
 depends_on: [1169d]
 required_by: [1169f, 1169g, 1169h, 1181]
-pr: 63
 merged: 2026-04-27
 ---
 # #1169e — IR Phase 4 Slice 6: iterators and for-of through IR

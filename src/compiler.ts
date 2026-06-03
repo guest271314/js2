@@ -7,6 +7,7 @@ import {
   IncrementalLanguageService,
   type TypedAST,
 } from "./checker/index.js";
+import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
@@ -32,7 +33,7 @@ import { applyDefineSubstitutions } from "./compiler/define-substitution.js";
 import { rewriteCjsRequire } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
-import { optimizeBinary } from "./optimize.js";
+import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
@@ -100,9 +101,267 @@ function isBindingPatternFalsePositive(diag: ts.Diagnostic, checker: ts.TypeChec
   return ts.isArrayBindingPattern(paramDecl.name) || ts.isObjectBindingPattern(paramDecl.name);
 }
 
+function findSmallestNodeAtPosition(file: ts.SourceFile, pos: number): ts.Node | undefined {
+  function visit(node: ts.Node): ts.Node | undefined {
+    if (pos < node.getStart(file) || pos >= node.getEnd()) return undefined;
+    let found: ts.Node = node;
+    node.forEachChild((child) => {
+      const inner = visit(child);
+      if (inner) found = inner;
+    });
+    return found;
+  }
+  return visit(file);
+}
+
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  while (current) {
+    if (current === ancestor) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+type NullishExclusion = "null" | "undefined" | "nullish";
+
+interface NullGuardFact {
+  varName: string;
+  narrowedBranch: "then" | "else";
+  excludes: NullishExclusion;
+  provesNonNull: boolean;
+}
+
+function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) return "undefined";
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return "undefined";
+  return null;
+}
+
+function nullishPresenceOfType(type: ts.Type): { hasNull: boolean; hasUndefined: boolean } {
+  let hasNull = false;
+  let hasUndefined = false;
+  const parts = type.isUnion() ? type.types : [type];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.Null) hasNull = true;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) hasUndefined = true;
+  }
+  return { hasNull, hasUndefined };
+}
+
+function excludesAllNullish(type: ts.Type, excludes: NullishExclusion): boolean {
+  const presence = nullishPresenceOfType(type);
+  if (!presence.hasNull && !presence.hasUndefined) return false;
+  if (presence.hasNull && excludes === "undefined") return false;
+  if (presence.hasUndefined && excludes === "null") return false;
+  return true;
+}
+
+function detectNullGuardForVar(checker: ts.TypeChecker, expr: ts.Expression, varName: string): NullGuardFact | null {
+  if (!ts.isBinaryExpression(expr)) return null;
+  const op = expr.operatorToken.kind;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
+  const isNeq = isStrictNeq || isLooseNeq;
+  const isEq = isStrictEq || isLooseEq;
+  if (!isNeq && !isEq) return null;
+
+  const rightNullish = nullishLiteralKind(expr.right);
+  const leftNullish = nullishLiteralKind(expr.left);
+  if (!rightNullish && !leftNullish) return null;
+
+  const comparedNullish = rightNullish ?? leftNullish;
+  const nonNullSide = rightNullish ? expr.left : expr.right;
+  if (!ts.isIdentifier(nonNullSide) || nonNullSide.text !== varName) return null;
+  const excludes: NullishExclusion = isLooseEq || isLooseNeq ? "nullish" : comparedNullish!;
+  return {
+    varName,
+    narrowedBranch: isNeq ? "then" : "else",
+    excludes,
+    provesNonNull: excludesAllNullish(checker.getTypeAtLocation(nonNullSide), excludes),
+  };
+}
+
+function detectConditionNullGuard(
+  checker: ts.TypeChecker,
+  condition: ts.Expression,
+  varName: string,
+): NullGuardFact | null {
+  const direct = detectNullGuardForVar(checker, condition, varName);
+  if (direct) return direct;
+  if (ts.isIdentifier(condition)) {
+    const symbol = checker.getSymbolAtLocation(condition);
+    const decl = symbol?.valueDeclaration;
+    if (
+      decl &&
+      ts.isVariableDeclaration(decl) &&
+      decl.initializer &&
+      ts.isVariableDeclarationList(decl.parent) &&
+      (decl.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      return detectNullGuardForVar(checker, decl.initializer, varName);
+    }
+  }
+  if (
+    ts.isPrefixUnaryExpression(condition) &&
+    condition.operator === ts.SyntaxKind.ExclamationToken &&
+    ts.isIdentifier(condition.operand)
+  ) {
+    const alias = detectConditionNullGuard(checker, condition.operand, varName);
+    if (!alias) return null;
+    return { ...alias, narrowedBranch: alias.narrowedBranch === "then" ? "else" : "then" };
+  }
+  return null;
+}
+
+function unwrapExpression(expr: ts.Expression): ts.Expression {
+  let inner = expr;
+  while (
+    ts.isParenthesizedExpression(inner) ||
+    ts.isAsExpression(inner) ||
+    ts.isTypeAssertionExpression(inner) ||
+    ts.isNonNullExpression(inner)
+  ) {
+    inner = ts.isParenthesizedExpression(inner)
+      ? inner.expression
+      : ts.isAsExpression(inner)
+        ? inner.expression
+        : ts.isNonNullExpression(inner)
+          ? inner.expression
+          : (inner as ts.TypeAssertion).expression;
+  }
+  return inner;
+}
+
+function findNullablePrimitiveIdentifier(node: ts.Node, checker: ts.TypeChecker): ts.Identifier | null {
+  if (ts.isIdentifier(node) && getNullablePrimitiveInfo(checker.getTypeAtLocation(node))) return node;
+  let found: ts.Identifier | null = null;
+  node.forEachChild((child) => {
+    if (!found) found = findNullablePrimitiveIdentifier(child, checker);
+  });
+  return found;
+}
+
+function findIdentifierUseAtDiagnostic(
+  file: ts.SourceFile,
+  pos: number,
+  checker: ts.TypeChecker,
+): ts.Identifier | null {
+  let node = findSmallestNodeAtPosition(file, pos);
+  let direct: ts.Node | undefined = node;
+  while (direct && !ts.isIdentifier(direct)) direct = direct.parent;
+  if (direct && ts.isIdentifier(direct) && getNullablePrimitiveInfo(checker.getTypeAtLocation(direct))) return direct;
+
+  while (node) {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const rhs = unwrapExpression(node.right);
+      if (ts.isIdentifier(rhs) && getNullablePrimitiveInfo(checker.getTypeAtLocation(rhs))) return rhs;
+      return findNullablePrimitiveIdentifier(node.right, checker);
+    }
+    if (ts.isReturnStatement(node) && node.expression) {
+      return findNullablePrimitiveIdentifier(node.expression, checker);
+    }
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments) {
+      for (const arg of node.arguments) {
+        const found = findNullablePrimitiveIdentifier(arg, checker);
+        if (found) return found;
+      }
+    }
+    node = node.parent;
+  }
+  return null;
+}
+
+function containingFunctionLike(node: ts.Node): ts.SignatureDeclaration | undefined {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessorDeclaration(current) ||
+      ts.isSetAccessorDeclaration(current)
+    ) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function targetTypeForIdentifierUse(id: ts.Identifier, checker: ts.TypeChecker): ts.Type | null {
+  let current: ts.Node | undefined = id;
+  while (current) {
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      if (isDescendantOf(id, current.right)) return checker.getTypeAtLocation(current.left);
+    }
+    if (ts.isVariableDeclaration(current) && current.initializer && isDescendantOf(id, current.initializer)) {
+      return checker.getTypeAtLocation(current.name);
+    }
+    if (ts.isReturnStatement(current) && current.expression && isDescendantOf(id, current.expression)) {
+      const fn = containingFunctionLike(current);
+      const sig = fn ? checker.getSignatureFromDeclaration(fn) : undefined;
+      return sig ? checker.getReturnTypeOfSignature(sig) : null;
+    }
+    if ((ts.isCallExpression(current) || ts.isNewExpression(current)) && current.arguments) {
+      const args = current.arguments;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i]!;
+        if (!isDescendantOf(id, arg)) continue;
+        const sig = checker.getResolvedSignature(current);
+        const param = sig?.parameters[i];
+        return param ? checker.getTypeOfSymbol(param) : null;
+      }
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function identifierHasNonNullProofInAncestor(id: ts.Identifier, checker: ts.TypeChecker): boolean {
+  let current: ts.Node | undefined = id.parent;
+  while (current) {
+    if (ts.isIfStatement(current)) {
+      const guard = detectConditionNullGuard(checker, current.expression, id.text);
+      if (guard?.provesNonNull) {
+        if (guard.narrowedBranch === "then" && isDescendantOf(id, current.thenStatement)) return true;
+        if (guard.narrowedBranch === "else" && current.elseStatement && isDescendantOf(id, current.elseStatement)) {
+          return true;
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function isGuardedNullablePrimitiveDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
+  if (diag.code !== 2322 && diag.code !== 2345) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  const id = findIdentifierUseAtDiagnostic(file, diag.start, checker);
+  if (!id) return false;
+  const idType = checker.getTypeAtLocation(id);
+  if (!getNullablePrimitiveInfo(idType)) return false;
+  if (!identifierHasNonNullProofInAncestor(id, checker)) return false;
+  const targetType = targetTypeForIdentifierUse(id, checker);
+  if (!targetType) return false;
+  const nonNullType = checker.getNonNullableType(idType);
+  const assignable = (
+    checker as ts.TypeChecker & { isTypeAssignableTo?: (source: ts.Type, target: ts.Type) => boolean }
+  ).isTypeAssignableTo;
+  return assignable ? assignable.call(checker, nonNullType, targetType) : false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
+  if (checker && isGuardedNullablePrimitiveDiagnostic(diag, checker)) return false;
   return true;
 }
 
@@ -132,8 +391,48 @@ function detectNodeFsImports(source: string): Set<string> {
 /**
  * Orchestrates the full compilation pipeline:
  * TS Source → tsc Parser+Checker → Codegen → Binary + WAT
+ *
+ * Async because the optional Binaryen optimizer is lazy-loaded only when
+ * wasm-opt is requested (#1757 / GH #986), so normal compilation and
+ * standalone bundles do not need to embed Binaryen.
  */
-export function compileSource(
+export async function compileSource(
+  source: string,
+  options: CompileOptions = {},
+  /** Optional persistent language service for incremental compilation */
+  languageService?: IncrementalLanguageService,
+): Promise<CompileResult> {
+  // The whole codegen pipeline is synchronous; the ONLY async step is the
+  // optional Binaryen wasm-opt pass. Run the synchronous core, then apply
+  // optimization (when requested) over the produced binary. A synchronous
+  // entry point (compileSourceSync) is preserved for callers that cannot be
+  // async — notably the JS `eval` host shim in runtime-eval.ts, which never
+  // optimizes.
+  const result = compileSourceSync(source, options, languageService);
+
+  if (options.optimize && result.success) {
+    const level = typeof options.optimize === "number" ? options.optimize : 3;
+    const optResult = await optimizeBinaryAsync(result.binary, { level });
+    if (optResult.optimized) {
+      result.binary = optResult.binary;
+    }
+    if (optResult.warning) {
+      result.errors.push({ message: optResult.warning, line: 0, column: 0, severity: "warning" });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Synchronous compilation core (no Binaryen optimization).
+ *
+ * Identical to {@link compileSource} but never runs the async wasm-opt pass —
+ * the `optimize` option is ignored here. Use this only from synchronous
+ * contexts that cannot await (the `eval` host shim). All other callers should
+ * use the async {@link compileSource}.
+ */
+export function compileSourceSync(
   source: string,
   options: CompileOptions = {},
   /** Optional persistent language service for incremental compilation */
@@ -221,7 +520,10 @@ export function compileSource(
     if (diag.category === 1) {
       // Error
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
-      const severity = DOWNGRADE_DIAG_CODES.has(diag.code) ? "warning" : "error";
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, ast.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
@@ -485,17 +787,10 @@ export function compileSource(
     };
   }
 
-  // Step 3b: Optimize binary with Binaryen (optional)
-  if (options.optimize) {
-    const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
-    if (optResult.optimized) {
-      binary = optResult.binary;
-    }
-    if (optResult.warning) {
-      pushSourceAnchoredDiagnostic(errors, ast.sourceFile, optResult.warning, "warning");
-    }
-  }
+  // Step 3b: Optimize binary with Binaryen (optional) — applied by the async
+  // compileSource wrapper, not here (the optimizer is lazy-loaded only when
+  // wasm-opt is requested, #1757). This synchronous core ignores
+  // options.optimize.
 
   // Step 4: Emit WAT (optional)
   let wat = "";
@@ -523,7 +818,7 @@ export function compileSource(
   let witOutput: string | undefined;
   if (options.wit) {
     const witOpts = typeof options.wit === "object" ? options.wit : undefined;
-    witOutput = generateWit(ast, witOpts);
+    witOutput = generateWit(ast, { ...witOpts, imports: mod.imports, types: mod.types });
   }
 
   return {
@@ -540,6 +835,7 @@ export function compileSource(
     wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }
 
@@ -547,11 +843,11 @@ export function compileSource(
  * Compile multiple TypeScript source files into a single Wasm module.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMultiSource(
+export async function compileMultiSource(
   files: Record<string, string>,
   entryFile: string,
   options: CompileOptions = {},
-): CompileResult {
+): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -579,11 +875,15 @@ export function compileMultiSource(
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1 && isEntryDiag(diag)) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
@@ -768,7 +1068,7 @@ export function compileMultiSource(
   // Optimize binary with Binaryen (optional)
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }
@@ -800,6 +1100,11 @@ export function compileMultiSource(
   };
   const dts = generateDts(entryAst, mod);
   const importsHelper = generateImportsHelper(mod);
+  let witOutput: string | undefined;
+  if (options.wit) {
+    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
+    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  }
 
   return {
     binary,
@@ -811,8 +1116,10 @@ export function compileMultiSource(
     stringPool: mod.stringPool,
     sourceMap: sourceMapJson,
     imports: buildImportManifest(mod),
+    wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }
 
@@ -821,7 +1128,7 @@ export function compileMultiSource(
  * Uses ts.createProgram with real filesystem access -- TypeScript resolves
  * all imports automatically via standard module resolution.
  */
-export function compileFilesSource(entryPath: string, options: CompileOptions = {}): CompileResult {
+export async function compileFilesSource(entryPath: string, options: CompileOptions = {}): Promise<CompileResult> {
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;
 
@@ -833,11 +1140,15 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1) {
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
+      const severity =
+        DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, multiAst.checker)
+          ? "warning"
+          : "error";
       errors.push({
         message: typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText,
         line: pos.line + 1,
         column: pos.character + 1,
-        severity: "error",
+        severity,
         code: diag.code,
       });
     }
@@ -1007,7 +1318,7 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
 
   if (options.optimize) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = optimizeBinary(binary, { level });
+    const optResult = await optimizeBinaryAsync(binary, { level });
     if (optResult.optimized) {
       binary = optResult.binary;
     }
@@ -1039,6 +1350,11 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
   };
   const dts = generateDts(entryAst, mod);
   const importsHelper = generateImportsHelper(mod);
+  let witOutput: string | undefined;
+  if (options.wit) {
+    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
+    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  }
 
   return {
     binary,
@@ -1050,7 +1366,9 @@ export function compileFilesSource(entryPath: string, options: CompileOptions = 
     stringPool: mod.stringPool,
     sourceMap: sourceMapJson,
     imports: buildImportManifest(mod),
+    wit: witOutput,
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
   };
 }

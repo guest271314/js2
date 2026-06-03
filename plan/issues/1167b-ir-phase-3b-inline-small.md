@@ -16,7 +16,6 @@ sprint: 44
 depends_on: [1167a]
 required_by: [1167c]
 closed: 2026-04-23
-pr: 9
 net_improvement: 0
 ---
 # #1167b — IR Phase 3b: inline-small (direct IR-to-IR calls only)

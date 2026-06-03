@@ -1,9 +1,10 @@
 ---
 id: 1530
 title: "wasi: Native Messaging host example (Chrome extension integration)"
-status: in-progress
+status: done
 created: 2026-05-20
-updated: 2026-05-24
+updated: 2026-05-29
+completed: 2026-05-29
 priority: medium
 feasibility: medium
 reasoning_effort: low
@@ -12,9 +13,9 @@ area: wasi, runtime, docs
 language_feature: stdin, stdout, process.env
 goal: wasi-completeness
 sprint: 55
+depends_on: [1653, 1654]
 github_issue: 389
 filed_by: guest271314
-depends_on: [1653, 1654]
 related: [1482, 1483, 1484, 1651, 1653, 1654, 1655]
 ---
 ## Problem

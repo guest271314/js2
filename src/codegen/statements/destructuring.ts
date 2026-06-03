@@ -23,6 +23,7 @@ import {
   buildDestructureNullThrow,
   destructureParamArray,
   destructureParamObject,
+  emitExternrefDestructureGuard,
 } from "../destructuring-params.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { emitWasiErrorConstructor } from "../registry/error-types.js";
@@ -38,6 +39,183 @@ import {
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
 import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
+import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "../expressions/proto-override.js";
+
+/**
+ * (#1719 S1) Gate predicate for the array object-value representation track.
+ *
+ * Returns true iff array destructuring of a **typed vec / tuple RHS** must
+ * route through the host-Array reflection + host `GetIterator` lane instead of
+ * the backing-store fast path — i.e. when the program's `ITER_OVERRIDDEN`
+ * whole-program brand (`ctx.arrayIteratorMaybeOverridden`, set by
+ * `sourceOverridesArrayIterator`) is set AND the RHS is not a string.
+ *
+ * The string exclusion is load-bearing: a string is not an Array, so a
+ * monkeypatched `Array.prototype[@@iterator]` cannot affect string
+ * destructuring, and routing a string through the array iterator lane would
+ * regress string dstr (per the architecture spec).
+ *
+ * **S1 status (this PR):** this predicate establishes the *placement and
+ * string guard* the architecture spec mandates keeping from dev-a's
+ * scaffolding, but the routing target it gates is supplied by **S2** (the
+ * host-Array reflection helper + host `GetIterator`). Until S2 lands, callers
+ * evaluate this predicate but fall through to the existing fast path — so the
+ * predicate is correct and unit-tested while the codegen is behaviorally a
+ * no-op (zero test delta, the spec's S1 requirement). When
+ * `ctx.arrayIteratorMaybeOverridden` is false (the common case) this is always
+ * false, guaranteeing byte-identical output.
+ *
+ * Spec: §7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization.
+ */
+export function arrayDstrNeedsIdentity(ctx: CodegenContext, isStringRHS: boolean): boolean {
+  return ctx.arrayIteratorMaybeOverridden && !isStringRHS;
+}
+
+/**
+ * (#1719 CPR read-drive) Drive a captured `Array.prototype[@@iterator]` override
+ * for a typed-vec/tuple array-destructuring RHS, so the override's custom
+ * iterator (not the backing store) supplies the binding values
+ * (§8.5.2 IteratorBindingInitialization). PRECONDITION: the vec ref is on the
+ * stack and the caller gated on `arrayDstrNeedsIdentity && override-captured`.
+ *
+ * Scope (CPR-1): the binding pattern is all **identifier** elements (with optional
+ * `= default`) and elisions, **no rest / no nested** pattern — exactly the shape
+ * of the 71 `*-iter-val-array-prototype.js` tests. Returns `false` (caller falls
+ * through to the backing-store fast path) for rest/nested patterns so those are
+ * not regressed; CPR-2 widens the shape.
+ *
+ * Lowering: drive override → iterator (in-Wasm, `__drive_proto_iterator`), then
+ * per element `__iterator_next` → `(i32 done, externref value)`; on `done` the
+ * element takes its default (or `undefined`), else `value` coerced to the binding
+ * local's type. The brand only fires at this observation boundary, so internal
+ * array iterations inside the override body stay on the typed-vec fast path — no
+ * re-entrancy / no infinite loop.
+ */
+export function tryEmitArrayProtoIteratorReadDrive(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  pattern: ts.ArrayBindingPattern,
+  resultType: ValType,
+  /**
+   * (#1719 CPR-2) When provided, the array value is read from this local instead
+   * of consumed from the stack — lets the for-of-head / parameter dstr sites
+   * (whose value lives in a local) reuse this exact drive+drain. `undefined` ⇒
+   * the decl-dstr caller's convention (vec ref already on the stack).
+   */
+  srcLocal?: number,
+): boolean {
+  const overrideGlobalIdx = arrayIteratorOverrideGlobalIdx(ctx);
+  if (overrideGlobalIdx === undefined) return false;
+
+  // CPR shape gate: only plain identifiers (+ optional default) and elisions.
+  for (const el of pattern.elements) {
+    if (ts.isOmittedExpression(el)) continue;
+    if (el.dotDotDotToken) return false; // rest → follow-up
+    if (!ts.isIdentifier(el.name)) return false; // nested → follow-up
+  }
+
+  // Pre-register __iterator_next (the for-of multi-value drain shape) BEFORE
+  // emitting any drive instructions, so a missing import bails cleanly (returns
+  // false → caller uses the fast path) without leaving half-emitted bytes.
+  const nextIdx = ensureLateImport(
+    ctx,
+    "__iterator_next",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }, { kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (nextIdx === undefined) return false;
+
+  // Put the array value on the stack: from `srcLocal` (for-of / param convention)
+  // or from a fresh stash of the already-on-stack vec ref (decl convention). The
+  // value may be a vec ref OR an externref (for-of elements are often externref);
+  // `emitArrayProtoIteratorDrive` does `extern.convert_any`, which only accepts
+  // an anyref/(ref any) — so an externref source must be converted first.
+  if (srcLocal !== undefined) {
+    const srcType = getLocalType(fctx, srcLocal) ?? ({ kind: "externref" } as ValType);
+    fctx.body.push({ op: "local.get", index: srcLocal });
+    if (srcType.kind === "externref") {
+      // externref → anyref so the drive's `extern.convert_any` (any→extern) is
+      // the right direction. (#1719 CPR-2)
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+    }
+  } else {
+    const vecLocal = allocLocal(fctx, `__cpr_vec_${fctx.locals.length}`, resultType);
+    fctx.body.push({ op: "local.set", index: vecLocal });
+    fctx.body.push({ op: "local.get", index: vecLocal });
+  }
+  const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
+  const doneLocal = allocLocal(fctx, `__cpr_done_${fctx.locals.length}`, { kind: "i32" });
+  const valLocal = allocLocal(fctx, `__cpr_val_${fctx.locals.length}`, { kind: "externref" });
+
+  // Build the per-element drain into a buffer, then guard it on a non-null
+  // iterator. If the override drive returns null (e.g. the closure dispatch
+  // couldn't resolve the override — a TS-cast `(Array.prototype as any)[…]`
+  // generator whose compiled shape the arity-0 dispatcher doesn't match), the
+  // bindings stay at their TDZ/zero defaults rather than trapping on
+  // `__iterator_next(null)`. The 71 `.js` test262 cases resolve a real iterator;
+  // this guard only makes the unresolved-override edge degrade gracefully.
+  const drainInstrs: Instr[] = collectInstrs(fctx, () => {
+    for (const el of pattern.elements) {
+      // Advance the iterator: (done, value) = __iterator_next(iter).
+      fctx.body.push({ op: "local.get", index: iterLocal });
+      fctx.body.push({ op: "call", funcIdx: nextIdx });
+      fctx.body.push({ op: "local.set", index: valLocal }); // value (top)
+      fctx.body.push({ op: "local.set", index: doneLocal }); // done (below)
+
+      if (ts.isOmittedExpression(el) || !ts.isIdentifier(el.name)) continue; // elision: just advance
+
+      const name = el.name.text;
+      const localIdx = fctx.localMap.get(name);
+      if (localIdx === undefined) continue;
+      const localType = getLocalType(fctx, localIdx) ?? ({ kind: "externref" } as ValType);
+
+      // value-present arm: coerce `value` externref → the binding's local type.
+      const assignFromValue: Instr[] = collectInstrs(fctx, () => {
+        fctx.body.push({ op: "local.get", index: valLocal });
+        coerceType(ctx, fctx, { kind: "externref" }, localType);
+        fctx.body.push({ op: "local.set", index: localIdx });
+      });
+
+      // done / default arm: if the element has `= init`, evaluate it; else leave
+      // the local at its zero/undefined default (already TDZ-initialised upstream).
+      let defaultArm: Instr[] = [];
+      if (el.initializer) {
+        defaultArm = collectInstrs(fctx, () => {
+          const initType = compileExpression(ctx, fctx, el.initializer!);
+          if (initType) {
+            if (!valTypesMatch(initType, localType)) coerceType(ctx, fctx, initType, localType);
+            fctx.body.push({ op: "local.set", index: localIdx });
+          }
+        });
+      }
+      // ECMA-262 §8.5.2: when the iterator step is done, the value is `undefined`
+      // and the binding takes its default if present. We model that with the
+      // `done` flag: done ⇒ default arm, else ⇒ assign drained value. (A
+      // present-but-`undefined` value also triggers the default per dstr-binding
+      // semantics; CPR-2 folds that in — the 71 tests yield concrete values.)
+      fctx.body.push({ op: "local.get", index: doneLocal });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: defaultArm,
+        else: assignFromValue,
+      } as Instr);
+    }
+  });
+
+  // if (iter !== null) { drain }
+  fctx.body.push({ op: "local.get", index: iterLocal });
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: drainInstrs,
+    else: [],
+  } as Instr);
+  return true;
+}
 
 export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, pattern: ts.BindingPattern): void {
   for (const element of pattern.elements) {
@@ -59,6 +237,36 @@ export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * True when the binding pattern is declared at module top level — i.e. its
+ * nearest function-like ancestor is the SourceFile, not a nested function.
+ *
+ * #1690b: only module-level destructuring bindings genuinely back a module
+ * global and need the local→global writeback. A `var [a] = ...` / `var {a} =
+ * ...` declared inside a function body introduces a function-local that
+ * shadows any same-named module global, so its destructured value must NOT be
+ * synced to the global (doing so corrupted the module binding).
+ */
+function isModuleLevelBindingPattern(pattern: ts.BindingPattern): boolean {
+  let n: ts.Node | undefined = pattern;
+  while (n) {
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n)
+    ) {
+      return false;
+    }
+    if (ts.isSourceFile(n)) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+/**
  * After destructuring, sync any bound locals that have corresponding module
  * globals. Destructuring stores values into locals, but module-level variables
  * need to also be written via global.set so other functions can read them.
@@ -68,6 +276,9 @@ export function syncDestructuredLocalsToGlobals(
   fctx: FunctionContext,
   pattern: ts.BindingPattern,
 ): void {
+  // #1690b: a destructuring declaration inside a function body binds
+  // function-locals that shadow module globals — never write them back.
+  const isModuleLevel = isModuleLevelBindingPattern(pattern);
   for (const element of pattern.elements) {
     if (ts.isOmittedExpression(element)) continue;
     if (ts.isBindingElement(element)) {
@@ -82,7 +293,7 @@ export function syncDestructuredLocalsToGlobals(
         // the central "destructure complete" callsite — and is a
         // no-op for non-let/const bindings, which have no TDZ flag.
         emitLocalTdzInit(fctx, name);
-        const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+        const moduleGlobalIdx = isModuleLevel ? ctx.moduleGlobals.get(name) : undefined;
         const localIdx = fctx.localMap.get(name);
         if (moduleGlobalIdx !== undefined && localIdx !== undefined) {
           const localType = getLocalType(fctx, localIdx);
@@ -179,13 +390,9 @@ export function ensureAsyncIterator(ctx: CodegenContext, fctx: FunctionContext):
  * JS impl: (v: unknown) => v === undefined ? 1 : 0
  */
 export function ensureExternIsUndefined(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
-  const idx = ctx.funcMap.get("__extern_is_undefined");
-  if (idx !== undefined) return idx;
-  const importsBefore = ctx.numImportFuncs;
-  const fnType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__extern_is_undefined", { kind: "func", typeIdx: fnType });
-  shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-  return ctx.funcMap.get("__extern_is_undefined");
+  const idx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  flushLateImportShifts(ctx, fctx);
+  return idx;
 }
 
 /**
@@ -670,13 +877,22 @@ export function compileExternrefObjectDestructuringDecl(
   const tmpLocal = allocLocal(fctx, `__ext_obj_destruct_${fctx.locals.length}`, resultType);
   fctx.body.push({ op: "local.set", index: tmpLocal });
 
-  // Per ECMA-262 §13.15.5.5, an empty ObjectBindingPattern `{}` performs no
-  // property access and therefore no RequireObjectCoercible: `const {} = null`
-  // must NOT throw. `destructureParamObject` emits an unconditional
-  // null/undefined guard for externref sources, so we must short-circuit the
-  // empty pattern here before delegating (the binding-locals pre-pass is a
-  // no-op for an empty pattern). (#1553c — preserves twin behaviour.)
+  // Per ECMA-262 8.6.2 BindingInitialization, the production
+  // `BindingPattern : ObjectBindingPattern` runs `Perform ?
+  // RequireObjectCoercible(value)` as step 1 — BEFORE the inner
+  // `ObjectBindingPattern : { }` rule (which returns unused). So `const {} =
+  // null` / `const {} = undefined` MUST throw a TypeError, while `const {} = 5`
+  // must NOT (a number is object-coercible). The earlier blanket short-circuit
+  // (#846) skipped the coercibility check for empty patterns, silently
+  // accepting null/undefined — observably wrong (test262
+  // dstr-binding/obj-init-null + for-of/dstr/const-obj-init-*). Emit the same
+  // null/undefined RequireObjectCoercible guard that the parameter path
+  // (`destructureParamObject`) and assignment path
+  // (`emitExternrefAssignDestructureGuard`) already use, then short-circuit the
+  // no-property-access empty body. The guard only fires for null/undefined, so
+  // primitive sources still pass through unchanged. (#846)
   if (pattern.elements.length === 0) {
+    emitExternrefDestructureGuard(ctx, fctx, tmpLocal);
     ensureBindingLocals(ctx, fctx, pattern);
     return;
   }
@@ -811,6 +1027,24 @@ export function compileArrayDestructuring(
     ctx.nativeStrings &&
     ctx.anyStrTypeIdx >= 0 &&
     (typeIdx === ctx.anyStrTypeIdx || typeIdx === ctx.nativeStrTypeIdx || typeIdx === ctx.consStrTypeIdx);
+
+  // #1719 CPR read-drive — gate-site for the array object-value representation
+  // track. When the program overrode Array.prototype's @@iterator/values (the
+  // ITER_OVERRIDDEN brand) AND captured that override (CPR write-arm), and the
+  // RHS is a real array (not a string), the backing-store fast path below
+  // silently ignores the override (§7.4.2 GetIterator / §8.5.2
+  // IteratorBindingInitialization). Drive the captured override here instead.
+  // Strictly gated behind `arrayDstrNeedsIdentity && override-captured`, both
+  // false in the common case ⇒ override-free modules stay byte-identical.
+  if (
+    arrayDstrNeedsIdentity(ctx, isStringStruct) &&
+    arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+    (isVecArray || isTupleStruct) &&
+    tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, resultType)
+  ) {
+    syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+    return;
+  }
 
   if (!isVecArray && !isTupleStruct && !isStringStruct) {
     // Unknown struct: convert to externref and use __extern_get fallback

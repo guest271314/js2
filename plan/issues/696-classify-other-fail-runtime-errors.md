@@ -17,8 +17,7 @@ files:
 ---
 # #696 — Classify "other fail" runtime errors (4,649 FAIL)
 
-## Status: review
-
+## Status: in-review
 4,649 tests fail with errors that don't match "returned N" pattern. These are likely Wasm traps (RuntimeError) now propagating after we removed the try/catch wrapper. Need to classify these errors.
 
 ### Fix

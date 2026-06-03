@@ -1112,7 +1112,7 @@ async function main() {
     }
 
     try {
-      const result = compile(feat.js, { emitWat: true, fileName: "snippet.ts" });
+      const result = await compile(feat.js, { emitWat: true, fileName: "snippet.ts" });
 
       if (!result.success) {
         const msg = result.errors[0]?.message ?? "unknown error";

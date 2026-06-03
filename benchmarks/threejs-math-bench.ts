@@ -17,7 +17,7 @@ import { buildImports } from "../src/runtime.js";
 // ---------------------------------------------------------------------------
 
 async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = compile(source, { fileName: "bench.ts" });
+  const result = await compile(source, { fileName: "bench.ts" });
   if (!result.success || !result.binary || result.binary.length === 0) {
     throw new Error(`Compile failed:\n${result.errors.map((e: any) => `L${e.line}: ${e.message}`).join("\n")}`);
   }

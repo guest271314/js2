@@ -32,6 +32,7 @@ import {
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   hoistLetConstWithTdz,
+  hoistVarDeclarations,
   nextModuleGlobalIdx,
   resolveWasmType,
 } from "./index.js";
@@ -1110,6 +1111,56 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
 }
 
 /**
+ * Methods that STORE the callback for later invocation rather than calling it
+ * synchronously during the call. Closures passed to these methods need
+ * persistent ref-cell writebacks (re-emitted after every subsequent call) so
+ * that mutations made when the callback eventually runs are reflected in the
+ * outer scope. (#1695)
+ *
+ * Receiver-type-aware allowlist (className → method names): we only promote
+ * to persistent writebacks when the receiver type matches — e.g. a user-defined
+ * `class Foo { defer(cb) {} }` calling `foo.defer(...)` must NOT be promoted.
+ */
+const DEFERRED_CALLBACK_METHODS_BY_CLASS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["DisposableStack", new Set(["defer", "use", "adopt"])],
+  ["AsyncDisposableStack", new Set(["defer", "use", "adopt"])],
+]);
+
+/**
+ * Returns true if the arrow's parent CallExpression is a stored-callback host
+ * method (DisposableStack.defer/use/adopt etc.). The callback is not invoked
+ * synchronously by the call that registers it, so its captured-mutable
+ * writebacks must be persistent. (#1695)
+ */
+export function isDeferredCallbackArgument(node: ts.Node, ctx: CodegenContext): boolean {
+  const parent = node.parent;
+  if (!parent || !ts.isCallExpression(parent)) return false;
+  if (!parent.arguments.some((arg) => arg === node)) return false;
+  if (!ts.isPropertyAccessExpression(parent.expression)) return false;
+  const methodName = parent.expression.name.text;
+  try {
+    const recType = ctx.checker.getTypeAtLocation(parent.expression.expression);
+    const symName = recType.getSymbol?.()?.getName?.();
+    if (symName) {
+      const methods = DEFERRED_CALLBACK_METHODS_BY_CLASS.get(symName);
+      if (methods?.has(methodName)) return true;
+    }
+    const baseTypes = recType.getBaseTypes?.();
+    if (baseTypes) {
+      for (const bt of baseTypes) {
+        const bn = bt.getSymbol?.()?.getName?.();
+        if (!bn) continue;
+        const m = DEFERRED_CALLBACK_METHODS_BY_CLASS.get(bn);
+        if (m?.has(methodName)) return true;
+      }
+    }
+  } catch {
+    // checker failure → conservative false (no behavioural change)
+  }
+  return false;
+}
+
+/**
  * #1177: Returns true if the closure (`arrow`) is provably constructed AFTER
  * the let/const/using declaration of `name` AND the closure is NOT inside a
  * loop that wraps the declaration. In that case, we don't need to force-box
@@ -1185,7 +1236,8 @@ export function compileArrowFunction(
 ): ValType | null {
   // If used as callback argument to a host call, use the __make_callback path
   if (isHostCallbackArgument(arrow, ctx)) {
-    return compileArrowAsCallback(ctx, fctx, arrow);
+    const deferredInvocation = isDeferredCallbackArgument(arrow, ctx);
+    return compileArrowAsCallback(ctx, fctx, arrow, { deferredInvocation });
   }
   // Otherwise, compile as a first-class closure value
   return compileArrowAsClosure(ctx, fctx, arrow);
@@ -1618,6 +1670,12 @@ export function compileArrowAsClosure(
     // class-object singleton rather than `undefined`.
     isStaticContext: fctx.isStaticContext,
     isGenerator,
+    // (#1636-S1) This lifted closure body can be dispatched from the host via
+    // `__call_fn_method_N` (e.g. as a `JSON.stringify` replacer / `toJSON`),
+    // which installs the host receiver into `__current_this`. Allow `this`
+    // (with no other binding) to read that global. Named functions / methods
+    // are NOT lifted here and keep `undefined`/globalObject `this`.
+    readsCurrentThis: true,
   };
 
   // (#1384) Track liftedFctx.body in liveBodies BEFORE any emission so
@@ -2036,6 +2094,23 @@ export function compileArrowAsClosure(
     if (builders.size > 0) liftedFctx.pendingStringBuilders = builders;
   }
 
+  // Pre-hoist function-scoped `var` declarations into the closure's localMap
+  // (#1745). Regular functions run this in function-body.ts; closures/arrows
+  // previously skipped it, so a `var x` inside a closure body that collided
+  // with a same-named *module global* (declared a different type — e.g. a
+  // top-level numeric `var i` vs. an array-holding `var i` inside the closure)
+  // fell through `hasLocalShadow` to the global, emitting a `global.set`/`get`
+  // whose value type did not match the global's declared type → invalid Wasm
+  // ("global.set[0] expected type f64, found if of (ref null 3)" in acorn's
+  // __closure_37). hoistVarDecl allocates a function-local that shadows the
+  // module global per ECMA-262 §10.2.10. Must run BEFORE the let/const hoist
+  // and before any statement compiles so every read/write of the var binds to
+  // the local. The walker does not cross nested function scope boundaries, so
+  // captured free variables are untouched.
+  if (ts.isBlock(body)) {
+    hoistVarDeclarations(ctx, liftedFctx, body.statements);
+  }
+
   // Pre-hoist let/const with TDZ flags for the closure body so that
   // accesses before the declaration site throw ReferenceError (#790).
   if (ts.isBlock(body)) {
@@ -2279,7 +2354,7 @@ export function compileArrowAsCallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
-  options?: { needsThis?: boolean },
+  options?: { needsThis?: boolean; deferredInvocation?: boolean },
 ): ValType | null {
   const cbId = ctx.callbackCounter++;
   const cbName = `__cb_${cbId}`;
@@ -2440,6 +2515,12 @@ export function compileArrowAsCallback(
     // spawned inside static initializers / static methods resolve `this`
     // to the class-object singleton.
     isStaticContext: fctx.isStaticContext,
+    // (#1636-S1) Anonymous callbacks are dispatchable from the host via
+    // `__call_fn_method_N`, which installs the host receiver into
+    // `__current_this`. Allow `this` to read it when no other binding exists.
+    // (When needsThis=true, `this` is already bound to the `__this` param at
+    // localMap index 1, so the fallback is never reached for that path.)
+    readsCurrentThis: true,
   };
 
   // (#1384) Track cbFctx.body in liveBodies BEFORE any emission so addUnionImports
@@ -2544,6 +2625,13 @@ export function compileArrowAsCallback(
       const effectiveIdx = cbFctx.localMap.get(paramName) ?? arrowParamOffset + i;
       emitArrowParamDestructuring(ctx, cbFctx, param, effectiveIdx, resolved);
     }
+  }
+
+  // Pre-hoist function-scoped `var` declarations into the callback's localMap
+  // so they shadow same-named module globals (#1745, ECMA-262 §10.2.10) —
+  // mirrors the lifted-closure path above and function-body.ts.
+  if (ts.isBlock(body)) {
+    hoistVarDeclarations(ctx, cbFctx, body.statements);
   }
 
   // Pre-hoist let/const with TDZ flags for the callback body (#790)
@@ -2660,8 +2748,14 @@ export function compileArrowAsCallback(
         writebacks.push({ op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 } as Instr);
         writebacks.push({ op: "local.set", index: rc.outerLocalIdx } as Instr);
       }
-      if (needsThis) {
-        // Persistent: re-emit after every call, since getter may be called by any host call
+      // (#1695) Promote to persistent for stored-callback host methods too:
+      // defer/use/adopt only register the callback, the actual invocation
+      // happens later inside dispose(). A one-shot pending writeback would
+      // snapshot the pre-invocation ref-cell value into the outer local.
+      const usePersistent = needsThis || options?.deferredInvocation === true;
+      if (usePersistent) {
+        // Persistent: re-emit after every call, since the callback may be
+        // invoked by a later host call (getter/setter, defer/use/adopt + dispose).
         if (!fctx.persistentCallbackWritebacks) fctx.persistentCallbackWritebacks = [];
         fctx.persistentCallbackWritebacks.push(...writebacks);
       } else {
@@ -2675,6 +2769,149 @@ export function compileArrowAsCallback(
 
   fctx.body.push({ op: "call", funcIdx: makeCallbackIdx });
   return { kind: "externref" };
+}
+
+/** A captured local that must flow into an async continuation. */
+export interface AsyncCapture {
+  readonly name: string;
+  readonly type: ValType;
+  readonly localIdx: number;
+}
+
+/** Result of synthesizing an async continuation `__cb_N` function. */
+export interface SyntheticContinuation {
+  /** Callback id — the host dispatches `__cb_${cbId}(captures, awaitValue)`. */
+  readonly cbId: number;
+  /** Capture struct type index (field i holds capture[i]), or -1 if no captures. */
+  readonly capStructTypeIdx: number;
+  /** The captures, in struct-field order. */
+  readonly captures: readonly AsyncCapture[];
+}
+
+/**
+ * (#1042) Synthesize an async-continuation function for the CPS state machine.
+ *
+ * Unlike {@link compileArrowAsCallback} this is driven by an explicit statement
+ * list + capture set (not an arrow AST node). It emits an exported
+ * `__cb_${cbId}(captures: externref, awaitValue: externref) -> externref`
+ * function compatible with the `__make_callback` host bridge: the host invokes
+ * it with the settled promise value as `awaitValue`. The function restores
+ * captured locals from the capture struct, binds the awaited result to
+ * `resumeBinding` (if any), runs `segmentStmts`, and returns `ref.null.extern`
+ * (the host ignores a continuation's result).
+ *
+ * Returns the cbId + capture-struct info so the caller emits the creation site
+ * (`i32.const cbId` + capture struct + `extern.convert_any` + `__make_callback`).
+ *
+ * Captures are immutable snapshots (value-copied into the struct) — async
+ * continuations don't write back to the suspended frame, so no ref cells.
+ */
+export function compileSyntheticAsyncContinuation(
+  ctx: CodegenContext,
+  outerFctx: FunctionContext,
+  segmentStmts: readonly ts.Statement[],
+  captures: readonly AsyncCapture[],
+  resumeBinding: { name: string; type: ValType } | null,
+): SyntheticContinuation {
+  const cbId = ctx.callbackCounter++;
+  const cbName = `__cb_${cbId}`;
+
+  // 1. Capture struct: field i = captures[i].type (immutable snapshot).
+  let capStructTypeIdx = -1;
+  if (captures.length > 0) {
+    const fields: FieldDef[] = captures.map((c) => ({ name: c.name, type: c.type, mutable: false }));
+    capStructTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({ kind: "struct", name: `__cb_cap_${cbId}`, fields } as StructTypeDef);
+  }
+
+  // 2. Function signature: (externref captures, externref awaitValue) -> externref.
+  const cbParams: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
+  const cbResults: ValType[] = [{ kind: "externref" }];
+  const cbTypeIdx = addFuncType(ctx, cbParams, cbResults, `${cbName}_type`);
+
+  const cbFctx: FunctionContext = {
+    name: cbName,
+    params: [
+      { name: "__captures", type: { kind: "externref" } },
+      { name: "__awaitValue", type: { kind: "externref" } },
+    ],
+    locals: [],
+    localMap: new Map(),
+    returnType: { kind: "externref" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+    enclosingClassName: outerFctx.enclosingClassName ?? resolveEnclosingClassName(outerFctx),
+    isStaticContext: outerFctx.isStaticContext,
+    readsCurrentThis: true,
+  };
+  for (let i = 0; i < cbFctx.params.length; i++) cbFctx.localMap.set(cbFctx.params[i]!.name, i);
+
+  // (#1384) track body for late-import index shifting before any emission.
+  ctx.liveBodies.add(cbFctx.body);
+
+  // 3. Restore captured locals from the captures struct.
+  //    __captures is externref; convert to anyref + cast to the cap struct.
+  if (captures.length > 0) {
+    const capLocal = allocLocal(cbFctx, "__cap_struct", { kind: "ref", typeIdx: capStructTypeIdx });
+    cbFctx.body.push({ op: "local.get", index: 0 }); // __captures (externref)
+    cbFctx.body.push({ op: "any.convert_extern" } as Instr);
+    cbFctx.body.push({ op: "ref.cast", typeIdx: capStructTypeIdx } as Instr);
+    cbFctx.body.push({ op: "local.set", index: capLocal });
+    for (let i = 0; i < captures.length; i++) {
+      const cap = captures[i]!;
+      const localIdx = allocLocal(cbFctx, cap.name, cap.type);
+      cbFctx.body.push({ op: "local.get", index: capLocal });
+      cbFctx.body.push({ op: "struct.get", typeIdx: capStructTypeIdx, fieldIdx: i });
+      cbFctx.body.push({ op: "local.set", index: localIdx });
+    }
+  }
+
+  // 4. Bind the awaited result. `__awaitValue` arrives as externref; coerce to
+  //    the binding's declared wasm type (e.g. f64 via __unbox_number).
+  if (resumeBinding) {
+    const bindIdx = allocLocal(cbFctx, resumeBinding.name, resumeBinding.type);
+    cbFctx.body.push({ op: "local.get", index: 1 }); // __awaitValue
+    if (resumeBinding.type.kind === "externref") {
+      // already externref — store as-is
+    } else {
+      coerceType(ctx, cbFctx, { kind: "externref" }, resumeBinding.type);
+    }
+    cbFctx.body.push({ op: "local.set", index: bindIdx });
+  }
+
+  // 5. Compile the post-await segment statements.
+  const savedFunc = ctx.currentFunc;
+  if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
+  if (savedFunc) ctx.funcStack.push(savedFunc);
+  ctx.currentFunc = cbFctx;
+  for (const stmt of segmentStmts) compileStatement(ctx, cbFctx, stmt);
+  if (savedFunc) ctx.funcStack.pop();
+  if (savedFunc) ctx.parentBodiesStack.pop();
+  ctx.currentFunc = savedFunc;
+
+  // 6. Fall-through return — continuation result is ignored by the host.
+  const last = cbFctx.body[cbFctx.body.length - 1];
+  if (!last || last.op !== "return") cbFctx.body.push({ op: "ref.null.extern" });
+
+  // 7. Register + export the continuation (the __make_callback host bridge
+  //    dispatches by the exported `__cb_${cbId}` name).
+  const cbFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.mod.functions.push({
+    name: cbName,
+    typeIdx: cbTypeIdx,
+    locals: cbFctx.locals,
+    body: cbFctx.body,
+    exported: true,
+  });
+  ctx.liveBodies.delete(cbFctx.body);
+  ctx.funcMap.set(cbName, cbFuncIdx);
+  ctx.mod.exports.push({ name: cbName, desc: { kind: "func", index: cbFuncIdx } });
+
+  return { cbId, capStructTypeIdx, captures };
 }
 
 /**
@@ -3102,9 +3339,23 @@ export function emitObjectMethodAsClosure(
  */
 export function finalizeMethodTrampolines(ctx: CodegenContext): void {
   for (const t of ctx.pendingMethodTrampolines) {
+    // (#1525b) If the captured methodFuncIdx now resolves to an IMPORT (i.e.,
+    // < ctx.numImportFuncs at the time of finalize), the late-import shift
+    // machinery missed this entry. Fail loudly rather than emit invalid Wasm.
+    if (t.methodFuncIdx < ctx.numImportFuncs) {
+      throw new Error(
+        `pendingMethodTrampolines: methodFuncIdx ${t.methodFuncIdx} ` +
+          `points at import "${ctx.mod.imports[t.methodFuncIdx]?.name}" — ` +
+          `shift walker missed this entry (#1525b regression)`,
+      );
+    }
     const sig = getFuncSignature(ctx, t.methodFuncIdx);
-    if (!sig || sig.params.length === 0) continue;
-    const methodUserParams = sig.params.slice(1);
+    if (!sig) continue;
+    // (#1340) Plain function decls have no hidden `this`; method sigs lead
+    // with `this` at param 0 and need it dropped. The legacy method path
+    // requires `sig.params.length >= 1` because it slices off `this`.
+    if (!t.noThisParam && sig.params.length === 0) continue;
+    const methodUserParams = t.noThisParam ? sig.params : sig.params.slice(1);
     // Only rebuild when the user-param arity is unchanged. The trampoline's
     // OWN func type (its wrapper type) was fixed at registration with
     // `userParamCount` params and is shared/cached, so it cannot change here;
@@ -3166,7 +3417,10 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       savedBodies: [],
     };
 
-    const newBody: Instr[] = [{ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr];
+    // (#1340) Function-decl trampolines have no `this` prologue; method
+    // trampolines emit `ref.null <objStruct>` as the receiver before
+    // forwarding user params.
+    const newBody: Instr[] = t.noThisParam ? [] : [{ op: "ref.null", typeIdx: t.objStructTypeIdx } as Instr];
     for (let i = 0; i < methodUserParams.length; i++) {
       newBody.push({ op: "local.get", index: i + 1 } as Instr);
       const from = wrapperUserParams[i];
@@ -3373,6 +3627,140 @@ export function emitCachedMethodClosureAccess(
   });
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
   return true;
+}
+
+/**
+ * (#1340) Emit a cached singleton closure for a top-level function declaration
+ * used as a first-class value. Mirrors `emitCachedMethodClosureAccess` (#1394)
+ * for the function-decl case.
+ *
+ * Without caching, every textual occurrence of `foo` (in value position)
+ * compiled a fresh `struct.new $closure_struct`, so `foo === foo` was false
+ * and sidecar writes on `foo.prototype` keyed by the struct identity never
+ * round-tripped (test262 Iterator helpers misclassified as `wasm_compile`).
+ *
+ * One externref cache global per function name, lazily initialised on first
+ * read; all later reads return the same externref. Call dispatch is unchanged
+ * (resolved via `funcMap` + direct `call funcIdx`); only the value-context
+ * read uses the cached closure.
+ *
+ * Only safe for captureless functions — captures must be filled at the
+ * per-construction site, not once at module init.
+ *
+ * Returns the closure struct's `ref` ValType when the cached access was
+ * emitted (so downstream consumers like array-methods.ts can take the
+ * direct `call_ref` fast path against the closure's funcref slot rather
+ * than the externref-bridge slow path through `__call_2_f64`). Returns
+ * `null` when the signature couldn't be resolved (caller falls back).
+ */
+export function emitCachedFuncClosureAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  funcIdx: number,
+): ValType | null {
+  const sig = getFuncSignature(ctx, funcIdx);
+  if (!sig) return null;
+
+  const userParams = sig.params;
+  const results = sig.results;
+
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  if (!wrapperTypes) return null;
+  const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
+
+  // Reuse the canonical trampoline if one was already registered for this
+  // function; otherwise build it once.
+  const trampolineName = `__fn_tramp_${funcName}_cached`;
+  let trampolineFuncIdx = ctx.funcMap.get(trampolineName);
+  if (trampolineFuncIdx === undefined) {
+    // Forward user params (skip self at param 0) — function declarations
+    // don't have a hidden `this` param like methods do.
+    const trampolineBody: Instr[] = [];
+    for (let i = 0; i < userParams.length; i++) {
+      trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+    }
+    trampolineBody.push({ op: "call", funcIdx } as Instr);
+    trampolineFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: trampolineName,
+      typeIdx: liftedFuncTypeIdx,
+      locals: [],
+      body: trampolineBody,
+      exported: false,
+    });
+    ctx.funcMap.set(trampolineName, trampolineFuncIdx);
+    ctx.mod.declaredFuncRefs.push(trampolineFuncIdx);
+
+    // (#1669-style) Mirror the late-finalization guard used by
+    // `emitCachedMethodClosureAccess`. The function's `func.typeIdx` may
+    // still be re-resolved after this first cached access (default-param /
+    // generator funcs finalize param types during body compile). Enroll
+    // the trampoline so `finalizeMethodTrampolines` rebuilds the body
+    // against the function's final signature.
+    ctx.pendingMethodTrampolines.push({
+      trampolineBody,
+      trampolineFuncIdx,
+      methodFuncIdx: funcIdx,
+      // No `this` param for a plain function decl — `noThisParam: true`
+      // tells the finalizer to skip both the `sig.params.slice(1)` strip
+      // and the `ref.null <objStruct>` prologue. `objStructTypeIdx` is
+      // unused on this path.
+      objStructTypeIdx: -1,
+      userParamCount: userParams.length,
+      wrapperUserParams: userParams,
+      wrapperResult: results[0],
+      noThisParam: true,
+    });
+  }
+
+  // Reuse or allocate the cache global.
+  let cacheGlobalIdx = ctx.funcClosureGlobals.get(funcName);
+  if (cacheGlobalIdx === undefined) {
+    cacheGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__fn_closure_${funcName}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.funcClosureGlobals.set(funcName, cacheGlobalIdx);
+  }
+
+  // Emit the lazy-init access (mirrors emitCachedMethodClosureAccess), but
+  // recover the closure-struct ref on read so downstream consumers like
+  // `array-methods.ts:setupArrayCallback` take the direct `call_ref` fast
+  // path. Returning a bare externref forced the host-bridge slow path
+  // through `__call_2_f64`, which in JS expects a real Function — array
+  // callbacks via top-level fn decls (`[1,2].filter(fn)`) regressed with
+  // `TypeError: fn is not a function`. The externref global is preserved
+  // for stable cross-site identity (`foo === foo` and sidecar writes on
+  // `foo.prototype`); `any.convert_extern + ref.cast` is a cheap, stable
+  // bijection back to the struct ref view used by the call-site.
+  //   global.get $cache
+  //   ref.is_null
+  //   if (then: build closure, extern.convert_any, store in $cache)
+  //   global.get $cache
+  //   any.convert_extern
+  //   ref.cast (ref $struct)
+  const initBody: Instr[] = [
+    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
+    { op: "struct.new", typeIdx: structTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+    { op: "global.set", index: cacheGlobalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: initBody,
+    else: [],
+  });
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+  return { kind: "ref", typeIdx: structTypeIdx };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

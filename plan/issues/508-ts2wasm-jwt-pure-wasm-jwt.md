@@ -20,8 +20,7 @@ files:
 ---
 # #508 — ts2wasm-jwt: pure Wasm JWT decode + HS256 verify (showcase package)
 
-## Status: review
-
+## Status: in-review
 Build a JWT library that compiles to a ~5-10KB Wasm module with **zero host dependencies** — runs on Fastly Compute, wasmtime, wasmer, Cloudflare, any WASI runtime. No JS engine needed.
 
 This is the real-world showcase for ts2wasm's value proposition: take a useful npm package use case, write it in TypeScript, compile to tiny pure Wasm.

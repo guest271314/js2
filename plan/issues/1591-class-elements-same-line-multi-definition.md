@@ -3,7 +3,8 @@ id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
 status: blocked
 created: 2026-05-24
-updated: 2026-05-27
+updated: 2026-06-03
+depends_on: [1472]
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -30,6 +31,31 @@ test262_category: language/statements/class/elements, language/expressions/class
 > failures are runtime-semantics gaps** in how a WasmGC struct instance is
 > reconciled with the host's prototype / own-property model. The sections below
 > are rewritten to describe the real problem.
+
+## Evidence: refreshed standalone test262 artifact 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **1,660** rows primarily to the
+class elements / prototype / private-name reconciliation family: 1,649
+`fail` rows and 11 `compile_error` rows. The standalone evidence is broader
+than the older 294-row `class/elements` host-mode count because it includes
+both `language/statements/class/elements` and
+`language/expressions/class/elements` permutations plus class-subsystem
+failures exposed after earlier standalone gates.
+
+The failure modes still match the corrected scope in this issue:
+
+- own-property and descriptor checks on WasmGC-backed instances/prototypes
+- stable method identity and prototype method visibility
+- private method/accessor and static private brand behavior
+- computed, symbol, and string-literal member descriptors
+
+Keep this issue blocked on the representation/design decision, but treat it as
+a high-volume standalone conformance owner when planning pass-rate work.
 
 ## Problem
 
@@ -284,3 +310,52 @@ object, and private statics live keyed on the constructor. **Depends on 1591c.**
   the failure cause. `status` set to `blocked` pending sub-issue creation
   (1591a–e). No open `depends_on` — #1364 (the descriptor-infra prerequisite)
   already merged 2026-05-20.
+
+## 2026-06-03 senior-dev re-profile — Cluster A is NOT the gap; standalone-mode `__proto_method_call` is
+
+Re-investigated against current `main` (HEAD 815592da2) to scope a 1591a slice.
+**Cluster A (instance-field own-property visibility) already works in JS-host
+mode.** Earlier framing that `hasOwnProperty`/`getOwnPropertyDescriptor`/`Object.keys`
+fail on instance fields was a *test-harness artifact*, not a compiler defect:
+
+- `Object.getOwnPropertyDescriptor(c, "field")` → correct
+  `{value, writable:true, enumerable:true, configurable:true}`.
+- `Object.prototype.hasOwnProperty.call(c, "field")` → **true**,
+  `Object.keys(c)` → **`["field","other"]`**, `propertyIsEnumerable` → **true** —
+  *but only when the host wires `imports.setExports(instance.exports)`*. The
+  runtime's `_readOwnDescriptor` / proxy `getOwnPropertyDescriptor` traps resolve
+  struct fields via `_getStructFieldNames` + `__sget_<key>`, which require the
+  exports table. The real test262 runner DOES call `setExports`
+  (`tests/test262-runner.ts:3120`), so JS-host conformance for Cluster A is
+  already correct. Probes that omit `setExports` produce false negatives
+  (`__struct_field_names(c)` returns `"field,other"` but `__sget_*` is unreachable).
+
+**The genuine 1,660-row standalone gap is a hard COMPILE ERROR, not a runtime
+reconciliation miss.** In `--target standalone`, `Object.prototype.<method>.call(receiver, …)`
+always lowers to the JS-host `__proto_method_call` import
+(`src/codegen/expressions/calls.ts:2737-2862`), which is rejected:
+> `'__proto_method_call' (dynamic-shape object/property operation) is not yet
+> supported in --target standalone (#1472 Phase B).`
+`__hasOwnProperty` / `__object_hasOwn` are still classified as JS-host late
+imports (`src/codegen/expressions/late-imports.ts:70`), so even direct
+`c.hasOwnProperty(k)` does not yet compile standalone.
+
+### Revised fix direction (supersedes 1591a-as-runtime-materialization)
+
+The class-elements standalone family is **blocked on the #1472 Phase C native
+MOP routing** (Reflect.* + Object.prototype.* dispatch to the Wasm-native open-object
+runtime), which is in flight on **task #274** (`feat(#1472 Phase C): Reflect.*
+standalone routing`). The concrete next slice for 1591 is a codegen change at
+`calls.ts:2737`: when `ctx.standalone && typeName === "Object"` and `methodName ∈
+{hasOwnProperty, propertyIsEnumerable, isPrototypeOf}`, route to the native
+runtime helper instead of `__proto_method_call`; and a parallel
+`Object.keys`/`getOwnPropertyNames(struct)` native-enumeration emit (reusing the
+Phase B Blocker B Slice 2 enumeration consumer, task #261). These depend on Phase C
+landing its receiver→native-MOP plumbing first to avoid duplicating the dispatch
+layer. **Recommend keeping #1591 `blocked` on #1472 Phase C** rather than cutting a
+1591a runtime-materialization slice — there is no runtime materialization bug to fix.
+
+- No source changes in this pass; this is a re-profile correcting the scope.
+  The 294 host-mode `class/elements` count predates the descriptor-infra
+  (#1364/#1629) landings and should be re-measured; the 1,660 standalone rows
+  are the load-bearing number and are Phase-C-gated.

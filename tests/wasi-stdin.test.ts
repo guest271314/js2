@@ -2,16 +2,20 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildWasiPolyfill } from "../src/runtime.js";
 
-declare const readStdin: () => string;
+const PROCESS_DECL = `declare const process: {
+  stdin: { read(buf: Uint8Array, offset?: number): number };
+  stdout: { write(c: Uint8Array): void };
+};`;
 
-describe("WASI stdin via fd_read (#1481)", () => {
-  it("registers fd_read import when readStdin() is used", () => {
-    const result = compile(
+describe("WASI stdin via fd_read (#1653)", () => {
+  it("registers fd_read import when process.stdin.read() is used", async () => {
+    const result = await compile(
       `
-      declare function readStdin(): string;
+      ${PROCESS_DECL}
       export function main(): void {
-        const s = readStdin();
-        console.log(s);
+        const buf = new Uint8Array(4);
+        const n = process.stdin.read(buf, 0);
+        process.stdout.write(buf);
       }
       `,
       { target: "wasi" },
@@ -19,26 +23,25 @@ describe("WASI stdin via fd_read (#1481)", () => {
     expect(result.success).toBe(true);
     expect(result.wat).toContain("wasi_snapshot_preview1");
     expect(result.wat).toContain("fd_read");
-    // helper function should be present
-    expect(result.wat).toContain("__wasi_read_stdin_all");
     expect(result.binary.length).toBeGreaterThan(0);
   });
 
-  it("does NOT register fd_read when readStdin() is not used", () => {
-    const result = compile(`console.log("no stdin here");`, { target: "wasi" });
+  it("does NOT register fd_read when process.stdin.read() is not used", async () => {
+    const result = await compile(`console.log("no stdin here");`, { target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.wat).not.toContain("fd_read");
-    expect(result.wat).not.toContain("__wasi_read_stdin_all");
   });
 
-  it("does not add WASI imports in default mode even with readStdin reference", () => {
-    // In non-wasi mode, `readStdin` is just an unknown identifier — and our
-    // codegen path is gated by ctx.wasi. The compile may fail (undefined
-    // function), but the important guarantee is no WASI imports leak in.
-    const result = compile(
+  it("does not add WASI imports in default (non-wasi) mode", async () => {
+    // In non-wasi mode the codegen path is gated by ctx.wasi, so no WASI
+    // imports should leak in.
+    const result = await compile(
       `
-      declare function readStdin(): string;
-      export function main(): string { return readStdin(); }
+      ${PROCESS_DECL}
+      export function main(): void {
+        const buf = new Uint8Array(4);
+        process.stdin.read(buf, 0);
+      }
       `,
     );
     // We don't care if it compiles; we only assert WASI imports are not added.

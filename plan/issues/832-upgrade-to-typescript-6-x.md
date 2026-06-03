@@ -3,7 +3,7 @@ id: 832
 title: "Upgrade to TypeScript 6.x to support Unicode 16.0.0 identifiers"
 status: ready
 created: 2026-03-28
-updated: 2026-04-28
+updated: 2026-06-02
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -40,3 +40,16 @@ TypeScript 6.0 is a major version — internal APIs we use may have breaking cha
 
 - TypeScript 6.x installed and all equivalence tests pass
 - 82 Unicode 16.0.0 tests unskipped and running
+
+## Refreshed standalone evidence - 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **43** rows to Unicode /
+reserved-word identifier handling and another **18** rows to lexical grammar,
+hashbang, whitespace, and line-terminator parsing. The Unicode 16.0.0 slice is
+still the core #832 owner, while the reserved-word/directive-prologue cases
+share ownership with the older lexical/strict-mode issues (#270/#990/#1435).

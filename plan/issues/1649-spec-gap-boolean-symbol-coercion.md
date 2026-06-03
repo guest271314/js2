@@ -2,7 +2,6 @@
 id: 1649
 title: "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)"
 status: blocked
-escalation: needs-architect-spec-OR-carve
 created: 2026-05-08
 updated: 2026-05-28
 priority: medium
@@ -15,6 +14,7 @@ goal: spec-completeness
 sprint: 50
 renumbered_from: 1342
 parent: 1328
+escalation: needs-architect-spec-OR-carve
 related: 1319
 ---
 # #1342 — Boolean wrapper coercion + Symbol primitive coercion

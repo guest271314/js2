@@ -13,7 +13,6 @@ sprint: 42
 required_by: [1020]
 test262_fail: 327
 closed: 2026-04-12
-pr: 135
 ---
 # #990 -- Remaining early-error gaps after detectEarlyErrors()
 

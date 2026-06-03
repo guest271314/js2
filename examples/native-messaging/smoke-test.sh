@@ -18,9 +18,14 @@ REPO_ROOT=$(CDPATH= cd -- "$DIR/../.." && pwd)
 OUT_DIR=$(mktemp -d)
 trap 'rm -rf "$OUT_DIR"' EXIT
 
-echo "== Compiling examples/native-messaging/host.ts --target wasi =="
-( cd "$REPO_ROOT" && npx tsx src/cli.ts examples/native-messaging/host.ts --target wasi -o "$OUT_DIR" )
-WASM="$OUT_DIR/host.wasm"
+echo "== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi =="
+CLI="$OUT_DIR/js2wasm-cli.mjs"
+(
+  cd "$REPO_ROOT"
+  node scripts/build-standalone-cli.mjs --outfile "$CLI"
+  node "$CLI" examples/native-messaging/nm_js2wasm.ts --target wasi -o "$OUT_DIR" --quiet
+)
+WASM="$OUT_DIR/nm_js2wasm.wasm"
 [ -f "$WASM" ] || { echo "FAIL: $WASM was not produced" >&2; exit 1; }
 
 # Framed input: 4-byte LE length prefix (0x0d = 13) + the 13-byte body.
@@ -41,9 +46,11 @@ echo "== Running under wasmtime ($(wasmtime --version)) =="
 printf "$FRAME" | wasmtime $WASMTIME_FLAGS "$WASM" >"$STDOUT_FILE" 2>"$STDERR_FILE"
 
 # ---- Expected stdout frame -------------------------------------------------
-# Body is the echo wrapper the host builds; its length is the LE prefix.
-EXPECTED_BODY='{"received":{"ping":true},"runtime":"js2wasm+wasi"}'
-BODY_LEN=${#EXPECTED_BODY}            # 51 → prefix 0x33 0x00 0x00 0x00 (computed, not hardcoded)
+# Strict echo: the response body is the received body verbatim, byte-for-byte.
+# So the expected stdout body equals the input body and its length (13) is the
+# LE prefix — a true round-trip with no added bytes.
+EXPECTED_BODY='{"ping":true}'
+BODY_LEN=${#EXPECTED_BODY}            # 13 → prefix 0x0d 0x00 0x00 0x00 (computed, not hardcoded)
 EXPECTED_STDOUT_FILE="$OUT_DIR/expected_stdout.bin"
 {
   # 4-byte little-endian uint32 length prefix.

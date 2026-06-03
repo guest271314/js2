@@ -35,6 +35,14 @@ benchmarks/results/test262-results.jsonl
 .claude/settings.local.json
 .claude/worktrees/
 .claude/agents/
+.claude/agent-status/
+.codex/worktrees/
+.codex/agent-status/
+.codex/agent-context/
+.codex/nonces/
+.codex/ci-status/
+.codex/symphony/
+.codex/dispatch/
 .test262-cache/
 output/
 examples/native-messaging/out/
@@ -42,6 +50,7 @@ scripts/compiler-bundle.mjs
 scripts/runtime-bundle.mjs
 scripts/main-compiler-bundle.mjs
 scripts/main-runtime-bundle.mjs
+website/public/graph-data.json
 tmp_*.ts
 tmp_*.mts
 _tmp_*.ts
@@ -52,6 +61,12 @@ tests/test*_check*.ts
 # Dev scratch — ad-hoc probe/debug/repro scripts
 # Agents: put ALL ad-hoc files here, not at repo root or tests/
 .tmp/
+
+# Dogfood harness (#1710) generated artifacts — the pinned tarball under
+# tests/dogfood/fixtures/ IS committed, but the extracted source and the
+# regenerated surface report are derived and stay out of git.
+tests/dogfood/.acorn/
+tests/dogfood/report/
 /check-*.ts
 /check-*.mts
 /debug-*.ts
@@ -85,6 +100,7 @@ tests/fixtures/*.imports.js
 .claude/nonces/
 *.jsonl
 benchmarks/results/runs/
+benchmarks/wasmtime-cold-host/target/
 .playwright-cli/
 vendor/
 docs/publications/

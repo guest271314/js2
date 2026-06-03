@@ -3,8 +3,8 @@ id: 1580
 title: "string-hash benchmark: wasm-validator pre-existing bug + uncompetitive hot runtime"
 status: done
 created: 2026-05-21
-updated: 2026-05-23
-completed: 2026-05-23
+updated: 2026-06-02
+completed: 2026-05-30
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -12,11 +12,83 @@ task_type: performance
 area: codegen
 language_feature: strings
 goal: performance
-sprint: 54
+sprint: 58
 related: [1175, 1178, 1210, 1184]
 origin: surfaced again by 4-lane competitive benchmark refresh
 ---
 # #1580 — string-hash benchmark: wasm-validator failure + uncompetitive runtime
+
+## Reopened 2026-05-30 — published 63.7 ms-warm contradicted the claimed fix
+
+The user observed js2wasm still performs horribly on `string-hash`. The
+committed `benchmarks/results/wasm-host-wasmtime-hot-runtime.json` showed
+`string-hash` **warm wasmUs = 63,659** — the EXACT pre-fix baseline this issue
+quoted (54× the JS lane; slower than StarlingMonkey 14.2 ms and Javy 36 ms).
+That contradicted the "Verified results" section below claiming ~22 ms warm.
+
+### Verdict: the published JSON was STALE, not a regression. The fix works.
+
+Evidence (senior-dev, sprint 57):
+
+1. **Timeline proves staleness.** The benchmark JSON was last written
+   2026-05-21 **22:42** (commit `134171e21`, the Javy/StarlingMonkey-lanes
+   feature). The #1580 fix merged 2026-05-21 **23:49** (commit `636856628`) —
+   **67 minutes later**. The JSON was never regenerated. Its `lanesProvenance`
+   string is even the *older* format ("…published in README.md commit
+   0d25e197a"), which the current `scripts/generate-wasmtime-hot-runtime.mjs`
+   no longer emits — independent proof the file predates the fix.
+
+2. **No CI regenerates it.** Nothing in `.github/workflows` refreshes
+   `wasm-host-wasmtime-hot-runtime.json`; it is only produced by the manual
+   `pnpm run refresh:benchmarks:wasmtime` (needs `wasmtime` on PATH). That is
+   the process gap that let it rot for 9 days.
+
+3. **The fix is on main and effective (code-verified).** Compiling
+   `website/public/benchmarks/competitive/programs/string-hash.js` with
+   `{ target: "wasi", nativeStrings: true, optimize: 3 }` on current main:
+   - `wasm-opt` **is** running (6851 → 1575 bytes; not the silent no-op
+     fallback), no warnings, zero host imports (standalone), and both the
+     unopt and opt3 binaries pass `WebAssembly.compile`.
+   - The **hash hot loop** in the optimized binary is tight: the
+     `$NativeString` view is allocated **once** behind a `ref.is_null` cache
+     guard (not per-iteration), `wasm-opt` fully **inlines `__str_flatten`**
+     (zero `call` in the loop — its `ref.test $NativeString` identity
+     fast-path collapses because the cached value is statically flat), and the
+     per-iteration body is just `array.get_u $u16Array` + integer/f64 hash
+     math. Exactly the inline-`array.get_u` shape the acceptance criteria
+     require. The pre-fix ~40k per-read `struct.new $NativeString` allocations
+     are gone.
+
+### Action taken
+
+- **Got a REAL measurement.** Installed wasmtime 45.0.0 (aarch64-linux) and ran
+  `scripts/generate-wasmtime-hot-runtime.mjs` against current main. **Measured
+  `string-hash` warm = 22,721 µs** (cold = 52,753 µs) — directly confirms the
+  #1580-documented ~22 ms and refutes the stale 63.7 ms. Refreshed only the two
+  `string-hash` rows in `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+  (+ public mirror) with these measured values + a `wasmProvenance` field.
+  **Caveat (in that field):** measured on a constrained shared CI container, so
+  the *cold* number is inflated by wasmtime process-startup overhead and is
+  conservative/high vs a clean box; the *warm* number (exec-only, baseline
+  subtracted) is the meaningful one and is solid. The other three benchmarks
+  (fib/fib-recursive/array-sum) were intentionally left at their prior
+  clean-aarch64-box values — they don't depend on the #1580 fix and re-measuring
+  them on this noisy container would introduce cross-machine skew (a full regen
+  here showed wasm losing to V8 on `fib` cold — a container startup artifact,
+  not reality).
+- Added a regression guard to `tests/issue-1580.test.ts`: the committed JSON's
+  `string-hash`/warm `wasmUs` must stay below 40,000 µs. This fails loudly if
+  the JSON is ever Interpreter-class stale again, or a codegen change re-adds
+  per-iteration allocation.
+
+### Remaining gap (honest)
+
+Even at ~22 ms warm, `string-hash` is still **~1.5× StarlingMonkey** (14.2 ms)
+and **~19× the JS-JIT lane** (1.18 ms). The #1580 "30 ms gate" is lenient. The
+next real perf target is the **build loop** — the `text += …` doubling-buffer
+(`array.copy` + `array.new_default` growth) plus the cons-rope `__str_flatten`
+on first read. Closing on StarlingMonkey needs that work; it is **not** covered
+by this fix.
 
 ## Problem
 

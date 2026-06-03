@@ -11,7 +11,6 @@ reasoning_effort: high
 goal: async-model
 sprint: 44
 closed: 2026-04-23
-pr: 243
 net_improvement: 262
 ---
 # #1150 — Fix 38 async destructuring / TDZ / rest-element regressions

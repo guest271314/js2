@@ -15,7 +15,6 @@ goal: property-model
 sprint: 45
 depends_on: [1169c]
 required_by: [1169e, 1169i]
-pr: 50
 merged: 2026-04-27
 ---
 # #1169d — IR Phase 4 Slice 4: class instantiation and method calls through IR

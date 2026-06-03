@@ -1,9 +1,10 @@
 ---
 id: 1677
 title: "Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi)"
-status: in-progress
+status: done
 created: 2026-05-27
 updated: 2026-05-27
+completed: 2026-05-27
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,8 +13,8 @@ area: codegen, standalone, import-bookkeeping
 language_feature: classes, closures, number-formatting, typed-arrays, template-literals
 goal: standalone-mode
 sprint: Backlog
-owner: senior-developer
 parent: 1666
+owner: senior-developer
 related: [1666, 1664, 1665, 1335, 1470]
 note: "Carved out of #1666. Signature B (unbound late global) re-landed safely via PR #684; Signature A is the genuine #618 shift-regime hazard and needs an architect-level fix."
 ---

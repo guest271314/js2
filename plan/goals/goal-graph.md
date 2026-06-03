@@ -5,7 +5,7 @@ Unlike a linear roadmap, multiple independent goals can be worked on in parallel
 and a goal being "ready" doesn't mean it should be worked on immediately.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 28,842 / 43,159 (66.8 %) — baseline 1f5208c8, 2026-05-22T19:51:21Z
+**test262 conformance**: 30,214 / 43,135 (70.0 %) — baseline 9ee8e921, 2026-05-29T00:58:42Z
 <!-- AUTO:conformance-end -->
 
 ## DAG
@@ -85,6 +85,19 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
    +--------------+      +--------------+
    Depends on:           Independent
    standalone-mode
+
+   +-------------------+   +----------------------+
+   | self-hosting-     |   | backend-agnostic-ir  |
+   |   dogfood         |   | (IR independent of   |
+   | (compile acorn,   |   |  backend: WasmGC /   |
+   |  diff vs node)    |   |  linear / bytecode)  |
+   +-------------------+   +----------------------+
+   Depends on:             Depends on:
+   compilable (met)        compiler-architecture
+   crash-free (partial)    (activatable)
+   ── both feed #1584 (in-Wasm bytecode interpreter), which needs ──
+   ── compiled-acorn (self-hosting-dogfood) AND a non-Wasm IR     ──
+   ── backend (backend-agnostic-ir) ──
 ```
 
 ## Goal Status Summary
@@ -108,6 +121,8 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
 | **performance** | Activatable | faster output | core-semantics | #743, #773, #745, #744, #824 (timeouts) |
 | **platform** | Blocked | edge deploy | standalone-mode | #639, #640, #641, #644 |
 | **refactoring** | Independent | maintainability | -- | #688, #741, #788, #803-#811 |
+| **self-hosting-dogfood** | Active (s57) | compiled acorn AST == node-acorn | compilable (met), crash-free (partial) | #1710 (harness), #1711 (triage), #1712 (acceptance); #1679/#1690/#1690b done |
+| **backend-agnostic-ir** | Active (s57) | IR lowers to 2+ backends via a trait | compiler-architecture | #1713 (trait seam, hard, arch-spec), #1714 (linear proof), #1715 (bytecode proof); feeds #1584 |
 
 ## How to use this
 

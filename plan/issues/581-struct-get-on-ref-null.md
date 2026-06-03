@@ -17,8 +17,7 @@ files:
 ---
 # #581 — struct.get on ref.null in Wasm:test function (177 CE)
 
-## Status: review
-
+## Status: in-review
 177 tests fail with `struct.get[0] expected type (ref null N), found ref.null of type externref` in the `test` function. The struct type indices vary (4, 5, 6, 7) indicating different struct types.
 
 ### Root cause

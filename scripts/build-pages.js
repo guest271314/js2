@@ -280,6 +280,12 @@ const test262ReportSource = resolvePreferredFile(
   join(BENCHMARKS_RESULTS_DIR, "test262-report.json"),
   latestNamedFile(BENCHMARKS_RESULTS_DIR, "test262-report-", ".json"),
 );
+const test262StandaloneReportSource = resolvePreferredFileOrNull(
+  join(PUBLIC_BENCH, "test262-standalone-report.json"),
+  join(BENCHMARKS_RESULTS_DIR, "test262-standalone-report.json"),
+  join(ROOT, "public", "benchmarks", "results", "test262-standalone-report.json"),
+  latestNamedFile(BENCHMARKS_RESULTS_DIR, "test262-standalone-report-", ".json"),
+);
 const test262ResultsSource = resolvePreferredFileOrNull(
   // #1528 — the JSONL is no longer committed; prefer the cache fetched
   // from `loopdive/js2wasm-baselines` if present, then the public/ copy
@@ -295,6 +301,9 @@ const test262RunsIndexSource = resolvePreferredFileOrNull(
   join(PUBLIC_BENCH, "runs", "index.json"),
 );
 copyFile(test262ReportSource, join(PAGES_DIST, "benchmarks", "results", "test262-report.json"));
+if (test262StandaloneReportSource) {
+  copyFile(test262StandaloneReportSource, join(PAGES_DIST, "benchmarks", "results", "test262-standalone-report.json"));
+}
 if (test262ResultsSource) {
   copyFile(test262ResultsSource, join(PAGES_DIST, "benchmarks", "results", "test262-results.jsonl"));
 }
@@ -325,6 +334,8 @@ for (const fileName of [
   "playground-benchmark-sidebar-no-jit.json",
   "loadtime-benchmarks.json",
   "size-benchmarks.json",
+  "wasm-host-wasmtime-hot-runtime.json",
+  "wasm-host-wasmtime-module-size-per-test.json",
 ]) {
   const source = resolvePreferredFileOrNull(join(BENCHMARKS_RESULTS_DIR, fileName), join(PUBLIC_BENCH, fileName));
   if (source) {
@@ -342,9 +353,6 @@ copyFileIfExists(
   join(PAGES_DIST, "benchmarks", "results", "test262-report.json"),
   join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, "test262-report.json"),
 );
-
-// Iframe nav-sync glue (referenced from the landing page header at /).
-copyFileIfExists(join(WEBSITE, "frame-nav-sync.js"), join(PAGES_DIST, "frame-nav-sync.js"));
 
 // Disable Jekyll processing so all generated assets are published as-is.
 writeFileSync(join(PAGES_DIST, ".nojekyll"), "");

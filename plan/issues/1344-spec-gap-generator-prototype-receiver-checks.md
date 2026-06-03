@@ -1,11 +1,11 @@
 ---
 id: 1344
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: ready
+status: blocked
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-05-28
 priority: medium
-feasibility: medium
+feasibility: hard
 reasoning_effort: high
 task_type: bugfix
 area: codegen
@@ -13,7 +13,56 @@ language_feature: generators
 goal: spec-completeness
 sprint: 50
 parent: 1328
+depends_on: [1665]
 ---
+## Triage 2026-05-28 — NOT a localized receiver-check fix
+
+**Brand-check half is already done.** Issue #820j (TaskList #111, completed)
+installed `_GeneratorState.get(this)` guards on `%GeneratorPrototype%.next`
+/ `.return` / `.throw` and the `%AsyncGeneratorPrototype%` mirror. See
+`src/runtime.ts:182-225` for the implementations.
+
+**Current baseline (`.test262-cache/test262-current.jsonl`, 2026-05-28):**
+
+| Suite | total | pass | fail breakdown |
+|---|---|---|---|
+| `built-ins/GeneratorPrototype` | ~70 | ~35 | 14 unreachable, 10 assertion_fail, 8 other, 3 runtime_error |
+| `built-ins/AsyncGeneratorPrototype` | ~48 | ~46 | 2 assertion_fail |
+| `built-ins/AsyncIteratorPrototype` | 13 | 6 | 6 assertion_fail (`Symbol.asyncDispose` family), 1 promise_error |
+
+Zero remaining `type_error` failures on the cluster — exactly the
+acceptance-criterion family this issue was opened to address. Original
+"52 + 12 fails" tally is stale.
+
+**What the residual ~37 failures actually need (NOT brand checks):**
+
+1. **Generator state machine rewrite** (covers ~24 of the 35 GeneratorPrototype
+   fails — `unreachable`, `try-catch-*`, `try-finally-*`, `lone-return`,
+   `from-state-executing`, etc.). Today the generator desugaring buffers all
+   values eagerly into `state.buf`; it does not pause at `yield`, can't run
+   `finally` blocks on `.return()`, and can't observe the `executing` state
+   for re-entrant `.next()` calls. This is the **#1665 native-generators**
+   architect-blocked gap (task #93 senior-dev escalation, blocked on
+   #1666/#1664).
+2. **`AsyncIteratorPrototype[Symbol.asyncDispose]`** (~6 fails) — ES2026
+   stage-3 feature; not in `_getAsyncIteratorPrototype()` and not in
+   #1665's scope. Carve as a separate small issue once the spec lands.
+3. **`GeneratorPrototype/return/not-a-constructor.js` (1 fail)** — covered
+   by #930 (not-a-constructor detection); generator method case missing.
+
+**Why this is not a developer-localized fix:** the state-machine rewrite
+touches `src/codegen/expressions.ts` yield/yield* lowering AND the
+generator runtime closure shape. There is no ~20 LOC version; the
+architect spec #1665 (gated on #1666/#1664) is the path forward.
+
+## Recommendation
+
+Mark `status: blocked` with `depends_on: [1665]`. The ~6 asyncDispose
+residuals and the 1 not-a-constructor residual can be carved as separate
+small issues; the remaining ~30 are the same generator state-machine gap.
+
+---
+
 # #1344 — Generator / AsyncIterator prototype: receiver checks, .return/.throw
 
 ## Problem

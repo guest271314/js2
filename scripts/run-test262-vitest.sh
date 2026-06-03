@@ -16,6 +16,21 @@ LOCKDIR="/tmp/js2wasm-test262.lockdir"
 RESULTS_DIR="$MAIN_DIR/benchmarks/results"
 RUN_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 INCLUDE_PROPOSALS=1
+TEST262_TARGET="${TEST262_TARGET:-gc}"
+TEST262_REPORTER="${TEST262_REPORTER:-verbose}"
+
+case "$TEST262_TARGET" in
+  gc|linear|wasi|standalone) ;;
+  *)
+    echo "ERROR: TEST262_TARGET must be one of: gc, linear, wasi, standalone"
+    exit 1
+    ;;
+esac
+
+RESULT_PREFIX="test262"
+if [ "$TEST262_TARGET" != "gc" ]; then
+  RESULT_PREFIX="test262-${TEST262_TARGET}"
+fi
 
 forwarded_args=()
 for arg in "$@"; do
@@ -28,6 +43,8 @@ for arg in "$@"; do
   fi
 done
 export TEST262_INCLUDE_PROPOSALS="$INCLUDE_PROPOSALS"
+export TEST262_TARGET
+export TEST262_RESULT_PREFIX="$RESULT_PREFIX"
 
 resolve_esbuild() {
   if [ -n "${ESBUILD_BIN:-}" ] && [ -x "${ESBUILD_BIN:-}" ]; then
@@ -129,9 +146,7 @@ fi
 
 # Symlink heavy directories to avoid duplication
 if [ "$USE_WORKTREE" = "1" ]; then
-  rm -rf "$WT_DIR/node_modules" "$WT_DIR/test262"
-  ln -s "$MAIN_DIR/node_modules" "$WT_DIR/node_modules"
-  ln -s "$MAIN_DIR/test262" "$WT_DIR/test262"
+  bash "$MAIN_DIR/scripts/provision-worktree-deps.sh" "$WT_DIR"
 fi
 
 # Verify symlinks
@@ -161,7 +176,7 @@ fi
   --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen 2>&1 | tail -1
 
 # ── Prepare result files ─────────────────────────────────────────
-# Vitest writes to timestamped test262-results-YYYYMMDD-HHMMSS.jsonl directly.
+# Vitest writes to timestamped ${RESULT_PREFIX}-results-YYYYMMDD-HHMMSS.jsonl directly.
 # RUN_TIMESTAMP env var tells test262-shared.ts which filename to use.
 export RUN_TIMESTAMP
 
@@ -172,6 +187,8 @@ if [ "$USE_WORKTREE" = "1" ]; then
 fi
 
 echo "Run ID: $RUN_TIMESTAMP"
+echo "Target: $TEST262_TARGET"
+echo "Reporter: $TEST262_REPORTER"
 echo "Worktree at $(git -C "$WT_DIR" rev-parse --short HEAD)"
 echo "Running vitest (unified compile+execute in fork pool)..."
 
@@ -210,8 +227,8 @@ else
 fi
 
 # ── Run vitest chunk-by-chunk FROM THE WORKTREE ─────────────────
-# Local runs use 16 round-robin shards (tests/test262-local-shard{1..16}.test.ts).
-# CI uses the 50-chunk matrix (tests/test262-chunk{1..50}.test.ts) — needs many
+# Local runs use 16 weighted shards (tests/test262-local-shard{1..16}.test.ts).
+# CI uses the 57-chunk matrix (tests/test262-chunk{1..57}.test.ts) — needs many
 # parallel runners. Locally vitest.config.ts has maxForks=1, so wall time scales
 # linearly with shard count → fewer/larger shards = faster local runs.
 # Override pattern via TEST262_LOCAL_SHARD_GLOB env to scope a quick subset.
@@ -232,101 +249,51 @@ if [ -n "$CHUNKS" ]; then
   echo "Running $CHUNK_COUNT local shard files in one vitest invocation..."
   if [ ${#forwarded_args[@]} -gt 0 ]; then
     node node_modules/vitest/dist/cli.js run $LOCAL_SHARD_GLOB \
-      --reporter=verbose \
+      --reporter="$TEST262_REPORTER" \
       "${forwarded_args[@]}" 2>&1 | tee /tmp/test262-vitest-run.log || true
   else
     node node_modules/vitest/dist/cli.js run $LOCAL_SHARD_GLOB \
-      --reporter=verbose 2>&1 | tee /tmp/test262-vitest-run.log || true
+      --reporter="$TEST262_REPORTER" 2>&1 | tee /tmp/test262-vitest-run.log || true
   fi
 else
   # Single file mode: run the monolithic test file
   echo "Running single test file..."
   if [ ${#forwarded_args[@]} -gt 0 ]; then
     node node_modules/vitest/dist/cli.js run tests/test262-vitest.test.ts \
-      --reporter=verbose \
+      --reporter="$TEST262_REPORTER" \
       "${forwarded_args[@]}" 2>&1 | tee /tmp/test262-vitest-run.log || true
   else
     node node_modules/vitest/dist/cli.js run tests/test262-vitest.test.ts \
-      --reporter=verbose 2>&1 | tee /tmp/test262-vitest-run.log || true
+      --reporter="$TEST262_REPORTER" 2>&1 | tee /tmp/test262-vitest-run.log || true
   fi
 fi
 # Generate report.json from JSONL (atomic — no fork race condition)
-JSONL_FILE="$RESULTS_DIR/test262-results-${RUN_TIMESTAMP}.jsonl"
-REPORT_FILE="$RESULTS_DIR/test262-report-${RUN_TIMESTAMP}.json"
+JSONL_FILE="$RESULTS_DIR/${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl"
+REPORT_FILE="$RESULTS_DIR/${RESULT_PREFIX}-report-${RUN_TIMESTAMP}.json"
 COMPLETED=false
 if [ -f "$JSONL_FILE" ] && [ -s "$JSONL_FILE" ]; then
-  python3 -c "
-import json
-from collections import Counter
-
-statuses = Counter()
-official_statuses = Counter()
-strict_counts = Counter()
-cats = {}
-errors = Counter()
-skips = Counter()
-scope_counts = {
-    'standard': Counter(),
-    'annex_b': Counter(),
-    'proposal': Counter(),
-}
-
-with open('$JSONL_FILE') as f:
-    for line in f:
-        r = json.loads(line)
-        s = r['status']
-        statuses[s] += 1
-        scope = r.get('scope', 'standard')
-        scope_counts.setdefault(scope, Counter())
-        scope_counts[scope][s] += 1
-        if r.get('scope_official', scope != 'proposal'):
-            official_statuses[s] += 1
-            if r.get('strict', 'both') != 'no':
-                strict_counts[s] += 1
-        cat = r.get('category', 'unknown')
-        if cat not in cats:
-            cats[cat] = {'pass': 0, 'fail': 0, 'compile_error': 0, 'compile_timeout': 0, 'skip': 0, 'total': 0}
-        cats[cat][s] = cats[cat].get(s, 0) + 1
-        cats[cat]['total'] += 1
-        if r.get('error_category'):
-            errors[r['error_category']] += 1
-        if s == 'skip' and r.get('error'):
-            skips[r['error']] += 1
-
-def build_summary(counter):
-    return {
-        'total': sum(counter.values()),
-        'pass': counter.get('pass', 0),
-        'fail': counter.get('fail', 0),
-        'compile_error': counter.get('compile_error', 0),
-        'compile_timeout': counter.get('compile_timeout', 0),
-        'skip': counter.get('skip', 0),
-        'compilable': counter.get('pass', 0) + counter.get('fail', 0),
-        'stale': 0,
-    }
-
-report = {
-    'timestamp': '$(date -Iseconds)',
-    'mode': {
-        'include_proposals': ${INCLUDE_PROPOSALS},
-        'label': 'official test262 + proposals' if ${INCLUDE_PROPOSALS} else 'official test262 (default scope)',
-    },
-    'summary': build_summary(official_statuses),
-    'official_summary': build_summary(official_statuses),
-    'full_summary': build_summary(statuses),
-    'strict_summary': build_summary(strict_counts),
-    'scope_summaries': {name: build_summary(counter) for name, counter in sorted(scope_counts.items())},
-    'categories': [{'name': n, **c} for n, c in sorted(cats.items())],
-    'error_categories': dict(errors),
-    'skip_reasons': dict(skips),
-}
-
-with open('$REPORT_FILE', 'w') as f:
-    json.dump(report, f, indent=2)
-
-s = report['summary']
-print('Report: %d pass / %d total (%.1f%%)' % (s['pass'], s['total'], s['pass']/s['total']*100))
-" && COMPLETED=true
+  report_args=(
+    scripts/build-test262-report.mjs
+    --input "$JSONL_FILE"
+    --output "$REPORT_FILE"
+    --target "$TEST262_TARGET"
+    --baseline-generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  )
+  if [ "$INCLUDE_PROPOSALS" = "1" ]; then
+    report_args+=(--include-proposals)
+  fi
+  if [ "$TEST262_TARGET" = "standalone" ]; then
+    report_args+=(--max-unclassified-root-causes "${TEST262_MAX_UNCLASSIFIED_ROOT_CAUSES:-0}")
+  fi
+  if node "${report_args[@]}"; then
+    PASS_SUMMARY=$(node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); const s=d.summary; console.log('Report: '+s.pass+' pass / '+s.total+' total ('+(s.total ? (s.pass/s.total*100).toFixed(1) : '0.0')+'%)')" "$REPORT_FILE")
+    echo "$PASS_SUMMARY"
+    COMPLETED=true
+  else
+    report_status=$?
+    echo "Report generation failed with exit status $report_status"
+    exit "$report_status"
+  fi
 fi
 
 # ── Stop memory monitor ──────────────────────────────────────────
@@ -354,14 +321,14 @@ fi
 # ── Handle results ───────────────────────────────────────────────
 echo ""
 
-# Files are already timestamped (vitest writes to test262-results-${RUN_TIMESTAMP}.jsonl)
-RUN_REPORT="$RESULTS_DIR/test262-report-${RUN_TIMESTAMP}.json"
-RUN_JSONL="$RESULTS_DIR/test262-results-${RUN_TIMESTAMP}.jsonl"
+# Files are already timestamped (vitest writes to ${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl)
+RUN_REPORT="$RESULTS_DIR/${RESULT_PREFIX}-report-${RUN_TIMESTAMP}.json"
+RUN_JSONL="$RESULTS_DIR/${RESULT_PREFIX}-results-${RUN_TIMESTAMP}.jsonl"
 
 if [ "$COMPLETED" = true ]; then
   # Update symlinks to point to latest timestamped files
-  ln -sf "$(basename "$RUN_REPORT")" "$RESULTS_DIR/test262-report.json"
-  ln -sf "$(basename "$RUN_JSONL")" "$RESULTS_DIR/test262-results.jsonl"
+  ln -sf "$(basename "$RUN_REPORT")" "$RESULTS_DIR/${RESULT_PREFIX}-report.json"
+  ln -sf "$(basename "$RUN_JSONL")" "$RESULTS_DIR/${RESULT_PREFIX}-results.jsonl"
 
   PASS=$(python3 -c "import json; d=json.load(open('$RUN_REPORT')); print(d['summary']['pass'])" 2>/dev/null || echo "?")
   TOTAL=$(python3 -c "import json; d=json.load(open('$RUN_REPORT')); print(d['summary']['total'])" 2>/dev/null || echo "?")

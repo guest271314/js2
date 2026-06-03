@@ -20,8 +20,7 @@ files:
 ---
 # #410 -- Stack fallthru mismatch: control flow branches leave wrong stack state
 
-## Status: review
-
+## Status: in-review
 590 tests fail with "expected N elements on the stack for fallthru, found M". This is a Wasm validation error where control flow branches (if/else, switch cases, try/catch) leave different numbers of values on the operand stack.
 
 ## Root cause (actual)

@@ -5,6 +5,9 @@ This folder collects the repo's working method and operating conventions.
 Contents:
 
 - `team-setup.md` — current agent/team operating model
+- `codex-multi-agent-worktrees.md` — native Codex multi-agent worktree isolation protocol
+- `codex-symphony-dispatch.md` — lead-owned Codex sprint dispatcher using issue/sprint markdown
+- `symphony-service.md` — Node Symphony daemon implementation and operating model
 - `team.md` — older team/spec process doc kept for history
 - `definition-of-ready.md` — issue entry criteria
 - `definition-of-done.md` — issue exit criteria

@@ -13,7 +13,6 @@ area: codegen
 language_feature: functions
 goal: compilable
 sprint: 46
-pr: 95
 origin: surfaced by competitive-benchmark run 2026-04-29
 ---
 # #1211 — js2wasm hosted mode: fib-recursive produces invalid Wasm (call param type mismatch)

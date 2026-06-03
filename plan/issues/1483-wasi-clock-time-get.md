@@ -1,7 +1,7 @@
 ---
 id: 1483
 title: "wasi: route Date.now and performance.now to clock_time_get"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: high

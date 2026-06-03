@@ -1,9 +1,10 @@
 ---
 id: 820j
 title: "(Async)GeneratorPrototype brand check + receiver TypeError (~36 fails)"
-status: in-review
+status: done
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium

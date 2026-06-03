@@ -14,7 +14,6 @@ language_feature: compiler-internals
 goal: compiler-architecture
 sprint: 46
 depends_on: [1169i]
-pr: 101
 ---
 ## Implementation status (2026-04-30, senior-dev-1210)
 

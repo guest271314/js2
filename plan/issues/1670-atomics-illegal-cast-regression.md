@@ -1,14 +1,15 @@
 ---
 id: 1670
-slug: atomics-illegal-cast-regression
 title: "Atomics negative tests trap with `illegal cast` (regressed by #1654 / PR #599)"
-sprint: 55
 status: done
+created: 2026-05-25
+updated: 2026-05-25
+completed: 2026-05-25
 feasibility: hard
-depends_on: []
+sprint: 55
+slug: atomics-illegal-cast-regression
 regressed_by: 1654
 ---
-
 # #1670 — Atomics `illegal cast` regression from #1654
 
 ## Problem

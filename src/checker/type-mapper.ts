@@ -47,7 +47,12 @@ export function mapTsTypeToWasm(type: ts.Type, checker: ts.TypeChecker, fast?: b
     return { kind: fast ? "i32" : "f64" };
   }
   if (type.flags & ts.TypeFlags.Boolean || type.flags & ts.TypeFlags.BooleanLiteral) {
-    return { kind: "i32" };
+    // (#1788) Brand the i32 as boolean so struct field getters box it as a JS
+    // boolean (`__box_boolean`) rather than a number (`__box_number`). The brand
+    // is structurally inert — every `.kind === "i32"` check still matches, so
+    // boolean locals / params / arithmetic keep bare-i32 codegen. Only the
+    // struct-field boxing decision (`buildGetterExtract`) reads `.boolean`.
+    return { kind: "i32", boolean: true };
   }
   if (type.flags & ts.TypeFlags.String || type.flags & ts.TypeFlags.StringLiteral) {
     return { kind: "externref" }; // JS string pass-through
@@ -226,6 +231,56 @@ export function isBigIntType(type: ts.Type): boolean {
 /** Check if a ts.Type represents number */
 export function isNumberType(type: ts.Type): boolean {
   return (type.flags & ts.TypeFlags.Number) !== 0 || (type.flags & ts.TypeFlags.NumberLiteral) !== 0;
+}
+
+export type NullablePrimitiveKind = "number" | "boolean" | "string" | "bigint";
+
+export interface NullablePrimitiveInfo {
+  primitiveKind: NullablePrimitiveKind;
+  hasNull: boolean;
+  hasUndefined: boolean;
+}
+
+function primitiveKindOfType(type: ts.Type): NullablePrimitiveKind | null {
+  if (isNumberType(type)) return "number";
+  if (isBooleanType(type)) return "boolean";
+  if (isStringType(type)) return "string";
+  if (isBigIntType(type)) return "bigint";
+  return null;
+}
+
+/** Check if a type is a nullable primitive sentinel, e.g. number | null or boolean | undefined. */
+export function getNullablePrimitiveInfo(type: ts.Type): NullablePrimitiveInfo | null {
+  if (!type.isUnion()) return null;
+  let hasNull = false;
+  let hasUndefined = false;
+  const nonNullTypes: ts.Type[] = [];
+  for (const part of type.types) {
+    if (part.flags & ts.TypeFlags.Null) {
+      hasNull = true;
+      continue;
+    }
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
+      hasUndefined = true;
+      continue;
+    }
+    nonNullTypes.push(part);
+  }
+  if (!hasNull && !hasUndefined) return null;
+  if (nonNullTypes.length === 0) return null;
+  const firstKind = primitiveKindOfType(nonNullTypes[0]!);
+  if (!firstKind) return null;
+  if (!nonNullTypes.every((part) => primitiveKindOfType(part) === firstKind)) return null;
+  return { primitiveKind: firstKind, hasNull, hasUndefined };
+}
+
+export function isNullablePrimitiveType(type: ts.Type): boolean {
+  return getNullablePrimitiveInfo(type) !== null;
+}
+
+/** Check if a type is a nullable numeric sentinel, e.g. number | null or number | undefined. */
+export function isNullableNumberType(type: ts.Type): boolean {
+  return getNullablePrimitiveInfo(type)?.primitiveKind === "number";
 }
 
 /** Check if a ts.Type represents boolean */

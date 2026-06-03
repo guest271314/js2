@@ -432,7 +432,7 @@ async function optimizeBenchmarkWasm(binary: Uint8Array, label: string): Promise
 
 async function measureSizes(name: string, label: string, jsSrc: string, tsSrc: string): Promise<SizeEntry | null> {
   // Compile TypeScript → Wasm
-  const result = compile(tsSrc, { fileName: `${name}.ts` });
+  const result = await compile(tsSrc, { fileName: `${name}.ts` });
   if (!result.success) {
     console.error(`  [${name}] compile failed: ${result.errors[0]?.message}`);
     return null;
@@ -497,7 +497,7 @@ async function measureMultiSizes(name: string, label: string, entryPath: string)
     /^\s*import\s+\{[^}]+\}\s+from\s+["']\.\/(?:benchmarks\/)?helpers\.ts["'];?\s*$/m.test(tsSrc);
 
   // Compile using compileMulti to resolve helpers import
-  const result = compileMulti(
+  const result = await compileMulti(
     {
       [entryPath]: tsSrc,
       "examples/benchmarks/helpers.ts": HELPERS_SOURCE,

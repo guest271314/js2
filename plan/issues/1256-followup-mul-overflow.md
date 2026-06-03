@@ -14,7 +14,6 @@ language_feature: bitwise-coercion
 goal: core-semantics
 sprint: 45
 parent: 1179
-pr: 69
 merged: 2026-04-27
 created_by: senior-dev-1179
 implemented_by: senior-dev-1179

@@ -284,24 +284,24 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
     reason: "Host trampolines for invoking JS callbacks (__call_1_i32, __call_2_f64, ...); #1470.",
   },
 
-  // ---- #1376 Generator helpers (retired as part of IR fallback budget) ----
+  // ---- #1665 Generator helpers (retired by Wasm-native generator lowering) ----
   {
     kind: "prefix",
     name: "__gen_",
-    trackingIssue: 1376,
-    reason: "Generator scheduler primitives implemented JS-side; native path tracked in #1376.",
+    trackingIssue: 1665,
+    reason: "Generator scheduler primitives implemented JS-side; native path tracked in #1665.",
   },
   {
     kind: "prefix",
     name: "__create_generator",
-    trackingIssue: 1376,
-    reason: "Sync generator constructor host-side; #1376.",
+    trackingIssue: 1665,
+    reason: "Sync generator constructor host-side; #1665.",
   },
   {
     kind: "prefix",
     name: "__create_async_generator",
-    trackingIssue: 1376,
-    reason: "Async generator constructor host-side; #1376.",
+    trackingIssue: 1665,
+    reason: "Async generator constructor host-side; #1665.",
   },
 
   // ---- #1632a Function.prototype.bind / .apply / .call (host-delegated) ----
@@ -312,6 +312,14 @@ export const HOST_IMPORT_ALLOWLIST: readonly HostImportAllowlistEntry[] = [
     trackingIssue: 1632,
     reason:
       "Function.prototype.bind delegates to host Function.prototype.bind for spec-correct bound-function exotic. Standalone mode falls back to identity-bind (documented gap).",
+  },
+  {
+    kind: "exact",
+    name: "__construct",
+    signature: "(externref, externref) -> externref",
+    trackingIssue: 1732,
+    reason:
+      "#1732 S1: runtime [[Construct]] (§7.3.13) for `new f(...)` whose callee can't be proven constructable at compile time (e.g. `var f = String.prototype.indexOf; new f`). Throws a real TypeError when IsConstructor(callee) is false. Standalone parity is S4 ($FuncObj brand read).",
   },
 
   // ---- Async / Promise / JSON / dynamic-import (no native path yet) ----

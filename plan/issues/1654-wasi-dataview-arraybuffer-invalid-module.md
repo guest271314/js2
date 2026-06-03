@@ -13,9 +13,9 @@ area: wasi, codegen
 language_feature: arraybuffer, dataview, typedarray
 goal: wasi-completeness
 sprint: Backlog
+required_by: [1530, 1653, 1655]
 related: [1530, 1651, 1653]
 ---
-
 ## Problem
 
 Under `--target wasi`, code using `new ArrayBuffer(n)` +

@@ -16,8 +16,7 @@ files:
 ---
 # #635 — Add missing Instr opcodes to IR types (158 unsafe casts)
 
-## Status: review
-
+## Status: in-review
 158 occurrences of `as unknown as Instr` across the codegen because opcodes like ref.null.extern, ref.null.eq, ref.null.func, ref.cast_null, f64.copysign, f64.min, f64.max are missing from the Instr union in `src/ir/types.ts`.
 
 ### Fix

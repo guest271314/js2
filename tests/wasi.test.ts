@@ -10,8 +10,8 @@
 //
 // Scope:
 //   - fd_write fd=1 (console.log) and fd=2 (console.error / console.warn)
-//   - fd_read fd=0 (readStdin) — polyfill-level; e2e roundtripping through
-//     console.log currently boxes the string and is tracked separately.
+//   - fd_read fd=0 (process.stdin.read) — polyfill-level; the binary,
+//     incremental Node-API stdin read (#1653).
 //   - proc_exit (process.exit) — import-presence only; running
 //     process.exit(N) trips an i32/f64 mismatch in the current codegen,
 //     so e2e is covered once that's fixed.
@@ -41,7 +41,7 @@ interface CapturedOutput {
  * and capture everything sent to stdout / stderr plus any proc_exit code.
  */
 async function runWasi(source: string): Promise<CapturedOutput> {
-  const result = compile(source, {
+  const result = await compile(source, {
     fileName: "test.ts",
     target: "wasi",
   });
@@ -177,7 +177,7 @@ describe("WASI: proc_exit (compile-time / ABI level)", () => {
   // Once that's fixed we can switch these to e2e exit-code assertions.
 
   it("emits proc_exit import when process.exit is referenced", async () => {
-    const result = compile(
+    const result = await compile(
       `
         declare const process: { exit(code: number): void };
         process.exit(42);
@@ -190,7 +190,7 @@ describe("WASI: proc_exit (compile-time / ABI level)", () => {
   });
 
   it("does NOT emit proc_exit import when process.exit is unused", async () => {
-    const result = compile(`console.log("noop");`, { target: "wasi" });
+    const result = await compile(`console.log("noop");`, { target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.wat).not.toContain("proc_exit");
   });
@@ -218,24 +218,28 @@ describe("WASI: proc_exit (compile-time / ABI level)", () => {
 });
 
 describe("WASI: fd_read — stdin polyfill", () => {
-  // E2E readStdin() → console.log roundtrip currently surfaces a boxed
-  // string ("[object]") because the WASI string return path through
-  // console.log goes via the externref boxing helper; tracked separately.
+  // The binary, incremental Node-API stdin read (process.stdin.read, #1653).
   // We validate the polyfill itself + the import registration here.
 
-  it("emits fd_read import only when readStdin() is used", () => {
-    const used = compile(
+  it("emits fd_read import only when process.stdin.read() is used", async () => {
+    const used = await compile(
       `
-        declare function readStdin(): string;
-        const s = readStdin();
-        console.log("ignored");
+        declare const process: {
+          stdin: { read(buf: Uint8Array, offset?: number): number };
+          stdout: { write(c: Uint8Array): void };
+        };
+        export function main(): void {
+          const buf = new Uint8Array(4);
+          process.stdin.read(buf, 0);
+          process.stdout.write(buf);
+        }
       `,
       { target: "wasi" },
     );
     expect(used.success).toBe(true);
     expect(used.wat).toContain("fd_read");
 
-    const unused = compile(`console.log("nope");`, { target: "wasi" });
+    const unused = await compile(`console.log("nope");`, { target: "wasi" });
     expect(unused.success).toBe(true);
     expect(unused.wat).not.toContain("fd_read");
   });
@@ -343,7 +347,7 @@ describe("WASI: codegen sanity (WASI mode must not break compilation)", () => {
 
 describe("WASI: module structure invariants", () => {
   it("WASI binary exports memory and _start", async () => {
-    const result = compile(`console.log("x");`, { target: "wasi" });
+    const result = await compile(`console.log("x");`, { target: "wasi" });
     expect(result.success).toBe(true);
     const module = await WebAssembly.compile(result.binary);
     const exportNames = WebAssembly.Module.exports(module).map((e) => e.name);
@@ -352,7 +356,7 @@ describe("WASI: module structure invariants", () => {
   });
 
   it("only wasi_snapshot_preview1 imports are emitted in WASI mode", async () => {
-    const result = compile(
+    const result = await compile(
       `
         console.log("out");
         console.error("err");
@@ -373,7 +377,7 @@ describe("WASI: module structure invariants", () => {
   });
 
   it("WASI mode emits no wasm:js-string or env imports", async () => {
-    const result = compile(
+    const result = await compile(
       `
         console.log("hello");
         console.error("err");
@@ -389,7 +393,7 @@ describe("WASI: module structure invariants", () => {
   });
 
   it("WASI binary is a valid module (compiles via WebAssembly.compile)", async () => {
-    const result = compile(
+    const result = await compile(
       `
         function add(a: number, b: number): number { return a + b; }
         console.log(add(2, 3));

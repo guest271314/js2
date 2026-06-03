@@ -13,7 +13,6 @@ goal: ci-hardening
 sprint: 45
 parent: 1080
 depends_on: [1076]
-pr: 14
 net_improvement: 0
 ---
 # #1077 — PR CI fetches fresh baseline at runtime

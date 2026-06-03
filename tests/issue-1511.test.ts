@@ -76,3 +76,89 @@ describe("#1511 arguments object fidelity", () => {
     expect((exports as any).test()).toBe(2);
   });
 });
+
+// #1511 — mapped arguments descriptor fidelity / link-break (§10.4.4.2 /
+// §10.4.4.5). Making a mapped index non-writable, an accessor, or deleting it
+// severs the param↔arguments mapping for that slot; setting only
+// `configurable`/`enumerable` leaves the map intact.
+describe("#1511 mapped arguments descriptor link-break", () => {
+  it("defineProperty writable:false severs the param→arguments link", async () => {
+    const exports = await compileToWasm(`
+      function fn(a: any): any {
+        Object.defineProperty(arguments, "0", { writable: false });
+        a = 2;
+        return arguments[0];
+      }
+      export function test(): any { return fn(1); }
+    `);
+    expect((exports as any).test()).toBe(1);
+  });
+
+  it("defineProperty configurable:false alone keeps the mapping", async () => {
+    const exports = await compileToWasm(`
+      function fn(a: any): any {
+        Object.defineProperty(arguments, "0", { configurable: false });
+        a = 2;
+        return arguments[0];
+      }
+      export function test(): any { return fn(1); }
+    `);
+    expect((exports as any).test()).toBe(2);
+  });
+
+  it("set-by-param then writable:false freezes the current value", async () => {
+    const exports = await compileToWasm(`
+      function fn(a: any): any {
+        Object.defineProperty(arguments, "0", { configurable: false });
+        a = 2;
+        Object.defineProperty(arguments, "0", { writable: false });
+        a = 3;
+        return arguments[0];
+      }
+      export function test(): any { return fn(1); }
+    `);
+    expect((exports as any).test()).toBe(2);
+  });
+
+  it("an accessor descriptor on a mapped index severs the param→arguments link", async () => {
+    // Defining the slot as an accessor removes the mapping, so the later
+    // `a = 2` must NOT flow into arguments[0]. (Routing reads through the
+    // defined getter on the wasmGC-backed arguments vec is a separate gap —
+    // here we only assert the link was severed.)
+    const exports = await compileToWasm(`
+      function fn(a: any): any {
+        Object.defineProperty(arguments, "0", { get: function (): number { return 99; } });
+        a = 2;
+        return arguments[0];
+      }
+      export function test(): any { return fn(1); }
+    `);
+    expect((exports as any).test()).not.toBe(2);
+  });
+
+  it("delete arguments[i] stops the param write from propagating", async () => {
+    const exports = await compileToWasm(`
+      function fn(a: any): any {
+        delete arguments[0];
+        a = 2;
+        return arguments[0];
+      }
+      export function test(): any { return fn(1); }
+    `);
+    expect((exports as any).test()).not.toBe(2);
+  });
+
+  it("does not disturb the normal mapped link", async () => {
+    const fwd = await compileToWasm(`
+      function fn(a: any): any { a = 5; return arguments[0]; }
+      export function test(): any { return fn(1); }
+    `);
+    expect((fwd as any).test()).toBe(5);
+
+    const rev = await compileToWasm(`
+      function fn(a: any): any { arguments[0] = 7; return a; }
+      export function test(): any { return fn(1); }
+    `);
+    expect((rev as any).test()).toBe(7);
+  });
+});

@@ -8,6 +8,7 @@
 import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
+import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
 export function createCodegenContext(
@@ -59,6 +60,7 @@ export function createCodegenContext(
     enumStringValues: new Map(),
     arrayTypeMap: new Map(),
     vecTypeMap: new Map(),
+    exportSignatures: new Map(),
     externClassParent: new Map(),
     declaredGlobals: new Map(),
     callbackCounter: 0,
@@ -72,6 +74,7 @@ export function createCodegenContext(
     staticAccessorSet: new Set(),
     staticMethodSet: new Set(),
     staticProps: new Map(),
+    protoOverrides: new Map(), // #1719 CPR — captured prototype-member overrides
     staticInitExprs: [],
     closureCounter: 0,
     closureMap: new Map(),
@@ -82,12 +85,15 @@ export function createCodegenContext(
     extrasArgvGlobalIdx: -1,
     extrasArgvVecTypeIdx: -1,
     argcGlobalIdx: -1,
+    currentThisGlobalIdx: -1,
     valueOfClosureTypes: new Map(),
     exnTagIdx: -1,
     hasUnionImports: false,
     asyncFunctions: new Set(),
     generatorFunctions: new Set(),
     generatorYieldType: new Map(),
+    nativeGeneratorResultTypeIdx: -1,
+    nativeGenerators: new Map(),
     moduleGlobals: new Map(),
     moduleInitStatements: [],
     nestedFuncCaptures: new Map(),
@@ -103,6 +109,9 @@ export function createCodegenContext(
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
     nativeStrings,
+    // #1719 S1 — ITER_OVERRIDDEN brand; set later by the
+    // sourceOverridesArrayIterator pre-scan in index.ts. Default OFF.
+    arrayIteratorMaybeOverridden: false,
     // #1588 PR-B: dual i8/i16 storage, default OFF.
     utf8Storage: !!options?.utf8Storage,
     testRuntime: options?.testRuntime ?? false,
@@ -116,11 +125,22 @@ export function createCodegenContext(
     nativeStrExternBridgeEmitted: false,
     testRuntimeStringHelpersEmitted: false,
     nativeStrHelpers: new Map(),
+    nativeRegexHelpers: new Map(),
     nativeStrHelperImportBase: -1,
+    // #1103a Wasm-native Map runtime
+    mapTypeIdx: -1,
+    mapEntryTypeIdx: -1,
+    mapEntriesTypeIdx: -1,
+    mapBucketsTypeIdx: -1,
+    mapIterTypeIdx: -1,
+    mapIterResultTypeIdx: -1,
+    mapHelpers: new Map(),
+    mapHelpersEmitted: false,
     refCellTypeMap: new Map(),
     anyValueTypeIdx: -1,
     anyHelpers: new Map(),
     anyHelpersEmitted: false,
+    moduleInitGuardApplied: false,
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,
@@ -151,8 +171,13 @@ export function createCodegenContext(
     classStaticMethodNames: new Map(),
     classStaticMethodsCsvGlobal: new Map(),
     methodClosureGlobals: new Map(),
+    funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,
+    // #682 — native standalone RegExp engine hook. Standalone mode enables the
+    // reduced literal-substring backend; broader QuickJS libregexp ABI linking
+    // remains the follow-up path for near-JS parity.
+    standaloneRegExpEngine: options?.standalone ? nativeLiteralRegExpEngineConfig() : null,
     // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
     // expose a CLI/option flag once the CPS lowering is parity-tested.
     supportsAsyncIr: false,

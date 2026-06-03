@@ -1,0 +1,66 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/workspace/.claude/hooks/pre-agent-spawn.sh'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/workspace/.claude/hooks/post-file-edit.sh'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/workspace/.claude/hooks/post-file-edit.sh'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /workspace/scripts/prune-agent-status.mjs --quiet 2>/dev/null || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "REPO_ROOT=/workspace node /workspace/scripts/reconcile-tasklist.mjs --quiet 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p ~/.claude/pending-notify && date +%s > ~/.claude/last-user-activity && find ~/.claude/pending-notify -type f -delete 2>/dev/null || true",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

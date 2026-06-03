@@ -15,7 +15,6 @@ goal: ci-hardening
 sprint: 45
 depends_on: [1169a, 1169b, 1168]
 required_by: [1169d, 1169m]
-pr: 41
 merged: 2026-04-26
 ---
 # #1169c — IR Phase 4 Slice 3: closures through the IR path

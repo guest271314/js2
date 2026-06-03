@@ -3,7 +3,7 @@ id: 779
 title: "Assert failures: tests compile and run but produce wrong values (8,674 tests)"
 status: ready
 created: 2026-03-23
-updated: 2026-04-09
+updated: 2026-05-28
 priority: critical
 feasibility: hard
 reasoning_effort: max
@@ -216,3 +216,148 @@ umbrella triage.
 When umbrella drops below 2,000 official assertion_fail rows AND
 all called-out sub-issues have explicit Implementation Plans,
 close umbrella and convert to a tracker.
+
+## 2026-05-28 refresh — issue-1318-v2 (senior-dev investigation)
+
+Authoritative baseline `.test262-cache/test262-current.jsonl`
+(48,141 rows · timestamp `25.5.2026, 14:19:58` · standard scope):
+**pass=28,967 fail=12,043 compile_error=1,060 compile_timeout=3**.
+The umbrella's "8,674 assertion_fail" figure is stale — the
+baseline JSONL no longer carries the `reason` field, so all FAIL
+rows are bucketed together (compile-failed-runtime tests are now
+counted with assertion-fails; the historical decomposition into
+`returned 2/3/4/5/…` is no longer reproducible from this file
+alone). Treat the current 12,043 FAIL as the umbrella's working
+set; the 8,674 figure stays as a 2026-04-07 historical anchor.
+
+### Current FAIL bucket — top 3-level path prefixes
+
+| Prefix | FAIL | Routed to (status) |
+|---|---:|---|
+| `built-ins/Array/prototype` | 1,424 | #1130 (escalated, needs spec — task #63) + #1461 (array-like receivers) + #1601 (done) |
+| `language/statements/class` | 1,085 | #1364b + #1451 + #1456 + #1543/#1544 (done residuals) |
+| `language/expressions/class` | 986 | same as above |
+| `built-ins/Object/defineProperty` | 624 | **#1629** (escalated 2026-05-27, needs architect — investigation in `1629-…md`) |
+| `language/statements/for-of` | 364 | #1396 + #1454 + #1468 + #1347 (done) |
+| `language/statements/for-await-of` | 299 | #1347b (in_progress) |
+| `language/expressions/object` | 296 | #779d (in_progress, task #107) |
+| `built-ins/String/prototype` | 296 | mixed — see decomposition below |
+| `built-ins/Object/defineProperties` | 295 | inherits #1629 fix |
+| `built-ins/TypedArray/prototype` | 179 | shares #1130 accessor-observing pattern |
+| `language/expressions/assignment` | 179 | #1431 (in-review) |
+| `built-ins/Iterator/prototype` | 177 | #1340 + #1464 (active) — Iterator Helpers proposal |
+| `built-ins/RegExp/prototype` | 165 | #1329 + #1330 + #1331 (done) + #1332 (done) |
+| `built-ins/Function/prototype` | 158 | #1632a (just spec'd, dev task #183) + #1596 (apply/call, task #175) |
+| `built-ins/Object/create` | 145 | #1648 (in_progress, task #173) + #1334 (done) + #1631 (done) |
+
+### Array.prototype callback-family (~790 fails) — already routed
+
+`reduce` 135, `reduceRight` 140, `filter` 120, `map` 104, `every`
+102, `some` 96, `forEach` 93. Sampled tests all match the ES5
+`15.4.4.{16,17,18,19,20,21,22}-{4,5,7,8,9}-{b,c}-{i,ii,iii}-*`
+pattern. Three root causes, all already covered:
+- `Object.defineProperty` on `Array.prototype` to install accessors → **#1629**
+- `Array.prototype.METHOD.call(arrayLike)` with non-Array receiver → **#1461**
+- inherited getter/setter observation during iteration → **#1130**
+**No new sub-issue needed** — these decompose into existing
+escalated/spec-needed sub-issues.
+
+### String.prototype (296) — decomposition
+
+| Method | FAIL | Sub-issue |
+|---|---:|---|
+| split | 26 | #1331 (done) — residuals |
+| replace | 22 | #1329 (escalated, task #141) |
+| replaceAll | 21 | #1329 |
+| match | 20 | #1329 |
+| substring | 17 | **unrouted** — likely #1130 accessor-observing or numeric-coercion edge |
+| search | 16 | #1330 (in_progress, task #149) |
+| indexOf | 16 | **unrouted** — small, defer |
+| slice | 14 | **unrouted** — small, defer |
+| toUpperCase / toLowerCase / toLocale{Upper,Lower}Case | 49 | #1604 (done codegen) — residuals are spec-correctness |
+| matchAll | 11 | #1329 |
+| rest (charAt, concat, lastIndexOf, includes, trim, …) | ~84 | residual; defer until accessor / coercion fixes land |
+
+Substring/indexOf/slice (~47 combined) are the only mildly
+worth-it unrouted slice; suggested follow-up sub-issue **only**
+if a developer is otherwise idle. Not creating one now.
+
+### Object.prototype (79) — decomposition
+
+`toString` 22 → tied to `#1364b` prototype-chain (per #779b
+investigation, task #69 ESCALATED). Rest is `propertyIsEnumerable`
+9, `hasOwnProperty` 8, `__proto__` 7, `valueOf` 5,
+`__defineGetter__` / `__defineSetter__` 10 — all small, share
+the descriptor-model / sidecar root cause already tracked by
+**#1629** and **#1631** (done).
+
+### Function.prototype (158) — decomposition
+
+- `bind` 66 → **#1632a** (spec finalized 2026-05-28; dev task #183)
+- `apply` 36 → **#1596** (in_progress, task #175)
+- `call` 33 → **#1596**
+- `toString` 8 → **#1632b** (carved, task #165 — routed to architect joint with #1630/#1631)
+- `Symbol.hasInstance` 8 → unrouted residual, low priority
+- pre-ES2015 `caller`/`arguments` 3 → spec-deprecated, defer
+
+### RegExp.prototype (165) — decomposition
+
+- `Symbol.replace` 40 → #1329
+- `exec` 25 → #1332 (done) — residual
+- `Symbol.match` 20 → #1329
+- `Symbol.split` 17 → #1331 (done) — residual
+- `test` 14 → unrouted small
+- `Symbol.search` 12 → #1330 (in_progress)
+- `Symbol.matchAll` 11 → #1329
+- prototype getters (`flags`, `ignoreCase`, etc.) ~14 → unrouted small
+
+### TypedArray.prototype (179)
+
+Broad spread across `set` (15), `map` (9), `slice` (8), `sort`
+(8), `byteLength` (8), `includes` (7), `length` (7), and ~20
+other methods at 5–6 fails each. The pattern mirrors
+Array.prototype — likely the same root causes (`#1130`
+accessor-observing + receiver-coercion). No new sub-issue;
+defer until #1130 / #1461 architect specs land — TypedArray
+fixes likely come "for free" from those.
+
+### class/dstr + class/elements (~1,500 combined) — already routed
+
+`class/dstr (stmt)` 424 + `class/dstr (expr)` 410 + `class/elements
+(stmt)` 378 + `class/elements (expr)` 339 + `class/dstr`-related
+expression forms. Covered by #1364b, #1451, #1456, #1364 (done),
+#1543/#1544 (done), #779a (done), #1543/#1450 family. No new
+carve.
+
+### Conclusion of 2026-05-28 investigation
+
+**No new sub-issues warranted.** Every non-trivial fail cluster
+already has either:
+- an open implementation task (e.g. #1632a/dev-task-183, #1596,
+  #1329, #1330, #1347b, #1648),
+- an escalated-needs-spec architect entry (#1130, #1629,
+  #1594, #1320, #1644 Slice B), or
+- a completed fix landing residuals that will tail off as
+  upstream specs land (#1331, #1332, #1604, #1631).
+
+The umbrella is doing its job — it surfaced the buckets, the
+buckets have homes. The two `[ESCALATED-NEEDS-SPEC]` items
+that gate the largest residuals are:
+
+1. **#1629 Object.defineProperty attribute fidelity** (624 +
+   295 defineProperties + downstream Array/Object.prototype
+   propagation ≈ 1,200+ tests). Investigation 2026-05-27
+   already documents 3 sub-issues (#1629a/b/c) and recommends
+   carve before any dev claim. **Next action**: architect
+   spec for #1629a (dynamic-descriptor materialization).
+
+2. **#1130 Array methods observing accessor getters** (≈790
+   Array.prototype callback fails + ≈179 TypedArray + likely
+   parts of #1461). Already escalated (task #63), findings
+   doc'd in issue file, branch `issue-1130-array-getter`
+   has WIP commit b00babe27. **Next action**: architect
+   spec to define the accessor-protocol path.
+
+Umbrella stays open as a tracker. Acceptance unchanged:
+close when standard-scope FAIL drops below 2,000 AND
+escalated sub-issues have spec'd plans.

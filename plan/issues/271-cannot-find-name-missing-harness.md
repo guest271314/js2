@@ -16,8 +16,7 @@ files:
 ---
 # Issue #271: Cannot find name -- missing harness or global declarations
 
-## Status: review
-
+## Status: in-review
 ## Summary
 ~55 tests fail with "Cannot find name X" where X is a test262 harness function (like `assert`) or a global that is not declared. Some tests reference globals that are not in the shim declarations, causing TypeScript compilation to fail.
 

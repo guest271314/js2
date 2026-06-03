@@ -4,6 +4,16 @@ import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
+declare const __JS2WASM_CLI_VERSION__: string | undefined;
+
+function getCliVersion(): string {
+  const bundledVersion = typeof __JS2WASM_CLI_VERSION__ === "string" ? __JS2WASM_CLI_VERSION__ : undefined;
+  if (bundledVersion) return bundledVersion;
+  const require = createRequire(import.meta.url);
+  const pkg = require("../package.json") as { version?: string };
+  return pkg.version ?? "0.0.0";
+}
+
 const args = process.argv.slice(2);
 
 // `--ts7` swaps the parser/checker frontend to `@typescript/native-preview`
@@ -18,9 +28,7 @@ const { compile } = await import("./index.js");
 const { buildDefaultDefines } = await import("./compiler/define-substitution.js");
 
 if (args.includes("--version") || args.includes("-v")) {
-  const require = createRequire(import.meta.url);
-  const pkg = require("../package.json");
-  console.log(pkg.version);
+  console.log(getCliVersion());
   process.exit(0);
 }
 
@@ -47,6 +55,8 @@ Options:
   --no-wat          Skip WAT output
   --no-dts          Skip .d.ts output
   --wit             Generate WIT interface file for Component Model
+  --wit-package <p> Package name for --wit output (ns:name[@version]).
+                    Implies --wit. Defaults to js2wasm:<input-basename>.
   -O, --optimize    Run Binaryen wasm-opt optimizer (default: -O3)
   -O1..-O4          Set optimization level (1-4)
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
@@ -87,6 +97,7 @@ let watOnly = false;
 let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
 let emitWit = false;
+let witPackageName: string | undefined;
 let allowFs = false;
 let quiet = false;
 let utf8Storage = false;
@@ -117,6 +128,22 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === "--no-dts") {
     emitDts = false;
   } else if (arg === "--wit") {
+    emitWit = true;
+  } else if (arg === "--wit-package") {
+    const pkg = args[++i];
+    if (!pkg) {
+      console.error("--wit-package requires a package name argument");
+      process.exit(1);
+    }
+    witPackageName = pkg;
+    emitWit = true;
+  } else if (arg.startsWith("--wit-package=")) {
+    const pkg = arg.slice("--wit-package=".length);
+    if (!pkg) {
+      console.error("--wit-package requires a package name argument");
+      process.exit(1);
+    }
+    witPackageName = pkg;
     emitWit = true;
   } else if (arg === "--allow-fs") {
     allowFs = true;
@@ -175,17 +202,26 @@ if (!inputPath) {
   process.exit(1);
 }
 
+// #1554 — `--standalone` refuses all JS-host imports; `--allow-fs` enables
+// node:fs JS-host imports. Combining them silently violates standalone mode,
+// so reject at parse time.
+if (target === "standalone" && allowFs) {
+  console.error("error: --standalone and --allow-fs are mutually exclusive");
+  process.exit(1);
+}
+
 const absInput = resolve(inputPath);
 const source = readFileSync(absInput, "utf-8");
 const name = basename(absInput, ".ts");
 const dir = outDir ? resolve(outDir) : dirname(absInput);
 
-const result = compile(source, {
+const result = await compile(source, {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
-  ...(emitWit ? { wit: true } : {}),
+  ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
+  fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
 });

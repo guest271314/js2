@@ -8,7 +8,7 @@
 
 ## Environment check
 
-1. [ ] `pwd` — must be `/workspace`
+1. [ ] `pwd` — must be `/workspace`. **If in a worktree (`/workspace/.claude/worktrees/...`), stop and start a new session from `/workspace` before proceeding or spawning background jobs.**
 2. [ ] `git branch --show-current` — must be `main`
 3. [ ] `git status` — working tree should be clean. If dirty, review changes before proceeding.
 4. [ ] `git stash list` — should be empty. If not, investigate what's stashed and why.
@@ -45,18 +45,30 @@
     it before starting a fresh one — duplicate pollers double-dispatch.
     See `plan/method/pr-drift-protocol.md` for what to do when an event fires.
 
+15. [ ] **Start the merged-PR issue-status poller** — local watcher that scans
+    `status: in-review` issue files with explicit `pr: <N>` frontmatter and
+    flips them to `status: done` after GitHub reports all linked PRs merged.
+    ```
+    Monitor:
+      description: "Merged PRs -> issue status done"
+      persistent: true
+      command: INTERVAL_SECS=60 node /workspace/scripts/poll-merged-pr-issues.mjs --sync-artifacts 2>&1
+    ```
+    It only reads GitHub PR status and updates markdown; it does not merge,
+    comment, commit, or push.
+
 ## Before starting a new sprint
 
-14. [ ] **Check previous sprint is fully closed** — run the deterministic check:
+16. [ ] **Check previous sprint is fully closed** — run the deterministic check:
    ```bash
    node scripts/check-sprint-closed.mjs <N-1>
    ```
    Must exit 0 (all ✅) before starting a new sprint. If it exits 1, run `/sprint-wrap-up` and fix the failing items, then re-run the check.
 
-15. [ ] **Review stale/orphaned work**: check for unmerged branches, old worktrees, suspended issues, stale tasks. Report to user and ask before cleaning up.
+17. [ ] **Review stale/orphaned work**: check for unmerged branches, old worktrees, suspended issues, stale tasks. Report to user and ask before cleaning up.
    - Unmerged branches: `git branch | grep -v main`
    - Orphan worktrees: `git worktree list`
    - Suspended issues: `grep -l "status: suspended" plan/issues/*.md`
    - Stale task list: check if previous sprint's tasks are resolved
-16. [ ] **Smoke-test candidate issues**: for each issue you plan to dispatch, compile 1-2 sample test files from the issue description against current main. If they pass, close the issue — it's already fixed.
-17. [ ] Shut down all dev agents before running final test262 with multiple forks
+18. [ ] **Smoke-test candidate issues**: for each issue you plan to dispatch, compile 1-2 sample test files from the issue description against current main. If they pass, close the issue — it's already fixed.
+19. [ ] Shut down all dev agents before running final test262 with multiple forks

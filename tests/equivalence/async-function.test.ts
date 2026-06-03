@@ -74,7 +74,15 @@ describe("Async function support (synchronous compilation)", () => {
     expect(exports.main()).toBe(30);
   });
 
-  it("async arrow function", async () => {
+  // #1730: calling a module-level `const` arrow internally USED to trap with
+  // "illegal cast" at the closure dispatch site — independent of async (a SYNC
+  // `const f = (x:number):number => x*2; main(){ return f(21); }` trapped the
+  // same way). Root cause: a late string-constant import added while compiling
+  // the call arguments shifted every module-global index, but the funcref
+  // re-resolution in `compileClosureCall` reused a stale captured `moduleIdx`,
+  // emitting `global.get <pre-shift>` that pointed at the late import global.
+  // Fixed by re-reading `ctx.moduleGlobals` on each closure-ref push.
+  it("async arrow function (#1730 module-const-arrow dispatch)", async () => {
     const src = `
       const double = async (x: number): Promise<number> => x * 2;
       export function main(): number {

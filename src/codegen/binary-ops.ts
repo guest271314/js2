@@ -444,7 +444,15 @@ export function compileBinaryExpression(
       // Strict: refs can be null but never undefined
       // Loose: null == undefined, so ref.is_null covers both
       if (valType.kind === "ref" || valType.kind === "ref_null") {
-        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId) {
+        // #1105: a nullable native-string ref models `string | undefined`
+        // (e.g. String.prototype.at out-of-range → undefined). For that ONE
+        // type, a null ref IS the `undefined` value, so `x === undefined`
+        // must reduce to ref.is_null rather than the always-false struct rule
+        // below. Gate strictly on the AnyString type index so class-instance
+        // struct refs keep `struct === undefined → false` semantics.
+        const isNullableNativeString =
+          valType.kind === "ref_null" && ctx.nativeStrings && valType.typeIdx === ctx.anyStrTypeIdx;
+        if ((isStrictEqOp || isStrictNeqOp) && nullSideIsUndefinedId && !isNullableNativeString) {
           // struct === undefined → always false; struct !== undefined → always true
           fctx.body.push({ op: "drop" });
           fctx.body.push({ op: "i32.const", value: isStrictNeqOp ? 1 : 0 });
@@ -1243,6 +1251,11 @@ export function compileBinaryExpression(
       const n = Number(inner.text.replace(/_/g, ""));
       return Number.isInteger(n) && n >= -2147483648 && n <= 2147483647;
     }
+    // #1105: `String.prototype.charCodeAt` is not an i32-pure leaf.
+    // ECMA-262 §22.1.3.3 returns NaN when the position is out of range, and
+    // §7.1.7 ToInt32 maps that NaN to 0 only after the surrounding expression
+    // has evaluated. Treating `x.charCodeAt(i)` as a direct i32 leaf inside
+    // `(a + x.charCodeAt(i)) | 0` would incorrectly preserve `a` for OOB reads.
     if (ts.isBinaryExpression(inner)) {
       const k = inner.operatorToken.kind;
       // `expr | 0` always produces i32 cleanly when its operand does.
@@ -1270,6 +1283,45 @@ export function compileBinaryExpression(
     }
     return false;
   };
+  // #1746: emit a *proven-i32-pure* expression directly as an i32 instruction
+  // chain, leaving the result as i32 on the stack. The caller MUST have verified
+  // `isI32PureExpr(e)` first — this mirrors that predicate's structure exactly.
+  //
+  // Why this exists: `compileBinaryExpression` recomputes its i32 decision
+  // per-node by walking UP to find an enclosing bitwise/`| 0` context, and the
+  // incoming `hint` is dropped (compileExpression → compileBinaryExpression
+  // ignores it). So for `(hash*31 + charCodeAt) | 0`, the outer `+` is i32 (its
+  // parent is `| 0`), but the inner `hash*31`'s parent is `+` (not bitwise) — it
+  // would re-derive f64 and force a round-trip, defeating the whole point. This
+  // emitter keeps the entire pure subtree in i32 regardless of nesting depth,
+  // which is the lever that collapses the string-hash hot loop to pure i32.
+  const emitI32PureExpr = (e: ts.Expression): void => {
+    const inner = peel(e);
+    if (ts.isIdentifier(inner)) {
+      const idx = fctx.localMap.get(inner.text)!;
+      fctx.body.push({ op: "local.get", index: idx });
+      return;
+    }
+    if (ts.isNumericLiteral(inner)) {
+      fctx.body.push({ op: "i32.const", value: Number(inner.text.replace(/_/g, "")) | 0 });
+      return;
+    }
+    if (ts.isBinaryExpression(inner)) {
+      const k = inner.operatorToken.kind;
+      // `expr | 0` — the `| 0` is a no-op once its operand is i32.
+      if (k === ts.SyntaxKind.BarToken && ts.isNumericLiteral(inner.right) && inner.right.text === "0") {
+        emitI32PureExpr(inner.left);
+        return;
+      }
+      emitI32PureExpr(inner.left);
+      emitI32PureExpr(inner.right);
+      compileI32BinaryOp(ctx, fctx, k, inner);
+      return;
+    }
+    // Unreachable when the caller respects the isI32PureExpr precondition.
+    // Fall back to compileExpression for safety (keeps codegen total).
+    compileExpression(ctx, fctx, inner, { kind: "i32" });
+  };
   // Arith op with ToInt32-wrapping parent: fire if both operands are i32-pure.
   // Subsumes the original i32-locals-only check; literals and nested chains now apply too.
   // #1179-followup: when the OUTER op is `*`, additionally require the
@@ -1289,8 +1341,25 @@ export function compileBinaryExpression(
       }
     : undefined;
 
-  let leftType = compileExpression(ctx, fctx, expr.left, numericHint);
-  let rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+  // #1746: when both operands are proven i32-pure and the result is ToInt32-
+  // wrapped (arith under `| 0`/bitwise) or this op is itself bitwise, emit the
+  // operand subtrees via the self-contained i32 emitter. This keeps nested
+  // arith-under-arith nodes in i32 — the per-node parent-walk in
+  // compileBinaryExpression can't (the parent of an inner `*` inside a `+` is
+  // not bitwise, so it would re-derive f64). Without this the whole pure chain
+  // collapses back to the f64 round-trip the predicate was meant to eliminate.
+  const useI32PureEmit = arithI32WithToInt32Wrap || bitwiseI32;
+  let leftType: ValType | null;
+  let rightType: ValType | null;
+  if (useI32PureEmit) {
+    emitI32PureExpr(expr.left);
+    emitI32PureExpr(expr.right);
+    leftType = { kind: "i32" };
+    rightType = { kind: "i32" };
+  } else {
+    leftType = compileExpression(ctx, fctx, expr.left, numericHint);
+    rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+  }
 
   if (!leftType || !rightType) return null;
 
@@ -1586,6 +1655,130 @@ export function compileBinaryExpression(
     const leftIsBool = isBooleanType(leftTsType);
     const rightIsBool = isBooleanType(rightTsType);
 
+    // #1776: standalone / WASI (no-JS-host) dynamic equality.
+    //
+    // The JS-host equality fallbacks below import `__host_eq` / `__host_loose_eq`
+    // and delegate to JS `===` / `==`. Under `--target standalone` (and WASI)
+    // there is no JS host, so emitting those calls leaks an unsatisfiable
+    // `env::__host_eq` import — the module then fails `WebAssembly.instantiate`
+    // ("Import #0 env: module is not an object or function"). That broke the
+    // test262 harness helper `isSameValue` for ~1,436 standalone tests (#1776):
+    // `isSameValue(a: any, b: any)` compiles both params to `externref`, so its
+    // `a === b` / `a !== a` comparisons all reach this externref-equality path.
+    //
+    // We replace the host delegation with a Wasm-native tag dispatch on the two
+    // boxed operands (left in $l, right in $r):
+    //   1. both typeof number  → unbox to f64, compare (f64.eq / f64.ne).
+    //      Recovers equal numbers boxed in DISTINCT structs (ref.eq is identity,
+    //      not value) AND makes NaN self-comparison work (`a !== a`).
+    //   2. both typeof boolean → unbox to i32, compare.
+    //   3. otherwise           → reference identity via any.convert_extern +
+    //      ref.test/ref.eq on the WasmGC eq heap type; non-eqref or mismatched
+    //      tags compare unequal. Per §7.2.16 two distinct non-primitive
+    //      references that are not identical are not `===`.
+    // This needs no host import and never feeds an externref into an f64/i32
+    // helper (acceptance criteria #1776).
+    const noJsHost = ctx.standalone === true || ctx.wasi === true;
+    if (noJsHost && (leftType.kind === "externref" || rightType.kind === "externref")) {
+      const EQ_HEAP = -19; // WasmGC `eq` abstract heap type (signed LEB 0x6d)
+      addUnionImports(ctx);
+      const typeofNum = ctx.funcMap.get("__typeof_number")!;
+      const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
+      const unboxNum = ctx.funcMap.get("__unbox_number")!;
+      const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
+
+      // Coerce both operands to externref temps (right is on top of stack).
+      const rTmp = allocTempLocal(fctx, { kind: "externref" });
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      fctx.body.push({ op: "local.set", index: rTmp });
+      const lTmp = allocTempLocal(fctx, { kind: "externref" });
+      if (leftType.kind !== "externref") {
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+      }
+      fctx.body.push({ op: "local.set", index: lTmp });
+
+      const eqInstrs: Instr[] = [
+        // ── number? ──
+        { op: "local.get", index: lTmp },
+        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "local.get", index: rTmp },
+        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: lTmp },
+            { op: "call", funcIdx: unboxNum },
+            { op: "local.get", index: rTmp },
+            { op: "call", funcIdx: unboxNum },
+            { op: "f64.eq" } as Instr,
+          ],
+          else: [
+            // ── boolean? ──
+            { op: "local.get", index: lTmp },
+            { op: "call", funcIdx: typeofBool } as Instr,
+            { op: "local.get", index: rTmp },
+            { op: "call", funcIdx: typeofBool } as Instr,
+            { op: "i32.and" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: lTmp },
+                { op: "call", funcIdx: unboxBool },
+                { op: "local.get", index: rTmp },
+                { op: "call", funcIdx: unboxBool },
+                { op: "i32.eq" } as Instr,
+              ],
+              else: [
+                // ── reference identity ──
+                // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                { op: "local.get", index: lTmp },
+                { op: "any.convert_extern" } as Instr,
+                { op: "local.get", index: rTmp },
+                { op: "any.convert_extern" } as Instr,
+                ...(() => {
+                  const lAny = allocTempLocal(fctx, { kind: "anyref" });
+                  const rAny = allocTempLocal(fctx, { kind: "anyref" });
+                  const seq: Instr[] = [
+                    { op: "local.set", index: rAny },
+                    { op: "local.tee", index: lAny },
+                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                    { op: "local.get", index: rAny },
+                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                    { op: "i32.and" } as Instr,
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "i32" } },
+                      then: [
+                        { op: "local.get", index: lAny },
+                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                        { op: "local.get", index: rAny },
+                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                        { op: "ref.eq" } as Instr,
+                      ],
+                      else: [{ op: "i32.const", value: 0 }],
+                    } as Instr,
+                  ];
+                  releaseTempLocal(fctx, lAny);
+                  releaseTempLocal(fctx, rAny);
+                  return seq;
+                })(),
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ];
+      for (const ins of eqInstrs) fctx.body.push(ins);
+      if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
+      releaseTempLocal(fctx, rTmp);
+      releaseTempLocal(fctx, lTmp);
+      return { kind: "i32" };
+    }
+
     // Wrapper object semantics (#1111): `new Number(n)`, `new String(s)`,
     // `new Boolean(b)` are OBJECTS (typeof x === "object"), not primitives.
     // Strict equality between a wrapper and any primitive is always false.
@@ -1782,7 +1975,6 @@ export function compileBinaryExpression(
           // For loose equality, `__host_loose_eq` calls JS `==` which
           // handles null==undefined and type coercion per §7.2.15. (#1065, #1134)
           addUnionImports(ctx);
-          const unboxIdx = ctx.funcMap.get("__unbox_number")!;
           if (isStrict) {
             // Strict equality: __host_eq (JS ===) for reference identity.
             // If that returns false, fall through to numeric unboxing for
@@ -1811,11 +2003,13 @@ export function compileBinaryExpression(
               [{ kind: "i32" }],
             );
             flushLateImportShifts(ctx, fctx);
+            const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
             const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: hostEqIdx } as Instr,
+              { op: "call", funcIdx: finalHostEqIdx } as Instr,
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
@@ -1860,10 +2054,11 @@ export function compileBinaryExpression(
               [{ kind: "i32" }],
             );
             flushLateImportShifts(ctx, fctx);
+            const finalHostLooseEqIdx = ctx.funcMap.get("__host_loose_eq") ?? hostLooseEqIdx;
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: hostLooseEqIdx } as Instr,
+              { op: "call", funcIdx: finalHostLooseEqIdx } as Instr,
               ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
             ] as Instr[];
           }

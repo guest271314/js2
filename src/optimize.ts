@@ -3,7 +3,7 @@
  * Post-processing pass using Binaryen's wasm-opt optimizer.
  *
  * Tries two strategies in order:
- * 1. The `binaryen` npm package (if installed as an optional dependency)
+ * 1. The `binaryen` npm package (if installed as an optional peer dependency)
  * 2. A system `wasm-opt` binary on PATH
  *
  * If neither is available, returns the original binary unchanged and emits a warning.
@@ -16,6 +16,7 @@ let _nodeImports: {
   writeFileSync: typeof import("node:fs").writeFileSync;
   readFileSync: typeof import("node:fs").readFileSync;
   unlinkSync: typeof import("node:fs").unlinkSync;
+  rmdirSync: typeof import("node:fs").rmdirSync;
   mkdtempSync: typeof import("node:fs").mkdtempSync;
   join: typeof import("node:path").join;
   tmpdir: typeof import("node:os").tmpdir;
@@ -34,6 +35,7 @@ async function getNodeImports() {
     writeFileSync: fs.writeFileSync,
     readFileSync: fs.readFileSync,
     unlinkSync: fs.unlinkSync,
+    rmdirSync: fs.rmdirSync,
     mkdtempSync: fs.mkdtempSync,
     join: path.join,
     tmpdir: os.tmpdir,
@@ -95,6 +97,7 @@ function getNodeImportsSync() {
       writeFileSync: fs.writeFileSync,
       readFileSync: fs.readFileSync,
       unlinkSync: fs.unlinkSync,
+      rmdirSync: fs.rmdirSync,
       mkdtempSync: fs.mkdtempSync,
       join: path.join,
       tmpdir: os.tmpdir,
@@ -132,41 +135,16 @@ function isBrowserLikeRuntime(): boolean {
 
 /**
  * Optimize a Wasm binary using Binaryen.
- * Returns the optimized binary, or the original if optimization is unavailable.
- */
-export function optimizeBinary(binary: Uint8Array, options: OptimizeOptions = {}): OptimizeResult {
-  const level = options.level ?? 3;
-  const gc = options.gc !== false;
-  const referenceTypes = options.referenceTypes !== false;
-  const exceptionHandling = options.exceptionHandling !== false;
-
-  // Strategy 1: Try the binaryen npm package
-  try {
-    const result = optimizeWithBinaryenPackage(binary, level, gc, referenceTypes, exceptionHandling);
-    if (result) return result;
-  } catch {
-    // Fall through to system binary
-  }
-
-  // Strategy 2: Try system wasm-opt binary
-  try {
-    const result = optimizeWithSystemBinary(binary, level, gc, referenceTypes, exceptionHandling);
-    if (result) return result;
-  } catch {
-    // Fall through to warning
-  }
-
-  return {
-    binary,
-    optimized: false,
-    warning:
-      "wasm-opt not available: install the 'binaryen' npm package or add wasm-opt to PATH. Skipping optimization.",
-  };
-}
-
-/**
- * Async optimizer variant for environments that can lazy-load the ESM
- * `binaryen` package (for example the browser playground via Vite).
+ *
+ * This is the only public optimizer entry point (#1763). The previous
+ * synchronous `optimizeBinary` was removed: after the #1757 async-compile
+ * migration every live caller goes through this async path, and the sync
+ * variant only kept alive a dead `createRequire("binaryen")` branch — the
+ * exact bundler hazard #986/#1756 set out to remove. The `binaryen` package
+ * is loaded lazily at runtime (see `getBinaryenModule`) without making
+ * bundlers embed it in standalone artifacts; the system `wasm-opt` CLI
+ * fallback still uses the dynamic node-builtin shim that bundlers
+ * intentionally cannot statically resolve.
  */
 export async function optimizeBinaryAsync(binary: Uint8Array, options: OptimizeOptions = {}): Promise<OptimizeResult> {
   const level = options.level ?? 3;
@@ -220,7 +198,11 @@ async function getBinaryenModule(): Promise<any | null> {
     }
 
     try {
-      const mod = await import("binaryen");
+      // Keep Binaryen optional. A string-literal dynamic import makes esbuild,
+      // Bun, and Deno treat the package as a bundle input, adding ~13.5 MB to
+      // standalone artifacts even though wasm-opt is only a post-compile pass.
+      const specifier = (globalObject.__js2wasmBinaryenModuleSpecifier as string | undefined) ?? "binaryen";
+      const mod = await import(/* @vite-ignore */ specifier);
       return mod.default ?? mod;
     } catch {
       return null;
@@ -235,24 +217,6 @@ async function getBinaryenModule(): Promise<any | null> {
     }
   })();
   return _binaryenModulePromise;
-}
-
-function optimizeWithBinaryenPackage(
-  binary: Uint8Array,
-  level: number,
-  gc: boolean,
-  referenceTypes: boolean,
-  exceptionHandling: boolean,
-): OptimizeResult | null {
-  // Dynamic import to avoid hard dependency
-  let binaryen: any;
-  try {
-    binaryen = require("binaryen");
-  } catch {
-    return null;
-  }
-
-  return optimizeWithBinaryenModule(binaryen, binary, level, gc, referenceTypes, exceptionHandling);
 }
 
 function optimizeWithBinaryenModule(
@@ -474,14 +438,14 @@ function optimizeWithSystemBinary(
       /* ignore */
     }
     try {
-      n.unlinkSync(tmpDir);
+      // The temp dir is a directory, so `unlinkSync` is expected to fail;
+      // remove it with `rmdirSync`. #1763: route this through the same
+      // dynamic node-builtin bundle (`n` = getNodeImportsSync()) the rest of
+      // this function uses, rather than a bare `require("node:fs")` that a
+      // bundler can't bind in ESM (GH #986).
+      n.rmdirSync(tmpDir);
     } catch {
-      try {
-        const fs = require("node:fs");
-        fs.rmdirSync(tmpDir);
-      } catch {
-        /* ignore */
-      }
+      /* ignore */
     }
   }
 }

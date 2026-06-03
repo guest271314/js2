@@ -5,13 +5,44 @@
     "refreshInterval": 30
   },
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_MAX_RETRIES": "20",
+    "API_TIMEOUT_MS": "900000"
   },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "allow": ["Bash(*)"]
   },
   "hooks": {
+    "TeammateIdle": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/teammate-idle-retry.sh",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /workspace/scripts/prune-agent-status.mjs --quiet 2>/dev/null || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "REPO_ROOT=/workspace node /workspace/scripts/reconcile-tasklist.mjs --quiet 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "matcher": "",
@@ -83,7 +114,7 @@
       },
       {
         "matcher": "Bash",
-        "if": "Bash(git worktree add*)",
+        "if": "Bash(*worktree add*)",
         "hooks": [
           {
             "type": "command",
@@ -123,6 +154,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "if": "Bash(*worktree add*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/provision-worktree.sh",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "FileChanged": [
@@ -137,5 +179,8 @@
         ]
       }
     ]
+  },
+  "worktree": {
+    "bgIsolation": "none"
   }
 }

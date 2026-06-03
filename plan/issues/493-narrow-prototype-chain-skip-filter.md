@@ -18,8 +18,7 @@ files:
 ---
 # #493 -- Narrow prototype chain skip filter (502 tests, was 233 at filing)
 
-## Status: review
-
+## Status: in-review
 502 tests currently skipped for "prototype chain not supported" (count grew from 233 as more categories were added to TEST_CATEGORIES).
 
 ## Analysis

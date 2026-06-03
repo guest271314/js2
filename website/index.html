@@ -13,7 +13,6 @@
         document.head.appendChild(base);
       })();
     </script>
-    <script defer src="./frame-nav-sync.js"></script>
     <title>JS² - Javascript compiler</title>
     <meta
       name="description"
@@ -1065,6 +1064,34 @@
       .feat-toggle input {
         accent-color: var(--fg-soft);
       }
+      .conformance-unavailable {
+        min-height: 360px;
+        display: grid;
+        place-items: center;
+        max-width: 380px;
+        margin: 0 auto;
+        text-align: center;
+        color: var(--fg-faint);
+      }
+      .conformance-unavailable-value {
+        font-size: 2rem;
+        font-weight: 800;
+        color: var(--fg);
+        margin-bottom: 8px;
+      }
+      .conformance-unavailable-title {
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--fg-soft);
+      }
+      .conformance-unavailable-copy {
+        max-width: 280px;
+        margin-top: 10px;
+        font-size: 13px;
+        line-height: 1.55;
+      }
       .feat-tables.strict-only .feat-row[data-sloppy] {
         display: none;
       }
@@ -1275,7 +1302,16 @@
       .feat-row:hover .feat-name {
         color: #fff;
       }
+      /* The `host` label sits directly under the badge glyph in grid
+         column 1. It used to be `position: absolute` (left/top hard-coded),
+         which reserved no flow space and spilled past its row — overlapping
+         the next row's badge and the adjacent edition header's pass `%`.
+         Placing it as an in-flow grid item in column 1, row 2 makes the row
+         grow to contain badge + label so the ✓ / % / host stack cleanly. */
       .feat-host {
+        grid-column: 1;
+        grid-row: 2;
+        justify-self: center;
         font-family: var(--mono);
         font-size: 8px;
         font-weight: 600;
@@ -1283,12 +1319,18 @@
         color: inherit;
         background: none;
         padding: 0;
-        position: absolute;
-        left: 39px;
-        top: 34px;
-        transform: translateX(-50%);
-        line-height: 1.6;
+        margin-top: 2px;
+        line-height: 1.4;
+        text-align: center;
         white-space: nowrap;
+      }
+      /* Anchor the badge to row 1 of column 1 so the host label lands on the
+         row below it (not beside the feature name). Harmless on rows without
+         a host label (they only occupy row 1 of column 1 anyway), so no
+         `:has()` scoping is needed. */
+      .feat-badge {
+        grid-column: 1;
+        grid-row: 1;
       }
       .feat-badge.full + .feat-host {
         color: #4ade80;
@@ -1447,7 +1489,7 @@
           <h1
             id="hero-title"
             data-texts='["An ahead-of-time JavaScript compiler.", "Compile JavaScript without embedding a JS engine.",
-            "JavaScript compiled ahead of time, for fast cold starts and speed.", "Reduce supply chain attack surface with module sandboxing.", "Target existing Javascript code, not a new language."]'
+            "Tiny modules that start and run fast.", "Reduce supply chain attack surface with module sandboxing.", "Target existing Javascript code, not a new language."]'
           >
             <span class="hero-title-shell">
               <span class="hero-title-measure" aria-hidden="true"></span>
@@ -1501,8 +1543,10 @@
             <div class="feature-icon"><img src="./wasm-logo-white.svg" alt="WebAssembly logo" /></div>
             <h3>No Embedded Runtime</h3>
             <p>
-              Deploy compiled JavaScript modules in standalone WebAssembly runtimes such as Wasmtime without embedding a
-              JS engine or interpreter, reducing module size and runtime overhead.
+              Deploy compiled JavaScript modules in standalone WebAssembly runtimes such as Wasmtime. Code known at
+              compile time is translated directly to WebAssembly — no embedded JS engine or interpreter — keeping
+              modules small and fast. Only code generated at runtime (<code>eval</code> / <code>new Function</code>)
+              falls back to a small embedded bytecode interpreter.
             </p>
           </article>
           <article class="feature-card">
@@ -1529,7 +1573,7 @@
 
       <section class="section-pad" id="goals">
         <div class="intro">
-          <h2>Goal: 100% JavaScript compatibility.</h2>
+          <h2>Goal: 100% ECMAScript compatibility.</h2>
           <p>
             Which JS language features compile to WebAssembly today, which still rely on host support, and which are
             still on the roadmap. Status is derived from ECMAScript Test262 pass rates and known compiler limitations.
@@ -1572,10 +1616,12 @@
                  baseline. Off by default so the headline number reflects
                  shipped ECMAScript only. -->
             <div class="feat-filter conformance-scope-toggle">
+              <!-- JS-host switch retained for later re-enable; disabled while standalone regression is fixed.
               <label class="feat-toggle">
                 <input type="checkbox" id="host-support-toggle" checked />
                 <span>JS host</span>
               </label>
+              -->
               <label class="feat-toggle">
                 <input type="checkbox" id="strict-only-toggle" />
                 <span>Strict mode</span>
@@ -3199,6 +3245,12 @@ match (value) {
             When running outside of a JS engine like found in browsers or Node.js, compatibility today typically means
             embedding a JS interpreter inside the WebAssembly module. This increases module size and slows execution.
           </p>
+          <p class="bench-disclaimer">
+            These are microbenchmarks — small single-kernel programs (tight numeric loops, string hashing, array and
+            object operations) that each isolate one class of operation. They indicate where ahead-of-time compilation
+            helps or hurts at the kernel level; they are not full-application workloads, so the ratios shouldn't be read
+            as a general speedup. Each figure is the median of multiple measured rounds taken after warm-up.
+          </p>
         </div>
 
         <div class="host-bench-group">
@@ -3209,7 +3261,9 @@ match (value) {
             both runtimes to their baseline tier — the no-optimizing-JIT execution path that matters for cold-start,
             multi-tenant edge runtimes, and engines without a top tier. The right chart is the production setup — both
             runtimes use their full optimizing pipeline. Press the button to run the benchmark in your browser including
-            additional DOM benchmarks.
+            additional DOM benchmarks. These public website benchmarks run in a JS host: the compiled Wasm is
+            instantiated by the js2wasm JavaScript runtime and compared with the same source running in V8.
+            Wasmtime/WASI benchmark figures are shown separately in the WASI host section below.
           </p>
           <div class="conformance-diagrams">
             <div class="diagram-panel">
@@ -3235,7 +3289,7 @@ match (value) {
           </div>
         </div>
 
-        <div class="host-bench-group" id="wasmtime-bench-group" style="display: none">
+        <div class="host-bench-group" id="wasmtime-bench-group">
           <h3 class="host-bench-title">WASI host</h3>
           <p class="host-bench-subcopy">
             Per-request cost of running the same JavaScript programs (source for each is shown inline below) across four
@@ -3250,14 +3304,14 @@ match (value) {
             (a per-function tiny module delegating to a preloaded embedded-interpreter plugin), and
             <strong>Engine</strong>
             (a full JS engine bundled inside Wasm with AOT pre-init — multiple megabytes per function). Two scenarios per program:
-            fresh instance per request (cold) and reused instance (warm). Interpreter and Engine both run a JS
+            fresh context or instance per request (cold) and reused context or instance (warm). Interpreter and Engine both run a JS
             interpreter inside Wasm — the size and per-call cost tradeoff isn't free. One chart per benchmark; each
-            chart shows AOT vs Interpreter vs Engine for both scenarios.
+            chart shows the available execution-model lanes for both scenarios.
           </p>
           <div class="conformance-diagrams">
             <h4 class="host-bench-section-title">Speed <span class="section-title-note">(higher is better)</span></h4>
             <p class="host-bench-section-desc">
-              <strong>Cold speed</strong> shows first-invocation runtime — process start, module load, compile/instantiate, and the first call — with bars as speedup over the cold JS-in-V8 baseline. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
+              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime against a V8-isolate edge runtime — rather than any named commercial platform. <strong>Cold speed</strong> shows warm-engine per-request setup plus the first call: a Rust Wasmtime host compiles each Wasm module or component once, then creates a fresh store and instance per request; JS creates a fresh V8 context, compiles the program into it, and runs once. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
             </p>
             <div class="bench-test-group" data-test="fib">
               <h4 class="bench-test-title">Fibonacci loop</h4>
@@ -3295,7 +3349,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3310,7 +3363,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3357,7 +3409,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3372,7 +3423,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="fib-recursive"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3423,7 +3473,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3438,7 +3487,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="array-sum"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3494,7 +3542,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3509,7 +3556,6 @@ export function run(n) {
                   class="diagram-panel"
                   data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
                   data-row-filter="string-hash"
-                  style="display: none"
                 >
                   <perf-benchmark-chart
                     src="./benchmarks/results/wasm-host-wasmtime-hot-runtime.json"
@@ -3533,7 +3579,6 @@ export function run(n) {
               <div
                 class="diagram-panel"
                 data-benchmark-src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
-                style="display: none"
               >
                 <perf-benchmark-chart
                   src="./benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"
@@ -3546,6 +3591,7 @@ export function run(n) {
                 ></perf-benchmark-chart>
               </div>
             </div>
+          </div>
         </div>
       </section>
 
@@ -3752,76 +3798,34 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               </summary>
               <div class="approach-faq-answer">
                 <p>
-                  Good question! Large production JavaScript engines are highly optimized multi-tier streaming JIT
-                  compilers that often run code orders of magnitude faster than an interpreter - within reach of native
-                  performance - and have mature, battle-tested sandboxes. WebAssembly has an edge in some scenarios, but
-                  overall it is not always faster or even on par. Embedded JavaScript interpreters, on the other hand,
-                  trade peak performance for a small, portable footprint.
+                  Production engines are highly optimized, multi-tier JIT compilers that after warmup approach native performance. JS engines have mature process sandboxes and ship with browsers. JS interpreters are more lightweight but typically 90% slower. 
+                </p>
+                <p>
+                  <strong>Inside a JS host</strong> WebAssembly is no silver bullet and not always faster or even on par with a warmed up JS JIT engine, but it can be in compute heavy scenarios. Also, it adds a module sandbox for untrusted code, isolating it from the host process and other modules to run third party or AI generated code more securely.
+                </p>
+                <p>
+                  <strong>Outside of a JS host</strong>, embedding a JS engine disables their JIT tier, costing about 90% of performance of a warmed up engine, effectively falling back to their interpreter mode. Shipping an engine alongside typically weights ~14 megabytes. Pure interpreters like QuickJS with ~700kb are more lightweight but 90% slower than a JIT engine. An AOT JS to Wasm approach doesn't have this ceiling and potentially can achieve near-native performance without depending on a JIT or shipping a full engine or interpreter, while start at 100 bytes.
                 </p>
                 <h3>Runtime overhead</h3>
                 <p>
-                  However, in
-                  <strong>constrained environments</strong>
-                  like multi-tenant function as a service - aka. "
-                  <strong>serverless</strong>
-                  " - or
-                  <strong>embedded</strong>
-                  environments a JS host might simply be too heavy-weight and costly. It may result in a slow
-                  interpreter path and having to ship a JS interpreter or engine with JIT disabled (which typically
-                  results in a 10x slowdown) alongside the binary in the Megabyte range. On desktop this might even mean
-                  shipping a full browser or server runtime with 100 MB or more in the case of Electron.
+                  In constrained environments — serverless, embedded, or multi-tenant — a JS host can be prohibitively heavy. JIT-disabled engines typically run 10× slower; bundled interpreters add megabytes of dead weight per module. On desktop, shipping a full runtime like Electron adds 100 MB+. WebAssembly modules pay none of these costs.
                 </p>
-                <ul>
-                  <li>
-                    <strong>Bundled interpreters</strong>
-                    package a JavaScript interpreter into the Wasm module and run the user's program inside it. That can
-                    provide broad compatibility, but each deployed module pays the interpreter/runtime cost.
-                  </li>
-                  <li>
-                    <strong>Bundled engines</strong>
-                    inherit mature JavaScript engine semantics, but also inherit the size, startup, integration,
-                    sandboxing, and runtime code-generation tradeoffs of shipping an engine.
-                  </li>
-                </ul>
                 <h3>Dependency management</h3>
                 <p>
-                  NPM dependencies are fragile and hard to manage. If you upgrade one module globally in a project, this
-                  often forces a cascade of updates across the project which may take weeks, break things loudly,
-                  introduce silent bugs, and you may sometimes end up in situations where one dependency already needs a
-                  newer version while another still depends on an older version, hindering upgrades. In contrast,
-                  WebAssembly modules declare their imports, and you can satisfy them on a module by module basis that
-                  do not force to keep the version of a module in lock step across modules.
+                  NPM dependencies are fragile: upgrading one package often cascades across the project, taking weeks, breaking things loudly, or introducing silent bugs — and version conflicts can block upgrades entirely. WebAssembly modules declare explicit imports satisfied per-module, so versions don't need to stay in lockstep across the project.
                 </p>
                 <h3>Supply Chain Attacks</h3>
                 <p>
-                  Running untrusted code in JavaScript exposes the process to the risk of supply chain attacks: 95% of
-                  JavaScript code is a third party dependency. A single malicious or buggy module can take over the
-                  whole JavaScript process and extract sensitive information or in Node.js even access the file system
-                  or start programs with user rights. While isolation techniques exists they are rarely used in practice
-                  due their overhead, complexity, or ecosystem fragmentation. Supply chain attacks have become a real
-                  threat including high profile incidents in cornerstone dependencies such as
-                  <a href="https://github.com/axios/axios/issues/10636">axios</a>
-                  or
-                  <a
-                    href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
-                  >
-                    chalk
-                  </a>
-                  .
-                </p>
-                <p>
-                  JavaScript engines are highly complex and expose a large attack surface. Despite decades of hardening
-                  hackers and engine developers are in an arms race finding and fixing zero day vulnerabilities, and AI
-                  agents find vulnerabilities in high volumes (e.g. Anthropic's glasswing found
-                  <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
+                  95% of JS code is third-party. A single malicious or buggy dependency can compromise the entire process — exfiltrating data or, in Node.js, accessing the filesystem. Isolation techniques exist but are rarely used due to overhead and complexity. High-profile incidents have hit cornerstone packages like <a href="https://github.com/axios/axios/issues/10636">axios</a> and <a
+                  href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
+                >
+                  chalk
+                </a>.                
+                  JS engines also present a large attack surface: despite decades of hardening, zero-days are found continuously, and AI-assisted vulnerability research is accelerating the pace (Anthropic's Glasswing found <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
                     271 vulnerabilities in Firefox
-                  </a>
-                  ) . If your code ships with a full browser and Node depdendency like in the case of Electron, you need
-                  to maintain manual patches for security vulnerabilities.
-                </p>
-                <p>
-                  WebAssembly has a simpler execution and deny by default security model in which access is granted
-                  explicitly, limiting the blast radius of incidents significantly.
+                  </a>). Electron apps must manually patch engine CVEs indefinitely.
+                
+                  WebAssembly uses a simpler, deny-by-default model: capabilities are granted explicitly, limiting blast radius significantly.
                 </p>
               </div>
             </details>
@@ -3873,8 +3877,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
                   <strong>not</strong>
                   cover Web APIs, Node.js or other host behavior, or whether an arbitrary real-world npm package runs
                   unchanged. A high pass rate is necessary but not sufficient for &ldquo;runs real JavaScript.&rdquo;
-                  Second, the standalone (no-JS-host) path is less complete than the JS-host path. Check the per-feature
-                  report before relying on anything specific.
+                  Second, the public website figures are currently pinned to the JS-host path; standalone
+                  (no-JS-host) figures are hidden until the current regression is fixed. Check the per-feature report
+                  before relying on anything specific.
                 </p>
               </div>
             </details>
@@ -4041,35 +4046,6 @@ console.log(instance.exports.run()); // &rarr; 55</pre
     <script type="module" src="./components/site-nav.js"></script>
     <script type="module" src="./components/t262-charts.js"></script>
     <script type="module" src="./components/perf-benchmark-chart.js"></script>
-    <script>
-      (async () => {
-        const group = document.getElementById("wasmtime-bench-group");
-        if (!(group instanceof HTMLElement)) return;
-        const panels = Array.from(group.querySelectorAll("[data-benchmark-src]"));
-        let visibleCount = 0;
-        await Promise.all(
-          panels.map(async (panel) => {
-            if (!(panel instanceof HTMLElement)) return;
-            const src = panel.dataset.benchmarkSrc;
-            if (!src) return;
-            try {
-              const resp = await fetch(src);
-              if (!resp.ok) return;
-              const data = await resp.json();
-              if (Array.isArray(data) && data.length > 0) {
-                panel.style.display = "";
-                visibleCount += 1;
-              }
-            } catch {
-              // Leave unavailable benchmark panels hidden.
-            }
-          }),
-        );
-        if (visibleCount > 0) {
-          group.style.display = "";
-        }
-      })();
-    </script>
     <script src="./components/trend-chart.js"></script>
 
     <script>
@@ -4579,7 +4555,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       // Feature table toggles
       (function () {
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
         const tables = document.querySelector(".feat-tables");
         if (tables) {
           const hostRows = Array.from(document.querySelectorAll(".feat-row")).filter((row) =>
@@ -4595,21 +4571,24 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           });
           const sync = () => {
             if (strictToggle) tables.classList.toggle("strict-only", strictToggle.checked);
-            if (hostToggle) tables.classList.toggle("host-off", !hostToggle.checked);
-            const hostEnabled = hostToggle ? hostToggle.checked : true;
+            // if (hostToggle) tables.classList.toggle("host-off", !hostToggle.checked);
+            // const hostEnabled = hostToggle ? hostToggle.checked : true;
             hostRows.forEach((row) => {
               const badge = row.querySelector(".feat-badge");
               if (!(badge instanceof HTMLElement)) return;
               const origClass = badge.dataset.origClass || "";
               const origText = badge.dataset.origText || "";
               badge.className = "feat-badge";
-              if (hostEnabled) {
-                if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
-                badge.textContent = origText;
-              } else {
-                badge.classList.add("none");
-                badge.textContent = "×";
-              }
+              // JS-host switch branch retained for later re-enable:
+              // if (hostEnabled) {
+              //   if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
+              //   badge.textContent = origText;
+              // } else {
+              //   badge.classList.add("none");
+              //   badge.textContent = "×";
+              // }
+              if (origClass) badge.classList.add(...origClass.split(/\s+/).filter(Boolean));
+              badge.textContent = origText;
             });
             if (typeof window.updateEditionPassBars === "function") {
               window.updateEditionPassBars();
@@ -4620,7 +4599,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           };
           sync();
           strictToggle?.addEventListener("change", sync);
-          hostToggle?.addEventListener("change", sync);
+          // hostToggle?.addEventListener("change", sync);
         }
       })();
 
@@ -4637,9 +4616,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const labelEl = document.getElementById("compat-pass-rate-label");
         if (!rateEl || !labelEl) return;
         try {
+          if (window.__conformanceHeadlineHydrated) return;
           const resp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!resp.ok) return;
           const report = await resp.json();
+          if (window.__conformanceHeadlineHydrated) return;
           // Use strict-mode summary (tests compatible with ES modules) when available
           const s = report?.strict_summary ?? report?.summary;
           const pass = Number(s?.pass ?? 0);
@@ -4871,7 +4852,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const donutSlot = document.getElementById("conformance-donut-slot");
         const editionTimeline = document.getElementById("conformance-edition-timeline");
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
+        const rateEl = document.getElementById("compat-pass-rate");
+        const rateLabelEl = document.getElementById("compat-pass-rate-label");
         if (!donutSlot || !(editionTimeline instanceof HTMLElement)) return;
 
         const donutStyle = "--t262-bg: var(--bg, #060a14)";
@@ -4894,17 +4877,31 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           donut.setAttribute("caption-main", captionMain);
           donut.setAttribute("caption-sub", captionSub);
           donut.setAttribute("style", donutStyle);
+          updateHeadlineStat({ pass, fail, ce, skip, total }, captionMain, captionSub);
         };
         const normalizeSummary = (summary, fallback = {}) => {
           const pass = Number(summary?.pass ?? fallback.pass ?? 0);
-          const fail = Number(summary?.fail ?? fallback.fail ?? 0);
+          const skip = Number(summary?.skip ?? fallback.skip ?? 0);
           const ce =
             Number(summary?.ce ?? 0) ||
             Number(summary?.compile_error ?? 0) + Number(summary?.compile_timeout ?? 0) ||
             Number(fallback.ce ?? 0);
-          const skip = Number(summary?.skip ?? fallback.skip ?? 0);
-          const total = Number(summary?.total ?? fallback.total ?? pass + fail + ce + skip);
+          const explicitFail = Number(summary?.fail ?? fallback.fail);
+          const total = Number(
+            summary?.total ?? fallback.total ?? pass + (Number.isFinite(explicitFail) ? explicitFail : 0) + ce + skip,
+          );
+          const fail = Number.isFinite(explicitFail) ? explicitFail : Math.max(0, total - pass - ce - skip);
           return { pass, fail, ce, skip, total };
+        };
+        const updateHeadlineStat = (summary, captionMain, captionSub) => {
+          if (!rateEl || !rateLabelEl) return;
+          const pass = Number(summary?.pass ?? 0);
+          const total = Number(summary?.total ?? 0);
+          if (!Number.isFinite(pass) || !Number.isFinite(total) || total <= 0) return;
+          const pct = ((pass / total) * 100).toFixed(1);
+          window.__conformanceHeadlineHydrated = true;
+          rateEl.textContent = `${pct}%`;
+          rateLabelEl.textContent = `${captionMain} ${captionSub}: ${pass.toLocaleString()} / ${total.toLocaleString()} test262 tests passing`;
         };
         const statusRatio = (filtered, base, key) => {
           const baseValue = Number(base?.[key] ?? 0);
@@ -4918,38 +4915,148 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           const skip = Math.round(summary.skip * ratios.skip);
           return { pass, fail, ce, skip, total: pass + fail + ce + skip };
         };
-        const featureRowScore = (row, hostEnabled) => {
-          const badge = row.querySelector(".feat-badge");
-          if (!badge) return 0;
-          if (!hostEnabled && row.querySelector(".feat-host")) return 0;
-          const savedClasses = badge.dataset.origClass || Array.from(badge.classList).join(" ");
-          const classNames = new Set(savedClasses.split(/\s+/).filter(Boolean));
-          if (classNames.has("full")) return 1;
-          if (classNames.has("partial")) return 0.5;
-          return 0;
-        };
-        const hostOffPassScale = () => {
-          const strictOnly = strictToggle ? strictToggle.checked : false;
-          const rows = Array.from(document.querySelectorAll(".feat-row")).filter(
-            (row) => !(strictOnly && row.hasAttribute("data-sloppy")),
-          );
-          const hostOnScore = rows.reduce((sum, row) => sum + featureRowScore(row, true), 0);
-          if (hostOnScore <= 0) return 1;
-          const hostOffScore = rows.reduce((sum, row) => sum + featureRowScore(row, false), 0);
-          return Math.max(0, Math.min(1, hostOffScore / hostOnScore));
-        };
-        const applyHostMode = (summary) => {
-          const hostEnabled = hostToggle ? hostToggle.checked : true;
-          if (hostEnabled) return summary;
-          const nextPass = Math.round(summary.pass * hostOffPassScale());
-          const movedToFail = Math.max(0, summary.pass - nextPass);
-          return {
-            ...summary,
-            pass: nextPass,
-            fail: summary.fail + movedToFail,
-          };
-        };
-
+        /*
+         * Disabled JS-host switch path retained for later re-enable after the
+         * standalone regression is fixed.
+         *
+         * const STANDALONE_TEST262_REPORT_URLS = [
+         *   "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-standalone-current.json",
+         *   "./benchmarks/results/test262-standalone-report.json",
+         * ];
+         * const renderUnavailable = (captionMain, captionSub, detail) => {
+         *   donutSlot.innerHTML = `
+         *     <div class="conformance-unavailable" role="status" aria-live="polite">
+         *       <div>
+         *         <div class="conformance-unavailable-value">Unavailable</div>
+         *         <div class="conformance-unavailable-title">${captionMain}</div>
+         *         <div class="conformance-unavailable-title">${captionSub}</div>
+         *         <div class="conformance-unavailable-copy">${detail}</div>
+         *       </div>
+         *     </div>
+         *   `;
+         *   updateHeadlineUnavailable(captionMain, captionSub, detail);
+         * };
+         * const updateHeadlineUnavailable = (captionMain, captionSub, detail) => {
+         *   if (!rateEl || !rateLabelEl) return;
+         *   window.__conformanceHeadlineHydrated = true;
+         *   rateEl.textContent = "Unavailable";
+         *   rateLabelEl.textContent = `${captionMain} ${captionSub}: ${detail}`;
+         * };
+         * const hasUsableSummary = (summary) => {
+         *   const pass = Number(summary?.pass ?? 0);
+         *   const total = Number(summary?.total ?? 0);
+         *   return Number.isFinite(pass) && Number.isFinite(total) && total > 0;
+         * };
+         * const summaryHasStaleResults = (summary) => {
+         *   const stale = Number(summary?.stale ?? 0);
+         *   return Number.isFinite(stale) && stale > 0;
+         * };
+         * const fetchJson = async (url) => {
+         *   const resp = await fetch(url);
+         *   if (!resp.ok) throw new Error(`unavailable: ${url}`);
+         *   return resp.json();
+         * };
+         * const standalonePayloadFromHostReport = (report) => {
+         *   if (report?.standalone?.summary || report?.standalone?.official_summary) {
+         *     return report.standalone;
+         *   }
+         *   if (report?.standalone_summary || report?.standalone_full_summary || report?.standalone_strict_summary) {
+         *     return {
+         *       summary: report.standalone_summary,
+         *       official_summary: report.standalone_summary,
+         *       full_summary: report.standalone_full_summary,
+         *       strict_summary: report.standalone_strict_summary,
+         *       edition_summaries: report.standalone_edition_summaries,
+         *     };
+         *   }
+         *   return null;
+         * };
+         * const loadStandaloneReport = async (hostReport) => {
+         *   const embedded = standalonePayloadFromHostReport(hostReport);
+         *   if (embedded && hasUsableSummary(embedded.summary ?? embedded.official_summary)) {
+         *     return { report: embedded, source: "test262-current.json" };
+         *   }
+         *   for (const url of STANDALONE_TEST262_REPORT_URLS) {
+         *     try {
+         *       const report = await fetchJson(url);
+         *       if (hasUsableSummary(report?.summary ?? report?.official_summary)) {
+         *         return { report, source: url };
+         *       }
+         *     } catch {
+         *       // Try the next configured source.
+         *     }
+         *   }
+         *   return null;
+         * };
+         * const getNamedSummary = (report, names) => {
+         *   for (const name of names) {
+         *     if (hasUsableSummary(report?.[name])) return report[name];
+         *   }
+         *   return null;
+         * };
+         * const getStandaloneEditionSummary = (report, scope, strictOnly) => {
+         *   const editionMaps = [
+         *     strictOnly ? report?.strict_edition_summaries : null,
+         *     strictOnly ? report?.standalone_strict_edition_summaries : null,
+         *     report?.edition_summaries,
+         *     report?.standalone_edition_summaries,
+         *   ].filter(Boolean);
+         *   for (const map of editionMaps) {
+         *     const candidate = map?.[scope] ?? map?.[normalizeEditionLabel(scope)];
+         *     if (hasUsableSummary(candidate)) return candidate;
+         *   }
+         *
+         *   const editionRows = [
+         *     strictOnly ? report?.strict_editions : null,
+         *     strictOnly ? report?.standalone_strict_editions : null,
+         *     report?.editions,
+         *     report?.standalone_editions,
+         *   ].filter(Array.isArray);
+         *   for (const rows of editionRows) {
+         *     const candidate = rows.find((row) => {
+         *       const label = String(row?.edition ?? row?.rawEdition ?? row?.label ?? "");
+         *       return label === scope || normalizeEditionLabel(label) === normalizeEditionLabel(scope);
+         *     });
+         *     if (hasUsableSummary(candidate)) return candidate;
+         *   }
+         *   return null;
+         * };
+         * const getStandaloneSummary = (standaloneData, scope, strictOnly) => {
+         *   if (!standaloneData?.report) {
+         *     return {
+         *       summary: null,
+         *       reason: "No standalone test262 baseline has been published for this build.",
+         *     };
+         *   }
+         *   const report = standaloneData.report;
+         *   let summary = null;
+         *   if (scope === "overall") {
+         *     summary = strictOnly
+         *       ? getNamedSummary(report, ["strict_summary", "standalone_strict_summary"])
+         *       : getNamedSummary(report, ["summary", "official_summary", "standalone_summary"]);
+         *   } else if (scope === "overall+proposal") {
+         *     summary = strictOnly
+         *       ? getNamedSummary(report, ["strict_full_summary", "standalone_strict_full_summary"])
+         *       : getNamedSummary(report, ["full_summary", "standalone_full_summary"]);
+         *   } else {
+         *     summary = getStandaloneEditionSummary(report, scope, strictOnly);
+         *   }
+         *
+         *   if (!hasUsableSummary(summary)) {
+         *     return {
+         *       summary: null,
+         *       reason: `Standalone test262 data is not available for ${strictOnly ? "strict " : ""}${scope} scope yet.`,
+         *     };
+         *   }
+         *   if (summaryHasStaleResults(summary)) {
+         *     return {
+         *       summary: null,
+         *       reason: `Standalone test262 data is stale for ${strictOnly ? "strict " : ""}${scope} scope.`,
+         *     };
+         *   }
+         *   return { summary: normalizeSummary(summary), reason: "", source: standaloneData.source };
+         * };
+         */
         try {
           const reportResp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
           if (!reportResp.ok) throw new Error("conformance data unavailable");
@@ -4976,22 +5083,24 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             withProposal.ce !== overall.ce ||
             withProposal.skip !== overall.skip ||
             withProposal.total !== overall.total;
+          // const standaloneData = await loadStandaloneReport(report);
 
           let lastDetail = null;
           const conformanceOptions = () => {
             const strictOnly = strictToggle ? strictToggle.checked : false;
-            const hostEnabled = hostToggle ? hostToggle.checked : true;
+            // const hostEnabled = hostToggle ? hostToggle.checked : true;
             return {
               strictOnly,
-              hostEnabled,
-              captionSub:
-                strictOnly && !hostEnabled
-                  ? "strict standalone estimate"
-                  : strictOnly
-                    ? "strict conformance"
-                    : hostEnabled
-                      ? "conformance"
-                      : "standalone estimate",
+              // hostEnabled,
+              // captionSub:
+              //   strictOnly && !hostEnabled
+              //     ? "strict standalone conformance"
+              //     : strictOnly
+              //       ? "strict conformance"
+              //       : hostEnabled
+              //         ? "conformance"
+              //         : "standalone conformance",
+              captionSub: strictOnly ? "strict conformance" : "conformance",
             };
           };
           const applyConformanceOptions = (summary, { exactStrictSummary = null } = {}) => {
@@ -5004,7 +5113,21 @@ console.log(instance.exports.run()); // &rarr; 55</pre
                   ? applySummaryRatios(next, strictRatios)
                   : next;
             }
-            return { summary: applyHostMode(next), options };
+            return { summary: next, options };
+          };
+          const renderSelectedConformance = (scope, hostSummary, captionMain, { exactStrictSummary = null } = {}) => {
+            // const options = conformanceOptions();
+            // if (!options.hostEnabled) {
+            //   const standalone = getStandaloneSummary(standaloneData, scope, options.strictOnly);
+            //   if (!standalone.summary) {
+            //     renderUnavailable(captionMain, options.captionSub, standalone.reason);
+            //     return;
+            //   }
+            //   renderDonut(standalone.summary, captionMain, options.captionSub);
+            //   return;
+            // }
+            const { summary, options } = applyConformanceOptions(hostSummary, { exactStrictSummary });
+            renderDonut(summary, captionMain, options.captionSub);
           };
           const applyScopeFromDetail = (detail) => {
             if (!detail) return;
@@ -5016,29 +5139,26 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             const currentScope = detail.scope || "overall";
             window.__conformanceEditionScope = currentScope;
             if (currentScope === "overall") {
-              const { summary, options } = applyConformanceOptions(overall, { exactStrictSummary: strictSummary });
-              renderDonut(summary, "ECMAScript", options.captionSub);
+              renderSelectedConformance("overall", overall, "ECMAScript", { exactStrictSummary: strictSummary });
               applyFeatureEditionScope("overall");
               return;
             }
             if (currentScope === "overall+proposal") {
-              const { summary, options } = applyConformanceOptions(withProposal);
-              renderDonut(summary, "ECMAScript + proposals", options.captionSub);
+              renderSelectedConformance("overall+proposal", withProposal, "ECMAScript + proposals");
               applyFeatureEditionScope("overall+proposal");
               return;
             }
 
             const scope = detail.scopeMap instanceof Map ? detail.scopeMap.get(currentScope) : null;
             if (!scope) return;
-            const { summary, options } = applyConformanceOptions(scope.summary);
-            renderDonut(summary, scope.captionMain, options.captionSub);
+            renderSelectedConformance(currentScope, scope.summary, scope.captionMain);
             applyFeatureEditionScope(currentScope);
           };
           window.updateConformanceDonut = () => {
             if (lastDetail) applyScopeFromDetail(lastDetail);
           };
           strictToggle?.addEventListener("change", window.updateConformanceDonut);
-          hostToggle?.addEventListener("change", window.updateConformanceDonut);
+          // hostToggle?.addEventListener("change", window.updateConformanceDonut);
 
           editionTimeline.addEventListener("edition-change", (event) => {
             applyScopeFromDetail(event.detail);
@@ -5166,13 +5286,22 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
       (function hydrateEditionPassBars() {
         const strictToggle = document.getElementById("strict-only-toggle");
-        const hostToggle = document.getElementById("host-support-toggle");
+        // const hostToggle = document.getElementById("host-support-toggle");
 
-        const scoreRow = (row, hostEnabled) => {
+        // Host-aware scoring retained for later re-enable:
+        // const scoreRow = (row, hostEnabled) => {
+        //   const badge = row.querySelector(".feat-badge");
+        //   const usesHost = !!row.querySelector(".feat-host");
+        //   if (!badge) return 0;
+        //   if (usesHost && !hostEnabled) return 0;
+        //   if (badge.classList.contains("full")) return 1;
+        //   if (badge.classList.contains("partial")) return 0.5;
+        //   return 0;
+        // };
+
+        const scoreRow = (row) => {
           const badge = row.querySelector(".feat-badge");
-          const usesHost = !!row.querySelector(".feat-host");
           if (!badge) return 0;
-          if (usesHost && !hostEnabled) return 0;
           if (badge.classList.contains("full")) return 1;
           if (badge.classList.contains("partial")) return 0.5;
           return 0;
@@ -5211,7 +5340,7 @@ console.log(instance.exports.run()); // &rarr; 55</pre
 
         const renderHeuristicEditionPassBars = () => {
           const strictOnly = strictToggle ? strictToggle.checked : false;
-          const hostEnabled = hostToggle ? hostToggle.checked : true;
+          // const hostEnabled = hostToggle ? hostToggle.checked : true;
 
           document.querySelectorAll(".feat-section").forEach((section) => {
             const header = ensureEditionLabel(section)?.el;
@@ -5224,7 +5353,8 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             });
 
             const total = rows.length;
-            const score = rows.reduce((sum, row) => sum + scoreRow(row, hostEnabled), 0);
+            // const score = rows.reduce((sum, row) => sum + scoreRow(row, hostEnabled), 0);
+            const score = rows.reduce((sum, row) => sum + scoreRow(row), 0);
             const pct = total > 0 ? Math.round((score / total) * 100) : 0;
             const fill = bar.querySelector(".feat-edition-passbar-fill");
             const text = bar.querySelector(".feat-edition-passbar-text");

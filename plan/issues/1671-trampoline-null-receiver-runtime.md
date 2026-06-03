@@ -1,17 +1,19 @@
 ---
 id: 1671
-slug: trampoline-null-receiver-runtime
 title: "object-method trampoline / direct dispatch lost the real receiver → ~200 runtime null-derefs (completes #1669/#621)"
-sprint: 55
 status: done
 created: 2026-05-25
 updated: 2026-05-25
+completed: 2026-05-26
 priority: high
 feasibility: hard
 task_type: bugfix
 area: codegen
 language_feature: object-method-closures, destructuring-params, generators, async-generators
 goal: compiler-correctness
+sprint: 55
+required_by: [1672]
+slug: trampoline-null-receiver-runtime
 related: [1669, 1602, 1557]
 ---
 # #1671 — object-method dispatch lost the real receiver (empty stub method func)

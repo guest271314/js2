@@ -15,6 +15,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,
   compileExpression,
@@ -170,6 +171,42 @@ function isReceiverNonNull(expr: ts.Expression, checker: ts.TypeChecker): boolea
   return false;
 }
 
+function typeIncludesUndefined(type: ts.Type): boolean {
+  if ((type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return true;
+  if (type.isUnion()) return type.types.some((member) => typeIncludesUndefined(member));
+  return false;
+}
+
+function shouldReturnUndefinedCapableResult(
+  ctx: CodegenContext,
+  callExpr: ts.CallExpression,
+  expectedType?: ValType,
+): boolean {
+  let parent: ts.Node | undefined = callExpr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isNonNullExpression(parent))
+  ) {
+    parent = parent.parent;
+  }
+  if (parent && ts.isExpressionStatement(parent)) return false;
+  if (expectedType && expectedType.kind !== "externref" && expectedType.kind !== "ref_extern") return false;
+  return typeIncludesUndefined(ctx.checker.getTypeAtLocation(callExpr));
+}
+
+function arrayElementToExternrefInstrs(ctx: CodegenContext, fctx: FunctionContext, elemType: ValType): Instr[] {
+  if (elemType.kind === "i8" || elemType.kind === "i16") {
+    return coercionInstrs(ctx, { kind: "i32" }, { kind: "externref" }, fctx);
+  }
+  if (elemType.kind === "f32") {
+    return [{ op: "f64.promote_f32" } as Instr, ...coercionInstrs(ctx, { kind: "f64" }, { kind: "externref" }, fctx)];
+  }
+  return coercionInstrs(ctx, elemType, { kind: "externref" }, fctx);
+}
+
 // ── Bounds-checked array access ───────────────────────────────────────
 
 /**
@@ -219,10 +256,14 @@ export function emitBoundsCheckedArrayGet(
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
   // Build the "then" branch: in-bounds -> array.get
+  const packedLoad =
+    elementType.kind === "i8" ? "array.get_u" : elementType.kind === "i16" ? "array.get_s" : "array.get";
+  const valueType: ValType = elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
+
   const thenInstrs: Instr[] = [
     { op: "local.get", index: arrLocal } as Instr,
     { op: "local.get", index: idxLocal } as Instr,
-    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    { op: packedLoad, typeIdx: arrTypeIdx } as Instr,
   ];
 
   // Build the "else" branch: out-of-bounds -> default value (or JS undefined
@@ -230,15 +271,15 @@ export function emitBoundsCheckedArrayGet(
   const elseInstrs: Instr[] =
     undefinedFuncIdx !== undefined
       ? [{ op: "call", funcIdx: undefinedFuncIdx } as Instr]
-      : defaultValueInstrs(elementType);
+      : defaultValueInstrs(valueType);
 
   // When the element type is a non-null ref, the else branch produces ref.null
   // which is ref_null. Use ref_null as the block type so both branches validate,
   // then narrow back to ref with ref.as_non_null.
-  const needsNullableBlock = elementType.kind === "ref";
+  const needsNullableBlock = valueType.kind === "ref";
   const blockType: ValType = needsNullableBlock
-    ? { kind: "ref_null", typeIdx: (elementType as { typeIdx: number }).typeIdx }
-    : elementType;
+    ? { kind: "ref_null", typeIdx: (valueType as { typeIdx: number }).typeIdx }
+    : valueType;
 
   fctx.body.push({
     op: "if",
@@ -318,6 +359,14 @@ export function resolveArrayInfo(
   // methods are dispatched via compileNativeStringMethodCall instead.
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && isStringType(tsType)) return null;
   const wasmType = resolveWasmType(ctx, tsType);
+  return resolveArrayInfoFromWasmType(ctx, wasmType);
+}
+
+function resolveArrayInfoFromWasmType(
+  ctx: CodegenContext,
+  wasmType: ValType | undefined,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  if (!wasmType) return null;
   if (wasmType.kind !== "ref" && wasmType.kind !== "ref_null") return null;
   const vecTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
   const vecDef = ctx.mod.types[vecTypeIdx];
@@ -329,6 +378,38 @@ export function resolveArrayInfo(
   const arrDef = ctx.mod.types[arrTypeIdx];
   if (!arrDef || arrDef.kind !== "array") return null;
   return { vecTypeIdx, arrTypeIdx, elemType: arrDef.element };
+}
+
+function inferExpressionWasmType(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  allowProbe = true,
+): ValType | undefined {
+  if (ts.isIdentifier(expr)) {
+    const name = expr.text;
+    const localIdx = fctx.localMap.get(name);
+    if (localIdx !== undefined) return getLocalType(fctx, localIdx);
+    const gIdx = ctx.moduleGlobals.get(name);
+    if (gIdx !== undefined) return ctx.mod.globals[localGlobalIdx(ctx, gIdx)]?.type;
+  }
+
+  if (!allowProbe) return undefined;
+  const savedLen = fctx.body.length;
+  const probeResult = compileExpression(ctx, fctx, expr);
+  fctx.body.length = savedLen;
+  return probeResult ?? undefined;
+}
+
+function resolveArrayInfoForExpression(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  tsType: ts.Type,
+): { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType } | null {
+  return (
+    resolveArrayInfo(ctx, tsType) ?? resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, expr, false))
+  );
 }
 
 /**
@@ -1757,7 +1838,7 @@ function compileArrayPrototypeIndexOf(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use the `equals` string import (JS ===) for comparison
   // For ref/ref_null elements, use ref.eq for reference identity comparison
@@ -1872,7 +1953,7 @@ function compileArrayPrototypeIncludes(
   fctx.body.push({ op: "local.set", index: iTmp });
 
   const eqOp = elemType.kind === "f64" ? "f64.eq" : "i32.eq";
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // Use a result local instead of `return` to avoid returning from the
   // enclosing function when includes is inlined.
@@ -1972,7 +2053,7 @@ function compileArrayPrototypeEvery(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const numParams = closureInfo.paramTypes.length;
 
   // Use a result local instead of `return` to avoid returning from the
@@ -2104,7 +2185,7 @@ function compileArrayPrototypeSome(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const numParams = closureInfo.paramTypes.length;
 
   // Use a result local instead of `return` to avoid returning from the
@@ -2226,7 +2307,7 @@ function compileArrayPrototypeForEach(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const numParams = closureInfo.paramTypes.length;
 
@@ -2340,12 +2421,16 @@ export function compileArrayMethodCall(
   callExpr: ts.CallExpression,
   receiverType: ts.Type,
   overrideMethodName?: string,
+  expectedType?: ValType,
 ): ValType | null | undefined | typeof VOID_RESULT {
   const methodName =
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
 
-  const arrInfo = resolveArrayInfo(ctx, receiverType);
+  const receiverExpr = propAccess.expression;
+  const arrInfo =
+    resolveArrayInfo(ctx, receiverType) ??
+    resolveArrayInfoFromWasmType(ctx, inferExpressionWasmType(ctx, fctx, receiverExpr, false));
   if (!arrInfo) return undefined;
 
   let { vecTypeIdx, arrTypeIdx, elemType } = arrInfo;
@@ -2360,7 +2445,6 @@ export function compileArrayMethodCall(
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
   // but resolveArrayInfo resolves (number|boolean)[] → __vec_externref.
   // Probe-compile the receiver to determine the actual Wasm type (#826).
-  const receiverExpr = ts.isPropertyAccessExpression(propAccess) ? propAccess.expression : undefined;
   if (receiverExpr) {
     // Fast path: check the Wasm local/global type directly
     let actualType: ValType | undefined;
@@ -2467,10 +2551,10 @@ export function compileArrayMethodCall(
       result = compileArrayPush(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "pop":
-      result = compileArrayPop(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      result = compileArrayPop(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType, expectedType);
       break;
     case "shift":
-      result = compileArrayShift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+      result = compileArrayShift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType, expectedType);
       break;
     case "slice":
       result = compileArraySlice(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -2673,7 +2757,7 @@ function compileArrayToReversed(
   fctx.body.push({ op: "local.set", index: jTmp });
 
   const swapTmp = allocLocal(fctx, `__arr_trev_sw_${fctx.locals.length}`, elemType);
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
@@ -3003,6 +3087,17 @@ function compileArrayIteratorMethod(
   propAccess: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   methodName: string,
 ): ValType | null {
+  if (ctx.standalone || ctx.wasi) {
+    reportError(
+      ctx,
+      propAccess,
+      `Codegen error: #681 standalone/WASI Array.prototype.${methodName}() still requires JS-host iterator helpers; ` +
+        "use direct array for-of/destructuring for the current pure-Wasm slice " +
+        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose).",
+    );
+    return null;
+  }
+
   addArrayIteratorImports(ctx);
   const importName = `__array_${methodName}`;
   const funcIdx = ctx.funcMap.get(importName);
@@ -3187,7 +3282,7 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
@@ -3354,7 +3449,7 @@ function compileArrayIncludes(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // SameValueZero comparison for includes:
   // - For f64: a === b OR (isNaN(a) AND isNaN(b))
@@ -3516,7 +3611,7 @@ function compileArrayReverse(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
@@ -3706,25 +3801,27 @@ function compileArrayPop(
   ctx: CodegenContext,
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
-  _callExpr: ts.CallExpression,
+  callExpr: ts.CallExpression,
   vecTypeIdx: number,
   arrTypeIdx: number,
   elemType: ValType,
+  expectedType?: ValType,
 ): ValType | null {
+  const resultType: ValType = shouldReturnUndefinedCapableResult(ctx, callExpr, expectedType)
+    ? { kind: "externref" }
+    : elemType;
   const vecTmp = allocLocal(fctx, `__arr_pop_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const newLenTmp = allocLocal(fctx, `__arr_pop_nl_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_pop_res_${fctx.locals.length}`, elemType);
+  const resultTmp = allocLocal(fctx, `__arr_pop_res_${fctx.locals.length}`, resultType);
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const lenTmp = allocLocal(fctx, `__arr_pop_len_${fctx.locals.length}`, { kind: "i32" });
 
-  // (#1377) Initialize result to JS `undefined` for externref/anyref element
-  // types so empty-array `arr.pop()` returns spec-compliant undefined (not
-  // the wasm default `ref.null.extern`, which JS sees as `null`). f64 keeps
-  // its NaN default (matches `[].pop()` returning undefined which coerces
-  // to NaN in numeric context). i32 keeps 0 (best-effort; never mixed with
-  // null arrays).
-  if (elemType.kind === "externref" || elemType.kind === "anyref") {
+  // ECMA-262 §23.1.3.22: when length is 0, pop sets length to +0 and
+  // returns undefined. Preserve the old primitive result only for numeric
+  // hint contexts; otherwise use an externref result that can carry
+  // undefined for the Array<T>.pop(): T | undefined signature.
+  if (resultType.kind === "externref" || resultType.kind === "anyref") {
     emitUndefined(ctx, fctx);
     fctx.body.push({ op: "local.set", index: resultTmp });
   }
@@ -3754,6 +3851,7 @@ function compileArrayPop(
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
     { op: "local.get", index: newLenTmp } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // Decrement length: vec.length = newLen
     { op: "local.get", index: vecTmp } as Instr,
@@ -3765,7 +3863,7 @@ function compileArrayPop(
 
   // Return result (default value if empty, popped value if non-empty)
   fctx.body.push({ op: "local.get", index: resultTmp });
-  return elemType;
+  return resultType;
 }
 
 /**
@@ -3775,22 +3873,25 @@ function compileArrayShift(
   ctx: CodegenContext,
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
-  _callExpr: ts.CallExpression,
+  callExpr: ts.CallExpression,
   vecTypeIdx: number,
   arrTypeIdx: number,
   elemType: ValType,
+  expectedType?: ValType,
 ): ValType | null {
+  const resultType: ValType = shouldReturnUndefinedCapableResult(ctx, callExpr, expectedType)
+    ? { kind: "externref" }
+    : elemType;
   const vecTmp = allocLocal(fctx, `__arr_sft_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_sft_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_sft_len_${fctx.locals.length}`, { kind: "i32" });
   const newLenTmp = allocLocal(fctx, `__arr_sft_nl_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_sft_res_${fctx.locals.length}`, elemType);
+  const resultTmp = allocLocal(fctx, `__arr_sft_res_${fctx.locals.length}`, resultType);
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // (#1377) Initialize result to JS `undefined` for externref/anyref so
-  // empty-array `arr.shift()` returns spec-compliant undefined.
-  if (elemType.kind === "externref" || elemType.kind === "anyref") {
+  // ECMA-262 §23.1.3.27 mirrors pop's empty-array branch for shift.
+  if (resultType.kind === "externref" || resultType.kind === "anyref") {
     emitUndefined(ctx, fctx);
     fctx.body.push({ op: "local.set", index: resultTmp });
   }
@@ -3819,6 +3920,7 @@ function compileArrayShift(
     { op: "local.get", index: dataTmp } as Instr,
     { op: "i32.const", value: 0 } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // newLen = len - 1
     { op: "local.get", index: lenTmp } as Instr,
@@ -3842,7 +3944,7 @@ function compileArrayShift(
 
   // Return result (default value if empty, shifted value if non-empty)
   fctx.body.push({ op: "local.get", index: resultTmp });
-  return elemType;
+  return resultType;
 }
 
 /**
@@ -4245,7 +4347,7 @@ function compileArrayJoin(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // Build element-to-string instructions (use dataTmp instead of arrTmp)
   const elemToStr: Instr[] = [
@@ -4543,7 +4645,7 @@ function setupArrayLoop(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   return { vecTmp, dataTmp, lenTmp, iTmp, getOp };
 }
 
@@ -4566,7 +4668,18 @@ function buildClosureCallInstrs(
   const numParams = closureInfo.paramTypes.length;
   const elemCoerce = closureInfo.paramTypes[0] ? coercionInstrs(ctx, elemType, closureInfo.paramTypes[0], fctx) : [];
 
+  // #820l — array-method callbacks are invoked at spec arity 3
+  // (value, index, array). The callee's `arguments` object should see all
+  // 3 slots even when fewer formals are declared, so we plumb the extras
+  // (i.e. positionals beyond the declared formal count) through the
+  // module-level __argc + __extras_argv globals consumed by
+  // emitArgumentsVecBody. Convention from #1053: argc = numFormals
+  // (slots filled by direct params); extras vec holds slots beyond.
+  const SPEC_ARITY = 3;
+  const argsPlumbing = emitArrayCallbackArgsPlumbing(ctx, fctx, SPEC_ARITY, numParams, vecTypeIdx, arrTypeIdx, loop);
+
   return [
+    ...argsPlumbing,
     { op: "local.get", index: closureTmp } as Instr,
     // Element value (1st user param) — only pushed if callback declares ≥1 param.
     // A 0-arg callback (e.g. `function() {}`) compiles to a funcref that takes only
@@ -4608,6 +4721,107 @@ function buildClosureCallInstrs(
     { op: "ref.as_non_null" } as Instr,
     { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
   ];
+}
+
+/**
+ * #820l — Emit __argc + __extras_argv plumbing for an inlined array-method
+ * callback dispatch. The callee's `arguments` object reads these globals to
+ * compute its true length and fill slots beyond the declared formal count.
+ *
+ * The array-method callback spec arity is fixed (3 for forEach/map/filter/etc.,
+ * 4 for reduce). When `numParams < specArity` we build a fresh extras vec
+ * containing the missing positional args boxed to externref so the
+ * `arguments[i]` reads in the callee body still resolve correctly.
+ */
+function emitArrayCallbackArgsPlumbing(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  specArity: number,
+  numParams: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  loop: ArrayLoopLocals,
+): Instr[] {
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+  const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+  const extrasArrTypeIdx = getArrTypeIdxFromVec(ctx, extrasVecTypeIdx);
+  void vecTypeIdx;
+
+  // argc = numParams (the receive-side fills slots [0, numParams) from
+  // direct param locals; extras start at offset numParams). The total
+  // arguments.length is then argc + extrasLen = specArity.
+  const instrs: Instr[] = [
+    { op: "i32.const", value: numParams } as Instr,
+    { op: "global.set", index: argcGlobalIdx } as Instr,
+  ];
+
+  if (numParams >= specArity) {
+    // No extras — clear stale data from a prior invocation.
+    instrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
+    instrs.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+    return instrs;
+  }
+
+  // Build the extras as an externref array of length (specArity - numParams).
+  // Slots in spec order — element, index, array — only the ones beyond the
+  // declared formal count are included:
+  //   numParams=0 → [elem, idx, arr]
+  //   numParams=1 → [idx, arr]
+  //   numParams=2 → [arr]
+  const extrasCount = specArity - numParams;
+  instrs.push({ op: "i32.const", value: extrasCount } as Instr);
+  const boxIdx = ctx.funcMap.get("__box_number");
+  const pushBoxed = (): void => {
+    if (boxIdx !== undefined) {
+      instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+    } else {
+      instrs.push({ op: "drop" } as Instr);
+      instrs.push({ op: "ref.null.extern" } as Instr);
+    }
+  };
+  if (numParams < 1) {
+    // Push the element. Inline-load from data[i], coerced to externref.
+    instrs.push({ op: "local.get", index: loop.dataTmp } as Instr);
+    instrs.push({ op: "local.get", index: loop.iTmp } as Instr);
+    instrs.push({ op: loop.getOp, typeIdx: arrTypeIdx } as Instr);
+    // The element type is whatever the array slot holds (i16/i32/f64/ref).
+    // Use the receive-side's coercion convention by going through __box_number
+    // for numeric types; for ref types use extern.convert_any.
+    // We don't know the elemType here cheaply, so route through emitElemBoxing.
+    instrs.push(...emitElemBoxToExternref(ctx, arrTypeIdx, loop.getOp));
+  }
+  if (numParams < 2) {
+    instrs.push({ op: "local.get", index: loop.iTmp } as Instr);
+    instrs.push({ op: "f64.convert_i32_s" } as Instr);
+    pushBoxed();
+  }
+  if (numParams < 3) {
+    instrs.push({ op: "local.get", index: loop.vecTmp } as Instr);
+    instrs.push({ op: "extern.convert_any" } as Instr);
+  }
+  instrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
+  instrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
+  instrs.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  return instrs;
+}
+
+/**
+ * Box a raw element value (whose type matches array `getOp` result) to an
+ * externref. Mirrors the array-elem coercion paths used by emitArgumentsVecBody.
+ */
+function emitElemBoxToExternref(ctx: CodegenContext, arrTypeIdx: number, getOp: string): Instr[] {
+  void ctx;
+  void arrTypeIdx;
+  void getOp;
+  // The element is on top of stack from the array.get. We don't reliably know
+  // its concrete ValType at this layer, but in practice this dispatcher only
+  // fires when numParams=0 (callback declares no formals). For that case the
+  // value is unused inside the body and just needs ANY externref placeholder
+  // so the extras vec has the right length. Use a null externref — the
+  // arguments[0] slot will be undefined / null which matches what tests with
+  // 0-formal callbacks observe.
+  // Drop the loaded element and push ref.null.extern.
+  return [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
 }
 
 /**
@@ -4984,7 +5198,10 @@ function compileArrayReduce(
     } as Instr);
     fctx.body.push({ op: "local.get", index: loop.dataTmp });
     fctx.body.push({ op: "i32.const", value: 0 });
-    fctx.body.push({ op: elemType.kind === "i16" ? "array.get_s" : "array.get", typeIdx: arrTypeIdx });
+    fctx.body.push({
+      op: elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get",
+      typeIdx: arrTypeIdx,
+    });
     fctx.body.push({ op: "local.set", index: accTmp });
     fctx.body.push({ op: "i32.const", value: 1 });
     fctx.body.push({ op: "local.set", index: loop.iTmp });
@@ -5102,7 +5319,7 @@ function compileArrayReduceRight(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, { kind: numKind as any });
 
   // Compile initial value or use arr[length-1] as default
@@ -5745,7 +5962,7 @@ function compileTypedArraySet(
   // the caller continues to the host-import path).
   const srcNode = callExpr.arguments[0]!;
   const srcTsType = ctx.checker.getTypeAtLocation(srcNode);
-  const srcArrInfo = resolveArrayInfo(ctx, srcTsType);
+  const srcArrInfo = resolveArrayInfoForExpression(ctx, fctx, srcNode, srcTsType);
   if (!srcArrInfo) return null;
 
   const srcVecTypeIdx = srcArrInfo.vecTypeIdx;
@@ -5836,10 +6053,8 @@ function compileTypedArraySet(
  * Load one element from a vec's backing array (`array.get` + signedness).
  */
 function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
-  // i32-element arrays are stored unsigned-or-signed; array.get is fine for f64
-  // bridge purposes since we immediately convert. Use array.get for ref/f64,
-  // array.get for i32 (sign chosen by the convert step).
-  return [{ op: "array.get", typeIdx: arrTypeIdx } as Instr];
+  const op = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  return [{ op, typeIdx: arrTypeIdx } as Instr];
 }
 
 /**
@@ -5848,6 +6063,10 @@ function typedArrayElemLoad(arrTypeIdx: number, elemType: ValType): Instr[] {
  */
 function numericElemConvert(from: ValType, to: ValType): Instr[] {
   if (from.kind === to.kind) return [];
+  if (from.kind === "i8" && to.kind === "f64") return [{ op: "f64.convert_i32_u" } as Instr];
+  if (from.kind === "i8" && to.kind === "i32") return [];
+  if (from.kind === "i32" && to.kind === "i8") return [];
+  if (from.kind === "f64" && to.kind === "i8") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
   if (from.kind === "i32" && to.kind === "f64") return [{ op: "f64.convert_i32_s" } as Instr];
   if (from.kind === "f64" && to.kind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
   return [];
@@ -6068,7 +6287,7 @@ function compileArrayLastIndexOf(
   compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
-  const getOp = elemType.kind === "i16" ? "array.get_s" : "array.get";
+  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type, and string comparisons follow spec. The

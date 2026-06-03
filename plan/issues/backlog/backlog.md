@@ -2,6 +2,25 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Sprint 57 — acorn dogfood + backend-agnostic IR (2026-05-29)
+
+Architectural sprint (no pass-count target; zero-regression guard). Goals:
+[`self-hosting-dogfood`](../../goals/self-hosting-dogfood.md),
+[`backend-agnostic-ir`](../../goals/backend-agnostic-ir.md). Plan:
+[sprints/57.md](../sprints/57.md).
+
+Track 1 — acorn dogfood:
+- [#1710](../1710-acorn-dogfood-harness.md) — acorn harness: compile + validate + diff-AST vs node-acorn — high, medium, **ready (s57)**.
+- [#1711](../1711-acorn-failure-surface-triage.md) — triage harness surface → file sized child issues — high, medium, **ready (s57)**, depends on #1710.
+- [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **carried to sprint 59** (#1710/#1711 done; unblocked by #1745).
+- Prior blockers #1679/#1690/#1690b are **done**.
+
+Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
+- [#1713](../1713-ir-backend-emitter-trait-seam.md) — BackendEmitter trait + WasmGC bias audit + WasmGcEmitter (pure refactor, zero conformance delta) — high, hard, **ready (s57), needs arch spec**.
+- [#1714](../1714-ir-two-backend-proof-linear.md) — lower one IR node kind to BOTH WasmGC + linear via the trait (primary proof) — high, hard, **backlog→ready** after #1713.
+- [#1715](../1715-ir-bytecode-proof-point.md) — minimal bytecode emitter + dispatch loop for an IR subset (stretch proof) — medium, hard, **backlog→ready** after #1713.
+- Feeds [#1584](../1584-wasm-gc-native-interpreter.md) (in-Wasm bytecode interpreter) — gated on both tracks + #1712.
+
 ## Standalone (--target wasi) host-import audit (2026-05-25) — goal `standalone-mode`
 
 Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.
@@ -10,15 +29,13 @@ Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--targ
 - [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
 - [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
 - [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
-- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, ready (after #1666).
+- [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, **ready (sprint 58; after #1666)**.
 
 ## Harvest 2026-05-24b (fixable test262 compile-error causes — CE decomposition)
 
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
 528 `invalid Wasm binary` CEs were sub-clustered by validator error; sub-causes
 already enumerated in #1522 / #1543 / #1556 are not re-filed.
-
-
 ## Harvest 2026-05-24 (new issues from test262 error analysis)
 
 - [#1591](1591-class-elements-same-line-multi-definition.md) — class/elements same-line / stacked member definitions lost or reordered — **~294 fails**, high priority (formerly 779b)
@@ -34,6 +51,36 @@ From the dev-1553b destructuring-lane verification sweep.
 
 - [#1658](../1658-destructured-function-param-default-not-applied.md) — Destructured/scalar **function-parameter** default not applied: returns 30 where 40 is expected on the real runtime (distinct from the object/array decl-mode #1553b/#1553d which are done) — high, medium, **ready**. NOT currently caught by CI (see #1659); depends on #1659 for gating.
 - [#1659](../1659-ci-equivalence-tests-not-run.md) — CI does not run `tests/equivalence/` (OOMs in runner) so genuine equivalence regressions (e.g. #1658) land silently. Options: shard like test262 / constrained workers / `--no-threads` / separate scheduled job. Sub-item: fix `__extern_get` harness-fidelity gap in `tests/equivalence/helpers.ts` so the suite runs clean — high, medium, **ready**. Gates CI-visibility of #1658.
+
+## CI quality gate hardening (2026-06-01)
+
+- [#1771](../1771-prepush-issue-integrity-committed-tree.md) — Pre-push issue integrity must check the committed tree so dangling `depends_on` edges cannot be masked by uncommitted sibling issue files — medium, easy, **DONE (sprint 58)**.
+- [#1773](../1773-generate-graph-data-in-ci-and-labs.md) — Generate `website/public/graph-data.json` in CI/build output and publish the snapshot to labs instead of tracking the generated JSON in public source — medium, easy, **DONE (sprint 58)**.
+
+## Landing page / conformance dashboard UX (2026-06-02)
+
+- [#1777](../1777-landing-es-edition-slider-2026-notch-thumb-offset.md) — landing page ES edition slider shows ES2026 as a published notch and the thumb drifts right of ticks while dragging — medium, easy, **ready (sprint 59)**.
+- [#1778](../1778-landing-standalone-test262-pass-rate-real-number.md) — landing page JS-host toggle should show the real standalone-mode test262 pass rate instead of a scaled estimate — medium, medium, **DONE (sprint 58)**.
+
+## Standalone test262 root-cause refresh (2026-06-02)
+
+From the full standalone JSONL published in `loopdive/js2wasm-baselines`
+commit `b4684d8f97a462c6414716aea46f31b67f48b959` and mapped in #1781.
+Existing high-volume root causes were updated in their owning issue files;
+only one new root-cause issue was needed.
+
+- [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
+
+## IR / allowJs parity follow-ups (2026-06-03)
+
+- [#1783](../1783-ir-js-ts-native-messaging-wasm-parity.md) — IR inference parity: native-messaging `.js` and `.ts` emit divergent WASI Wasm; JS path boxes numeric values and loses numeric template interpolation despite valid WASI output — medium, medium, **ready (backlog)**; follow-up to #1768/#389.
+
+## TypedArray packed-integer follow-ups (2026-06-03)
+
+- [#1784](../1784-typedarray-packed-lane-storage.md) — Generalize TypedArray storage to packed WasmGC lanes: `i8`/`i16`/`i32`/`f32`/`f64` backing instead of the legacy f64 representation for all numeric typed arrays — medium, hard, **ready (backlog)**; follow-up to #1767/#389.
+- [#1785](../1785-typedarray-element-metadata.md) — TypedArray element metadata for signedness, clamping, storage lanes, and load/store behavior so codegen stops inferring semantics from vec-key strings — high, hard, **ready (backlog)**; unlocks #1784/#1786.
+- [#1786](../1786-wrapexports-packed-typedarray-abi.md) — `wrapExports` ABI support for packed TypedArray vectors at the JS-host boundary, replacing the f64-only allocator/mutator assumption — medium, hard, **ready (backlog)**; follow-up to #1700/#1784.
+- [#1787](../1787-packed-typedarray-semantics-regressions.md) — Regression coverage for packed TypedArray integer semantics: unsigned/signed reads, clamping, and invalid `array.get` guards — medium, medium, **ready (backlog)**; test guardrails for #1784/#1785.
 
 ## Sprint 55 — repo structure / website (2026-05-24)
 
@@ -79,3 +126,50 @@ both others); #1653 is the keystone for the read side + continuous loop.
 - [#1564](1564-toNumeric-symbol-throws-typeError.md) — ToNumeric: Symbol → TypeError — ~12 fails, easy
 
 - [#1600](1600-finalizationregistry-host-delegate-noop-stub.md) — FinalizationRegistry host-delegate (JS mode, like WeakRef) + no-op standalone stub; clears ~12 CEs. Faithful standalone finalization stays out of scope (→ #1101).
+
+## Test262 triage — untracked failure causes (PO, 2026-05-29)
+
+New issues from a fresh main-baseline (`.test262-cache/test262-current.jsonl`,
+48,117 records) root-cause triage. Dedup'd against all open issues; clusters
+already covered by open issues (dstr WasmGC type-mismatch → #1556/#1623;
+Promise non-constructor → #1528/#1694; Set set-like → #1627/#1646/#1674; bind
+fidelity → #1463) were NOT re-filed.
+
+- [#1716](../1716-spec-gap-toprimitive-residual-object-property-key-coercion.md) — **RESIDUAL of done #1090/#1319/#1525**: `Cannot convert object to primitive value` still thrown in 111 paths (Object property-key + String/RegExp/JSON/Date `this`-value coercion) — **high**, medium, **ready**
+- [#1717](../1717-arraybuffer-prototype-slice-not-implemented.md) — `ArrayBuffer.prototype.slice` not implemented (`slice is not a function`, 17 fails) — medium, medium, **ready**
+- [#1718](../1718-iterator-sequencing-helpers-concat-zip-flatmap.md) — Iterator sequencing helpers (`Iterator.concat`/`zip`/`zipKeyed`) + `Iterator.prototype.flatMap` not implemented (101 fails; distinct from done #1340) — medium, hard, **ready**
+- ~~[#1719](../1719-array-destructuring-ignores-overridden-array-prototype-iterator.md) — Array destructuring ignores overridden `Array.prototype[Symbol.iterator]` (`items[Symbol.iterator]` must be a function, 71 fails)~~ — **DONE** 2026-05-30 (CPR read-drive across decl/for-of/param/assignment, PRs #963/#968/#976). Follow-ups: #1749 (spread), #1750 (TS-cast form).
+
+### ES3 / edition-0 conformance → Sprint 57 (Track 3)
+
+- [#1720](../1720-es3-incdec-reference-evaluation-order-null-base.md) — ES3: prefix/postfix inc-dec reference evaluated once before null deref (`base[prop()]++`, sputnik S11.x, ~10 fails) — medium, medium, **ready (sprint 57)**
+- [#1721](../1721-es3-subclass-function-object-instanceof.md) — ES3 (residual of #1455): `class extends Function`/`extends Object` instanceof returns false (4 fails) — medium, medium, **ready (sprint 57)**
+- [#1722](../1722-es3-assignmenttargettype-early-syntaxerror.md) — ES3: AssignmentTargetType early SyntaxError not raised (yield/arrow as assignment target, 4 fails) — low, medium, **ready (sprint 57)**
+- [#1511](../1511-spec-gap-arguments-object-mapped-and-trailing-comma.md) — **MOVED to sprint 57** (was sprint 52): arguments object mapped semantics / descriptors / trailing-comma length — covers the ES3 mapped-arguments cluster (~19 edition-0 fails) — high, medium, **review**
+- [#1757](../1757-async-compile-api-migration.md) — Migrate public `compile()` API to async (embed binaryen via await import; follow-up to #1756/#986) — **BREAKING**, ~1675 sites/761 files, medium, hard, **in-progress** [SENIOR-DEV]
+
+### Platform / Component Model & runtime (from GitHub #389)
+
+- [#1751](../1751-wit-generator-incomplete-world-package-imports.md) — WIT generator emits an incomplete world: hardcoded `local:module` package + no `import` side (vs `wasm-tools`-extracted component WIT) — medium, medium, **DONE (sprint 58)**
+- [#1752](../1752-textencoder-textdecoder-runtime-api.md) — `TextEncoder`/`TextDecoder` runtime API (UTF-8, standalone + WASI; builds on #1588) — medium, medium, **DONE (sprint 58)**
+- [#1754](../1754-build-from-repo-loopdive-js2-unresolved.md) — Build-from-repo `packages/index.js` re-exports unresolved `@loopdive/js2` — medium, medium, **ready (backlog)**
+- [#1779](../1779-wit-generator-wasm-tools-roundtrip-parity.md) — Follow-up for #1751: WIT generator `wasm-tools` round-trip parity check — medium, medium, **ready (backlog)**
+- [#1780](../1780-textencoder-encodeinto-standalone-wasi.md) — Follow-up for #1752: `TextEncoder.encodeInto` support for standalone/WASI — medium, medium, **ready (backlog)**
+- [#1753](../1753-native-messaging-64mib-chunked-streaming.md) — Native-messaging host: 64 MiB read/write via ≤1 MiB chunked streaming (on the byte-native loop; builds on #1655) — medium, medium, **DONE (sprint 58)**
+- [#1755](../1755-uint8array-arraybuffer-generic-annotation.md) — `Uint8Array<ArrayBuffer>` generic type annotation not accepted (from GitHub #389) — medium, medium, **DONE (sprint 58)**
+- [#1759](../1759-wasi-native-number-to-string-bridge-gap.md) — WASI `process.stderr.write` numeric-template → native number→string bridge gap (from GitHub #389) — medium, medium, **DONE (sprint 58)**
+- [#1765](../1765-nullable-number-alias-narrowing-byte-assignment.md) — Nullable `number | null` sentinel not narrowed through a boolean alias before typed-array byte assignment (from GitHub #389, 2026-06-01) — medium, medium, **DONE (sprint 58)**
+- [#1766](../1766-process-stdout-write-drain-backpressure-api.md) — Node-style `process.stdout.write` backpressure / `once("drain")` pattern not supported; Preview-1 direct `fd_write` `write()`→`true` + no-op `once("drain")` shim done, full async helper still blocked (from GitHub #389, 2026-06-01) — medium, hard, **blocked (backlog)** on #1042/#1326/#1575
+- [#1772](../1772-edgejs-node-wasi-shim-spike.md) — Spike edge.js as a separate Node API module / WASI shim layer for imported `node:process`-style compatibility instead of accumulating host API cases inline in the compiler — medium, medium, **backlog**
+- [#1769](../1769-generalize-nullable-primitive-unions.md) — Generalize nullable primitive union lowering and narrowing beyond the narrow `number | null` typed-array byte-write fix: sentinel-preserving representation plus reusable non-null flow proofs for arithmetic, calls, returns, and writes — medium, hard, **DONE (sprint 58)**, follow-up to #1765
+- [#1767](../1767-native-messaging-64mib-memory-growth.md) — 64 MiB native-messaging stress run now streams continuations without staging the full request; guarded wasmtime 64x array run peaked at 36.1 MiB RSS (from GitHub #389, 2026-06-01) — high, hard, **DONE (sprint 58)**
+- [#1768](../1768-allowjs-native-messaging-sendmessage-invalid-wasm.md) — Plain `.js` / allowJs native-messaging `sendMessage` compiles but emits invalid WASI wasm (`unknown global`, earlier `expected externref, found f64`) — high, medium, **DONE (sprint 58)**
+- [#1774](../1774-wasi-preview3-async-stream-semantics.md) — WASI 0.3 / Preview 3 async stream semantics for Node stdout/stderr: map `Writable.write()` backpressure, `drain`, callbacks, and errors onto component-model `stream<u8>` / `future` shapes when that backend exists (follow-up from PR #1016 comment, 2026-06-01) — medium, hard, **ready (backlog)**, depends on #1042/#1326/#1575
+
+### String-hash warm perf — levers carved from #1746 umbrella (2026-05-31)
+
+Native differential (PR #997) found the string **build** loop is ~99% of warm wall
+time (the i32 hash path lever is DONE and already faster/char than V8). Two sized levers:
+
+- [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready (sprint 59)**
+- [#1762](../1762-linear-memory-string-backing-build-hash-hot-path.md) — Linear-memory string backing for the build/hash hot path — drop the WasmGC `(array i16)` GC barrier (strategic ceiling; dual-backend like #679/#682/#1714) — **high**, hard, **ready, likely needs arch spec**

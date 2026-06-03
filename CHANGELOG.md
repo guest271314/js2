@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Added: relocatable standalone CLI bundle (#1775, GH #986 follow-up)
+
+- Added `pnpm run build:standalone-cli`, which writes
+  `dist/js2wasm-standalone.mjs` for `deno compile` / `bun build --compile`
+  workflows. This build bundles the core compiler dependencies and injects
+  TypeScript's `lib.*.d.ts` files into the existing bundled-lib hook, so the
+  generated file does not need to stay next to `node_modules/typescript/lib`.
+- Standalone bundles now get the package version injected at build time, so
+  `--version` does not rely on `../package.json` after the file is moved.
+- Binaryen is now an optional peer/dev dependency and is no longer bundled into
+  the standalone CLI artifact; `-O` can use an installed `binaryen` package or a
+  `wasm-opt` binary on PATH, and the emitted `.wasm` can be optimized afterward.
+- The standalone docs now recommend `--minify`, which brings the no-Binaryen
+  bundle down to roughly 8.5 MB before native runtime embedding.
+
+### Breaking: `compile()` API is now async (#1757)
+
+- The public compiler entry points — `compile`, `compileMulti`, `compileFiles`,
+  `compileToWat`, `compileProject`, and `createIncrementalCompiler().compile`
+  (plus the lower-level `compileSource` / `compileMultiSource` /
+  `compileFilesSource`) — now return a `Promise`. **Every caller must `await`
+  them.** A synchronous `compileSourceSync` (no Binaryen optimization) is
+  retained for the few contexts that cannot await (the `eval` host shim).
+- **Why:** the optional Binaryen optimizer now loads via
+  `await import("binaryen")` instead of a synchronous `require`. Binaryen ships
+  a top-level `await` that a sync `require` cannot load, which is what blocked
+  embedding it in a `bun build --compile` / `deno compile` standalone binary
+  (GH #986). With the async path the optimizer is bundled and the single-file
+  binary runs `--optimize` with Binaryen embedded — no `wasm-opt` on `PATH`
+  required. Follow-up to the #1756 `createRequire` stopgap.
+
+  Migration: `const r = compile(src)` → `const r = await compile(src)`.
+
 ### Repository rename
 
 - The repo has been renamed `loopdive/js2wasm` → `loopdive/js2`.

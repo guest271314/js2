@@ -15,7 +15,6 @@ goal: platform
 sprint: 45
 depends_on: [1169e]
 required_by: [1182, 1183]
-pr: 67
 merged: 2026-04-27
 origin: surfaced from #1169e foundation PR (#63) — the IR infrastructure for slot/vec/forof.vec landed but the AST→IR bridge was deferred
 related: [1169e, 1169f, 1169g, 1169h]

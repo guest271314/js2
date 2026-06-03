@@ -56,6 +56,9 @@ export interface ImportDescriptor {
   intent: ImportIntent;
 }
 
+export type { ExportSignature, TypedArrayKind } from "./ir/types.js";
+import type { ExportSignature } from "./ir/types.js";
+
 export interface CompileResult {
   /** Wasm binary with GC proposal */
   binary: Uint8Array;
@@ -84,6 +87,18 @@ export interface CompileResult {
   /** Whether the source has top-level executable statements (module init code) */
   hasTopLevelStatements: boolean;
   /**
+   * Per-export TypedArray classifications (#1700). Surfaced so
+   * {@link wrapExports} can marshal `Uint8Array` (and other TypedArray)
+   * params/results across the JS↔Wasm boundary — the Wasm signature is
+   * ambiguous (`Uint8Array` and `number[]` share the same `(ref null $Vec[f64])`
+   * lowering), so we expose the TS-level distinction as metadata.
+   *
+   * Only present (and even then, possibly an empty object) when at least
+   * one exported function has a TypedArray param or return. Forward the
+   * value to `wrapExports(exports, { signatures: result.exportSignatures })`.
+   */
+  exportSignatures?: Record<string, ExportSignature>;
+  /**
    * Ready-to-pass JS-host import object for default/JS-host mode (#1667).
    *
    * In default mode the compiled binary needs host imports (`env.*`,
@@ -92,7 +107,7 @@ export interface CompileResult {
    * into a single object the caller passes directly:
    *
    * ```js
-   * const r = compile(src);
+   * const r = await compile(src);
    * const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
    * ```
    *
@@ -186,7 +201,8 @@ export interface CompileOptions {
   skipSemanticDiagnostics?: boolean;
   /** Generate a WIT (WebAssembly Interface Types) file from exported functions.
    *  When set, the result will include a `wit` field with the WIT interface definition.
-   *  Value can be true (use defaults) or an object with packageName/worldName options. */
+   *  Value can be true (derive package name from fileName/moduleName) or an object with
+   *  packageName/worldName options. */
   wit?: boolean | { packageName?: string; worldName?: string };
   /** Run Binaryen wasm-opt post-processing on the output binary (default: false).
    *  Requires either the 'binaryen' npm package or wasm-opt on PATH.
@@ -232,7 +248,7 @@ import { buildImports as buildImportsRuntime } from "./runtime.js";
  *
  * @example
  * ```ts
- * const result = compile(`
+ * const result = await compile(`
  *   export function add(a: number, b: number): number {
  *     return a + b;
  *   }
@@ -243,8 +259,8 @@ import { buildImports as buildImportsRuntime } from "./runtime.js";
  * }
  * ```
  */
-export function compile(source: string, options?: CompileOptions): CompileResult {
-  return withImportObject(compileSource(source, options));
+export async function compile(source: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileSource(source, options));
 }
 
 /**
@@ -289,12 +305,12 @@ function withImportObject(result: CompileResult): CompileResult {
  * Compile multiple TypeScript source files into a single Wasm GC binary.
  * Supports cross-file imports: `import { foo } from "./bar"`.
  */
-export function compileMulti(
+export async function compileMulti(
   files: Record<string, string>,
   entryFile: string,
   options?: CompileOptions,
-): CompileResult {
-  return withImportObject(compileMultiSource(files, entryFile, options));
+): Promise<CompileResult> {
+  return withImportObject(await compileMultiSource(files, entryFile, options));
 }
 
 /**
@@ -310,17 +326,17 @@ export function compileMulti(
  * @example
  * ```ts
  * // Given: src/main.ts imports from src/utils.ts
- * const result = compileFiles("src/main.ts");
+ * const result = await compileFiles("src/main.ts");
  * // TypeScript resolves src/utils.ts automatically
  * ```
  */
-export function compileFiles(entryPath: string, options?: CompileOptions): CompileResult {
-  return withImportObject(compileFilesSource(entryPath, options));
+export async function compileFiles(entryPath: string, options?: CompileOptions): Promise<CompileResult> {
+  return withImportObject(await compileFilesSource(entryPath, options));
 }
 
 /** Only WAT text (debug) */
-export function compileToWat(source: string): string {
-  const result = compileSource(source, { emitWat: true });
+export async function compileToWat(source: string): Promise<string> {
+  const result = await compileSource(source, { emitWat: true });
   return result.wat;
 }
 
@@ -341,7 +357,7 @@ export function compileToObject(source: string, options?: CompileOptions) {
  * @param entryFile - Absolute or relative path to the entry .ts file
  * @param options - Compile options including resolve and externals settings
  */
-export function compileProject(entryFile: string, options?: CompileOptions): CompileResult {
+export async function compileProject(entryFile: string, options?: CompileOptions): Promise<CompileResult> {
   const resolvedEntry = path.resolve(entryFile);
   const rootDir = path.dirname(resolvedEntry);
 
@@ -368,7 +384,7 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
   // Entry file key
   const entryKey = `./${path.relative(rootDir, resolvedEntry)}`;
 
-  return withImportObject(compileMultiSource(files, entryKey, effectiveOptions));
+  return withImportObject(await compileMultiSource(files, entryKey, effectiveOptions));
 }
 
 /**
@@ -388,12 +404,12 @@ export function compileProject(entryFile: string, options?: CompileOptions): Com
  * ```
  */
 export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
-  compile: (source: string, options?: CompileOptions) => CompileResult;
+  compile: (source: string, options?: CompileOptions) => Promise<CompileResult>;
   dispose: () => void;
 } {
   const service = new IncrementalLanguageService();
   return {
-    compile(source: string, options?: CompileOptions): CompileResult {
+    compile(source: string, options?: CompileOptions): Promise<CompileResult> {
       return compileSource(source, { ...defaultOptions, ...options }, service);
     },
     dispose() {
@@ -403,6 +419,7 @@ export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
 }
 
 export { getBarePackageName, ModuleResolver, resolveAllImports } from "./resolve.js";
+export { preloadLibFiles } from "./checker/index.js";
 export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";

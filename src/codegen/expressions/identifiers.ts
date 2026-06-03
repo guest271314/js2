@@ -3,9 +3,18 @@
  * Identifier resolution, TDZ analysis, and instanceof handling.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isBooleanType, isHeterogeneousUnion, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import {
+  getNullablePrimitiveInfo,
+  isBigIntType,
+  isBooleanType,
+  isHeterogeneousUnion,
+  isNumberType,
+  isStringType,
+  type NullablePrimitiveInfo,
+  type NullablePrimitiveKind,
+} from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
-import { emitFuncRefAsClosure } from "../closures.js";
+import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -26,6 +35,7 @@ import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../built
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
+import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
 
 /**
  * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
@@ -266,6 +276,47 @@ function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
+function getDeclaredNullablePrimitiveInfo(ctx: CodegenContext, id: ts.Identifier): NullablePrimitiveInfo | null {
+  const symbol = ctx.checker.getSymbolAtLocation(id);
+  const decl = symbol?.valueDeclaration;
+  if (!decl) return null;
+  if (ts.isVariableDeclaration(decl) || ts.isParameter(decl)) {
+    return getNullablePrimitiveInfo(ctx.checker.getTypeAtLocation(decl));
+  }
+  return null;
+}
+
+function emitNullablePrimitiveUnbox(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  primitiveKind: NullablePrimitiveKind,
+): ValType | null {
+  if (primitiveKind === "string") return null;
+  addUnionImports(ctx);
+  if (primitiveKind === "number") {
+    const funcIdx = ctx.funcMap.get("__unbox_number");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "f64" };
+    }
+  }
+  if (primitiveKind === "boolean") {
+    const funcIdx = ctx.funcMap.get("__unbox_boolean");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i32" };
+    }
+  }
+  if (primitiveKind === "bigint") {
+    const funcIdx = ctx.funcMap.get("__to_bigint");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i64", bigint: true };
+    }
+  }
+  return null;
+}
+
 /**
  * Compile-time TDZ elision for top-level let/const variables (#906).
  *
@@ -394,6 +445,11 @@ export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, n
 function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
   const name = id.text;
 
+  const withBinding = findWithBinding(fctx, name);
+  if (withBinding) {
+    return emitWithBindingGet(fctx, withBinding);
+  }
+
   // #1210: string-builder bindings are stored as a (buf, len, cap, mat)
   // tuple of synthetic locals. The binding name is intentionally NOT in
   // `localMap` — read access materializes a NativeString lazily and caches
@@ -453,6 +509,13 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;
+      if (fctx.narrowedNonNull?.has(name)) {
+        const declaredNullable = getDeclaredNullablePrimitiveInfo(ctx, id);
+        if (declaredNullable) {
+          const unboxed = emitNullablePrimitiveUnbox(ctx, fctx, declaredNullable.primitiveKind);
+          if (unboxed) return unboxed;
+        }
+      }
     }
 
     // Null narrowing: if this variable is known non-null (e.g. inside `if (x !== null)`),
@@ -673,7 +736,22 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
         );
       }
     }
-    // Wrap the plain function in a closure struct
+    // (#1340) For captureless top-level function decls, emit a cached
+    // singleton closure so identity is preserved across textual occurrences.
+    // Without this, `foo === foo` is false and any sidecar write keyed by the
+    // per-site struct (e.g. `foo.prototype = X`) does not round-trip — which
+    // is what made the test262 Iterator.prototype.* shim show up as
+    // misclassified "wasm_compile" errors. Captures must be filled at the
+    // construction site (per-instance), so we only take the cached path when
+    // no captures are required.
+    const nestedCaptures = ctx.nestedFuncCaptures.get(name);
+    if (!nestedCaptures || nestedCaptures.length === 0) {
+      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx);
+      if (cachedRefType) {
+        return cachedRefType;
+      }
+    }
+    // Fallback: per-site closure struct (with captures, or if cache emit failed).
     const refType = emitFuncRefAsClosure(ctx, fctx, name, funcRefIdx);
     if (refType) return refType;
   }
@@ -762,6 +840,14 @@ function narrowTypeToUnbox(ctx: CodegenContext, fctx: FunctionContext, narrowedT
       return { kind: "i32" };
     }
   }
+  if (isBigIntType(narrowedType)) {
+    addUnionImports(ctx);
+    const funcIdx = ctx.funcMap.get("__to_bigint");
+    if (funcIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx });
+      return { kind: "i64", bigint: true };
+    }
+  }
   // String stays as externref — no unboxing needed
   if (isStringType(narrowedType)) return null;
 
@@ -845,11 +931,16 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
       if (builtinParent !== undefined) {
         return isBuiltinSubtype(builtinParent, ctorName);
       }
-      return false;
+      // (#1729) A user-class instance with no builtin parent is still an
+      // `instanceof Object` (its prototype chain ends at Object.prototype).
+      // Any other builtin RHS is false (a plain user struct isn't a Map/Array/…).
+      return ctorName === "Object";
     }
     // 2. LHS is itself a built-in (or matches the constructor's instance-type
-    //    name) — apply hierarchy reasoning.
+    //    name) — apply hierarchy reasoning. Every builtin instance is also an
+    //    `instanceof Object` (#1729), so Object is a universal yes here.
     if (isBuiltinTypeName(lhsSymbolName)) {
+      if (ctorName === "Object") return true;
       return isBuiltinSubtype(lhsSymbolName, ctorName);
     }
   }
@@ -859,6 +950,37 @@ function tryStaticInstanceOf(ctx: CodegenContext, expr: ts.BinaryExpression, cto
   //    TS type may be the wrapper, so we leave that to runtime.)
   if (isNumberType(leftTsType) || isBooleanType(leftTsType)) {
     return false;
+  }
+
+  // 4. (#1729) `<obj> instanceof Object` is true for every object value
+  //    (§7.3.20 OrdinaryHasInstance walks the prototype chain to
+  //    Object.prototype). WasmGC-struct-backed values — object literals,
+  //    arrays, tuples — are not real host objects, so the runtime
+  //    `__instanceof` falls through to a spurious `false`. Short-circuit to
+  //    `true` when the RHS is `Object` and the LHS is a provably non-primitive
+  //    object type. Guarded against primitives / null / undefined / any /
+  //    unknown so only definite objects qualify. (User-class instances are
+  //    handled by the `classTagMap` branch above, which returns before here.)
+  if (ctorName === "Object") {
+    const f = leftTsType.flags;
+    const isPrimitiveOrIndeterminate =
+      (f &
+        (ts.TypeFlags.Any |
+          ts.TypeFlags.Unknown |
+          ts.TypeFlags.NumberLike |
+          ts.TypeFlags.StringLike |
+          ts.TypeFlags.BooleanLike |
+          ts.TypeFlags.BigIntLike |
+          ts.TypeFlags.ESSymbolLike |
+          ts.TypeFlags.Null |
+          ts.TypeFlags.Undefined |
+          ts.TypeFlags.Void |
+          ts.TypeFlags.Never)) !==
+      0;
+    // Object literals, arrays, and tuples all carry the Object type flag.
+    if (!isPrimitiveOrIndeterminate && (f & ts.TypeFlags.Object) !== 0) {
+      return true;
+    }
   }
 
   return undefined;

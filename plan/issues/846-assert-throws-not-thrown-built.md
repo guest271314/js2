@@ -1,16 +1,17 @@
 ---
 id: 846
 title: "assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests)"
-status: ready
+status: in-review
 created: 2026-03-28
-updated: 2026-04-28
+updated: 2026-06-03
 priority: critical
 feasibility: hard
 reasoning_effort: max
 goal: core-semantics
-sprint: Backlog
+sprint: 58
 parent: 779
 test262_fail: 2799
+pr: 1098
 ---
 # #846 -- assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests)
 
@@ -279,3 +280,206 @@ localized fix.
 are the already-dispatched child issues (#1594, #1592, #1553, #820 family).
 The only genuinely new, isolated micro-bucket is array-`length` RangeError
 (~28) — too small to be worth a standalone PR under the ≥200 target.
+
+## Slice landed (sd-1472, 2026-06-03): RequireObjectCoercible for empty/nested object patterns
+
+### Fresh re-profile vs the stale 2026-05-21/05-27 notes
+Most of the overlapping child issues cited above are now **done** on main
+(#1594, #1592, #1553, #1543, #1630), so the residual #846 surface shifted.
+Re-profiling the 2026-05-28 baseline jsonl found **1,282** remaining
+`assert.throws(ErrType,…)`-not-thrown failures (down from 2,799). Within the
+destructuring slice there is one clean, spec-localized root cause worth a
+standalone PR:
+
+**Destructuring a `null`/`undefined` value through an EMPTY object pattern did
+not throw.** Confirmed via probe: `let {} = null`, `let {} = undefined`,
+`const {} = null`, `for (const {} of [null])`, and the nested form
+`{ w: {} } = { w: null }` all silently succeeded; `let {a} = null` (non-empty)
+already threw correctly.
+
+### Root cause (WHY)
+Per **ECMA-262 8.6.2 BindingInitialization**, the production
+`BindingPattern : ObjectBindingPattern` runs `Perform ?
+RequireObjectCoercible(value)` as **step 1** — *before* the inner
+`ObjectBindingPattern : { }` rule (which "Return unused"). So the coercibility
+check fires even for `{}`. The codegen had a confidently-wrong comment
+(introduced under #225 / #1553c) claiming the empty pattern performs "no
+property access and therefore no RequireObjectCoercible", and short-circuited
+the empty object-binding-decl path (`compileExternrefObjectDestructuringDecl`)
+*before* the null/undefined guard. The fixture
+`statements/const/dstr/obj-init-null.js` documents the trap: its `info:` block
+cites `ObjectBindingPattern : { } → Return NormalCompletion(empty)` yet asserts
+a TypeError — because the *outer* `BindingPattern` wrapper does the
+RequireObjectCoercible. The parameter path (`destructureParamObject`, guard at
+the externref branch before its empty short-circuit) and the assignment path
+(`emitExternrefAssignDestructureGuard`, fixed under #1701) were already correct;
+only the binding-declaration + the empty-nested paths were not.
+
+### Changes (2 files, surgical)
+1. `src/codegen/statements/destructuring.ts` —
+   `compileExternrefObjectDestructuringDecl`: emit
+   `emitExternrefDestructureGuard(tmpLocal)` (the existing null + JS-undefined
+   RequireObjectCoercible guard) before the empty-pattern short-circuit. Fixes
+   `let/const/var {} = null|undefined` AND the for-of binding-pattern path
+   (loops.ts routes for-of object binding patterns through this same helper).
+   The guard fires only for null/undefined, so coercible primitives
+   (`{} = 5`, `{} = "s"`) still pass — verified.
+2. `src/codegen/destructuring-params.ts` —
+   `destructureParamObjectExternref` nested-element handler: drop the
+   `element.name.elements.length > 0` gate so the nested coercibility guard
+   also fires for empty nested patterns (`{ w: {} } = { w: null }`). Spec-clean:
+   the guard is null/undefined-only.
+
+### Considered and deliberately deferred (higher risk, separate root cause)
+- **Array-assignment non-iterable** (`for ([] of [1])`, `[] = 5`): needs a
+  `GetIterator` probe (calling `value[Symbol.iterator]()` then IteratorClose)
+  on the empty/elision array path. The empty-array path intentionally skips
+  `__array_from_iter` to avoid advancing generators; adding iterability without
+  that side effect is a distinct change. ~12 for-of + a few assignment tests.
+- **Typed-struct static-`null` nested** (`for (var {w:{x}=d} of [{w:null}])`):
+  the `[{w:null}]` literal is constant-folded and the inner destructure is
+  optimized away before any guard site; chasing this through the
+  `compileForOfDestructuring` typed/vec paths added **3 false "regressions"**
+  in one attempt and zero validated wins, so it was reverted. ~6 tests.
+
+### Validation
+- New equivalence test `tests/equivalence/destructuring-require-object-coercible.test.ts`
+  (10 cases) — all pass.
+- Existing destructuring equivalence suites: 97/97 pass.
+- **Delta**: of 146 baseline-failing dstr-noncoercible candidates, **38 now
+  pass** (object RequireObjectCoercible family across const/let/var binding
+  decls, for-of object binding patterns, nested empty object patterns).
+- **Regressions**: 0 real. Broad sweeps via the test262 runner on
+  baseline-PASSING tests: 400-test dstr sample 392/400 (8 apparent failures all
+  reproduce on clean main HEAD = pre-existing baseline drift, `it.next is not a
+  function` / iterator-elision, unrelated to coercibility), 200/200
+  nested-pattern, 235/238 for-of-nested (the 3 `*-ary-init-iter-no-close` also
+  fail on clean main = drift). `tsc --noEmit` clean; `check:ir-fallbacks` OK.
+
+**Umbrella remains open** — this is one slice. Remaining mergeable buckets:
+array-assignment GetIterator, array-`length` RangeError (~28), and the
+descriptor-model work under #1630.
+
+## Slice 2 landed (sd-1472, 2026-06-03): array-pattern GetIterator on non-iterable primitives
+
+### Root cause (WHY, not just WHAT)
+ArrayAssignmentPattern (§13.15.5.2) and array BindingPattern
+initialization (§8.5.2/§8.5.3) BOTH begin with `GetIterator(value)`. A
+primitive number/boolean has no `[Symbol.iterator]`, so GetIterator throws a
+**TypeError**. The compiler had two distinct gaps here, and crucially the
+test262 `assert.throws(TypeError, fn)` callbacks run **inside the compiled
+program** and check `e instanceof TypeError` — so the thrown value has to be a
+real `__new_TypeError` *instance*, not an opaque string-payload exception.
+
+1. **`[a] = 5` (array-assignment destructuring, f64/i32 RHS)** —
+   `src/codegen/expressions/assignment.ts:~1219`. It already threw, but via
+   `emitThrowString("TypeError: value is not iterable")`, which produces a bare
+   string-payload Wasm exception. The runtime classifies that to a host
+   TypeError for the OUTER `assert.throws`, but an INNER `e instanceof
+   TypeError` (the common test262 shape) sees only a string ref and fails →
+   the test took the "wrong error type" branch. Fixed by switching to
+   `emitThrowTypeError` (emits the real `__new_TypeError` instance; has a
+   standalone in-module fallback via `emitWasiErrorConstructor` in no-JS-host
+   mode).
+
+2. **`for (let [x] of [1])` / `for ([] of [1])` (for-of array binding
+   pattern over numeric elements)** —
+   `src/codegen/statements/loops.ts`, the f64/i32 element branch of
+   `compileForOfDestructuring`'s ArrayBindingPattern case. This branch
+   **silently assigned `undefined` sentinels and never threw** — the worst
+   failure mode (no throw at all, the assertion's callback returns normally).
+   The element value (a number) is non-iterable, so GetIterator must throw.
+   The throw is now emitted **unconditionally before the element loop** so the
+   EMPTY-pattern form (`for ([] of [1])`) also throws — per spec GetIterator
+   runs before any binding element is read. Binding locals are still
+   `allocLocal`'d (so later body references type-check) but no longer assigned;
+   the throw makes the remainder of the iteration unreachable.
+
+### Why these are spec-safe (no false positives)
+- **Strings are iterable** and lower to a string ref / externref, so they take
+  a different branch — confirmed unaffected (`[c] = "ab"` and
+  `for ([c] of ["ab"])` still work).
+- **Object patterns** use RequireObjectCoercible, NOT GetIterator — numbers ARE
+  object-coercible, so `for ({x} of [1,2])` must NOT throw. The object-pattern
+  branch is untouched; verified it still no-throws.
+- f64/i32 element type only arises when the iterable yields numbers/booleans,
+  which are genuinely non-iterable, so throwing is never a false positive.
+- Stack-balanced: `emitThrowTypeError` is net-zero (push message externref →
+  `__new_TypeError` → `throw` consumes it).
+
+### Deliberately NOT touched (heeding the prior reverted attempt)
+The typed-struct static-`null` nested case remains out of scope — the prior
+attempt produced 3 false regressions and was reverted. The `any`-typed
+externref for-of path already routes through `__array_from_iter_n` (host
+GetIterator) and throws correctly, so it needed no change.
+
+### Validation
+- `tests/issue-846-slice2.test.ts` — 11 cases, all pass (real-TypeError-instance
+  assertions for `[a]=5`/null/undefined; string/array no-throw; for-of
+  array-pattern + empty-pattern throw; for-of object-pattern + tuples + arrays +
+  plain binding no-throw).
+- `tsc --noEmit` clean; `biome lint` clean on changed files.
+- Existing iterator-override / dstr suites (#1701, #1592, #1431, #1719 CPR/S1,
+  #1128 TDZ, generator-method-destructuring) — all green.
+- **Regressions: 0 real.** A 1,688-file dstr+for-of sweep showed 24 apparent
+  `compile_error` flips, but ALL reproduce as `pass` when run standalone — they
+  are single-process batch-state-pollution artifacts of the runner (shared
+  string pool / import caches across files), not regressions. Spot-checked 7
+  standalone: all pass. The 9 apparent "flips to pass" are stale-baseline drift
+  (already pass on clean HEAD too).
+
+## Slice 3 re-profile (sd-846-slice3, 2026-06-03): no localized win left — Option A already done
+
+Fresh profiling against the current `loopdive/js2wasm-baselines`
+`test262-current.jsonl` (48,117 entries, fetched 2026-06-03). Filtered to
+failures where the **failing assertion line itself** is an `assert.throws(...)`
+(not a `sameValue`/`compareArray` mislabeled by a coarser regex). Top
+not-thrown buckets and their disposition:
+
+| Bucket (failing `assert.throws` only) | Count | Disposition |
+|---|---|---|
+| `built-ins/Array/prototype` | 100 | see breakdown below |
+| `built-ins/Object/define{Property,Properties}` + `Object/create` | 104 | **descriptor model** — escalated #1630/#1631; all 104 are descriptor-conflict / array-`length` RangeError / non-object-descriptor (`ToPropertyDescriptor`), not non-object-1st-arg (that subset already throws) |
+| `built-ins/String/prototype` | 7 | ToPrimitive/Symbol coercion — overlaps done #1525/#1564 |
+| RequireObjectCoercible via `X.prototype.M.call(null/undefined)` | 9 | heterogeneous host-bridge dispatch (Function.prototype.call/apply, Object.prototype.hasOwnProperty/propertyIsEnumerable, String.prototype.concat) — one fix per dispatch path, no shared seam |
+
+**Array/prototype 100-fail breakdown** — the largest single area, but the
+top sub-clusters (reduce 11, reduceRight 10) are **`reduce`/`reduceRight` on a
+sparse / all-holes array with no initial value → TypeError**:
+- `15.4.4.21-8-c-1.js` (`new Array(10)`), `15.4.4.21-8-c-3.js` (`[1,2,3,4,5]`
+  then `delete` all elements), `15.4.4.21-5-*` (custom array-like with
+  `length` coerced to 0/null).
+- Confirmed via probe (`compileAndInstantiate`): `[].reduce(cb)` **already
+  throws** correctly (the `len === 0` guard at `array-methods.ts:5191-5198`
+  works), but `new Array(3).reduce(cb)` **returns `0`** instead of throwing —
+  because our dense WasmGC vec fills `new Array(3)` with three `0`/`NaN`
+  elements (`len = 3`), with no concept of "holes". Per ES §23.1.3.24 step 6,
+  reduce counts only *present* (HasProperty) elements, so all-holes ⇒ throw.
+  **Fixing this requires hole / sparse-array tracking** — the same dense-array
+  representation gap already escalated under **#1130** (accessor-getter
+  observation) and **#1592** (elision/over-consumption). Not a localized fix.
+- The remaining Array sub-buckets (splice/slice on frozen/non-extensible
+  target, concat on frozen target) need the **frozen-object model**, also
+  escalated under the descriptor-model work.
+
+**Callback type-check (team-lead's recommended Option A) is ALREADY DONE.**
+Verified by probe on both dispatch paths:
+- direct receiver: `[1,2,3].map(null)` → `TypeError: ... is not a function`;
+- `.call()` path: `Array.prototype.map.call(a, null)` / `forEach.call(a, 42)`
+  → TypeError.
+The shared emitter is `emitCallbackTypeCheck` (`array-methods.ts:78`), wired
+into filter/map/reduce/reduceRight/forEach/find/findIndex/some/every; the
+array-like `.call()` path routes non-closure callbacks to `__proto_method_call`
+which throws via the host. No further callback-validity work is needed.
+
+### Conclusion
+Slice 3 has **no implementation deliverable** — the recommended pattern is
+already shipped, and every remaining not-thrown sub-cluster of meaningful size
+is blocked on a representation/model gap (holes/sparse arrays → #1130/#1592;
+descriptor model → #1630/#1631; frozen-object model) or overlaps with
+already-done coercion issues (#1525/#1564/#820 family). This re-confirms the
+2026-05-27 profiling conclusion against fresher data. The umbrella's progress
+is gated on those representation issues, not on more silent-throw guards.
+Recommend the umbrella stay open but be **de-prioritised** until #1130/#1592
+(hole tracking) and #1630/#1631 (descriptor model) land, which will unblock the
+bulk of the residual not-thrown buckets at once.

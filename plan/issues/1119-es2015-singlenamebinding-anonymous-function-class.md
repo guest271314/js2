@@ -12,7 +12,6 @@ goal: core-semantics
 sprint: 44
 required_by: [1154]
 closed: 2026-04-23
-pr: —
 net_improvement: 0
 ---
 # #1119 — ES2015 SingleNameBinding anonymous function/class naming from destructuring context

@@ -26,7 +26,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -42,9 +42,25 @@ import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { detectStringBuilders } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
+import { compileNativeGeneratorFunction } from "./generators-native.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait, emitAsyncStateMachine } from "./async-cps.js";
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
+
+/**
+ * (#1042) Re-point a function to a func type with the same params but a new
+ * result list. Func types are interned/shared, so we cannot mutate the existing
+ * one in place (that would corrupt every other function with the same shape);
+ * instead intern a fresh type and reassign `func.typeIdx`. Used by the async
+ * CPS hook to switch an async function's result from its unwrapped value type
+ * to `externref` (it returns a Promise object).
+ */
+function rewriteFuncResultType(ctx: CodegenContext, func: WasmFunction, result: ValType): void {
+  const ft = ctx.mod.types[func.typeIdx];
+  if (!ft || ft.kind !== "func") return;
+  func.typeIdx = addFuncType(ctx, ft.params.slice(), [result]);
+}
 
 /** Set of instruction ops that disqualify a function body from inlining */
 export const INLINE_DISALLOWED_OPS = new Set([
@@ -846,78 +862,90 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   }
 
   if (isGenerator) {
-    // Generator function: eagerly evaluate body, collect yields into a JS array,
-    // then wrap it with __create_generator to return a Generator-like object.
-    // Body is wrapped in try/catch to defer thrown exceptions to first next() (#928).
-    const bufferLocal = allocLocal(fctx, "__gen_buffer", { kind: "externref" });
-    const pendingThrowLocal = allocLocal(fctx, "__gen_pending_throw", { kind: "externref" });
+    const nativeGenerator = ctx.nativeGenerators.get(func.name);
+    if (nativeGenerator) {
+      compileNativeGeneratorFunction(ctx, fctx, decl, nativeGenerator);
+    } else if (ctx.standalone || ctx.wasi) {
+      reportError(
+        ctx,
+        decl,
+        "Codegen error: native generator lowering currently supports only sequential numeric yields in standalone/WASI targets (#680). Recompile with a JS host target for complex generator shapes.",
+      );
+      fctx.body.push({ op: "ref.null.extern" });
+    } else {
+      // Generator function: eagerly evaluate body, collect yields into a JS array,
+      // then wrap it with __create_generator to return a Generator-like object.
+      // Body is wrapped in try/catch to defer thrown exceptions to first next() (#928).
+      const bufferLocal = allocLocal(fctx, "__gen_buffer", { kind: "externref" });
+      const pendingThrowLocal = allocLocal(fctx, "__gen_pending_throw", { kind: "externref" });
 
-    // Create buffer: __gen_buffer = __gen_create_buffer()
-    const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
-    fctx.body.push({ op: "call", funcIdx: createBufIdx });
-    fctx.body.push({ op: "local.set", index: bufferLocal });
-    fctx.body.push({ op: "ref.null.extern" });
-    fctx.body.push({ op: "local.set", index: pendingThrowLocal });
+      // Create buffer: __gen_buffer = __gen_create_buffer()
+      const createBufIdx = ctx.funcMap.get("__gen_create_buffer")!;
+      fctx.body.push({ op: "call", funcIdx: createBufIdx });
+      fctx.body.push({ op: "local.set", index: bufferLocal });
+      fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "local.set", index: pendingThrowLocal });
 
-    // Wrap the generator body in a block so that `return` statements inside
-    // the body can `br` out to the generator creation code instead of
-    // using the wasm `return` opcode (which would skip __create_generator).
-    // Use pushBody/popBody so the outer body stays reachable for global-index
-    // fixups when new string-constant imports are added during body compilation.
-    const savedGenBody = pushBody(fctx);
+      // Wrap the generator body in a block so that `return` statements inside
+      // the body can `br` out to the generator creation code instead of
+      // using the wasm `return` opcode (which would skip __create_generator).
+      // Use pushBody/popBody so the outer body stays reachable for global-index
+      // fixups when new string-constant imports are added during body compilation.
+      const savedGenBody = pushBody(fctx);
 
-    // Set generator return depth for correct `br` depth in nested contexts
-    fctx.generatorReturnDepth = 0;
+      // Set generator return depth for correct `br` depth in nested contexts
+      fctx.generatorReturnDepth = 0;
 
-    // Push a block label level so return can break out
-    fctx.blockDepth++;
-    for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!++;
-    for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]!++;
+      // Push a block label level so return can break out
+      fctx.blockDepth++;
+      for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!++;
+      for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]!++;
 
-    if (decl.body) {
-      hoistVarDeclarations(ctx, fctx, decl.body.statements);
-      hoistLetConstWithTdz(ctx, fctx, decl.body.statements);
-      hoistFunctionDeclarations(ctx, fctx, decl.body.statements);
-      for (const stmt of decl.body.statements) {
-        compileStatement(ctx, fctx, stmt);
+      if (decl.body) {
+        hoistVarDeclarations(ctx, fctx, decl.body.statements);
+        hoistLetConstWithTdz(ctx, fctx, decl.body.statements);
+        hoistFunctionDeclarations(ctx, fctx, decl.body.statements);
+        for (const stmt of decl.body.statements) {
+          compileStatement(ctx, fctx, stmt);
+        }
       }
+
+      fctx.blockDepth--;
+      for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!--;
+      for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]!--;
+      fctx.generatorReturnDepth = undefined;
+
+      // Restore outer body and wrap compiled body in a try/catch(block)
+      const bodyInstrs = fctx.body;
+      popBody(fctx, savedGenBody);
+
+      // Wrap generator body block in try/catch to capture exceptions as pending throw
+      const tagIdx = ensureExnTag(ctx);
+      const getCaughtIdx = ctx.funcMap.get("__get_caught_exception");
+      const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
+      const catchAllBody: Instr[] =
+        getCaughtIdx !== undefined
+          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+          : [];
+      fctx.body.push({
+        op: "try",
+        blockType: { kind: "empty" },
+        body: [{ op: "block", blockType: { kind: "empty" }, body: bodyInstrs }],
+        catches: [{ tagIdx, body: catchBody }],
+        catchAll: catchAllBody.length > 0 ? catchAllBody : undefined,
+      });
+
+      // Return __create_generator or __create_async_generator depending on async flag.
+      // Note: ctx.asyncFunctions excludes async generators (by design), so we check
+      // the AST node directly to detect async function* declarations.
+      const isAsyncGenerator = hasAsyncModifier(decl);
+      const createGenName = isAsyncGenerator ? "__create_async_generator" : "__create_generator";
+      const createGenIdx = ctx.funcMap.get(createGenName)!;
+      fctx.body.push({ op: "local.get", index: bufferLocal });
+      fctx.body.push({ op: "local.get", index: pendingThrowLocal });
+      fctx.body.push({ op: "call", funcIdx: createGenIdx });
+      // The externref Generator object is now on the stack as the return value
     }
-
-    fctx.blockDepth--;
-    for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!--;
-    for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]!--;
-    fctx.generatorReturnDepth = undefined;
-
-    // Restore outer body and wrap compiled body in a try/catch(block)
-    const bodyInstrs = fctx.body;
-    popBody(fctx, savedGenBody);
-
-    // Wrap generator body block in try/catch to capture exceptions as pending throw
-    const tagIdx = ensureExnTag(ctx);
-    const getCaughtIdx = ctx.funcMap.get("__get_caught_exception");
-    const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
-    const catchAllBody: Instr[] =
-      getCaughtIdx !== undefined
-        ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
-        : [];
-    fctx.body.push({
-      op: "try",
-      blockType: { kind: "empty" },
-      body: [{ op: "block", blockType: { kind: "empty" }, body: bodyInstrs }],
-      catches: [{ tagIdx, body: catchBody }],
-      catchAll: catchAllBody.length > 0 ? catchAllBody : undefined,
-    });
-
-    // Return __create_generator or __create_async_generator depending on async flag.
-    // Note: ctx.asyncFunctions excludes async generators (by design), so we check
-    // the AST node directly to detect async function* declarations.
-    const isAsyncGenerator = hasAsyncModifier(decl);
-    const createGenName = isAsyncGenerator ? "__create_async_generator" : "__create_generator";
-    const createGenIdx = ctx.funcMap.get(createGenName)!;
-    fctx.body.push({ op: "local.get", index: bufferLocal });
-    fctx.body.push({ op: "local.get", index: pendingThrowLocal });
-    fctx.body.push({ op: "call", funcIdx: createGenIdx });
-    // The externref Generator object is now on the stack as the return value
   } else {
     // Compile body statements
     if (decl.body) {
@@ -949,8 +977,35 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // Hoist function declarations: JS semantics require function declarations
       // to be available before their textual position in the enclosing scope.
       hoistFunctionDeclarations(ctx, fctx, bodyStatements);
-      for (const stmt of bodyStatements) {
-        compileStatement(ctx, fctx, stmt);
+
+      // (#1042) Async/await CPS state-machine activation hook. Gated behind
+      // ASYNC_CPS_ENABLED (off by default → byte-identical legacy codegen).
+      // Eligible only for a JS-host async function whose body matches a single
+      // tail-await canonical shape with no try-across-await / nested await. On
+      // a match we rewrite the result type to externref (the fn returns a
+      // Promise object), drive emitAsyncStateMachine, and skip the normal loop.
+      let asyncCpsHandled = false;
+      if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+        const asyncPlan = analyzeAsyncBody(ctx, decl);
+        if (
+          asyncPlan.awaitPoints.length === 1 &&
+          !asyncPlan.hasTryAcrossAwait &&
+          splitBodyAtAwait(decl, asyncPlan) !== null
+        ) {
+          // The async function returns a Promise object (externref), not the
+          // unwrapped value. Rewrite the registered signature's result + fctx.
+          rewriteFuncResultType(ctx, func, { kind: "externref" });
+          fctx.returnType = { kind: "externref" };
+          fctx.asyncCpsActive = true;
+          emitAsyncStateMachine(ctx, fctx, decl, asyncPlan);
+          asyncCpsHandled = true;
+        }
+      }
+
+      if (!asyncCpsHandled) {
+        for (const stmt of bodyStatements) {
+          compileStatement(ctx, fctx, stmt);
+        }
       }
     }
 

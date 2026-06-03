@@ -4,6 +4,30 @@ Issues organized by dependency order -- work items at the top are ready now,
 items below unlock when their dependencies complete. No sprint batching needed:
 pick any "ready" item and start.
 
+## Sprint 57 — acorn dogfood + backend-agnostic IR (added 2026-05-29)
+
+Architectural sprint. Two tracks; conformance guard is zero-regression.
+
+**Track 1 — self-hosting-dogfood** (compile + run acorn correctly):
+
+| #     | Title | Priority | Feasibility | Status | Depends on |
+|-------|-------|----------|-------------|--------|------------|
+| 1710  | acorn dogfood harness (compile + validate + diff-AST vs node-acorn) | high | medium | Done (s57) | — |
+| 1711  | triage harness surface → file sized child issues | high | medium | Done (s57) | #1710 |
+| 1712  | acceptance: compiled acorn AST == node-acorn on a representative .js | high | hard | Carried to sprint 58 (unblocked by #1745) | #1710, #1711 |
+
+Prior acorn blockers #1679 / #1690 / #1690b are **done** (regression-guarded by #1710).
+
+**Track 2 — backend-agnostic-ir** (decouple IR from WasmGC):
+
+| #     | Title | Priority | Feasibility | Status | Depends on |
+|-------|-------|----------|-------------|--------|------------|
+| 1713  | BackendEmitter trait: audit WasmGC bias + seam + WasmGcEmitter | high | hard | Ready — **needs architect spec first** | — |
+| 1714  | lower one IR node kind to BOTH WasmGC + linear via the trait | high | hard | Backlog→ready after #1713 | #1713 (**arch spec**) |
+| 1715  | minimal bytecode emitter + dispatch loop for an IR subset (proof) | medium | hard | Backlog→ready after #1713 | #1713 (**arch spec**) |
+
+Feeds #1584 (in-Wasm bytecode interpreter) — gated on both tracks + #1712.
+
 ## Sprint 50 Extension (added 2026-05-07)
 
 Pulled into S50 alongside the original closure/dispatch cohort. Direct-dispatch items have no architect dependency; spec items wait on architect.
@@ -281,6 +305,19 @@ All independent, can run in parallel.
 | 956 | Emit i32.const directly vs f64.const + trunc (8.8%, 673 cases) | Size/perf | **Ready** (easy) |
 | 957 | Eliminate local.set + drop dead-store pattern (4.8%, 272 cases) | Size/perf | **Ready** (easy) |
 | 958 | Batch string concat chains into multi-arg call (4.8%, 531 chains) | GC allocs | **Ready** (hard) |
+
+### String-hash warm-perf levers (carved from #1746 umbrella, 2026-05-31)
+
+Native differential (PR #997) found the string **build** loop, not the hash loop, is
+~99% of warm wall time (the i32 hash path #1746 lever #1 is DONE and already ~3.8×
+faster/char than V8). The two remaining levers are now sized, dispatchable issues:
+
+| #    | Title | Impact | Ready? | Deps |
+|------|-------|--------|--------|------|
+| 1761 | Presize string-build buffer from static loop trip count (kill reallocs + per-append cap-check) | Warm perf — top AOT win | **Ready** (medium) | — (related #1746, #1580, #1744) |
+| 1762 | Linear-memory string backing for build/hash hot path — drop the WasmGC `(array i16)` GC barrier | Warm perf — strategic ceiling | **Ready, likely needs arch spec** (hard) | — (related #1746, #679, #682, #1714) |
+
+#1746 stays the umbrella tracking issue.
 
 ---
 

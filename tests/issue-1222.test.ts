@@ -17,13 +17,17 @@
  *   3. Distinct sources produce distinct hashes
  */
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { compile } from "../src/index.js";
 import { computeWasmSha } from "./test262-runner.js";
 
 const HEX_12 = /^[0-9a-f]{12}$/;
 
-function compileSimple(src: string): Uint8Array {
-  const result = compile(src, { fileName: "test.ts" });
+async function compileSimple(src: string): Promise<Uint8Array> {
+  const result = await compile(src, { fileName: "test.ts" });
   if (!result.success) {
     const errs = result.errors.map((e) => `L${e.line}:${e.column} ${e.message}`).join("; ");
     throw new Error(`compile failed: ${errs}`);
@@ -32,24 +36,24 @@ function compileSimple(src: string): Uint8Array {
 }
 
 describe("#1222 — wasm-hash noise filter", () => {
-  it("computeWasmSha returns a 12-char lowercase hex digest", () => {
-    const binary = compileSimple(`export function test(): number { return 1; }`);
+  it("computeWasmSha returns a 12-char lowercase hex digest", async () => {
+    const binary = await compileSimple(`export function test(): number { return 1; }`);
     const sha = computeWasmSha(binary);
     expect(sha).toMatch(HEX_12);
     expect(sha.length).toBe(12);
   });
 
-  it("is deterministic — compiling the same snippet twice yields the same sha", () => {
+  it("is deterministic — compiling the same snippet twice yields the same sha", async () => {
     const src = `export function test(): number { return 42; }`;
-    const a = computeWasmSha(compileSimple(src));
-    const b = computeWasmSha(compileSimple(src));
+    const a = computeWasmSha(await compileSimple(src));
+    const b = computeWasmSha(await compileSimple(src));
     expect(a).toBe(b);
     expect(a).toMatch(HEX_12);
   });
 
-  it("is sensitive to source changes — distinct sources yield distinct shas", () => {
-    const a = computeWasmSha(compileSimple(`export function test(): number { return 1; }`));
-    const b = computeWasmSha(compileSimple(`export function test(): number { return 2; }`));
+  it("is sensitive to source changes — distinct sources yield distinct shas", async () => {
+    const a = computeWasmSha(await compileSimple(`export function test(): number { return 1; }`));
+    const b = computeWasmSha(await compileSimple(`export function test(): number { return 2; }`));
     // Different return values produce a different f64.const operand in the
     // emitted Wasm, so the binaries cannot be byte-identical even after
     // constant folding.
@@ -72,5 +76,72 @@ describe("#1222 — wasm-hash noise filter", () => {
     const c = computeWasmSha(mutated);
     expect(c).not.toBe(a);
     expect(c).toMatch(HEX_12);
+  });
+
+  it("diff-test262 exits non-zero for net-negative wasm-changing regressions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "diff-test262-net-"));
+    try {
+      const baseline = join(dir, "baseline.jsonl");
+      const candidate = join(dir, "candidate.jsonl");
+      writeFileSync(baseline, `${JSON.stringify({ file: "a.js", status: "pass", wasm_sha: "aaaaaaaaaaaa" })}\n`);
+      writeFileSync(
+        candidate,
+        `${JSON.stringify({
+          file: "a.js",
+          status: "compile_error",
+          error_category: "wasm_compile",
+          wasm_sha: null,
+        })}\n`,
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [
+          "--experimental-strip-types",
+          "scripts/diff-test262.ts",
+          baseline,
+          candidate,
+          "--quiet",
+        ]),
+      ).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("diff-test262 exits zero when improvements offset wasm-changing regressions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "diff-test262-net-"));
+    try {
+      const baseline = join(dir, "baseline.jsonl");
+      const candidate = join(dir, "candidate.jsonl");
+      writeFileSync(
+        baseline,
+        [
+          { file: "a.js", status: "pass", wasm_sha: "aaaaaaaaaaaa" },
+          { file: "b.js", status: "fail", wasm_sha: null },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+      writeFileSync(
+        candidate,
+        [
+          { file: "a.js", status: "compile_error", error_category: "wasm_compile", wasm_sha: null },
+          { file: "b.js", status: "pass", wasm_sha: "bbbbbbbbbbbb" },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+
+      const out = execFileSync(process.execPath, [
+        "--experimental-strip-types",
+        "scripts/diff-test262.ts",
+        baseline,
+        candidate,
+        "--quiet",
+      ]).toString();
+      expect(out).toContain("=== Net: +0 pass (1 → 1) ===");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

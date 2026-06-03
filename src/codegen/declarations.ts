@@ -20,6 +20,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../i
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
+import { collectFunctionOwnLocals, collectReferencedIdentifiers } from "./closures.js";
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { compileFunctionBody, registerInlinableFunction } from "./function-body.js";
@@ -32,6 +33,7 @@ import {
   addStringImports,
   addUnionImports,
   collectEnumDeclarations,
+  classifyTypedArrayType,
   ensureStructForType,
   extractConstantDefault,
   FUNCTIONAL_ARRAY_METHODS,
@@ -50,6 +52,11 @@ import {
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import {
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+  sourceNeedsGeneratorHostImports,
+} from "./generators-native.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
 import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 import {
@@ -59,6 +66,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
+import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { compileExpression, compileStatement } from "./shared.js";
 
 /** Accumulated state for the single-pass collector */
@@ -124,6 +132,40 @@ interface UnifiedCollectorState {
 }
 
 const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
+
+/**
+ * (#1700) Record TypedArray classifications for a user-exported function so
+ * the JS-host `wrapExports` can marshal `Uint8Array` params/returns across
+ * the JS↔Wasm boundary. The Wasm signature alone is ambiguous —
+ * `(input: Uint8Array)` and `(input: number[])` lower to the same
+ * `(ref null $Vec[f64])` — so we surface the TS-level distinction here.
+ *
+ * No-op when every slot classifies as `"other"` so non-TypedArray modules
+ * accumulate no metadata.
+ */
+function recordExportSignature(
+  ctx: CodegenContext,
+  exportName: string,
+  stmt: ts.FunctionDeclaration,
+  isAsync: boolean,
+): void {
+  const sig = ctx.checker.getSignatureFromDeclaration(stmt);
+  if (!sig) return;
+  const params: import("../ir/types.js").TypedArrayKind[] = [];
+  let anyHit = false;
+  for (const p of stmt.parameters) {
+    const pt = ctx.checker.getTypeAtLocation(p);
+    const kind = classifyTypedArrayType(pt, ctx.checker);
+    if (kind !== "other") anyHit = true;
+    params.push(kind);
+  }
+  const retType = ctx.checker.getReturnTypeOfSignature(sig);
+  const unwrappedRet = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+  const result = classifyTypedArrayType(unwrappedRet, ctx.checker);
+  if (result !== "other") anyHit = true;
+  if (!anyHit) return;
+  ctx.exportSignatures.set(exportName, { params, result });
+}
 
 export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedCollectorState {
   return {
@@ -256,11 +298,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
     }
     if (isNumberType(receiverType) && methodName === "toString") {
-      state.primitiveNeeded.add("number_toString");
       // #1321: toString(radix) needs a 2-arg host import so the radix is
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+      } else {
+        state.primitiveNeeded.add("number_toString");
       }
     }
     // (#1644 Slice D) BigInt.prototype.toString — bigint-typed receiver routes
@@ -534,7 +577,16 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     node.expression.expression.text === "JSON"
   ) {
     const method = node.expression.name.text;
-    if (method === "stringify") state.jsonNeedStringify = true;
+    if (method === "stringify") {
+      state.jsonNeedStringify = true;
+      const arg = node.arguments[0];
+      if (arg) {
+        const argType = ctx.checker.getTypeAtLocation(arg);
+        if (isNumberType(argType)) {
+          state.primitiveNeeded.add("number_toString");
+        }
+      }
+    }
     if (method === "parse") state.jsonNeedParse = true;
   }
 
@@ -645,7 +697,8 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       ts.isFunctionDeclaration(node) &&
       node.asteriskToken &&
       node.body &&
-      !hasDeclareModifier(node)
+      !hasDeclareModifier(node) &&
+      !((ctx.standalone || ctx.wasi) && isNativeGeneratorCandidate(ctx, node))
     ) {
       state.unionFound = true;
     }
@@ -855,14 +908,22 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectPrimitiveMethodImports finalize ──
-  if (state.primitiveNeeded.has("number_toString")) {
+  // #1759: under WASI/standalone, template interpolation and String(number)
+  // need a pure-Wasm default Number::toString helper. Do not emit the JS-host
+  // env.number_toString import there; emit the native helper below instead.
+  const needsNativeNumberToString = state.primitiveNeeded.has("number_toString") && (ctx.wasi || ctx.standalone);
+  if (state.primitiveNeeded.has("number_toString") && !needsNativeNumberToString) {
     const t = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString", { kind: "func", typeIdx: t });
   }
   // #1321: 2-arg `number_toString_radix(value, radix)` for `toString(radix)` calls.
   // Without this, the codegen validates the radix range but then calls 1-arg
   // `number_toString(value)`, silently producing decimal output for any radix.
-  if (state.primitiveNeeded.has("number_toString_radix")) {
+  // #1335 Phase 1: standalone/WASI emits the safe-integer radix formatter in
+  // pure Wasm instead of requesting the JS host import.
+  const needsNativeNumberToStringRadix =
+    state.primitiveNeeded.has("number_toString_radix") && (ctx.wasi || ctx.standalone);
+  if (state.primitiveNeeded.has("number_toString_radix") && !needsNativeNumberToStringRadix) {
     const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "number_toString_radix", { kind: "func", typeIdx: t });
   }
@@ -884,7 +945,13 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // like emitNativeParseNumber's.
   if (ctx.wasi || ctx.standalone) {
     const fmtNative = new Set<string>();
-    for (const n of ["number_toFixed", "number_toExponential", "number_toPrecision"]) {
+    for (const n of [
+      "number_toString",
+      "number_toString_radix",
+      "number_toFixed",
+      "number_toExponential",
+      "number_toPrecision",
+    ]) {
       if (state.primitiveNeeded.has(n) && !ctx.funcMap.has(n)) fmtNative.add(n);
     }
     if (fmtNative.size > 0) {
@@ -946,6 +1013,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   {
     const NATIVE_STR_METHODS = new Set([
       "charAt",
+      "charCodeAt",
       "substring",
       "slice",
       "at",
@@ -962,19 +1030,25 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
       "padEnd",
       "toLowerCase",
       "toUpperCase",
+      "concat",
       "replace",
       "replaceAll",
       "split",
     ]);
     for (const method of state.stringMethodNeeded) {
-      if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && !state.stringRegexpMethodNeeded.has(method)) {
+      const nativeStringMethod = ctx.nativeStrings && NATIVE_STR_METHODS.has(method);
+      if (nativeStringMethod) {
         ensureNativeStringHelpers(ctx);
+      }
+      // #682/#1474: standalone refuses RegExp-consuming string methods during
+      // lowering, so do not pre-register JS-host string_* imports for them.
+      if (ctx.standalone && (method === "match" || method === "matchAll" || method === "search")) {
         continue;
       }
-      if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && state.stringRegexpMethodNeeded.has(method)) {
-        // Need BOTH native helpers AND host import for RegExp-arg calls
-        ensureNativeStringHelpers(ctx);
+      if (ctx.standalone && state.stringRegexpMethodNeeded.has(method)) {
+        continue;
       }
+      if (nativeStringMethod && !state.stringRegexpMethodNeeded.has(method)) continue;
       const sig = STRING_METHODS[method]!;
       const params: ValType[] = [{ kind: "externref" }, ...sig.params];
       const t = addFuncType(ctx, params, [sig.result]);
@@ -1184,16 +1258,20 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // claims a generator function (#1169f). The helper is idempotent —
   // guards on `ctx.funcMap.has("__gen_create_buffer")` internally.
   if (state.generatorFound) {
-    addGeneratorImports(ctx);
+    const needsNoJsHostFallback =
+      (ctx.standalone || ctx.wasi) && sourceNeedsGeneratorHostImports(ctx, state.sourceFile);
+    if (!(ctx.standalone || ctx.wasi) || needsNoJsHostFallback) {
+      addGeneratorImports(ctx, { allowNoJsHost: needsNoJsHostFallback });
+    }
   }
 
   // ── collectIteratorImports finalize ──
-  if (state.iteratorFound) {
+  if (state.iteratorFound && !ctx.standalone && !ctx.wasi) {
     addIteratorImports(ctx);
   }
 
   // ── collectArrayIteratorImports finalize ──
-  if (state.arrayIteratorFound) {
+  if (state.arrayIteratorFound && !ctx.standalone && !ctx.wasi) {
     addArrayIteratorImports(ctx);
     // Array iterator results are externref iterators consumed via for-of generic path
     if (!state.iteratorFound) {
@@ -2055,6 +2133,282 @@ export function applyShapeInference(ctx: CodegenContext, checker: ts.TypeChecker
   }
 }
 
+function bindingPatternParamNeedsWiden(p: ts.ParameterDeclaration): boolean {
+  if (p.type || p.dotDotDotToken) return false;
+  return ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
+}
+
+function restBindingOverridesToExternref(p: ts.ParameterDeclaration): boolean {
+  if (p.type || p.dotDotDotToken) return false;
+  if (ts.isArrayBindingPattern(p.name)) {
+    return p.name.elements.some((e) => !ts.isOmittedExpression(e) && !!e.dotDotDotToken);
+  }
+  if (ts.isObjectBindingPattern(p.name)) {
+    return p.name.elements.some((e) => !!e.dotDotDotToken);
+  }
+  return false;
+}
+
+function containingFunctionOrSource(node: ts.Node): ts.Node | undefined {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (
+      ts.isSourceFile(current) ||
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessorDeclaration(current) ||
+      ts.isSetAccessorDeclaration(current)
+    ) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  while (current) {
+    if (current === ancestor) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function functionDeclarationCapturesEnclosingLocal(ctx: CodegenContext, stmt: ts.FunctionDeclaration): boolean {
+  if (!stmt.body) return false;
+  const referenced = new Set<string>();
+  const ownLocals = new Set<string>();
+  collectFunctionOwnLocals(stmt, ownLocals);
+  for (const s of stmt.body.statements) {
+    collectReferencedIdentifiers(s, referenced, ownLocals);
+  }
+
+  for (const name of referenced) {
+    if (name === "arguments" || name === "this" || name === "super") continue;
+    let capturesOuterFunctionLocal = false;
+    const visit = (node: ts.Node): void => {
+      if (capturesOuterFunctionLocal) return;
+      if (
+        node !== stmt &&
+        (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))
+      ) {
+        return;
+      }
+      if (ts.isIdentifier(node) && node.text === name) {
+        const sym = ctx.checker.getSymbolAtLocation(node);
+        const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+        if (decl && !isDescendantOf(decl, stmt)) {
+          const owner = containingFunctionOrSource(decl);
+          if (owner && !ts.isSourceFile(owner)) {
+            capturesOuterFunctionLocal = true;
+            return;
+          }
+        }
+      }
+      forEachChild(node, visit);
+    };
+    visit(stmt.body);
+    if (capturesOuterFunctionLocal) return true;
+  }
+  return false;
+}
+
+function registerBodylessFunctionDeclaration(
+  ctx: CodegenContext,
+  stmt: ts.FunctionDeclaration,
+  sourceFile: ts.SourceFile,
+): WasmFunction | undefined {
+  if (!stmt.name || !stmt.body || hasDeclareModifier(stmt)) return undefined;
+  const name = stmt.name.text;
+  const sig = ctx.checker.getSignatureFromDeclaration(stmt);
+  if (!sig) return undefined;
+
+  ctx.functionNameMap.set(name, name);
+  try {
+    const sourceText = stmt.getText(sourceFile);
+    if (sourceText) ctx.funcSourceText.set(name, sourceText);
+  } catch {
+    // Synthetic nodes lacking source positions: keep the normal placeholder.
+  }
+
+  const isGeneric = stmt.typeParameters && stmt.typeParameters.length > 0;
+  const resolved = isGeneric ? resolveGenericCallSiteTypes(ctx, name, sourceFile) : null;
+  if (resolved) {
+    ctx.genericResolved.set(name, resolved);
+  }
+
+  const isAsync = hasAsyncModifier(stmt);
+  const isGenerator = isGeneratorFunction(stmt);
+  if (isAsync && !isGenerator) {
+    ctx.asyncFunctions.add(name);
+  }
+  if (isGenerator) {
+    ctx.generatorFunctions.add(name);
+    const retType = ctx.checker.getReturnTypeOfSignature(sig);
+    ctx.generatorYieldType.set(name, unwrapGeneratorYieldType(retType, ctx));
+  }
+
+  const retType = ctx.checker.getReturnTypeOfSignature(sig);
+  const unwrappedRetType = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+  if (!isGenerator && !isVoidType(unwrappedRetType)) ensureStructForType(ctx, unwrappedRetType);
+  for (const p of stmt.parameters) {
+    ensureStructForType(ctx, ctx.checker.getTypeAtLocation(p));
+  }
+
+  let params: ValType[];
+  let results: ValType[];
+  if (isGenerator) {
+    params = [];
+    for (let i = 0; i < stmt.parameters.length; i++) {
+      const param = stmt.parameters[i]!;
+      const paramType = ctx.checker.getTypeAtLocation(param);
+      let wasmType: ValType = bindingPatternParamNeedsWiden(param)
+        ? { kind: "externref" }
+        : restBindingOverridesToExternref(param)
+          ? { kind: "externref" }
+          : resolveWasmType(ctx, paramType);
+      if (param.initializer && wasmType.kind === "ref") {
+        wasmType = { kind: "ref_null", typeIdx: wasmType.typeIdx };
+      }
+      if (
+        !param.type &&
+        paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
+        (wasmType.kind === "externref" ||
+          (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
+      ) {
+        let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
+        if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, i);
+        if (inferred) wasmType = inferred;
+      }
+      params.push(wasmType);
+    }
+    const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
+    results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }];
+  } else if (resolved) {
+    params = resolved.params;
+    results = resolved.results;
+  } else {
+    params = [];
+    for (let i = 0; i < stmt.parameters.length; i++) {
+      const param = stmt.parameters[i]!;
+      if (param.dotDotDotToken) {
+        const paramType = ctx.checker.getTypeAtLocation(param);
+        const typeArgs = ctx.checker.getTypeArguments(paramType as ts.TypeReference);
+        const elemTsType = typeArgs[0];
+        const elemType: ValType = elemTsType ? resolveWasmType(ctx, elemTsType) : { kind: "f64" };
+        const elemKey =
+          elemType.kind === "ref" || elemType.kind === "ref_null" ? `ref_${elemType.typeIdx}` : elemType.kind;
+        const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+        const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+        params.push({ kind: "ref_null", typeIdx: vecTypeIdx });
+        ctx.funcRestParams.set(name, {
+          restIndex: i,
+          elemType,
+          arrayTypeIdx: arrTypeIdx,
+          vecTypeIdx,
+        });
+      } else {
+        const paramType = ctx.checker.getTypeAtLocation(param);
+        let wasmType: ValType = bindingPatternParamNeedsWiden(param)
+          ? { kind: "externref" }
+          : restBindingOverridesToExternref(param)
+            ? { kind: "externref" }
+            : resolveWasmType(ctx, paramType);
+        if (param.initializer && wasmType.kind === "ref") {
+          wasmType = { kind: "ref_null", typeIdx: wasmType.typeIdx };
+        }
+        if (
+          !param.type &&
+          paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
+          (wasmType.kind === "externref" ||
+            (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
+        ) {
+          let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
+          if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, i);
+          if (inferred) wasmType = inferred;
+        }
+        params.push(wasmType);
+      }
+    }
+    const rUnwrapped = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+    const inferredNumericRet = !isAsync ? ctx.numericReturnTypes?.get(name) : undefined;
+    const isImplicitAnyReturn = (rUnwrapped.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const allParamsNumeric = params.every((p) => p.kind === "f64" || p.kind === "i32");
+    if (inferredNumericRet && isImplicitAnyReturn && allParamsNumeric) {
+      results = [inferredNumericRet];
+    } else {
+      results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
+    }
+  }
+
+  const optionalParams: OptionalParamInfo[] = [];
+  for (let i = 0; i < stmt.parameters.length; i++) {
+    const param = stmt.parameters[i]!;
+    if (param.questionToken || param.initializer) {
+      const info: OptionalParamInfo = { index: i, type: params[i]! };
+      if (param.initializer) {
+        const cd = extractConstantDefault(param.initializer, params[i]!);
+        if (cd) info.constantDefault = cd;
+        else info.hasExpressionDefault = true;
+      }
+      optionalParams.push(info);
+    }
+  }
+  if (optionalParams.length > 0) {
+    ctx.funcOptionalParams.set(name, optionalParams);
+  }
+  if (bodyUsesArguments(stmt.body)) {
+    ctx.funcUsesArguments.add(name);
+  }
+
+  const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const func: WasmFunction = {
+    name,
+    typeIdx,
+    locals: [],
+    body: [],
+    exported: false,
+  };
+  ctx.funcMap.set(name, funcIdx);
+  ctx.mod.functions.push(func);
+  if (!ctx.preRegisteredBodyless) ctx.preRegisteredBodyless = new Set();
+  ctx.preRegisteredBodyless.add(name);
+  return func;
+}
+
+function defaultReturnInstrs(returnType: ValType | undefined): Instr[] {
+  if (!returnType) return [];
+  switch (returnType.kind) {
+    case "f64":
+      return [{ op: "f64.const", value: 0 }];
+    case "f32":
+      return [{ op: "f32.const", value: 0 } as Instr];
+    case "i32":
+      return [{ op: "i32.const", value: 0 }];
+    case "i64":
+      return [{ op: "i64.const", value: 0n }];
+    case "externref":
+    case "ref_extern":
+      return [{ op: "ref.null.extern" } as Instr];
+    case "eqref":
+    case "anyref":
+      return [{ op: "ref.null.eq" } as Instr];
+    case "funcref":
+      return [{ op: "ref.null.func" } as Instr];
+    case "ref_null":
+      return [{ op: "ref.null", typeIdx: returnType.typeIdx }];
+    case "ref":
+      return [{ op: "ref.null", typeIdx: returnType.typeIdx }, { op: "ref.as_non_null" } as Instr];
+    default:
+      return [{ op: "i32.const", value: 0 }];
+  }
+}
+
 export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile, isEntryFile = true): void {
   function getAssignmentRootIdentifier(expr: ts.Expression): string | undefined {
     let current: ts.Expression = expr;
@@ -2416,7 +2770,8 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           }
           params.push(wasmType);
         }
-        results = [{ kind: "externref" }]; // Returns a JS Generator object
+        const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
+        results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }]; // JS-host fallback returns a Generator object
       } else if (resolved) {
         // Use call-site resolved types for generic functions
         params = resolved.params;
@@ -2544,6 +2899,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           name,
           desc: { kind: "func", index: funcIdx },
         });
+        recordExportSignature(ctx, name, stmt, isAsync);
         // `export default function foo() {}` — also export as "default" (#1074)
         // Skip if name is already "default" (anonymous export default function)
         const mods = ts.canHaveModifiers(stmt) ? ts.getModifiers(stmt) : undefined;
@@ -2553,6 +2909,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             name: "default",
             desc: { kind: "func", index: funcIdx },
           });
+          recordExportSignature(ctx, "default", stmt, isAsync);
         }
       }
     }
@@ -3019,6 +3376,15 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           opKind === ts.SyntaxKind.BarBarEqualsToken ||
           opKind === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
         if (!isAssignOp) continue;
+        // (#1719 CPR) `Array.prototype[Symbol.iterator] = fn` / `.values = fn`
+        // has no module-global root identifier (`Array` is a builtin), so the
+        // generic check below drops it. When the S1 brand is set, keep it in
+        // __module_init so the CPR write-arm (compileAssignment) captures the
+        // override closure. Gated — byte-identical when no override exists.
+        if (ctx.arrayIteratorMaybeOverridden && isArrayProtoIteratorAssignTarget(expr.left)) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {
           ctx.moduleInitStatements.push(stmt);
@@ -3170,6 +3536,44 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   for (let i = 0; i < ctx.mod.functions.length; i++) {
     funcByName.set(ctx.mod.functions[i]!.name, i);
   }
+  const siblingFunctionLists = new WeakSet<object>();
+
+  function statementListHasEagerClass(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): boolean {
+    for (const stmt of stmts) {
+      const isAmbient = hasDeclareModifier(stmt) || stmt.getSourceFile().isDeclarationFile;
+      if (ts.isClassDeclaration(stmt) && stmt.name && !isAmbient) return true;
+      if (ts.isVariableStatement(stmt) && !isAmbient) {
+        for (const decl of stmt.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) return true;
+        }
+      }
+      let hasClassExpression = false;
+      const visit = (node: ts.Node): void => {
+        if (hasClassExpression) return;
+        if (ts.isClassExpression(node)) {
+          hasClassExpression = true;
+          return;
+        }
+        forEachChild(node, visit);
+      };
+      forEachChild(stmt, visit);
+      if (hasClassExpression) return true;
+    }
+    return false;
+  }
+
+  function ensureSiblingFunctionsRegistered(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
+    if (siblingFunctionLists.has(stmts as object)) return;
+    siblingFunctionLists.add(stmts as object);
+    if (!statementListHasEagerClass(stmts)) return;
+
+    for (const sibling of stmts) {
+      if (!ts.isFunctionDeclaration(sibling) || !sibling.name || !sibling.body) continue;
+      if (hasDeclareModifier(sibling) || ctx.funcMap.has(sibling.name.text)) continue;
+      if (functionDeclarationCapturesEnclosingLocal(ctx, sibling)) continue;
+      registerBodylessFunctionDeclaration(ctx, sibling, sourceFile);
+    }
+  }
 
   // Compile class constructors and methods
   // Also compile class expressions in variable declarations
@@ -3178,6 +3582,9 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[],
     insideFunction = false,
   ): void {
+    if (!insideFunction) {
+      ensureSiblingFunctionsRegistered(stmts);
+    }
     for (const stmt of stmts) {
       // Mirror the `.d.ts` ambient guard from `collectClassesFromStatements`:
       // there is no body to compile for classes declared in declaration
@@ -3483,6 +3890,19 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       reportError(ctx, stmt, `Internal error compiling CJS function '${funcName}': ${msg}`);
+    }
+  }
+
+  if (ctx.preRegisteredBodyless?.size) {
+    for (const name of Array.from(ctx.preRegisteredBodyless)) {
+      const funcIdx = ctx.funcMap.get(name);
+      const func = funcIdx !== undefined ? ctx.mod.functions[funcIdx - ctx.numImportFuncs] : undefined;
+      if (func && func.body.length === 0) {
+        const typeDef = ctx.mod.types[func.typeIdx];
+        const returnType = typeDef?.kind === "func" ? typeDef.results[0] : undefined;
+        func.body = defaultReturnInstrs(returnType);
+      }
+      ctx.preRegisteredBodyless.delete(name);
     }
   }
 

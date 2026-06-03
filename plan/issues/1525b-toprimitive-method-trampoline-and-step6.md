@@ -1,9 +1,9 @@
 ---
 id: 1525b
 title: "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError"
-status: ready
+status: in-review
 created: 2026-05-27
-updated: 2026-05-27
+updated: 2026-06-02
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -64,3 +64,28 @@ Failing unit case (skipped in `tests/issue-1525.test.ts`):
 Needs an architect spec — the trampoline-result coercion drift is shared with
 #1602/#1669 and the host struct-method dispatch with #1130/#983. Do not inline
 a localized patch.
+
+## Refreshed standalone evidence - 2026-06-02
+
+Source: `loopdive/js2wasm-baselines` commit
+`b4684d8f97a462c6414716aea46f31b67f48b959`,
+`test262-standalone-current.jsonl`; js2 baseline
+`ac88301967d70be11c9abb456051ff4afcd3a9d7`.
+
+The standalone root-cause classifier assigns **876** rows to the ToPrimitive /
+object-to-string dispatch family shared by #1525, #1525b, and #1759. The
+dominant runtime signature is still:
+
+```text
+Cannot convert object to primitive value
+```
+
+Example files:
+
+- `test/language/expressions/grouping/S11.1.6_A3_T6.js`
+- `test/language/expressions/logical-not/S11.4.9_A3_T4.js`
+
+The current artifact shows this is no longer just the original `new Object()`
+null-prototype bug; that was fixed in #1525. The remaining standalone root
+cause still points at dynamic object method dispatch, user `toString` /
+`valueOf` trampoline paths, and native number/string bridge behavior.

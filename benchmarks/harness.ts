@@ -76,14 +76,14 @@ interface CompiledModule {
 
 const compileCache = new Map<string, CompiledModule>();
 
-function compileSource(source: string, fast: boolean, target?: "gc" | "linear"): CompiledModule {
+async function compileSource(source: string, fast: boolean, target?: "gc" | "linear"): Promise<CompiledModule> {
   const optimize = 4;
   const key = `${fast}:${target ?? "gc"}:O${optimize}:${source}`;
   const cached = compileCache.get(key);
   if (cached) return cached;
 
   const t0 = performance.now();
-  const result = compile(source, { fast, target, emitWat: false, optimize });
+  const result = await compile(source, { fast, target, emitWat: false, optimize });
   const compileMs = performance.now() - t0;
 
   if (!result.success) {
@@ -125,7 +125,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       }
 
       case "host-call": {
-        const mod = compileSource(def.source, false);
+        const mod = await compileSource(def.source, false);
         binarySize = mod.binary.byteLength;
         compileMs = mod.compileMs;
         const imports = buildImports(mod.imports, def.deps ?? {}, mod.stringPool);
@@ -138,7 +138,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       }
 
       case "gc-native": {
-        const mod = compileSource(def.source, true);
+        const mod = await compileSource(def.source, true);
         binarySize = mod.binary.byteLength;
         compileMs = mod.compileMs;
         const imports = buildImports(mod.imports, def.deps ?? {}, mod.stringPool);
@@ -151,7 +151,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       }
 
       case "linear-memory": {
-        const mod = compileSource(def.source, true, "linear");
+        const mod = await compileSource(def.source, true, "linear");
         binarySize = mod.binary.byteLength;
         compileMs = mod.compileMs;
         const imports = buildImports(mod.imports, def.deps ?? {}, mod.stringPool);
@@ -165,6 +165,10 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     }
   } catch (err) {
     // Strategy not supported for this benchmark
+    // Some optimizer failures (notably Binaryen's Emscripten wrapper) set a
+    // process exit code before throwing. Since this path explicitly treats the
+    // strategy as skipped, clear that sticky failure state here.
+    process.exitCode = undefined;
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`\n    [${strategy} skipped: ${msg.split("\n")[0]}]\n`);
     return null;

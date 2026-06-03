@@ -6,15 +6,15 @@
  *   --mode=single
  *     Load module, call run(arg) once, exit. The parent measures the full
  *     process wall time (process spawn + V8 boot + parse + first run). This
- *     is the "cold isolate" / per-request cost on Cloudflare Workers, Deno
- *     Deploy, etc. when an isolate hasn't been warmed yet.
+ *     legacy mode models a cold OS process, not the production edge-serverless
+ *     cold lane used by the current generator.
  *
  *   --mode=warm
  *     Load module, call run(arg) WARMUP times so TurboFan tiers up, then call
  *     run(arg) MEASURED more times recording each iteration's in-process
  *     wall time. Reports the median iteration time. This is the "warm
- *     isolate" / per-request cost on platforms that reuse isolates across
- *     requests (the common case for Cloudflare Workers steady-state traffic).
+ *     isolate" / per-request cost for a reused V8 execution context after
+ *     optimizing tiers have settled.
  *
  * Usage:
  *   node [--jitless] wasmtime-bench-child-js.mjs --mode=single <program.js> <arg>

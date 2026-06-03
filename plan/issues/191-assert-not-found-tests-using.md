@@ -10,8 +10,7 @@ sprint: 2
 ---
 # #191 — `assert` not found: tests using raw `assert()` calls
 
-## Status: review
-
+## Status: in-review
 ## Summary
 test262 compile errors from "Cannot find name 'assert'". The test262 wrapper replaces `assert(` with `assert_true(` but some assert calls are not being matched because `assert.compareArray` was not handled.
 

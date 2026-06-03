@@ -14,7 +14,6 @@ goal: standalone-mode
 sprint: 41
 parent: 1034
 closed: 2026-04-12
-pr: 141
 ---
 # #1070 — Unsupported `new Intl.ListFormat` (and other Intl constructors)
 

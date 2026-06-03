@@ -12,14 +12,21 @@ import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
   addStringConstantGlobal,
+  addUnionImports,
   ensureExnTag,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
+import { ensureMapHelpers } from "../map-runtime.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
+import {
+  compileStandaloneRegExpConstructor,
+  isGlobalRegExpIdentifier,
+  isGlobalRegExpType,
+} from "../regexp-standalone.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
 import {
@@ -51,6 +58,63 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   const underscoreIdx = fctx.name.indexOf("_");
   if (underscoreIdx > 0) return fctx.name.substring(0, underscoreIdx);
   return undefined;
+}
+
+/**
+ * (#1732 S1) Decide whether a `new <id>` callee identifier resolves to a value
+ * that is PROVABLY not a constructor — so the runtime `__construct` brand check
+ * can be emitted without risk of intercepting a real constructor.
+ *
+ * Returns true only when the identifier's (variable/parameter) declaration has
+ * an initializer that is a known-non-constructable expression shape:
+ *   - `<expr>.prototype.<method>` — builtin/user prototype methods never have
+ *     [[Construct]] (§20.x / §10.2.2). This is the `S15.5.4.*_A7` pattern
+ *     (`var f = String.prototype.indexOf; new f`).
+ *   - `<expr>.bind(...)` / `.call(...)` / `.apply(...)` — bound functions are
+ *     non-constructors unless the target is (and the result of `.call`/`.apply`
+ *     is a plain value, never a constructor).
+ *
+ * Deliberately conservative: any other initializer shape (function expression,
+ * class reference, plain identifier, call to a factory, etc.) returns false so
+ * those keep the existing static / unknown-ctor handling. User function
+ * declarations are resolved earlier (2414-2469) and never reach the caller.
+ */
+function resolvesToNonConstructableValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
+  if (!ts.isIdentifier(calleeExpr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(calleeExpr);
+  const decls = sym?.getDeclarations();
+  if (!decls || decls.length === 0) return false;
+
+  const isNonConstructableInit = (init: ts.Expression): boolean => {
+    // Unwrap as/paren/non-null wrappers.
+    let e: ts.Expression = init;
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
+      e = ts.isParenthesizedExpression(e)
+        ? e.expression
+        : ts.isAsExpression(e)
+          ? e.expression
+          : (e as ts.NonNullExpression).expression;
+    }
+    // `<...>.prototype.<method>` — a method pulled off a prototype.
+    if (ts.isPropertyAccessExpression(e)) {
+      const obj = e.expression;
+      if (ts.isPropertyAccessExpression(obj) && obj.name.text === "prototype") return true;
+    }
+    // `<...>.bind(...)` / `.call(...)` / `.apply(...)` result.
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression)) {
+      const m = e.expression.name.text;
+      if (m === "bind" || m === "call" || m === "apply") return true;
+    }
+    return false;
+  };
+
+  for (const decl of decls) {
+    // `var/let/const f = <init>`
+    if (ts.isVariableDeclaration(decl) && decl.initializer) {
+      if (isNonConstructableInit(decl.initializer)) return true;
+    }
+  }
+  return false;
 }
 
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */
@@ -1461,6 +1525,45 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return cur;
   };
 
+  // TextEncoder/TextDecoder are standard Web/Node classes, but standalone and
+  // WASI builds cannot depend on host `env.TextEncoder_*` imports. The instance
+  // carries no state for the UTF-8-only surface implemented here, so the native
+  // method fast paths use this evaluated placeholder receiver.
+  if ((noJsHost(ctx) || ctx.strictNoHostImports) && ctx.nativeStrings && ts.isIdentifier(expr.expression)) {
+    const ctorName = expr.expression.text;
+    if (ctorName === "TextEncoder" || ctorName === "TextDecoder") {
+      const args = expr.arguments ?? [];
+      for (const arg of args) {
+        const argType = compileExpression(ctx, fctx, arg);
+        if (argType !== null) fctx.body.push({ op: "drop" } as Instr);
+      }
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+  }
+
+  // (#1103a) `new Map()` in standalone / nativeStrings mode → the WasmGC-native
+  // Map runtime (map-runtime.ts) instead of a `Map_new` host import. `new Map()`
+  // is a NewExpression, so the interception must live here (not in the
+  // call-expression compiler). Slice 1: no-arg form only — `new Map(iterable)`
+  // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
+  // so the binding/receiver is typed (see resolveWasmType Map case + the
+  // method/.size dispatch in extern.ts / property-access.ts).
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Map" &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureMapHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
     const unwrappedNew = unwrapNewTarget(expr.expression);
@@ -1525,6 +1628,27 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         emitThrowTypeError(ctx, fctx, "is not a constructor");
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
+      }
+      // (#1732 S2) `new <NonCtorNamespace>.<method>()` — a method pulled off a
+      // non-constructor namespace object (Math/JSON/Reflect/Atomics). Every such
+      // method is an ordinary function with no [[Construct]] (§21.3/§25.5/§28.1/
+      // §25.4), so `new` must throw TypeError. Pattern 2 below only fires when
+      // the TS lib KNOWS the method has call-sigs/no-construct-sigs; methods
+      // NEWER than the bundled lib (e.g. `Math.f16round`, `Math.sumPrecise`)
+      // resolve to `any`, slip past Pattern 2, and reach the unknown-ctor path
+      // which never performs [[Construct]] and so wrongly returns instead of
+      // throwing (test262 built-ins/Math/f16round/not-a-constructor.js etc.).
+      // Keying on the namespace NAME makes the guard lib-version-independent —
+      // it fires for any current or future Math/JSON/Reflect/Atomics method. The
+      // receiver-name match is intentionally narrow to those four built-ins
+      // (the same discipline as the namespace-identifier guard below).
+      if (ts.isIdentifier(obj)) {
+        const NS_NON_CONSTRUCTORS = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+        if (NS_NON_CONSTRUCTORS.has(obj.text)) {
+          emitThrowTypeError(ctx, fctx, "is not a constructor");
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
       }
     }
 
@@ -1847,8 +1971,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   // Handle `new Proxy(target, handler)` — delegate to __proxy_create host import.
   // The host wraps the target in a real JS Proxy with the given handler object.
-  // In standalone (no-JS) mode, falls back to pass-through (target returned as-is).
+  // Standalone has no JS Proxy machinery, so fail clearly instead of silently
+  // lowering to a half-working pass-through value (#1472 Phase C).
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Proxy") {
+    if (ctx.standalone) {
+      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
     const args = expr.arguments ?? [];
     if (args.length >= 1) {
       // Compile target argument and coerce to externref
@@ -2141,8 +2271,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   }
 
   // Handle `new TypedArray(n)` — TypedArray constructors (Uint8Array, Int32Array, Float64Array, etc.)
-  // TypedArrays are fixed-length numeric arrays. We represent them as vec structs with f64 elements,
-  // where length equals capacity (no dynamic growth like regular arrays).
+  // TypedArrays are fixed-length numeric arrays. Native Uint8Array uses the
+  // byte-oriented i8_byte vec; other typed arrays stay on the legacy f64
+  // representation for now.
   if (ts.isIdentifier(expr.expression)) {
     const TYPED_ARRAY_NAMES = new Set([
       "Int8Array",
@@ -2156,8 +2287,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (TYPED_ARRAY_NAMES.has(expr.expression.text)) {
-      const elemWasm: ValType = { kind: "f64" };
-      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", elemWasm);
+      const isNativeUint8Array = noJsHost(ctx) && expr.expression.text === "Uint8Array";
+      const elemWasm: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
+      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
@@ -2177,7 +2310,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         const argSym = argType.getSymbol?.();
         // #1654 — `new Uint8Array(arrayBuffer)` views the buffer's bytes. The
         // ArrayBuffer/DataView is backed by an i32_byte vec; copy the bytes
-        // into this TypedArray's f64 backing array. Must precede the
+        // into this TypedArray's backing array. Must precede the
         // size-constructor path (an ArrayBuffer is NOT a numeric length).
         //
         // #1670 — only in no-JS-host mode. The byte-buffer view path emits an
@@ -2266,6 +2399,63 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
                 dstTypeIdx: arrTypeIdx,
                 srcTypeIdx: arrTypeIdx,
               } as Instr);
+            } else if (srcArrTypeIdx >= 0) {
+              const srcArrDef = ctx.mod.types[srcArrTypeIdx];
+              const dstArrDef = ctx.mod.types[arrTypeIdx];
+              if (srcArrDef?.kind === "array" && dstArrDef?.kind === "array") {
+                const srcDataLocal = allocLocal(fctx, `__ta_src_data_${fctx.locals.length}`, {
+                  kind: "ref",
+                  typeIdx: srcArrTypeIdx,
+                });
+                const copyIndexLocal = allocLocal(fctx, `__ta_copy_i_${fctx.locals.length}`, { kind: "i32" });
+                fctx.body.push({ op: "local.get", index: srcVecLocal });
+                fctx.body.push({ op: "struct.get", typeIdx: srcTypeIdx, fieldIdx: 1 });
+                fctx.body.push({ op: "local.set", index: srcDataLocal });
+                fctx.body.push({ op: "i32.const", value: 0 });
+                fctx.body.push({ op: "local.set", index: copyIndexLocal });
+
+                const srcGetOp =
+                  srcArrDef.element.kind === "i8"
+                    ? "array.get_u"
+                    : srcArrDef.element.kind === "i16"
+                      ? "array.get_s"
+                      : "array.get";
+                const convertInstrs: Instr[] =
+                  srcArrDef.element.kind === "f64" && dstArrDef.element.kind !== "f64"
+                    ? [{ op: "i32.trunc_sat_f64_s" } as Instr]
+                    : srcArrDef.element.kind !== "f64" && dstArrDef.element.kind === "f64"
+                      ? [{ op: "f64.convert_i32_u" } as Instr]
+                      : [];
+
+                fctx.body.push({
+                  op: "block",
+                  blockType: { kind: "empty" },
+                  body: [
+                    {
+                      op: "loop",
+                      blockType: { kind: "empty" },
+                      body: [
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "local.get", index: lenLocal } as Instr,
+                        { op: "i32.ge_u" } as Instr,
+                        { op: "br_if", depth: 1 } as Instr,
+                        { op: "local.get", index: dstDataLocal } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "local.get", index: srcDataLocal } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: srcGetOp, typeIdx: srcArrTypeIdx } as Instr,
+                        ...convertInstrs,
+                        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+                        { op: "local.get", index: copyIndexLocal } as Instr,
+                        { op: "i32.const", value: 1 } as Instr,
+                        { op: "i32.add" } as Instr,
+                        { op: "local.set", index: copyIndexLocal } as Instr,
+                        { op: "br", depth: 0 } as Instr,
+                      ],
+                    } as Instr,
+                  ],
+                } as Instr);
+              }
             }
             // Build result vec struct
             fctx.body.push({ op: "local.get", index: lenLocal });
@@ -2324,21 +2514,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // #1474 — RegExp delegates to the JS host engine; there is no Wasm-native
-  // regex engine yet. Refuse `new RegExp(...)` in --target standalone
-  // (Phase 1: refuse-and-document). Match either the resolved builtin name
-  // or the literal identifier (which is how `new RegExp(...)` appears).
+  // #682 — standalone mode supports a reduced native RegExp subset for static
+  // literal patterns. Unsupported constructor forms still produce explicit
+  // #1474-compatible compile errors instead of JS-host imports.
   if (
     ctx.standalone &&
-    (className === "RegExp" || (ts.isIdentifier(expr.expression) && expr.expression.text === "RegExp"))
+    (isGlobalRegExpType(type) || (ts.isIdentifier(expr.expression) && isGlobalRegExpIdentifier(ctx, expr.expression)))
   ) {
-    reportError(
-      ctx,
-      expr,
-      "Codegen error: new RegExp(...) is not supported in --target standalone (#1474). " +
-        "Recompile without --target standalone.",
-    );
-    return null;
+    return compileStandaloneRegExpConstructor(ctx, fctx, expr.arguments ?? [], expr);
   }
 
   // #1679 — `new this(...)` inside a static method: the callee is `this`, which
@@ -2476,6 +2659,63 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // RangeError validation for built-in constructors (type resolves to any
     // when lib declarations are not loaded, so className is undefined here)
     const args = expr.arguments ?? [];
+
+    // (#1732 S1) `new f(...)` where `f` is a LOCAL holding a builtin-method
+    // value — e.g. `var f = String.prototype.indexOf; new f`. The compile-time
+    // Pattern 1/2 guards above only fire on the *direct* `new X.prototype.Y()`
+    // form; through a local the callee is a bare identifier of type `any`, so
+    // no static guard sees it and control reaches here, which never performs
+    // [[Construct]] and so wrongly does not throw (test262 String.prototype
+    // `S15.5.4.*_A7` not-a-constructor cases, ~14 files in JS-host mode).
+    //
+    // Per ECMA-262 §7.3.13 Construct → §10.2.2 [[Construct]], `new` on a value
+    // with no [[Construct]] must throw TypeError. When the local's declaration
+    // initializer is a PROVABLY non-constructable expression — a
+    // `<...>.prototype.<method>` member access, or a `.bind()/.call()/.apply()`
+    // result — route the runtime value through the host `__construct` helper,
+    // which throws a real TypeError when IsConstructor(value) is false. Builtin
+    // namespaces / intrinsic ctors (ArrayBuffer, DataView, TypedArrays, Error
+    // subclasses, Promise) are handled by the explicit branches that FOLLOW, so
+    // this guard is scoped to the proven-non-constructor initializer shapes and
+    // never intercepts a real constructor. Standalone parity is S4.
+    // Unwrap `as`/paren/non-null wrappers so `new (f as any)()` is recognised
+    // the same as the bare `new f` form (both reach here with the value held in
+    // a local of type `any`).
+    let s1Callee: ts.Expression = expr.expression;
+    while (ts.isParenthesizedExpression(s1Callee) || ts.isAsExpression(s1Callee) || ts.isNonNullExpression(s1Callee)) {
+      s1Callee = ts.isParenthesizedExpression(s1Callee)
+        ? s1Callee.expression
+        : ts.isAsExpression(s1Callee)
+          ? s1Callee.expression
+          : (s1Callee as ts.NonNullExpression).expression;
+    }
+    if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToNonConstructableValue(ctx, s1Callee)) {
+      // Evaluate `f` to an externref value (the held callee).
+      const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
+      if (calleeTy && calleeTy.kind !== "externref") {
+        coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+      } else if (calleeTy === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // argsArray — null externref (the A7 cases never reach construction; the
+      // TypeError is thrown by the IsConstructor check before args are used).
+      fctx.body.push({ op: "ref.null.extern" });
+      const funcIdx = ensureLateImport(
+        ctx,
+        "__construct",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return { kind: "externref" };
+      }
+      // Import unavailable (shouldn't happen in JS-host): drop callee+args and
+      // fall through to the existing unknown-ctor path below.
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+    }
 
     // new ArrayBuffer(byteLength) — validate non-negative integer length
     if (ctorName === "ArrayBuffer" && args.length >= 1) {
@@ -2757,7 +2997,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // new Uint8Array(n), new Int32Array(n), new Float64Array(n), etc. → vec struct with f64 elements
+  // new Uint8Array(n), new Int32Array(n), new Float64Array(n), etc. → vec struct.
+  // Native Uint8Array uses i8_byte storage; the remaining typed arrays keep
+  // the legacy f64 element representation.
   {
     const TYPED_ARRAY_CTORS = new Set([
       "Int8Array",
@@ -2770,8 +3012,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (className && TYPED_ARRAY_CTORS.has(className)) {
-      const elemType: ValType = { kind: "f64" };
-      const vecTypeIdx = getOrRegisterVecType(ctx, "f64", elemType);
+      const isNativeUint8Array = noJsHost(ctx) && className === "Uint8Array";
+      const elemType: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
+      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
@@ -2785,8 +3029,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // #1654 — `new Uint8Array(arrayBuffer)` must VIEW the buffer's bytes,
         // not treat the buffer as a numeric length. The ArrayBuffer is backed
         // by an `i32_byte` vec (one i32 per byte). Detect that case and copy the
-        // bytes into the f64-element vec this TypedArray uses (so e.g.
-        // process.stdout.write, which expects a vec_f64, sees the real bytes).
+        // bytes into this TypedArray's backing vec.
         const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSymName = argTsType.getSymbol?.()?.name;
         // #1670 — gate on no-JS-host (see the matching guard above): the
@@ -3220,14 +3463,14 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
 /**
  * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
- * TypedArray's f64-element backing array.
+ * TypedArray backing array.
  *
  * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
  * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
  * variables to externref, so recover the struct via any.convert_extern +
- * ref.cast, read its length, allocate an f64 array of that length, and copy
- * byte-by-byte (i32 → f64). Returns true on success; false to let the caller
- * fall back to the numeric-length path.
+ * ref.cast, read its length, allocate a destination array of that length, and
+ * copy byte-by-byte. Returns true on success; false to let the caller fall back
+ * to the numeric-length path.
  */
 function emitTypedArrayFromByteBuffer(
   ctx: CodegenContext,
@@ -3285,7 +3528,10 @@ function emitTypedArrayFromByteBuffer(
   } as Instr);
   fctx.body.push({ op: "local.set", index: srcArrLocal });
 
-  // dstArr = new f64[len]
+  const dstArrDef = ctx.mod.types[dstArrTypeIdx];
+  const dstElemKind = dstArrDef?.kind === "array" ? dstArrDef.element.kind : undefined;
+
+  // dstArr = new element[len]
   const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, {
     kind: "ref",
     typeIdx: dstArrTypeIdx,
@@ -3294,7 +3540,7 @@ function emitTypedArrayFromByteBuffer(
   fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
   fctx.body.push({ op: "local.set", index: dstArrLocal });
 
-  // for (i = 0; i < len; i++) dstArr[i] = f64(srcArr[i] & 0xff)
+  // for (i = 0; i < len; i++) dstArr[i] = srcArr[i] converted to dst element type.
   const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, {
     kind: "i32",
   });
@@ -3306,7 +3552,7 @@ function emitTypedArrayFromByteBuffer(
     { op: "local.get", index: lenLocal } as Instr,
     { op: "i32.ge_s" } as Instr,
     { op: "br_if", depth: 1 } as Instr,
-    // dstArr[i] = f64(srcArr[i] & 0xff)
+    // dstArr[i] = converted srcArr[i] byte
     { op: "local.get", index: dstArrLocal } as Instr,
     { op: "local.get", index: iLocal } as Instr,
     { op: "local.get", index: srcArrLocal } as Instr,
@@ -3314,7 +3560,7 @@ function emitTypedArrayFromByteBuffer(
     { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
     { op: "i32.const", value: 0xff } as Instr,
     { op: "i32.and" } as Instr,
-    { op: "f64.convert_i32_u" } as Instr,
+    ...(dstElemKind === "f64" ? ([{ op: "f64.convert_i32_u" } as Instr] as Instr[]) : []),
     { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
     // i++
     { op: "local.get", index: iLocal } as Instr,

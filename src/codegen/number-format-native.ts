@@ -1,14 +1,16 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * Pure-Wasm `Number.prototype.{toFixed,toPrecision,toExponential}` for
- * standalone / WASI targets (#1321 / #1335 Phase 2).
+ * Pure-Wasm `Number.prototype.{toString,toFixed,toPrecision,toExponential}` for
+ * standalone / WASI targets (#1321 / #1335 / #1759).
  *
  * In JS-host mode these are `env` imports (`number_toFixed` etc.). Under
  * `--target wasi` / `--target standalone` there is no JS runtime, so this
  * module emits WasmGC-native implementations registered under the same
- * `ctx.funcMap` names. The call sites push `(f64 value, f64 arg)` and expect
- * an `externref` result (a `$NativeString` widened via `extern.convert_any`),
- * so these functions keep that `(f64, f64) -> externref` signature.
+ * `ctx.funcMap` names. The method call sites push `(f64 value, f64 arg)` and
+ * expect an `externref` result (a `$NativeString` widened via
+ * `extern.convert_any`), so those functions keep that `(f64, f64) -> externref`
+ * signature. The default `number_toString(value)` helper uses the one-argument
+ * host-import-compatible `(f64) -> externref` signature.
  *
  * Algorithm strategy (no Ryu): the three methods all need a *fixed* number of
  * digits, which is computed with straightforward scaled f64 arithmetic and a
@@ -27,6 +29,7 @@
  * `number_toFixed` etc. host imports.
  *
  * Spec references:
+ * - toString      — ECMA-262 §21.1.3.6, §6.1.6.1.20, §7.1.5
  * - toFixed       — ECMA-262 §21.1.3.3
  * - toPrecision   — ECMA-262 §21.1.3.5
  * - toExponential — ECMA-262 §21.1.3.2
@@ -42,11 +45,13 @@ import { ensureNativeStringHelpers } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
 
 const BUF_CAP = 256;
+const MAX_SAFE_INTEGER = 9007199254740991;
 const C_ZERO = 48; // '0'
 const C_MINUS = 45; // '-'
 const C_PLUS = 43; // '+'
 const C_DOT = 46; // '.'
 const C_LC_E = 101; // 'e'
+const C_LC_A_MINUS_10 = 87; // 'a' - 10
 
 /**
  * Allocate the next defined-function index. Mirrors parse-number-native.ts.
@@ -353,10 +358,11 @@ function emitIntegerDigits(
 }
 
 /**
- * Emit the three native number-format functions and register them in
- * `ctx.funcMap`. `which` is a subset of {number_toFixed, number_toPrecision,
- * number_toExponential}. Must run before any function bodies that call them,
- * and (via ensureNativeStringHelpers) sets up the NativeString types.
+ * Emit native number-format functions and register them in `ctx.funcMap`.
+ * `which` is a subset of {number_toString, number_toString_radix,
+ * number_toFixed, number_toPrecision, number_toExponential}. Must run before
+ * any function bodies that call them, and (via ensureNativeStringHelpers) sets
+ * up the NativeString types.
  */
 export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>): void {
   ensureNativeStringHelpers(ctx);
@@ -366,6 +372,14 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   const f64: ValType = { kind: "f64" };
   const extern: ValType = { kind: "externref" };
   const bufType: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
+
+  const needRadix = which.has("number_toString") || which.has("number_toString_radix");
+  if (needRadix && !ctx.funcMap.has("number_toString_radix")) {
+    emitToStringRadix(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
+  }
+  if (which.has("number_toString") && !ctx.funcMap.has("number_toString")) {
+    emitToString(ctx, strDataTypeIdx, i32, f64, extern, bufType);
+  }
 
   // number_toPrecision delegates to number_toFixed + number_toExponential, so
   // those two must be emitted whenever toPrecision is requested — even if the
@@ -383,6 +397,491 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   if (needPrecision && !ctx.funcMap.has("number_toPrecision")) {
     emitToPrecision(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
   }
+}
+
+/**
+ * `number_toString(value: f64) -> externref`
+ *
+ * Host-compatible default radix-10 Number::toString for standalone/WASI. Safe
+ * integers delegate to the existing radix formatter; finite fractional values
+ * use a compact fixed-point fallback (six fractional digits, trimmed) so
+ * template interpolation can produce a native string without any JS host bridge.
+ */
+function emitToString(
+  ctx: CodegenContext,
+  strDataTypeIdx: number,
+  i32: ValType,
+  f64: ValType,
+  extern: ValType,
+  bufType: ValType,
+): void {
+  const radixIdx = ctx.funcMap.get("number_toString_radix");
+  if (radixIdx === undefined) return;
+  const finalizeIdx = ctx.funcMap.get("__num_fmt_finalize");
+  if (finalizeIdx === undefined) return;
+
+  // params: 0 value:f64
+  // locals: 1 buf 2 pos 3 tmp 4 neg 5 abs 6 scale 7 scaled 8 intpart
+  //         9 fracpart 10 pow 11 digit 12 k
+  const L_VALUE = 0;
+  const L_BUF = 1;
+  const L_POS = 2;
+  const L_TMP = 3;
+  const L_NEG = 4;
+  const L_ABS = 5;
+  const L_SCALE = 6;
+  const L_SCALED = 7;
+  const L_INT = 8;
+  const L_FRAC = 9;
+  const L_POW = 10;
+  const L_DIGIT = 11;
+  const L_K = 12;
+
+  const finalizeReturn = (): Instr[] => [
+    { op: "local.get", index: L_BUF },
+    { op: "local.get", index: L_POS },
+    { op: "call", funcIdx: finalizeIdx },
+    { op: "return" },
+  ];
+
+  const body: Instr[] = [
+    ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+
+    // Safe integers can reuse the radix-10 formatter exactly.
+    { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.floor" },
+    { op: "f64.eq" },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: MAX_SAFE_INTEGER },
+    { op: "f64.le" },
+    { op: "i32.and" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L_VALUE },
+        { op: "f64.const", value: 10 },
+        { op: "call", funcIdx: radixIdx },
+        { op: "return" },
+      ],
+    },
+
+    // Fractional fallback: round to 6 fractional digits and trim trailing zeros.
+    { op: "f64.const", value: 1000000 },
+    { op: "local.set", index: L_SCALE },
+    { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_SCALE },
+    { op: "f64.mul" },
+    { op: "f64.const", value: 0.5 },
+    { op: "f64.add" },
+    { op: "f64.floor" },
+    { op: "local.set", index: L_SCALED },
+    { op: "local.get", index: L_SCALED },
+    { op: "local.get", index: L_SCALE },
+    { op: "f64.div" },
+    { op: "f64.floor" },
+    { op: "local.set", index: L_INT },
+    { op: "local.get", index: L_SCALED },
+    { op: "local.get", index: L_INT },
+    { op: "local.get", index: L_SCALE },
+    { op: "f64.mul" },
+    { op: "f64.sub" },
+    { op: "local.set", index: L_FRAC },
+
+    { op: "local.get", index: L_NEG },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
+    },
+    ...emitIntegerDigits(strDataTypeIdx, L_INT, L_BUF, L_POS, L_TMP, L_POW, L_DIGIT),
+
+    { op: "local.get", index: L_FRAC },
+    { op: "f64.const", value: 0 },
+    { op: "f64.ne" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...putConst(strDataTypeIdx, L_BUF, L_POS, C_DOT),
+        { op: "local.get", index: L_SCALE },
+        { op: "f64.const", value: 10 },
+        { op: "f64.div" },
+        { op: "f64.floor" },
+        { op: "local.set", index: L_POW },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_K },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: 6 },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_POW },
+                { op: "f64.div" },
+                { op: "f64.floor" },
+                { op: "local.set", index: L_DIGIT },
+                { op: "local.get", index: L_BUF },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: C_ZERO },
+                { op: "local.get", index: L_DIGIT },
+                { op: "i32.trunc_f64_s" },
+                { op: "i32.add" },
+                { op: "array.set", typeIdx: strDataTypeIdx },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_POS },
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_DIGIT },
+                { op: "local.get", index: L_POW },
+                { op: "f64.mul" },
+                { op: "f64.sub" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_POW },
+                { op: "f64.const", value: 10 },
+                { op: "f64.div" },
+                { op: "f64.floor" },
+                { op: "local.set", index: L_POW },
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_K },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // while pos>0 && buf[pos-1]=='0': pos--
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_POS },
+                { op: "i32.eqz" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_BUF },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "array.get_u", typeIdx: strDataTypeIdx },
+                { op: "i32.const", value: C_ZERO },
+                { op: "i32.ne" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "local.set", index: L_POS },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // If trimming removed all fractional digits, remove the decimal point.
+        { op: "local.get", index: L_POS },
+        { op: "i32.const", value: 0 },
+        { op: "i32.gt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_POS },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "i32.const", value: C_DOT },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "local.set", index: L_POS },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    ...finalizeReturn(),
+  ];
+
+  const typeIdx = addFuncType(ctx, [f64], [extern]);
+  const funcIdx = nextFuncIdx(ctx);
+  ctx.funcMap.set("number_toString", funcIdx);
+  ctx.mod.functions.push({
+    name: "number_toString",
+    typeIdx,
+    locals: [
+      { name: "buf", type: bufType },
+      { name: "pos", type: i32 },
+      { name: "tmp", type: i32 },
+      { name: "neg", type: i32 },
+      { name: "abs", type: f64 },
+      { name: "scale", type: f64 },
+      { name: "scaled", type: f64 },
+      { name: "intpart", type: f64 },
+      { name: "fracpart", type: f64 },
+      { name: "pow", type: f64 },
+      { name: "digit", type: f64 },
+      { name: "k", type: i32 },
+    ],
+    body,
+    exported: false,
+  });
+}
+
+/**
+ * `number_toString_radix(value: f64, radix: f64) -> externref`
+ * (§21.1.3.6, §6.1.6.1.20, §7.1.5).
+ *
+ * The call site has already applied `ToIntegerOrInfinity(radix)`'s truncating
+ * shape for ordinary positive radices and rejected values outside 2..36. This
+ * standalone slice handles non-finite values, ±0, and finite safe integers.
+ * Fractional and unsafe-integer shortest formatting remains #1335 Phase 2.
+ */
+function emitToStringRadix(
+  ctx: CodegenContext,
+  finalizeIdx: number,
+  strDataTypeIdx: number,
+  i32: ValType,
+  f64: ValType,
+  extern: ValType,
+  bufType: ValType,
+): void {
+  // params: 0 value:f64, 1 radix:f64
+  // locals: 2 buf 3 pos 4 tmp 5 neg 6 abs 7 r 8 n 9 q 10 digit
+  //         11 digitCode 12 i 13 j
+  const L_VALUE = 0;
+  const L_RADIX = 1;
+  const L_BUF = 2;
+  const L_POS = 3;
+  const L_TMP = 4;
+  const L_NEG = 5;
+  const L_ABS = 6;
+  const L_R = 7;
+  const L_N = 8;
+  const L_Q = 9;
+  const L_DIGIT = 10;
+  const L_CODE = 11;
+  const L_I = 12;
+  const L_J = 13;
+
+  const writeFinalizeReturn = (): Instr[] => [
+    { op: "local.get", index: L_BUF },
+    { op: "local.get", index: L_POS },
+    { op: "call", funcIdx: finalizeIdx },
+    { op: "return" },
+  ];
+
+  const body: Instr[] = [
+    ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+
+    // radix = floor(radix). The caller already rejects non-integers outside the
+    // valid interval after ToIntegerOrInfinity-style truncation.
+    { op: "local.get", index: L_RADIX },
+    { op: "f64.floor" },
+    { op: "local.set", index: L_R },
+
+    // if abs == 0: return "0" (covers both +0 and -0).
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: 0 },
+    { op: "f64.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO), ...writeFinalizeReturn()],
+    },
+
+    // Phase 1 guard: finite integers only, and stay within exactly represented
+    // integer space so the f64 div/mod digit loop is stable.
+    { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.floor" },
+    { op: "f64.ne" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "unreachable" }],
+    },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: MAX_SAFE_INTEGER },
+    { op: "f64.gt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "unreachable" }],
+    },
+
+    // n = abs; write least-significant digits into buf[0..pos).
+    { op: "local.get", index: L_ABS },
+    { op: "local.set", index: L_N },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_N },
+            { op: "f64.const", value: 0 },
+            { op: "f64.eq" },
+            { op: "br_if", depth: 1 },
+
+            // q = floor(n / radix); digit = n - q * radix.
+            { op: "local.get", index: L_N },
+            { op: "local.get", index: L_R },
+            { op: "f64.div" },
+            { op: "f64.floor" },
+            { op: "local.set", index: L_Q },
+            { op: "local.get", index: L_N },
+            { op: "local.get", index: L_Q },
+            { op: "local.get", index: L_R },
+            { op: "f64.mul" },
+            { op: "f64.sub" },
+            { op: "local.set", index: L_DIGIT },
+
+            // digitCode = digit < 10 ? '0' + digit : 'a' - 10 + digit.
+            { op: "local.get", index: L_DIGIT },
+            { op: "f64.const", value: 10 },
+            { op: "f64.lt" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: i32 },
+              then: [
+                { op: "i32.const", value: C_ZERO },
+                { op: "local.get", index: L_DIGIT },
+                { op: "i32.trunc_f64_s" },
+                { op: "i32.add" },
+              ],
+              else: [
+                { op: "i32.const", value: C_LC_A_MINUS_10 },
+                { op: "local.get", index: L_DIGIT },
+                { op: "i32.trunc_f64_s" },
+                { op: "i32.add" },
+              ],
+            },
+            { op: "local.set", index: L_CODE },
+
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_POS },
+            { op: "local.get", index: L_CODE },
+            { op: "array.set", typeIdx: strDataTypeIdx },
+            { op: "local.get", index: L_POS },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_POS },
+
+            { op: "local.get", index: L_Q },
+            { op: "local.set", index: L_N },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // Negative finite non-zero values prepend '-' after the digit loop, then the
+    // full buffer is reversed below.
+    { op: "local.get", index: L_NEG },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
+    },
+
+    // Reverse buf[0..pos) in place.
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_I },
+    { op: "local.get", index: L_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.sub" },
+    { op: "local.set", index: L_J },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_J },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_I },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "local.set", index: L_TMP },
+
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_J },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "array.set", typeIdx: strDataTypeIdx },
+
+            { op: "local.get", index: L_BUF },
+            { op: "local.get", index: L_J },
+            { op: "local.get", index: L_TMP },
+            { op: "array.set", typeIdx: strDataTypeIdx },
+
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L_I },
+            { op: "local.get", index: L_J },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "local.set", index: L_J },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    ...writeFinalizeReturn(),
+  ];
+
+  const typeIdx = addFuncType(ctx, [f64, f64], [extern]);
+  const funcIdx = nextFuncIdx(ctx);
+  ctx.funcMap.set("number_toString_radix", funcIdx);
+  ctx.mod.functions.push({
+    name: "number_toString_radix",
+    typeIdx,
+    locals: [
+      { name: "buf", type: bufType },
+      { name: "pos", type: i32 },
+      { name: "tmp", type: i32 },
+      { name: "neg", type: i32 },
+      { name: "abs", type: f64 },
+      { name: "radix", type: f64 },
+      { name: "n", type: f64 },
+      { name: "q", type: f64 },
+      { name: "digit", type: f64 },
+      { name: "digitCode", type: i32 },
+      { name: "i", type: i32 },
+      { name: "j", type: i32 },
+    ],
+    body,
+    exported: false,
+  });
 }
 
 /**

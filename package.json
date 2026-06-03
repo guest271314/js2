@@ -58,7 +58,25 @@
   "engines": {
     "node": ">=20"
   },
+  "peerDependencies": {
+    "binaryen": "^125.0.0",
+    "bun": ">=1.3.14",
+    "deno": ">=2.8.1"
+  },
+  "peerDependenciesMeta": {
+    "binaryen": {
+      "optional": true
+    },
+    "bun": {
+      "optional": true
+    },
+    "deno": {
+      "optional": true
+    }
+  },
   "scripts": {
+    "new:issue-id": "node scripts/next-issue-id.mjs",
+    "worktree:provision": "bash scripts/provision-worktree-deps.sh",
     "build": "vite build --config vite.config.lib.ts",
     "build:playground": "vite build --config website/playground/vite.config.ts",
     "dev": "pnpm run build:compiler-bundle && (pnpm run dashboard:watch &) && vite serve --config website/playground/vite.config.ts",
@@ -74,18 +92,20 @@
     "test:diff": "npx tsx scripts/diff-test.ts",
     "test:diff:triage": "npx tsx scripts/diff-triage.ts",
     "test:diff:gate": "npx tsx scripts/diff-test-gate.ts",
+    "dogfood:acorn": "npx tsx tests/dogfood/acorn-harness.mjs",
     "prepublishOnly": "pnpm run build",
-    "refresh:benchmarks": "npx tsx benchmarks/run.ts && pnpm run build:compiler-bundle && node scripts/generate-playground-benchmark-sidebar.mjs && node scripts/generate-playground-benchmark-sidebar-no-jit.mjs && pnpm run generate:size-benchmarks && node scripts/generate-browser-runtime-benchmarks.mjs",
-    "refresh:benchmarks:no-jit": "pnpm run build:compiler-bundle && node scripts/generate-playground-benchmark-sidebar-no-jit.mjs",
-    "refresh:benchmarks:wasmtime": "pnpm run build:compiler-bundle && node scripts/generate-wasmtime-hot-runtime.mjs",
+    "refresh:benchmarks": "npx tsx --experimental-wasm-stringref --experimental-wasm-custom-descriptors benchmarks/run.ts && pnpm run build:compiler-bundle && node --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-playground-benchmark-sidebar.mjs && node --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-playground-benchmark-sidebar-no-jit.mjs && pnpm run generate:size-benchmarks && node scripts/generate-browser-runtime-benchmarks.mjs",
+    "refresh:benchmarks:no-jit": "pnpm run build:compiler-bundle && node --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-playground-benchmark-sidebar-no-jit.mjs",
+    "refresh:benchmarks:wasmtime": "pnpm run build:compiler-bundle && node --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-wasmtime-hot-runtime.mjs",
     "build:compiler-bundle": "esbuild scripts/compiler-bundle-entry.ts --bundle --platform=node --format=esm --outfile=scripts/compiler-bundle.mjs --external:typescript --external:binaryen --external:@typescript/native-preview --external:@typescript/native-preview/*",
+    "build:standalone-cli": "node scripts/build-standalone-cli.mjs",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'",
-    "lint": "biome lint --diagnostic-level=error",
+    "lint": "biome lint src tests scripts --diagnostic-level=error",
     "typecheck": "tsc --noEmit",
     "generate:editions": "npx tsx scripts/generate-editions.ts",
     "generate:feature-examples": "npx tsx scripts/generate-feature-examples.ts",
-    "generate:size-benchmarks": "npx tsx scripts/generate-size-benchmarks.ts",
+    "generate:size-benchmarks": "npx tsx --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-size-benchmarks.ts",
     "generate:browser-runtime-benchmarks": "node scripts/generate-browser-runtime-benchmarks.mjs",
     "build:planning-artifacts": "node scripts/build-planning-artifacts.mjs",
     "dashboard": "node website/dashboard/build-data.js",
@@ -96,10 +116,21 @@
     "build:pages": "node scripts/run-pages-build.mjs",
     "deploy:registry-home": "mkdir -p .registry-home && cp website/index.html .registry-home/index.html && node ../file-registry-cli/dist/bin/main.js commit .registry-home -r users/tt/projects/ts2wasm && node ../file-registry-cli/dist/bin/main.js push .registry-home -r users/tt/projects/ts2wasm --public",
     "upload": "pnpm run build:playground && node ../file-registry-cli/dist/bin/main.js commit && node ../file-registry-cli/dist/bin/main.js push",
-    "prepare": "git config core.hooksPath .husky || true"
+    "prepare": "git config core.hooksPath .husky || true",
+    "reconcile:tasks": "node scripts/reconcile-tasklist.mjs",
+    "issues:pr-status": "node scripts/poll-merged-pr-issues.mjs --once --sync-artifacts",
+    "issues:pr-status:watch": "node scripts/poll-merged-pr-issues.mjs --sync-artifacts",
+    "symphony": "node scripts/symphony.mjs",
+    "symphony:once": "node scripts/symphony.mjs --once",
+    "symphony:dry-run": "node scripts/symphony.mjs --once --dry-run",
+    "symphony:status": "node scripts/symphony.mjs --status",
+    "symphony:control": "node scripts/symphony.mjs --control",
+    "dispatch:queue": "node scripts/dispatch-channel.mjs queue",
+    "dispatch:request-claude": "node scripts/dispatch-channel.mjs request-claude",
+    "dispatch:inbox": "node scripts/dispatch-channel.mjs inbox",
+    "claude:symphony-channel": "node scripts/claude-symphony-channel.mjs"
   },
   "dependencies": {
-    "binaryen": "^125.0.0",
     "typescript": "^5.7"
   },
   "devDependencies": {
@@ -110,6 +141,9 @@
     "@types/node": "^22",
     "@typescript/native-preview": "^7.0.0-dev.20260502.1",
     "axios": "^1.16.1",
+    "binaryen": "^125.0.0",
+    "bun": "1.3.14",
+    "deno": "2.8.1",
     "esbuild": "^0.25.12",
     "eslint": "^10.0.3",
     "hono": "^4.12.16",

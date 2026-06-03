@@ -18,6 +18,7 @@ import {
 } from "./index.js";
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
@@ -32,6 +33,17 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
+import { arrayIteratorOverrideGlobalIdx } from "./expressions/proto-override.js";
+// (#1719 CPR-2) `arrayDstrNeedsIdentity` / `tryEmitArrayProtoIteratorReadDrive` /
+// `syncDestructuredLocalsToGlobals` live in statements/destructuring.ts, which
+// already imports `destructureParamArray` from here — a module cycle. ESM
+// resolves it because these references are used at call time (inside
+// `destructureParamArray`), never at module-init.
+import {
+  arrayDstrNeedsIdentity,
+  syncDestructuredLocalsToGlobals,
+  tryEmitArrayProtoIteratorReadDrive,
+} from "./statements/destructuring.js";
 
 /**
  * Detect array binding patterns that, per ECMA-262 §13.3.3.6, perform no
@@ -210,7 +222,13 @@ function boxToExternref(ctx: CodegenContext, elemKey: string): Instr[] {
 export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionContext): Instr[] {
   const msg = "Cannot destructure 'null' or 'undefined'";
   addStringConstantGlobal(ctx, msg);
-  const strIdx = ctx.stringGlobalMap.get(msg)!;
+  // #1623 — in nativeStrings mode (wasi / standalone) `stringGlobalMap` holds a
+  // `-1` sentinel rather than a real import-global index, so a bare
+  // `global.get strIdx` lowers to `global.get 0xFFFFFFFF` ("Invalid global
+  // index"). `stringConstantExternrefInstrs` materializes the NativeString
+  // struct inline (and externref-converts) in that mode, and emits the plain
+  // `global.get` only when a real import global exists.
+  const pushMsg = () => stringConstantExternrefInstrs(ctx, msg);
   // #1473 — no JS host (wasi / standalone): build a TypeError INSTANCE via the
   // in-module `__new_TypeError` constructor so `e instanceof TypeError`
   // works under wasmtime, with no `__throw_type_error` host import. The
@@ -218,17 +236,23 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   // ensureLateImport resolves it without adding an import (no index shift).
   if (ctx.wasi || ctx.standalone) {
     emitWasiErrorConstructor(ctx, "TypeError", 1);
-    const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+    // #1623 — resolve `__new_TypeError` through ensureLateImport (NOT a raw
+    // `funcMap.get`). The constructor is an in-module function whose index is
+    // computed eagerly; later import additions shift every function index, and
+    // only the ensureLateImport / flushLateImportShifts bookkeeping keeps an
+    // already-emitted `call` index in sync. A raw `funcMap.get` snapshot goes
+    // stale and lowered to `call <wrong-fn>` (e.g. the enclosing function,
+    // observed as "throw expected externref, found call of type f64"). This
+    // mirrors the proven path in `emitThrowTypeError` (expressions/helpers.ts).
+    const newTypeErrorIdx = ensureLateImport(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
     const tagIdx = ensureExnTag(ctx);
-    if (newTypeErrorIdx !== undefined) {
-      return [
-        { op: "global.get", index: strIdx } as Instr,
-        { op: "call", funcIdx: newTypeErrorIdx } as Instr,
-        { op: "throw", tagIdx } as Instr,
-      ];
+    if (newTypeErrorIdx !== undefined && fctx) {
+      flushLateImportShifts(ctx, fctx);
+      const funcIdx = ctx.funcMap.get("__new_TypeError")!;
+      return [...pushMsg(), { op: "call", funcIdx } as Instr, { op: "throw", tagIdx } as Instr];
     }
     // Degrade to throwing the raw string with the same tag.
-    return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+    return [...pushMsg(), { op: "throw", tagIdx } as Instr];
   }
   // JS-host: prefer the host import so the caller sees a genuine JS TypeError
   // (constructor-matching tests such as `({constructor}) => constructor ===
@@ -238,14 +262,10 @@ export function buildDestructureNullThrow(ctx: CodegenContext, fctx?: FunctionCo
   if (throwIdx !== undefined && fctx) {
     flushLateImportShifts(ctx, fctx);
     const funcIdx = ctx.funcMap.get("__throw_type_error")!;
-    return [
-      { op: "global.get", index: strIdx } as Instr,
-      { op: "call", funcIdx } as Instr,
-      { op: "unreachable" } as Instr,
-    ];
+    return [...pushMsg(), { op: "call", funcIdx } as Instr, { op: "unreachable" } as Instr];
   }
   const tagIdx = ensureExnTag(ctx);
-  return [{ op: "global.get", index: strIdx } as Instr, { op: "throw", tagIdx } as Instr];
+  return [...pushMsg(), { op: "throw", tagIdx } as Instr];
 }
 
 /**
@@ -327,7 +347,9 @@ export function destructureParamObjectExternref(
       const excludedStrIdx = ctx.stringGlobalMap.get(excludedStr);
       if (excludedStrIdx === undefined) continue;
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "global.get", index: excludedStrIdx });
+      // #1623 — nativeStrings has a -1 sentinel global index; materialize the
+      // key string inline as externref instead of `global.get -1`.
+      for (const instr of stringConstantExternrefInstrs(ctx, excludedStr)) fctx.body.push(instr);
       fctx.body.push({ op: "call", funcIdx: restObjIdx });
       fctx.body.push({ op: "local.set", index: restIdx });
       if (isDecl) emitLocalTdzInit(fctx, restName);
@@ -353,7 +375,9 @@ export function destructureParamObjectExternref(
     if (getIdx === undefined) continue;
 
     fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "global.get", index: strGlobalIdx });
+    // #1623 — nativeStrings has a -1 sentinel global index; materialize the
+    // key string inline as externref instead of `global.get -1`.
+    for (const instr of stringConstantExternrefInstrs(ctx, propNameText)) fctx.body.push(instr);
     fctx.body.push({ op: "call", funcIdx: getIdx });
 
     const elemType: ValType = { kind: "externref" };
@@ -463,13 +487,16 @@ export function destructureParamObjectExternref(
         }
       }
 
-      // Per ECMA-262 §13.15.5.5 RequireObjectCoercible / §8.4.2 GetIterator,
-      // destructuring null/undefined through a non-empty nested pattern must
-      // throw TypeError. Emit the guard BEFORE recursing so we throw even when
-      // the nested destructure path silently no-ops on null (#1225).
-      if (element.name.elements.length > 0) {
-        emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
-      }
+      // Per ECMA-262 8.6.2 BindingInitialization, both
+      // `BindingPattern : ObjectBindingPattern` (RequireObjectCoercible) and
+      // `BindingPattern : ArrayBindingPattern` (GetIterator) run their
+      // coercibility step FIRST — even for an empty nested pattern `{}` / `[]`.
+      // So `{ w: {} } = { w: null }` and `{ w: [] } = { w: null }` must throw
+      // TypeError. Emit the null/undefined guard unconditionally (the prior
+      // `length > 0` gate skipped empty nested patterns — #846). The guard only
+      // fires for null/undefined, so coercible primitive values still pass.
+      // (#1225 / #846)
+      emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
 
       if (ts.isObjectBindingPattern(element.name)) {
         destructureParamObjectExternref(ctx, fctx, nestedLocal, element.name, opts);
@@ -804,10 +831,35 @@ export function destructureParamArray(
   paramType: ValType,
   opts: DestructureOpts = {},
 ): void {
+  // #1719 S2 gate-site (second of two): this is the shared vec/tuple lowering
+  // that `compileArrayDestructuring` delegates to (and the parameter-dstr
+  // lane). When the ITER_OVERRIDDEN brand is set and `paramType` is a real
+  // array (not a string), S2 routes the typed-vec/tuple path below through the
+  // host-Array reflection + host GetIterator (see `arrayDstrNeedsIdentity` in
+  // statements/destructuring.ts). S1 does not wire it here — placement note
+  // only; the typed path stays byte-identical when the brand is clear.
   const isDecl = isDeclMode(opts);
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
   }
+
+  // (#1719 CPR-2) Parameter / externref-decl array destructuring: when the
+  // program overrode Array.prototype[@@iterator] and `paramType` is a real array
+  // (not a string), drive the captured override from the value local instead of
+  // the backing-store / __array_from_iter lane (§8.5.2). The typed-vec *decl*
+  // case never reaches here — `compileArrayDestructuring` runs its own drive and
+  // returns before delegating — so this covers exactly the parameter-dstr and
+  // externref-decl lanes. Strictly gated behind the brand + a captured override
+  // (both clear in the common case ⇒ byte-identical). The value lives in
+  // `paramIdx`, so feed the shared decl read-drive that local.
+  if (arrayDstrNeedsIdentity(ctx, false) && arrayIteratorOverrideGlobalIdx(ctx) !== undefined) {
+    ensureBindingLocals(ctx, fctx, pattern);
+    if (tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, paramType, paramIdx)) {
+      if (isDecl) syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+      return;
+    }
+  }
+
   if (paramType.kind !== "ref" && paramType.kind !== "ref_null") {
     // externref parameters: convert to vec struct before destructuring (#647)
     // The externref may wrap any vec type at runtime (e.g. __vec_f64 from [1,2,3]

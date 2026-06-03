@@ -16,8 +16,7 @@ files:
 ---
 # #147 — Function.name property
 
-## Status: review
-
+## Status: in-review
 ## Problem
 258 test262 compile errors because tests access `.name` on functions, classes, and generators:
 - "Property 'name' does not exist on type '() => void'" (128)

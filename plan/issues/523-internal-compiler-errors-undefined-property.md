@@ -18,8 +18,7 @@ files:
 ---
 # #523 — Internal compiler errors: undefined property access (59 CE)
 
-## Status: review
-
+## Status: in-review
 Two internal error patterns:
 - "Cannot read properties of undefined (reading 'text')" — 36 CE
 - "Unsupported expression: SpreadElement" — 23 CE

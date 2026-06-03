@@ -13,7 +13,6 @@ language_feature: test262-harvest-cluster
 goal: test-infrastructure
 sprint: 42
 closed: 2026-04-12
-pr: 130
 es_edition: multi
 ---
 ## Implementation Summary

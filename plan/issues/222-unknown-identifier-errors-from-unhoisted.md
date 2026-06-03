@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #222: Unknown identifier errors from unhoisted var declarations
 
-## Status: review
-
+## Status: in-review
 ## Problem
 
 ~1200+ compile errors from "Unknown identifier: x" (and y, z, etc.) caused by variables that should be in scope but are not recognized by the compiler. The root cause is that the var-hoisting pre-pass (`hoistVarDeclarations` / `walkStmtForVars`) skips several declaration patterns:

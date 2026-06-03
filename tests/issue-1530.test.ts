@@ -1,7 +1,7 @@
 // #1530 — Native Messaging host example compiles to a valid WASI module.
 //
-// The example under examples/native-messaging/host.ts demonstrates reading a
-// Chrome Native Messaging framed message off stdin (fd=0 via readStdin), routing
+// The example under examples/native-messaging/nm_js2wasm.ts demonstrates reading a
+// Chrome Native Messaging framed message off stdin (fd=0 via process.stdin.read), routing
 // debug to stderr (fd=2 via console.error), and emitting a JSON response on
 // stdout (fd=1). This test pins down that the example still compiles to a valid
 // WASI binary that imports only wasi_snapshot_preview1 — so a refactor of the
@@ -19,30 +19,30 @@ import { dirname, join } from "node:path";
 import { compile } from "../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const hostPath = join(here, "..", "examples", "native-messaging", "host.ts");
+const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
 
 describe("#1530 Native Messaging host example", () => {
-  it("compiles examples/native-messaging/host.ts under --target wasi", () => {
+  it("compiles examples/native-messaging/nm_js2wasm.ts under --target wasi", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = compile(src, { fileName: "host.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.binary.length).toBeGreaterThan(0);
   });
 
-  it("imports stdin (fd_read) and stdout (fd_write) WASI syscalls, no env imports", () => {
+  it("imports stdin (fd_read) and stdout (fd_write) WASI syscalls, no env imports", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = compile(src, { fileName: "host.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.wat).toContain("wasi_snapshot_preview1");
-    expect(result.wat).toContain("fd_read"); // readStdin()
+    expect(result.wat).toContain("fd_read"); // process.stdin.read()
     expect(result.wat).toContain("fd_write"); // console.log / console.error
     // Standalone: no JS host env.* imports leak in.
     expect(result.wat).not.toContain('(import "env"');
   });
 
-  it("produces a binary that WebAssembly accepts", () => {
+  it("produces a binary that WebAssembly accepts", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = compile(src, { fileName: "host.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
     expect(result.success).toBe(true);
     // Throws on an invalid module; passing means the structure/types are sound.
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
@@ -122,23 +122,35 @@ describe("#1618/#1651 framed stdin→stdout round-trip", () => {
     return out;
   }
 
-  it("decodes a framed input and re-frames the response with a 4-byte LE prefix", () => {
-    // A self-contained host that mirrors the example: strip the 4-byte prefix,
-    // rebuild the body char-by-char from the decoded length, then write a framed
-    // response (binary length prefix via Uint8Array + JSON body via string).
+  it("decodes a framed input and re-frames the response with a 4-byte LE prefix", async () => {
+    // A self-contained host that mirrors the example: read the 4-byte prefix and
+    // then exactly the declared body bytes via process.stdin.read read-until
+    // loops, rebuild the body char-by-char, then write a framed response (binary
+    // length prefix via Uint8Array + JSON body via string).
     const src = `
-declare function readStdin(): string;
-declare const process: { stdout: { write(chunk: Uint8Array | string): void } };
+declare const process: {
+  stdin: { read(buf: Uint8Array, offset?: number): number };
+  stdout: { write(chunk: Uint8Array | string): void };
+};
 export function main(): void {
-  const framed = readStdin();
-  const b0 = framed.charCodeAt(0) & 0xff;
-  const b1 = framed.charCodeAt(1) & 0xff;
-  const b2 = framed.charCodeAt(2) & 0xff;
-  const b3 = framed.charCodeAt(3) & 0xff;
-  const len = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+  const header = new Uint8Array(4);
+  let got = 0;
+  while (got < 4) {
+    const n = process.stdin.read(header, got);
+    if (n <= 0) return;
+    got = got + n;
+  }
+  const len = header[0] + header[1] * 256 + header[2] * 65536 + header[3] * 16777216;
+  const bodyBuf = new Uint8Array(len);
+  let bgot = 0;
+  while (bgot < len) {
+    const n = process.stdin.read(bodyBuf, bgot);
+    if (n <= 0) break;
+    bgot = bgot + n;
+  }
   let body = "";
   for (let i = 0; i < len; i++) {
-    body = body + framed.charAt(4 + i);
+    body = body + String.fromCharCode(bodyBuf[i]);
   }
   const response = \`{"received":\${body}}\`;
   const rl = response.length;
@@ -147,7 +159,7 @@ export function main(): void {
   );
   process.stdout.write(response);
 }`;
-    const result = compile(src, { fileName: "rt.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "rt.ts", target: "wasi" });
     expect(result.success).toBe(true);
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
 
@@ -159,14 +171,218 @@ export function main(): void {
     expect(new TextDecoder().decode(out.subarray(4))).toBe(expectedBody);
   });
 
-  it("compiles the shipped example and round-trips it byte-exactly", () => {
+  it("compiles the shipped example and round-trips it byte-exactly", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = compile(src, { fileName: "host.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
     expect(result.success).toBe(true);
 
+    // The shipped host echoes the received body verbatim (byte-for-byte, no
+    // wrapper), so the response body equals the input body exactly.
     const out = runWasiRaw(result.binary, frame('{"cmd":"ping"}'));
-    const expectedBody = '{"received":{"cmd":"ping"},"runtime":"js2wasm+wasi"}';
+    const expectedBody = '{"cmd":"ping"}';
     expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(expectedBody.length);
     expect(new TextDecoder().decode(out.subarray(4))).toBe(expectedBody);
+  });
+
+  // #389 — the shipped host echoes a 1 MiB framed body byte-for-byte.
+  // guest271314 reported that a 1 MiB message came back corrupt (an array of
+  // `null`s). Root cause: the raw-byte stdout write helper
+  // (`__wasi_write_uint8array`) staged the body into linear memory at
+  // WASI_WRITE_SCRATCH_START without growing memory first — only 3 pages
+  // (192 KiB) are reserved by default, so a ~1 MiB write ran past the end of
+  // memory and trapped / corrupted the output. The host now carries the body
+  // as a raw Uint8Array (no lossy String.fromCharCode stringify) and the write
+  // helper grows memory like the string-write path already did (#1723).
+  //
+  // We build a frame whose body is non-trivial bytes (a repeating 0..250 ramp,
+  // so any truncation, zeroing, or aliasing shows up as a byte mismatch) and
+  // assert the response is the exact same 1 MiB body with the right prefix.
+  it("echoes a 1 MiB framed body byte-exactly (#389 large-message regression)", async () => {
+    const src = readFileSync(hostPath, "utf-8");
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const SIZE = 1024 * 1024; // 1 MiB
+    const body = new Uint8Array(SIZE);
+    for (let i = 0; i < SIZE; i++) body[i] = i % 251;
+    const input = new Uint8Array(4 + SIZE);
+    new DataView(input.buffer).setUint32(0, SIZE, true);
+    input.set(body, 4);
+
+    const out = runWasiRaw(result.binary, input);
+    // 4-byte LE prefix declares the full 1 MiB length…
+    expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(SIZE);
+    // …and the body is the exact same bytes, with no truncation/null-fill.
+    const respBody = out.subarray(4);
+    expect(respBody.length).toBe(SIZE);
+    let firstMismatch = -1;
+    for (let i = 0; i < SIZE; i++) {
+      if (respBody[i] !== body[i]) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+  });
+
+  // #389 — multi-message + large-body regression. guest271314's repro is a
+  // long-lived port loop fed repeated large bodies. Two earlier bugs hid here:
+  //   1. the >1 MiB path only echoed JSON *string* bodies (leading `"`); any
+  //      other large body (a JSON array starts with `[`) was read and dropped,
+  //      so the echo came back as 0 bytes;
+  //   2. the per-message allocation grew the GC heap on wasmtime < v45.
+  // The fixed host streams every body straight back in <=1 MiB frames through a
+  // single reused buffer, so each message round-trips byte-exactly regardless of
+  // content, and several messages in one session don't drift. We send THREE
+  // frames whose bodies are non-string ramps just over the 1 MiB chunk boundary
+  // (so each splits into a full 1 MiB frame + a partial tail frame), then assert
+  // the reassembled response equals the concatenated inputs and that no single
+  // response frame body exceeds the 1 MiB cap.
+  it("echoes several large non-string bodies byte-exactly across one session (#389)", async () => {
+    const src = readFileSync(hostPath, "utf-8");
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const CHUNK = 1024 * 1024;
+    const BODY = CHUNK + 256 * 1024; // 1.25 MiB → one full frame + a tail frame
+    const MESSAGES = 3;
+
+    // Distinct ramp per message so a swap/duplication/truncation shows up.
+    const bodies: Uint8Array[] = [];
+    for (let m = 0; m < MESSAGES; m++) {
+      const b = new Uint8Array(BODY);
+      for (let i = 0; i < BODY; i++) b[i] = (i + m * 97) % 251;
+      bodies.push(b);
+    }
+    // Frame each body (4-byte LE prefix + body) and concatenate into one stdin.
+    const framed = bodies.map((b) => {
+      const f = new Uint8Array(4 + b.length);
+      new DataView(f.buffer).setUint32(0, b.length, true);
+      f.set(b, 4);
+      return f;
+    });
+    const stdin = new Uint8Array(framed.reduce((n, f) => n + f.length, 0));
+    let off = 0;
+    for (const f of framed) {
+      stdin.set(f, off);
+      off += f.length;
+    }
+
+    const out = runWasiRaw(result.binary, stdin);
+
+    // Walk the framed response: collect body bytes and the max frame size.
+    const expected = new Uint8Array(bodies.reduce((n, b) => n + b.length, 0));
+    let eo = 0;
+    for (const b of bodies) {
+      expected.set(b, eo);
+      eo += b.length;
+    }
+    const view = new DataView(out.buffer, out.byteOffset);
+    let p = 0;
+    let assembledLen = 0;
+    let maxFrameBody = 0;
+    let firstMismatch = -1;
+    const assembled = new Uint8Array(expected.length);
+    while (p + 4 <= out.length) {
+      const len = view.getUint32(p, true);
+      p += 4;
+      maxFrameBody = Math.max(maxFrameBody, len);
+      for (let i = 0; i < len && p + i < out.length; i++) {
+        assembled[assembledLen + i] = out[p + i];
+      }
+      assembledLen += len;
+      p += len;
+    }
+    // Reassembled echo equals the concatenated request bodies, byte-for-byte…
+    expect(assembledLen).toBe(expected.length);
+    for (let i = 0; i < expected.length; i++) {
+      if (assembled[i] !== expected[i]) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+    // …and the host never emits a frame body larger than Chrome's 1 MiB cap.
+    expect(maxFrameBody).toBeLessThanOrEqual(CHUNK);
+  });
+});
+
+// #389 — direct regression for the compiler-side bug: a large
+// process.stdout.write(Uint8Array) under --target wasi must grow linear memory
+// so the staged bytes don't run past the end of memory. Before the fix this
+// trapped "memory access out of bounds" at ~1 MiB (the byte-write helpers were
+// missing the memory.grow guard the string-write helper got in #1723). This is
+// independent of the Native Messaging example shape.
+describe("#389 large raw-byte stdout write grows memory", () => {
+  function runWriteOnly(binary: Uint8Array): Uint8Array {
+    const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
+    const writes: Uint8Array[] = [];
+    const wasi = {
+      fd_read(): number {
+        return 0;
+      },
+      fd_write(fd: number, iovs: number, iovsLen: number, nwritten: number): number {
+        const view = new DataView(ref.mem!.buffer);
+        let total = 0;
+        for (let i = 0; i < iovsLen; i++) {
+          const ptr = view.getUint32(iovs + i * 8, true);
+          const len = view.getUint32(iovs + i * 8 + 4, true);
+          if (fd === 1) writes.push(Uint8Array.from(new Uint8Array(ref.mem!.buffer, ptr, len)));
+          total += len;
+        }
+        view.setUint32(nwritten, total, true);
+        return 0;
+      },
+      proc_exit(code: number): void {
+        throw new Error(`proc_exit(${code})`);
+      },
+      random_get(): number {
+        return 0;
+      },
+      clock_time_get(): number {
+        return 0;
+      },
+    };
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+      wasi_snapshot_preview1: wasi,
+      env: {},
+    });
+    ref.mem = inst.exports.memory as WebAssembly.Memory;
+    (inst.exports.main as () => void)();
+    const total = writes.reduce((n, b) => n + b.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const b of writes) {
+      out.set(b, off);
+      off += b.length;
+    }
+    return out;
+  }
+
+  it("writes a 1 MiB Uint8Array to stdout without trapping", async () => {
+    const src = `
+declare const process: {
+  stdout: { write(chunk: Uint8Array | string): void };
+};
+export function main(): void {
+  const n = 1048576;
+  const buf = new Uint8Array(n);
+  let i = 0;
+  while (i < n) { buf[i] = (i % 251); i = i + 1; }
+  process.stdout.write(buf);
+}`;
+    const result = await compile(src, { fileName: "u8write.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const out = runWriteOnly(result.binary);
+    expect(out.length).toBe(1048576);
+    let firstMismatch = -1;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== i % 251) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
   });
 });

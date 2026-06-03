@@ -17,8 +17,7 @@ files:
 ---
 # #596 — Eliminate unnecessary ref.cast when type is statically known
 
-## Status: review
-
+## Status: in-review
 Closure calls and property access emit `ref.cast` + `ref.as_non_null` even when TypeScript's type system guarantees the type:
 
 ```wasm

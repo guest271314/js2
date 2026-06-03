@@ -12,7 +12,6 @@ goal: spec-completeness
 sprint: 45
 depends_on: [1016]
 required_by: [1205, 1223]
-pr: 53
 merged: 2026-04-27
 ---
 # #1177 — TDZ propagation through closure captures

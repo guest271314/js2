@@ -759,11 +759,110 @@ export function compileObjectDefineProperty(
     propName = propArg.text;
   }
 
+  // (#1511) Mapped-arguments link-break. Per ECMA-262 §10.4.4.2
+  // (ArgumentsExoticObject.[[DefineOwnProperty]]), defining a mapped index
+  // with an accessor descriptor, or a data descriptor whose `writable` is
+  // explicitly false, removes the param↔arguments mapping for that index:
+  // subsequent parameter writes must stop reflecting into `arguments[i]` and
+  // vice-versa. Setting only `configurable:false` (or `enumerable`) leaves the
+  // map intact. We detect the statically-resolvable shape — `arguments` as the
+  // receiver identifier (in a mapped-args function) with a literal index — and
+  // sever the link in `mappedArgsInfo.unmappedIndices`; the mapped-sync
+  // emitters read this set live, so codegen order makes the break apply only
+  // to syncs emitted after this defineProperty call.
+  if (
+    fctx.mappedArgsInfo &&
+    ts.isIdentifier(objArg) &&
+    objArg.text === "arguments" &&
+    ts.isObjectLiteralExpression(descArg)
+  ) {
+    const idxKey = propName ?? (ts.isNumericLiteral(propArg) ? propArg.text : undefined);
+    const argIndex = idxKey !== undefined ? Number(idxKey) : NaN;
+    if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      const isAccessor =
+        getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
+      const breaksLink = isAccessor || descWritable === false;
+      if (breaksLink) {
+        (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+      }
+    }
+  }
+
+  // (#1629a) Dynamic-descriptor path: when the descriptor argument is not an
+  // ObjectLiteralExpression (e.g. `var d = {value: 1}; defineProperty(o, k, d)`),
+  // the inline-literal code below has nothing to extract — valueExpr / getNode /
+  // descWritable are all undefined. The legacy fall-through to
+  // emitExternDefinePropertyNoValue silently emits empty flags AND for typed
+  // struct receivers skips the runtime call entirely, so the descriptor's
+  // value / accessor / flag bits are dropped on the floor.
+  //
+  // Route to the runtime's __defineProperty_desc helper, which materializes
+  // the descriptor via struct-aware getField (sidecar + __sget_<f> exports)
+  // and applies it via native Object.defineProperty. The obj is coerced to
+  // externref so the runtime sees a uniform entry point — this matches the
+  // sibling Object.create path at calls.ts:3996+ (#1631).
+  if (!ts.isObjectLiteralExpression(descArg)) {
+    // Compile obj → externref
+    const objType = compileExpression(ctx, fctx, objArg);
+    if (!objType) return null;
+    if (objType.kind === "ref" || objType.kind === "ref_null") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    } else if (objType.kind !== "externref") {
+      coerceType(ctx, fctx, objType, { kind: "externref" });
+    }
+    // Compile prop → externref
+    const propType = compileExpression(ctx, fctx, propArg, { kind: "externref" });
+    if (propType && propType.kind !== "externref") {
+      coerceType(ctx, fctx, propType, { kind: "externref" });
+    } else if (!propType) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    // Compile descArg → externref (WasmGC struct or plain object both work;
+    // runtime helper handles both via struct-aware getField).
+    const descType = compileExpression(ctx, fctx, descArg);
+    if (descType) {
+      if (descType.kind === "ref" || descType.kind === "ref_null") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      } else if (descType.kind !== "externref") {
+        coerceType(ctx, fctx, descType, { kind: "externref" });
+      }
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const dpDescIdx = ensureLateImport(
+      ctx,
+      "__defineProperty_desc",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (dpDescIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: dpDescIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return { kind: "externref" };
+  }
+
   // Check if obj is a struct type with the given field
   const objTsType = ctx.checker.getTypeAtLocation(objArg);
   let structName =
     resolveStructName(ctx, objTsType) ||
     (ts.isIdentifier(objArg) ? ctx.widenedVarStructMap.get(objArg.text) : undefined);
+
+  // (#1629 S3) Whether the receiver is *statically* struct-typed — i.e. resolved
+  // WITHOUT the `any`/externref rescue fallbacks 1-3 below. This is the same
+  // strength of resolution the *read* site (`resolveStructNameForExpr` in
+  // property-access.ts) has, so when it is set the compiled accessor fast path
+  // (`${structName}_get_<prop>` + `classAccessorSet`) is reachable from reads and
+  // must be kept. When it is unset (the `const o:any = {...}` case, resolved only
+  // via the define-site-only fallbacks), reads route through `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — those must
+  // instead mirror the accessor into the runtime sidecar (the working
+  // `emitExternDefinePropertyNoValue` → `__defineProperty_accessor` path). Splitting
+  // on this bit fixes the `const o:any` accessor-get bug without regressing the
+  // statically struct-typed (class-instance) accessor path.
+  const receiverIsStaticStruct = structName !== undefined;
 
   // Fallback 1: resolve struct name from the local variable's Wasm type.
   // This handles cases where the TS type is `any` but the local holds a struct ref.
@@ -822,11 +921,36 @@ export function compileObjectDefineProperty(
 
   // ── Getter/setter path ──────────────────────────────────────────────
   // Object.defineProperty(obj, "prop", { get() {...}, set(v) {...} })
-  // Compile as struct accessor methods, analogous to object literal getters/setters.
-  // Take the struct path whenever a struct is known — accessor properties don't need fieldIdx >= 0
-  // because they compile as Wasm functions (not struct fields). Property assignment uses the
-  // classAccessorSet to route o.foo = v to the compiled setter Wasm function.
-  if ((getNode || setNode) && !valueExpr && structName && structTypeIdx !== undefined && propName) {
+  //
+  // (#1629 S3) For a *statically struct-typed* receiver (a class instance / typed
+  // object — `receiverIsStaticStruct`) this branch compiles the getter/setter into
+  // a `${structName}_get_<prop>` Wasm function + `classAccessorSet` registration,
+  // which the read site dispatches via `compilePropertyAccess`'s class-accessor
+  // path. That read site resolves the same `structName`, so the compiled fast
+  // path is reachable and stays — removing it regresses the #459 accessor suite.
+  //
+  // For a `const o:any = {...}` receiver, by contrast, `structName` was resolved
+  // ONLY via the define-site rescue fallbacks 1-3 below, which the *read* site
+  // (`resolveStructNameForExpr`) lacks. Such reads lower to `__extern_get` /
+  // `_safeGet`, which the synthesized compiled getter can NOT serve — so the old
+  // unconditional early-return left the getter in neither
+  // `_wasmStructProps[obj]["__get_<prop>"]` nor `_wasmStructAccessors`, and
+  // `o.p` / `o["p"]` / `o[k]` / host reads returned `undefined`. We now fall
+  // those through (below) to `emitExternDefinePropertyNoValue`, which mirrors
+  // get/set into the runtime `__defineProperty_accessor` import (closure-wrapped
+  // via `_maybeWrapCallable` / the unconditional `__call_fn_<n>` bridge, validated
+  // by `_validatePropertyDescriptor`, written to the canonical sidecar slot
+  // `_safeGet` / S1 `_readOwnDescriptor` / GOPD all consult). One write reconciles
+  // every reader — the symmetric mirror the data-value path already emits via
+  // `__defineProperty_value`.
+  if (
+    receiverIsStaticStruct &&
+    (getNode || setNode) &&
+    !valueExpr &&
+    structName &&
+    structTypeIdx !== undefined &&
+    propName
+  ) {
     // Compile obj and save to local
     const objType = compileExpression(ctx, fctx, objArg);
     if (!objType) return null;

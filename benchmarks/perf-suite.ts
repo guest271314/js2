@@ -346,7 +346,7 @@ function fmtSpeedup(ratio: number): string {
 
 async function compileWorkload(source: string): Promise<{ run: () => number; binarySize: number; compileMs: number }> {
   const t0 = performance.now();
-  const result = compile(source, { fast: false });
+  const result = await compile(source, { fast: false });
   const compileMs = performance.now() - t0;
 
   if (!result.success) {

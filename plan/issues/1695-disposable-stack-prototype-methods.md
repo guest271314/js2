@@ -1,9 +1,10 @@
 ---
 id: 1695
 title: "DisposableStack/AsyncDisposableStack prototype methods — deferred-callback writeback fires too early (23 fails)"
-status: ready
+status: done
 created: 2026-05-28
 updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: hard
 reasoning_effort: high

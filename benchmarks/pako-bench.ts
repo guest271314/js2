@@ -330,7 +330,7 @@ interface WasmModule {
 async function compileModule(source: string, fast: boolean): Promise<WasmModule | null> {
   try {
     const t0 = performance.now();
-    const result = compile(source, { fast });
+    const result = await compile(source, { fast });
     const compileMs = performance.now() - t0;
 
     if (!result.success) {

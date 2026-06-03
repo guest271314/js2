@@ -14,7 +14,6 @@ language_feature: n/a
 goal: contributor-readiness
 sprint: 46
 depends_on: [1201, 1202]
-pr: 107
 es_edition: n/a
 related: [1201, 1202, 1203]
 origin: credibility infrastructure sprint — js2wasm is one of the first production compilers built entirely by AI agents. The methodology itself is a publishable contribution. Without documentation it is invisible; with documentation it is a credibility multiplier and a community attractor.

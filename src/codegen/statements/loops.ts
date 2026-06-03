@@ -16,7 +16,7 @@ import {
   findUnresolvableInObjectPattern,
   isStrictContext,
 } from "../expressions/assignment.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
+import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
 import { shiftLateImportIndices } from "../expressions/late-imports.js";
 import {
   addIteratorImports,
@@ -35,8 +35,10 @@ import {
   emitBoundsCheckedArrayGet,
   valTypesMatch,
 } from "../shared.js";
+import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
 import {
   compileArrayDestructuring,
+  arrayDstrNeedsIdentity,
   compileExternrefArrayDestructuringDecl,
   compileExternrefObjectDestructuringDecl,
   compileObjectDestructuring,
@@ -45,7 +47,9 @@ import {
   ensureAsyncIterator,
   ensureExternIsUndefined,
   syncDestructuredLocalsToGlobals,
+  tryEmitArrayProtoIteratorReadDrive,
 } from "./destructuring.js";
+import { arrayIteratorOverrideGlobalIdx } from "../expressions/proto-override.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
 
@@ -486,7 +490,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
         // Check if this variable is a module-level global (e.g., for(var i...)
         // at the top level). If so, use global.set instead of local.set.
-        const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+        // #1745: a function-local of the same name (hoisted by
+        // hoistVarDeclarations for a `var` inside a function/closure body)
+        // SHADOWS the module global per ECMA-262 §10.2.10 — bind to the local
+        // and fall through. Otherwise a `for (var i = <arrayExpr>; ...)` inside
+        // a closure whose `i` collides with a differently-typed top-level
+        // module global `i` would `global.set` an incompatible value type into
+        // the global → invalid Wasm.
+        const hasLocalShadow = fctx.localMap.has(name);
+        const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
         if (moduleGlobalIdx !== undefined) {
           if (decl.initializer) {
             const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleGlobalIdx)];
@@ -754,15 +766,21 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.continueStack.push(0);
 
   // Condition (inside $loop, before $continue block)
+  // (#1690) Register condInstrs in liveBodies before any nested compilation
+  // can fire an `addStringConstantGlobal` whose fixup walker would otherwise
+  // miss this detached buffer. The cond instrs live outside `fctx.body`
+  // (which is the loop body buffer registered via savedBodies) for the entire
+  // window from cond compilation through body+incrementor compilation until
+  // the assembled loop is pushed back into fctx.body below.
   const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
   if (stmt.condition) {
     const condBody = fctx.body;
-    fctx.body = [];
+    fctx.body = condInstrs;
     const condType = compileExpression(ctx, fctx, stmt.condition);
     ensureI32Condition(fctx, condType, ctx);
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({ op: "br_if", depth: 1 }); // break: exits $break (depth 1 from $loop body)
-    condInstrs.push(...fctx.body);
     fctx.body = condBody;
   }
 
@@ -834,12 +852,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.safeIndexedArrays = savedSafeIndexed;
 
   // Incrementor (inside $loop, after $continue block)
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as condInstrs above: the incrementor
+  // buffer is detached until the assembled loop is pushed below.
+  const incrInstrs: Instr[] = [];
+  ctx.liveBodies.add(incrInstrs);
+  fctx.body = incrInstrs;
   if (stmt.incrementor) {
     const resultType = compileExpression(ctx, fctx, stmt.incrementor);
     if (resultType !== null) fctx.body.push({ op: "drop" });
   }
-  const incrInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -898,6 +919,12 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       },
     ],
   });
+
+  // (#1690) The cond/incr Instr objects are now reachable via fctx.body →
+  // assembled loop. The condInstrs/incrInstrs arrays themselves are no longer
+  // needed by the walker (their contents were spread into `loopBody`).
+  ctx.liveBodies.delete(condInstrs);
+  ctx.liveBodies.delete(incrInstrs);
 
   // #1589: For pre-emptively boxed `var`/outer-scope names, write the final
   // ref-cell value back to the original unboxed local so post-loop reads of
@@ -996,11 +1023,14 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   const bodyInstrs = fctx.body;
 
   // Compile condition — true means continue looping
-  fctx.body = [];
+  // (#1690) Same liveBodies registration as compileForStatement: the cond
+  // buffer is detached from fctx.body until the assembled loop is pushed.
+  const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
+  fctx.body = condInstrs;
   const condType = compileExpression(ctx, fctx, stmt.expression);
   ensureI32Condition(fctx, condType, ctx);
   fctx.body.push({ op: "br_if", depth: 0 }); // restart $loop if true
-  const condInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
@@ -1034,6 +1064,9 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
       },
     ],
   });
+
+  // (#1690) The cond Instr objects are now reachable via fctx.body → loop.
+  ctx.liveBodies.delete(condInstrs);
 }
 
 function compileForOfDestructuring(
@@ -1222,6 +1255,19 @@ function compileForOfDestructuring(
     }); // end null guard for for-of object destructuring
   } else if (ts.isArrayBindingPattern(pattern)) {
     // Array destructuring in for-of: for (var [a, b] of arr)
+    // (#1719 CPR-2) When the program overrode Array.prototype's @@iterator and
+    // the per-element array is destructured, drive the override instead of the
+    // backing store (§8.5.2). Strictly gated behind the brand + a captured
+    // override; both clear in the common case ⇒ byte-identical. The element
+    // value lives in `elemLocal`, so feed the shared decl read-drive that local.
+    if (
+      arrayDstrNeedsIdentity(ctx, false) &&
+      arrayIteratorOverrideGlobalIdx(ctx) !== undefined &&
+      tryEmitArrayProtoIteratorReadDrive(ctx, fctx, pattern, elemType, elemLocal)
+    ) {
+      syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+      return;
+    }
     // Element may be a vec struct (array wrapper) OR a tuple struct.
     // Handle externref elements: use __extern_get to extract indexed properties
     if (elemType.kind !== "ref" && elemType.kind !== "ref_null") {
@@ -1232,7 +1278,19 @@ function compileForOfDestructuring(
         syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
         return;
       }
-      // Non-ref, non-externref (f64, i32): assign defaults or undefined sentinels
+      // #846: A non-ref, non-externref element (f64/i32 ⇒ number/boolean) is a
+      // primitive that lacks [Symbol.iterator]. ArrayBindingPattern initialization
+      // (§8.5.2 BindingInitialization → §8.5.3 IteratorBindingInitialization)
+      // first performs GetIterator(elem), which throws TypeError for a non-iterable
+      // primitive. This applies even to an EMPTY pattern (`for ([] of [1])`) because
+      // GetIterator runs before any binding element is read. Previously this branch
+      // silently assigned undefined sentinels and never threw. Strings are iterable
+      // but lower to a string ref / externref, so they take a different branch and
+      // are unaffected.
+      //
+      // The binding locals are still declared (allocated) so later references in
+      // the loop body type-check, but the throw makes the code after it
+      // unreachable in this iteration.
       for (const element of pattern.elements) {
         if (ts.isOmittedExpression(element)) continue;
         if (!ts.isBindingElement(element)) continue;
@@ -1240,27 +1298,9 @@ function compileForOfDestructuring(
         const localName = element.name.text;
         const bindingTsType = ctx.checker.getTypeAtLocation(element);
         const bindingType = resolveWasmType(ctx, bindingTsType);
-        const localIdx = allocLocal(fctx, localName, bindingType);
-        if (element.initializer) {
-          const instrs = collectInstrs(fctx, () => {
-            compileExpression(ctx, fctx, element.initializer!, bindingType);
-            fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-          });
-          fctx.body.push(...instrs);
-        } else {
-          if (bindingType.kind === "f64") {
-            fctx.body.push({ op: "f64.const", value: NaN });
-          } else if (bindingType.kind === "i32") {
-            fctx.body.push({ op: "i32.const", value: 0 });
-          } else if (bindingType.kind === "ref_null" || bindingType.kind === "ref") {
-            const refTypeIdx = (bindingType as { typeIdx: number }).typeIdx;
-            fctx.body.push({ op: "ref.null", typeIdx: refTypeIdx });
-          } else {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
-          fctx.body.push({ op: "local.set", index: localIdx });
-        }
+        allocLocal(fctx, localName, bindingType);
       }
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       return;
     }
 
@@ -2297,6 +2337,16 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
+  // #681: `for (x of arr.values())` is semantically identical to `for (x of arr)`
+  // — Array.prototype.values() walks the element list in order. Recognize the
+  // CallExpression subject and drive the existing index loop over the inner
+  // receiver, so standalone/WASI iterate natively instead of hard-erroring in
+  // compileArrayIteratorMethod. JS-host mode benefits too (no __array_values).
+  const valuesReceiver = arrayValuesReceiverForForOf(ctx, fctx, stmt);
+  if (valuesReceiver && compileForOfArrayTentative(ctx, fctx, stmt, valuesReceiver)) {
+    return;
+  }
+
   // The TS type resolving to `Array` is necessary but NOT sufficient to use the
   // fast vec-struct array path: an Array-typed iterable can still lower to a
   // non-vec value (a Symbol.iterator whose declared return widens to Array, an
@@ -2307,6 +2357,37 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
     compileForOfIterator(ctx, fctx, stmt);
   }
+}
+
+/**
+ * #681: detect `for (… of <recv>.values())` and return `<recv>` when it is a
+ * zero-argument `.values()` call whose receiver resolves to a Wasm vec struct.
+ * `Array.prototype.values()` yields each element in order, so iterating the
+ * iterator is identical to iterating the array directly. `.keys()`/`.entries()`
+ * have a different element shape (index / `[i, v]` pair) and are NOT handled
+ * here — they keep falling through to compileForOfIterator (and hard-error in
+ * standalone for now, a tracked follow-up). Returns undefined when the subject
+ * is not a recognizable `.values()` call.
+ */
+function arrayValuesReceiverForForOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+): ts.Expression | undefined {
+  const subject = stmt.expression;
+  if (!ts.isCallExpression(subject) || subject.arguments.length !== 0) return undefined;
+  const callee = subject.expression;
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "values") return undefined;
+
+  // Confirm the receiver lowers to a vec struct without leaving any code behind.
+  const bodyLenBefore = fctx.body.length;
+  const localsLenBefore = fctx.locals.length;
+  const recvType = compileExpression(ctx, fctx, callee.expression);
+  fctx.body.length = bodyLenBefore;
+  fctx.locals.length = localsLenBefore;
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return undefined;
+  if (getArrTypeIdxFromVec(ctx, recvType.typeIdx) < 0) return undefined;
+  return callee.expression;
 }
 
 /** Compile for...of over a string — iterate characters using __str_charAt */
@@ -2486,11 +2567,17 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
  * and if so delegates to compileForOfArray (which re-compiles the expression).
  * Returns true if the array path was used, false if caller should fall back.
  */
-function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): boolean {
+function compileForOfArrayTentative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): boolean {
+  const iterableExpr = iterableOverride ?? stmt.expression;
   // Tentatively compile just the expression to discover its Wasm type
   const bodyLenBefore = fctx.body.length;
   const localsLenBefore = fctx.locals.length;
-  const exprType = compileExpression(ctx, fctx, stmt.expression);
+  const exprType = compileExpression(ctx, fctx, iterableExpr);
 
   // Check if it compiled to a ref to a vec struct (not just any struct —
   // a class instance is also a struct but not iterable via array access).
@@ -2502,7 +2589,7 @@ function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, 
       // full array path (which compiles the expression again with proper setup)
       fctx.body.length = bodyLenBefore;
       fctx.locals.length = localsLenBefore;
-      compileForOfArray(ctx, fctx, stmt);
+      compileForOfArray(ctx, fctx, stmt, iterableOverride);
       return true;
     }
   }
@@ -2514,10 +2601,16 @@ function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /** Compile for...of over an array using index-based loop (existing behavior) */
-function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
-  // Compile the iterable expression (vec struct ref)
+function compileForOfArray(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): void {
+  // Compile the iterable expression (vec struct ref). `iterableOverride` is the
+  // inner receiver of a `.values()` call (#681) when present.
   const bodyLenBefore = fctx.body.length;
-  const vecType = compileExpression(ctx, fctx, stmt.expression);
+  const vecType = compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
   if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
     fctx.body.length = bodyLenBefore;
     reportError(ctx, stmt, "for-of requires an array expression");
@@ -3345,6 +3438,8 @@ function findStructFieldsByTypeIdx(
  */
 function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
   // Compile the iterable expression
+  const bodyLenBefore = fctx.body.length;
+  const localsLenBefore = fctx.locals.length;
   const iterableType = compileExpression(ctx, fctx, stmt.expression);
   if (!iterableType) {
     reportError(ctx, stmt, "for-of: failed to compile iterable expression");
@@ -3373,7 +3468,32 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     }
   }
 
+  // #1665: Wasm-native generator for-of. When the iterable is a native
+  // generator state struct (the value produced by a `function*` declaration
+  // under --target wasi/standalone), drive the loop via the generator's resume
+  // function — no JS-host iterator protocol, no #681 gate. The subject value is
+  // already on the stack from compileExpression above.
+  if ((ctx.standalone || ctx.wasi) && (iterableType.kind === "ref" || iterableType.kind === "ref_null")) {
+    const genInfo = nativeGeneratorInfoForForOfSubject(ctx, iterableType);
+    if (genInfo && tryCompileNativeGeneratorForOf(ctx, fctx, stmt, iterableType, genInfo)) {
+      return;
+    }
+  }
+
   // Fallback: host-delegated iterator protocol
+  if (ctx.standalone || ctx.wasi) {
+    fctx.body.length = bodyLenBefore;
+    fctx.locals.length = localsLenBefore;
+    reportError(
+      ctx,
+      stmt,
+      "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
+        "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
+        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
+    );
+    return;
+  }
+
   // Ensure iterator host imports are registered before using them
   addIteratorImports(ctx);
 

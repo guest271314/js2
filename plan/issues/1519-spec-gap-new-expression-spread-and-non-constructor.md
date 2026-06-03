@@ -1,7 +1,7 @@
 ---
 id: 1519
 title: "spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call"
-status: review
+status: in-review
 created: 2026-05-20
 updated: 2026-05-20
 priority: medium

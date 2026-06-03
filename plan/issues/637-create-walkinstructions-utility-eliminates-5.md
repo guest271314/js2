@@ -28,8 +28,7 @@ files:
 ---
 # #637 — Create walkInstructions utility (eliminates 5 duplicate walkers)
 
-## Status: review
-
+## Status: in-review
 5+ independent implementations of "walk all instructions recursively into blocks" across: shiftInstrs, patchInstrs, collectRefsFromBody, optimizeBody, walkInstrs/walkBlockTypes in WAT emitter.
 
 ### Fix

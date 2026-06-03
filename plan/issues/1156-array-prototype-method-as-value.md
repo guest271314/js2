@@ -14,7 +14,6 @@ goal: developer-experience
 sprint: 44
 depends_on: [1152]
 closed: 2026-04-23
-pr: 250
 net_improvement: 2739
 es_edition: multi
 ---

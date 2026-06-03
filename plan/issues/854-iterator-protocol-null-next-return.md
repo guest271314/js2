@@ -12,7 +12,6 @@ goal: async-model
 sprint: 44
 parent: 820
 closed: 2026-04-23
-pr: 144
 net_improvement: 0
 test262_fail: 126
 ---

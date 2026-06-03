@@ -11,7 +11,6 @@ reasoning_effort: high
 goal: spec-completeness
 sprint: 44
 closed: 2026-04-23
-pr: 241
 net_improvement: 57
 ---
 # #1149 — Fix null_deref:32 in eval-code direct method tests

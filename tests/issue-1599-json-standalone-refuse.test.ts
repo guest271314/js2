@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
- * #1599 Phase 1 — refuse-and-document for JSON in standalone / WASI mode.
+ * #1599 — standalone / WASI JSON host-import guard.
  *
  * `JSON.stringify` / `JSON.parse` of non-primitive shapes delegate to the JS
  * host imports `env::JSON_stringify` / `env::JSON_parse`. In `--target
@@ -14,17 +14,17 @@ import { compile } from "../src/index.js";
  * Phase 1 instead:
  *   - skips registering the `env::JSON_*` imports in standalone/wasi mode, and
  *   - emits a clear `#1599` compile error at the call site for any shape not
- *     covered by the pure-Wasm primitive `JSON.stringify` slice (#1324).
+ *     covered by pure-Wasm/static JSON slices.
  *
- * The primitive `JSON.stringify` slice (null / undefined / boolean / number)
- * is still lowered to pure Wasm and continues to compile standalone.
- *
- * Phase 2 (a pure-Wasm JSON codec for objects / arrays / strings / parse) is
- * tracked in the issue file as a follow-up.
+ * The primitive/static slices (null / undefined / boolean / number and static
+ * JSON-compatible literals) are lowered without a JSON host import.
  */
 
-function expectRefused(src: string, target: "standalone" | "wasi" = "standalone"): ReturnType<typeof compile> {
-  const r = compile(src, { target });
+async function expectRefused(
+  src: string,
+  target: "standalone" | "wasi" = "standalone",
+): Promise<ReturnType<typeof compile>> {
+  const r = await compile(src, { target });
   expect(r.success, `expected compile failure, got success for:\n${src}`).toBe(false);
   expect(r.errors.length).toBeGreaterThan(0);
   expect(r.errors.some((e) => /#1599/.test(e.message))).toBe(true);
@@ -33,34 +33,46 @@ function expectRefused(src: string, target: "standalone" | "wasi" = "standalone"
   return r;
 }
 
-describe("#1599 --target standalone refuses unsupported JSON shapes", () => {
-  it("rejects JSON.stringify of an object", () => {
-    expectRefused(`export function f(): string { return JSON.stringify({ a: 1 }); }`);
+async function expectAccepted(src: string, target: "standalone" | "wasi" = "standalone") {
+  const r = await compile(src, { target });
+  expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  const labels = r.imports.map((i) => `${i.module}::${i.name}`);
+  expect(labels.some((l) => /JSON_stringify|JSON_parse/.test(l))).toBe(false);
+  return r;
+}
+
+describe("#1599 --target standalone refuses dynamic unsupported JSON shapes", () => {
+  it("rejects JSON.stringify of a dynamic object", async () => {
+    await expectRefused(`export function f(o: { a: number }): string { return JSON.stringify(o); }`);
   });
 
-  it("rejects JSON.stringify of an array", () => {
-    expectRefused(`export function f(): string { return JSON.stringify([1, 2, 3]); }`);
+  it("rejects JSON.stringify of a dynamic array", async () => {
+    await expectRefused(`export function f(a: number[]): string { return JSON.stringify(a); }`);
   });
 
-  it("rejects JSON.stringify of a string", () => {
-    expectRefused(`export function f(s: string): string { return JSON.stringify(s); }`);
+  it("compiles JSON.stringify of a dynamic string (#1599 Phase 2 — pure-Wasm __json_quote_string)", async () => {
+    await expectAccepted(`export function f(s: string): string { return JSON.stringify(s); }`);
   });
 
-  it("rejects JSON.parse", () => {
-    expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`);
+  it("compiles JSON.stringify of a dynamic number", async () => {
+    await expectAccepted(`export function f(n: number): string { return JSON.stringify(n); }`);
   });
 
-  it("rejects JSON.parse of a string literal", () => {
-    expectRefused(`export function f(): number { return JSON.parse('{"x":42}').x; }`);
+  it("rejects dynamic JSON.parse text", async () => {
+    await expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`);
   });
 
-  it("also refuses under --target wasi", () => {
-    expectRefused(`export function f(): string { return JSON.stringify({ a: 1 }); }`, "wasi");
-    expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`, "wasi");
+  it("compiles JSON.parse of a static string literal property read", async () => {
+    await expectAccepted(`export function f(): number { return JSON.parse('{"x":42}').x; }`);
   });
 
-  it("emits no env::JSON_* import when refused", () => {
-    const r = compile(`export function f(): string { return JSON.stringify({ a: 1 }); }`, {
+  it("also refuses under --target wasi", async () => {
+    await expectRefused(`export function f(o: { a: number }): string { return JSON.stringify(o); }`, "wasi");
+    await expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`, "wasi");
+  });
+
+  it("emits no env::JSON_* import when refused", async () => {
+    const r = await compile(`export function f(o: { a: number }): string { return JSON.stringify(o); }`, {
       target: "standalone",
     });
     expect(r.success).toBe(false);
@@ -71,7 +83,7 @@ describe("#1599 --target standalone refuses unsupported JSON shapes", () => {
 
 describe("#1599 primitive JSON.stringify slice still works standalone (#1324)", () => {
   async function runStandalone(src: string, expected: string | undefined) {
-    const r = compile(src, { target: "standalone" });
+    const r = await compile(src, { target: "standalone" });
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     // No JSON host import was registered.
     const labels = r.imports.map((i) => `${i.module}::${i.name}`);
@@ -86,23 +98,24 @@ describe("#1599 primitive JSON.stringify slice still works standalone (#1324)", 
     await runStandalone(`export function f(): string { return JSON.stringify(true); }`, "true");
   });
 
-  // NOTE: JSON.stringify(number) is *not* standalone-safe even though it is a
-  // primitive — the #1324 slice lowers it through `env::number_toString`, a
-  // host import that does not exist in standalone/wasi mode. It is therefore
-  // correctly refused with the #1599 message (see refusal block above). The
-  // pure-Wasm number-to-string path is part of the Phase 2 follow-up.
+  it("JSON.stringify of a static object compiles standalone", async () => {
+    await runStandalone(
+      `export function f(): string { return JSON.stringify({ a: 1, b: [2, 3] }); }`,
+      '{"a":1,"b":[2,3]}',
+    );
+  });
 });
 
 describe("#1599 default (JS-host) mode unchanged", () => {
-  it("compiles JSON.stringify of an object in default mode", () => {
-    const r = compile(`export function f(): string { return JSON.stringify({ a: 1 }); }`, {});
+  it("compiles JSON.stringify of an object in default mode", async () => {
+    const r = await compile(`export function f(): string { return JSON.stringify({ a: 1 }); }`, {});
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     const labels = r.imports.map((i) => `${i.module}::${i.name}`);
     expect(labels.some((l) => /JSON_stringify/.test(l))).toBe(true);
   });
 
-  it("compiles JSON.parse in default mode", () => {
-    const r = compile(`export function f(s: string): number { return JSON.parse(s).x; }`, {});
+  it("compiles JSON.parse in default mode", async () => {
+    const r = await compile(`export function f(s: string): number { return JSON.parse(s).x; }`, {});
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     const labels = r.imports.map((i) => `${i.module}::${i.name}`);
     expect(labels.some((l) => /JSON_parse/.test(l))).toBe(true);

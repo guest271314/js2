@@ -1,9 +1,10 @@
 ---
 id: 821
 title: "BindingElement null guard over-triggering"
-status: in-review
+status: done
 created: 2026-03-27
-updated: 2026-04-28
+updated: 2026-05-29
+completed: 2026-05-29
 priority: critical
 feasibility: medium
 reasoning_effort: high

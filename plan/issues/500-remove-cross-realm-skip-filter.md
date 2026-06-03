@@ -17,8 +17,7 @@ files:
 ---
 # #500 — Remove cross-realm skip filter (33 tests)
 
-## Status: review
-
+## Status: in-review
 33 tests skipped for "unsupported feature: cross-realm". These tests check behavior across different JS realms (iframe vs parent), where each realm has its own built-in prototypes.
 
 In our single-module Wasm model, cross-realm edge cases can't arise — there's only one Array, one Object, one set of prototypes. Most of these tests should pass trivially since the "gotcha" they test (wrong prototype from a different realm) doesn't exist.

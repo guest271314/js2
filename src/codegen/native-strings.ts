@@ -9,7 +9,7 @@ import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureLateImport } from "./expressions/late-imports.js";
 import { addImport } from "./registry/imports.js";
-import { addFuncType, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 
 export function nativeStringType(ctx: CodegenContext): ValType {
   return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
@@ -3779,6 +3779,1098 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       exported: false,
     });
   }
+}
+
+/**
+ * (#1780) Register the WasmGC struct backing `TextEncoder.encodeInto`'s
+ * `{ read, written }` result. Registered under the lib.dom.d.ts interface name
+ * `TextEncoderEncodeIntoResult` so that member access on the call result
+ * (`r.read`, `r.written`) resolves to this struct via `resolveStructName`
+ * (which keys on `tsType.symbol?.name`). Both fields are JS numbers → f64.
+ */
+function ensureEncodeIntoResultStruct(ctx: CodegenContext): number {
+  const name = "TextEncoderEncodeIntoResult";
+  const existing = ctx.structMap.get(name);
+  if (existing !== undefined) return existing;
+
+  const fields = [
+    { name: "read", type: { kind: "f64" as const }, mutable: false },
+    { name: "written", type: { kind: "f64" as const }, mutable: false },
+  ];
+  const typeIdx = ctx.mod.types.length;
+  // superTypeIdx: -1 emits the struct as a `(sub (struct …))` with no supertype,
+  // giving it a distinct nominal identity. A plain `(struct f64 f64)` would get
+  // canonical structural identity and could be merged/aliased with another
+  // structurally-identical two-f64 struct, breaking `struct.new`/field access by
+  // type-index (mirrors the vec-type pattern in registry/types.ts).
+  ctx.mod.types.push({ kind: "struct", name, fields, superTypeIdx: -1 });
+  ctx.structMap.set(name, typeIdx);
+  ctx.typeIdxToStructName.set(typeIdx, name);
+  ctx.structFields.set(name, fields);
+  return typeIdx;
+}
+
+export function ensureTextEncodingHelpers(ctx: CodegenContext): {
+  encodeIdx: number;
+  decodeU8Idx: number;
+  vecTypeIdx: number;
+  resultTypeIdx: number;
+} {
+  ensureNativeStringHelpers(ctx);
+
+  const existingEncode = ctx.funcMap.get("__textencoder_encode");
+  const existingDecode = ctx.funcMap.get("__textdecoder_decode_u8");
+  const elemType: ValType = { kind: "f64" };
+  const vecTypeIdx = getOrRegisterVecType(ctx, "f64", elemType);
+  const vecArrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  const resultTypeIdx = ensureEncodeIntoResultStruct(ctx);
+  if (existingEncode !== undefined && existingDecode !== undefined) {
+    return {
+      encodeIdx: existingEncode,
+      decodeU8Idx: existingDecode,
+      vecTypeIdx,
+      resultTypeIdx,
+    };
+  }
+
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (strTypeIdx < 0 || anyStrTypeIdx < 0 || strDataTypeIdx < 0 || vecArrTypeIdx < 0) {
+    throw new Error("TextEncoder/TextDecoder require native string and Uint8Array runtime types");
+  }
+
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const flatStrRef: ValType = { kind: "ref", typeIdx: strTypeIdx };
+  const strDataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
+  const vecRef: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+  const vecNonNullRef: ValType = { kind: "ref", typeIdx: vecTypeIdx };
+  const vecArrRef: ValType = { kind: "ref", typeIdx: vecArrTypeIdx };
+  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten")!;
+
+  if (existingEncode === undefined) {
+    const typeIdx = addFuncType(ctx, [strRef], [vecRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__textencoder_encode", funcIdx);
+    ctx.funcMap.set("__textencoder_encode", funcIdx);
+
+    const FLAT = 1;
+    const DATA = 2;
+    const OFF = 3;
+    const LEN = 4;
+    const OUT = 5;
+    const I = 6;
+    const O = 7;
+    const BYTELEN = 8;
+    const CU = 9;
+    const CP = 10;
+    const LO = 11;
+
+    const writeByte = (valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: OUT },
+      { op: "local.get", index: O },
+      ...valueInstrs,
+      { op: "f64.convert_i32_u" },
+      { op: "array.set", typeIdx: vecArrTypeIdx },
+      { op: "local.get", index: O },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: O },
+    ];
+
+    const writeCodePoint: Instr[] = [
+      { op: "local.get", index: CP },
+      { op: "i32.const", value: 0x80 },
+      { op: "i32.lt_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: writeByte([{ op: "local.get", index: CP }]),
+        else: [
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x800 },
+          { op: "i32.lt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              ...writeByte([
+                { op: "i32.const", value: 0xc0 },
+                { op: "local.get", index: CP },
+                { op: "i32.const", value: 6 },
+                { op: "i32.shr_u" },
+                { op: "i32.or" },
+              ]),
+              ...writeByte([
+                { op: "i32.const", value: 0x80 },
+                { op: "local.get", index: CP },
+                { op: "i32.const", value: 0x3f },
+                { op: "i32.and" },
+                { op: "i32.or" },
+              ]),
+            ],
+            else: [
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x10000 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...writeByte([
+                    { op: "i32.const", value: 0xe0 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 12 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByte([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 6 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByte([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                ],
+                else: [
+                  ...writeByte([
+                    { op: "i32.const", value: 0xf0 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 18 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByte([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 12 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByte([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 6 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByte([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const decodeCodePoint: Instr[] = [
+      { op: "local.get", index: DATA },
+      { op: "local.get", index: OFF },
+      { op: "local.get", index: I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
+      { op: "local.set", index: CU },
+      { op: "local.get", index: CU },
+      { op: "local.set", index: CP },
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: I },
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xd800 },
+      { op: "i32.ge_u" },
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xdbff },
+      { op: "i32.le_u" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: I },
+          { op: "local.get", index: LEN },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: DATA },
+              { op: "local.get", index: OFF },
+              { op: "local.get", index: I },
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataTypeIdx },
+              { op: "local.set", index: LO },
+              { op: "local.get", index: LO },
+              { op: "i32.const", value: 0xdc00 },
+              { op: "i32.ge_u" },
+              { op: "local.get", index: LO },
+              { op: "i32.const", value: 0xdfff },
+              { op: "i32.le_u" },
+              { op: "i32.and" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "i32.const", value: 0x10000 },
+                  { op: "local.get", index: CU },
+                  { op: "i32.const", value: 0xd800 },
+                  { op: "i32.sub" },
+                  { op: "i32.const", value: 10 },
+                  { op: "i32.shl" },
+                  { op: "i32.add" },
+                  { op: "local.get", index: LO },
+                  { op: "i32.const", value: 0xdc00 },
+                  { op: "i32.sub" },
+                  { op: "i32.add" },
+                  { op: "local.set", index: CP },
+                  { op: "local.get", index: I },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: I },
+                ],
+                else: [
+                  { op: "i32.const", value: 0xfffd },
+                  { op: "local.set", index: CP },
+                ],
+              },
+            ],
+            else: [
+              { op: "i32.const", value: 0xfffd },
+              { op: "local.set", index: CP },
+            ],
+          },
+        ],
+        else: [
+          { op: "local.get", index: CU },
+          { op: "i32.const", value: 0xdc00 },
+          { op: "i32.ge_u" },
+          { op: "local.get", index: CU },
+          { op: "i32.const", value: 0xdfff },
+          { op: "i32.le_u" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 0xfffd },
+              { op: "local.set", index: CP },
+            ],
+          },
+        ],
+      },
+      ...writeCodePoint,
+    ];
+
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "local.set", index: FLAT },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: OFF },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: LEN },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: DATA },
+      { op: "local.get", index: LEN },
+      { op: "i32.const", value: 2 },
+      { op: "i32.shl" },
+      { op: "array.new_default", typeIdx: vecArrTypeIdx },
+      { op: "local.set", index: OUT },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: O },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              ...decodeCodePoint,
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: O },
+      { op: "local.get", index: OUT },
+      { op: "struct.new", typeIdx: vecTypeIdx },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__textencoder_encode",
+      typeIdx,
+      locals: [
+        { name: "flat", type: flatStrRef },
+        { name: "data", type: strDataRef },
+        { name: "off", type: { kind: "i32" } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "out", type: vecArrRef },
+        { name: "i", type: { kind: "i32" } },
+        { name: "o", type: { kind: "i32" } },
+        { name: "maxByteLen", type: { kind: "i32" } },
+        { name: "cu", type: { kind: "i32" } },
+        { name: "cp", type: { kind: "i32" } },
+        { name: "lo", type: { kind: "i32" } },
+      ],
+      body,
+      exported: false,
+    });
+  }
+
+  if (existingDecode === undefined) {
+    const typeIdx = addFuncType(ctx, [vecRef], [strRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__textdecoder_decode_u8", funcIdx);
+    ctx.funcMap.set("__textdecoder_decode_u8", funcIdx);
+
+    const SRC = 1;
+    const LEN = 2;
+    const DATA = 3;
+    const OUT = 4;
+    const I = 5;
+    const O = 6;
+    const B0 = 7;
+    const B1 = 8;
+    const B2 = 9;
+    const B3 = 10;
+    const CP = 11;
+
+    const readByteTo = (local: number): Instr[] => [
+      { op: "local.get", index: DATA },
+      { op: "local.get", index: I },
+      { op: "array.get", typeIdx: vecArrTypeIdx },
+      { op: "i32.trunc_sat_f64_u" },
+      { op: "i32.const", value: 0xff },
+      { op: "i32.and" },
+      { op: "local.set", index: local },
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: I },
+    ];
+
+    const writeCodePoint: Instr[] = [
+      { op: "local.get", index: CP },
+      { op: "i32.const", value: 0x10000 },
+      { op: "i32.ge_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: OUT },
+          { op: "local.get", index: O },
+          { op: "i32.const", value: 0xd800 },
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x10000 },
+          { op: "i32.sub" },
+          { op: "i32.const", value: 10 },
+          { op: "i32.shr_u" },
+          { op: "i32.or" },
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: OUT },
+          { op: "local.get", index: O },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "i32.const", value: 0xdc00 },
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x10000 },
+          { op: "i32.sub" },
+          { op: "i32.const", value: 0x3ff },
+          { op: "i32.and" },
+          { op: "i32.or" },
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: O },
+          { op: "i32.const", value: 2 },
+          { op: "i32.add" },
+          { op: "local.set", index: O },
+        ],
+        else: [
+          { op: "local.get", index: OUT },
+          { op: "local.get", index: O },
+          { op: "local.get", index: CP },
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: O },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: O },
+        ],
+      },
+    ];
+
+    const decodeMultibyte: Instr[] = [
+      { op: "local.get", index: B0 },
+      { op: "i32.const", value: 0xe0 },
+      { op: "i32.lt_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: I },
+          { op: "local.get", index: LEN },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              ...readByteTo(B1),
+              { op: "local.get", index: B0 },
+              { op: "i32.const", value: 0x1f },
+              { op: "i32.and" },
+              { op: "i32.const", value: 6 },
+              { op: "i32.shl" },
+              { op: "local.get", index: B1 },
+              { op: "i32.const", value: 0x3f },
+              { op: "i32.and" },
+              { op: "i32.or" },
+              { op: "local.set", index: CP },
+            ],
+            else: [
+              { op: "i32.const", value: 0xfffd },
+              { op: "local.set", index: CP },
+            ],
+          },
+        ],
+        else: [
+          { op: "local.get", index: B0 },
+          { op: "i32.const", value: 0xf0 },
+          { op: "i32.lt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: I },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.get", index: LEN },
+              { op: "i32.lt_s" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...readByteTo(B1),
+                  ...readByteTo(B2),
+                  { op: "local.get", index: B0 },
+                  { op: "i32.const", value: 0x0f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shl" },
+                  { op: "local.get", index: B1 },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shl" },
+                  { op: "i32.or" },
+                  { op: "local.get", index: B2 },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "local.set", index: CP },
+                ],
+                else: [
+                  { op: "i32.const", value: 0xfffd },
+                  { op: "local.set", index: CP },
+                ],
+              },
+            ],
+            else: [
+              { op: "local.get", index: I },
+              { op: "i32.const", value: 2 },
+              { op: "i32.add" },
+              { op: "local.get", index: LEN },
+              { op: "i32.lt_s" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...readByteTo(B1),
+                  ...readByteTo(B2),
+                  ...readByteTo(B3),
+                  { op: "local.get", index: B0 },
+                  { op: "i32.const", value: 0x07 },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 18 },
+                  { op: "i32.shl" },
+                  { op: "local.get", index: B1 },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shl" },
+                  { op: "i32.or" },
+                  { op: "local.get", index: B2 },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shl" },
+                  { op: "i32.or" },
+                  { op: "local.get", index: B3 },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.or" },
+                  { op: "local.set", index: CP },
+                ],
+                else: [
+                  { op: "i32.const", value: 0xfffd },
+                  { op: "local.set", index: CP },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "ref.as_non_null" },
+      { op: "local.set", index: SRC },
+      { op: "local.get", index: SRC },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: LEN },
+      { op: "local.get", index: SRC },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: DATA },
+      { op: "local.get", index: LEN },
+      { op: "array.new_default", typeIdx: strDataTypeIdx },
+      { op: "local.set", index: OUT },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: O },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              ...readByteTo(B0),
+              { op: "local.get", index: B0 },
+              { op: "i32.const", value: 0x80 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: B0 },
+                  { op: "local.set", index: CP },
+                ],
+                else: decodeMultibyte,
+              },
+              ...writeCodePoint,
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: O },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: OUT },
+      { op: "struct.new", typeIdx: strTypeIdx },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__textdecoder_decode_u8",
+      typeIdx,
+      locals: [
+        { name: "src", type: vecNonNullRef },
+        { name: "len", type: { kind: "i32" } },
+        { name: "data", type: vecArrRef },
+        { name: "out", type: strDataRef },
+        { name: "i", type: { kind: "i32" } },
+        { name: "o", type: { kind: "i32" } },
+        { name: "b0", type: { kind: "i32" } },
+        { name: "b1", type: { kind: "i32" } },
+        { name: "b2", type: { kind: "i32" } },
+        { name: "b3", type: { kind: "i32" } },
+        { name: "cp", type: { kind: "i32" } },
+      ],
+      body,
+      exported: false,
+    });
+  }
+
+  return {
+    encodeIdx: ctx.funcMap.get("__textencoder_encode")!,
+    decodeU8Idx: ctx.funcMap.get("__textdecoder_decode_u8")!,
+    vecTypeIdx,
+    resultTypeIdx,
+  };
+}
+
+/**
+ * (#1780) Register `__textencoder_encode_into_<destElemKey>`: writes UTF-8 bytes
+ * of `source` into the `dest` Uint8Array backing array, never splitting a code
+ * point, and returns a `{ read, written }` result struct. `read` counts UTF-16
+ * code units consumed for fully-written code points; `written` counts bytes
+ * written. Shares the surrogate-decode + UTF-8 emit shape of
+ * `__textencoder_encode`, but writes into a caller-supplied bounded buffer.
+ *
+ * The destination vec storage differs by target: WASI/standalone back
+ * `Uint8Array` with a packed `i8_byte` array (`{ kind: "i8" }`), other targets
+ * with an `f64` array (see `typedArrayVecStorage`). The caller passes the
+ * matching `destElemKey` so the bytes land in the right element representation.
+ */
+export function ensureEncodeIntoHelper(
+  ctx: CodegenContext,
+  destElemKey: "f64" | "i8_byte",
+): { encodeIntoIdx: number; destVecTypeIdx: number; resultTypeIdx: number } {
+  ensureTextEncodingHelpers(ctx);
+  const resultTypeIdx = ensureEncodeIntoResultStruct(ctx);
+  const destElemType: ValType = destElemKey === "i8_byte" ? { kind: "i8" } : { kind: "f64" };
+  const destVecTypeIdx = getOrRegisterVecType(ctx, destElemKey, destElemType);
+  const destVecArrTypeIdx = getArrTypeIdxFromVec(ctx, destVecTypeIdx);
+
+  const helperName = `__textencoder_encode_into_${destElemKey}`;
+  const existingEncodeInto = ctx.funcMap.get(helperName);
+  if (existingEncodeInto !== undefined) {
+    return { encodeIntoIdx: existingEncodeInto, destVecTypeIdx, resultTypeIdx };
+  }
+
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (strTypeIdx < 0 || anyStrTypeIdx < 0 || strDataTypeIdx < 0 || destVecArrTypeIdx < 0) {
+    throw new Error("TextEncoder.encodeInto requires native string and Uint8Array runtime types");
+  }
+
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const flatStrRef: ValType = { kind: "ref", typeIdx: strTypeIdx };
+  const strDataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
+  const destVecRef: ValType = { kind: "ref_null", typeIdx: destVecTypeIdx };
+  const destVecArrRef: ValType = { kind: "ref", typeIdx: destVecArrTypeIdx };
+  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten")!;
+  const vecTypeIdx = destVecTypeIdx;
+  const vecArrTypeIdx = destVecArrTypeIdx;
+
+  {
+    // Returns (i32 read, i32 written) as a multi-value result. The caller builds
+    // the `{ read, written }` result object via normal codegen (struct.new in a
+    // regularly-compiled function), which avoids materializing a fresh WasmGC
+    // struct from inside this late-registered runtime helper.
+    const typeIdx = addFuncType(ctx, [strRef, destVecRef], [{ kind: "i32" }, { kind: "i32" }]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set(helperName, funcIdx);
+    ctx.funcMap.set(helperName, funcIdx);
+
+    const FLAT = 2;
+    const DATA = 3;
+    const OFF = 4;
+    const LEN = 5;
+    const DEST = 6;
+    const CAP = 7;
+    const I = 8; // current read index into the source code units
+    const O = 9; // bytes written so far
+    const READ = 10; // committed UTF-16 code units consumed
+    const CU = 11;
+    const CP = 12;
+    const LO = 13;
+    const NB = 14; // UTF-8 byte length of the current code point
+
+    // Compute the UTF-8 byte length for the decoded code point in CP.
+    const computeNB: Instr[] = [
+      { op: "local.get", index: CP },
+      { op: "i32.const", value: 0x80 },
+      { op: "i32.lt_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: 1 },
+          { op: "local.set", index: NB },
+        ],
+        else: [
+          { op: "local.get", index: CP },
+          { op: "i32.const", value: 0x800 },
+          { op: "i32.lt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 2 },
+              { op: "local.set", index: NB },
+            ],
+            else: [
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x10000 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "i32.const", value: 3 },
+                  { op: "local.set", index: NB },
+                ],
+                else: [
+                  { op: "i32.const", value: 4 },
+                  { op: "local.set", index: NB },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    // i8_byte arrays store one packed byte per element (raw i32 value); f64
+    // arrays store the byte as an f64, so widen before the set.
+    const isPacked = destElemKey === "i8_byte";
+    const writeByteToDest = (valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: DEST },
+      { op: "local.get", index: O },
+      ...valueInstrs,
+      ...(isPacked ? [] : [{ op: "f64.convert_i32_u" } as Instr]),
+      { op: "array.set", typeIdx: vecArrTypeIdx },
+      { op: "local.get", index: O },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: O },
+    ];
+
+    const emitCodePointBytes: Instr[] = [
+      { op: "local.get", index: NB },
+      { op: "i32.const", value: 1 },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: writeByteToDest([{ op: "local.get", index: CP }]),
+        else: [
+          { op: "local.get", index: NB },
+          { op: "i32.const", value: 2 },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              ...writeByteToDest([
+                { op: "i32.const", value: 0xc0 },
+                { op: "local.get", index: CP },
+                { op: "i32.const", value: 6 },
+                { op: "i32.shr_u" },
+                { op: "i32.or" },
+              ]),
+              ...writeByteToDest([
+                { op: "i32.const", value: 0x80 },
+                { op: "local.get", index: CP },
+                { op: "i32.const", value: 0x3f },
+                { op: "i32.and" },
+                { op: "i32.or" },
+              ]),
+            ],
+            else: [
+              { op: "local.get", index: NB },
+              { op: "i32.const", value: 3 },
+              { op: "i32.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0xe0 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 12 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 6 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                ],
+                else: [
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0xf0 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 18 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 12 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 6 },
+                    { op: "i32.shr_u" },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                  ...writeByteToDest([
+                    { op: "i32.const", value: 0x80 },
+                    { op: "local.get", index: CP },
+                    { op: "i32.const", value: 0x3f },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
+                  ]),
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    // Decode the code point at source index I (advancing I past it), exactly as
+    // __textencoder_encode's decodeCodePoint does, but leaving the result in CP
+    // without emitting bytes (the caller decides whether the bytes fit first).
+    const decodeOnly: Instr[] = [
+      { op: "local.get", index: DATA },
+      { op: "local.get", index: OFF },
+      { op: "local.get", index: I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
+      { op: "local.set", index: CU },
+      { op: "local.get", index: CU },
+      { op: "local.set", index: CP },
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: I },
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xd800 },
+      { op: "i32.ge_u" },
+      { op: "local.get", index: CU },
+      { op: "i32.const", value: 0xdbff },
+      { op: "i32.le_u" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: I },
+          { op: "local.get", index: LEN },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: DATA },
+              { op: "local.get", index: OFF },
+              { op: "local.get", index: I },
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataTypeIdx },
+              { op: "local.set", index: LO },
+              { op: "local.get", index: LO },
+              { op: "i32.const", value: 0xdc00 },
+              { op: "i32.ge_u" },
+              { op: "local.get", index: LO },
+              { op: "i32.const", value: 0xdfff },
+              { op: "i32.le_u" },
+              { op: "i32.and" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "i32.const", value: 0x10000 },
+                  { op: "local.get", index: CU },
+                  { op: "i32.const", value: 0xd800 },
+                  { op: "i32.sub" },
+                  { op: "i32.const", value: 10 },
+                  { op: "i32.shl" },
+                  { op: "i32.add" },
+                  { op: "local.get", index: LO },
+                  { op: "i32.const", value: 0xdc00 },
+                  { op: "i32.sub" },
+                  { op: "i32.add" },
+                  { op: "local.set", index: CP },
+                  { op: "local.get", index: I },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: I },
+                ],
+                else: [
+                  { op: "i32.const", value: 0xfffd },
+                  { op: "local.set", index: CP },
+                ],
+              },
+            ],
+            else: [
+              { op: "i32.const", value: 0xfffd },
+              { op: "local.set", index: CP },
+            ],
+          },
+        ],
+        else: [
+          { op: "local.get", index: CU },
+          { op: "i32.const", value: 0xdc00 },
+          { op: "i32.ge_u" },
+          { op: "local.get", index: CU },
+          { op: "i32.const", value: 0xdfff },
+          { op: "i32.le_u" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 0xfffd },
+              { op: "local.set", index: CP },
+            ],
+          },
+        ],
+      },
+    ];
+
+    // Leave (read, written) on the stack as two i32s; the caller materializes
+    // the result object.
+    const buildResult: Instr[] = [
+      { op: "local.get", index: READ },
+      { op: "local.get", index: O },
+    ];
+
+    const body: Instr[] = [
+      // dest may be null (spec rejects, but be defensive) → read=written=0
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: READ },
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: O },
+          ...buildResult,
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "local.set", index: FLAT },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: OFF },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: LEN },
+      { op: "local.get", index: FLAT },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: DATA },
+      { op: "local.get", index: 1 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: CAP },
+      { op: "local.get", index: 1 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: DEST },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: O },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: READ },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              ...decodeOnly,
+              ...computeNB,
+              // If O + NB > CAP, the code point doesn't fit — stop without
+              // writing (and without committing READ for it).
+              { op: "local.get", index: O },
+              { op: "local.get", index: NB },
+              { op: "i32.add" },
+              { op: "local.get", index: CAP },
+              { op: "i32.gt_s" },
+              { op: "br_if", depth: 1 },
+              ...emitCodePointBytes,
+              // Commit: the whole code point fit, so READ now covers I.
+              { op: "local.get", index: I },
+              { op: "local.set", index: READ },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      ...buildResult,
+    ];
+
+    ctx.mod.functions.push({
+      name: helperName,
+      typeIdx,
+      locals: [
+        { name: "flat", type: flatStrRef },
+        { name: "data", type: strDataRef },
+        { name: "off", type: { kind: "i32" } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "dest", type: destVecArrRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "o", type: { kind: "i32" } },
+        { name: "read", type: { kind: "i32" } },
+        { name: "cu", type: { kind: "i32" } },
+        { name: "cp", type: { kind: "i32" } },
+        { name: "lo", type: { kind: "i32" } },
+        { name: "nb", type: { kind: "i32" } },
+      ],
+      body,
+      exported: false,
+    });
+  }
+
+  return { encodeIntoIdx: ctx.funcMap.get(helperName)!, destVecTypeIdx, resultTypeIdx };
 }
 
 export function ensureNativeStringExternBridge(ctx: CodegenContext): void {

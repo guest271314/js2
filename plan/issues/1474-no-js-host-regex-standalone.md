@@ -159,6 +159,28 @@ Tests: `tests/issue-1474-standalone-regex-refuse.test.ts` (14 cases —
 assert). Default-mode `tests/regexp.test.ts` and standalone
 `tests/issue-1470-standalone-string-imports.test.ts` both still green.
 
+Verification on 2026-06-01:
+
+- Spec checked from TC39 ECMA-262 anchors:
+  [`RegularExpressionLiteral`](https://tc39.es/ecma262/#sec-regular-expression-literals),
+  [`RegExp` constructor](https://tc39.es/ecma262/#sec-regexp-constructor),
+  [`RegExpInitialize`](https://tc39.es/ecma262/#sec-regexpinitialize) /
+  [`[[RegExpMatcher]]` instance state](https://tc39.es/ecma262/#sec-properties-of-regexp-instances),
+  and the string dispatch points
+  [`match`](https://tc39.es/ecma262/#sec-string.prototype.match),
+  [`matchAll`](https://tc39.es/ecma262/#sec-string.prototype.matchall),
+  [`search`](https://tc39.es/ecma262/#sec-string.prototype.search),
+  [`replace`](https://tc39.es/ecma262/#sec-string.prototype.replace),
+  [`replaceAll`](https://tc39.es/ecma262/#sec-string.prototype.replaceall),
+  [`split`](https://tc39.es/ecma262/#sec-string.prototype.split).
+  These all require a real RegExp object/matcher path, so Phase 1 keeps
+  standalone honest by refusing instead of importing the JS host engine.
+- `pnpm exec vitest run tests/issue-1474-standalone-regex-refuse.test.ts`
+  -> 14 passed.
+- `pnpm exec vitest run tests/equivalence/regexp-methods.test.ts tests/issue-1470-standalone-string-imports.test.ts`
+  -> 28 passed.
+- `pnpm exec vitest run tests/regexp.test.ts` -> 10 passed.
+
 Phase 2 (NFA engine) remains a separate follow-up issue.
 
 ### Phase 2 (follow-up, Option B — separate issue)

@@ -12,7 +12,7 @@ Two related rules about GitHub issues:
 **1. Never mutate user-opened GitHub issues without explicit consent.**
 Don't post comments to, edit, close, or reopen GitHub issues opened by external users (contributors, guests, reporters) without the user's explicit consent in the current conversation.
 
-**Why:** The user was annoyed when the tech lead posted a status update to issue #389 (opened by guest271314) without being asked. It looked presumptuous toward the reporter.
+**Why:** The user was annoyed when the tech lead posted a status update to issue #389 (opened by guest271314) without being asked. It looked presumptuous toward the reporter. Reinforced 2026-05-29: "dont auto reply, always ask for my consent!" — consent is **per-reply and does NOT carry over**. Even when the user says "let's address issue #389 comment X," that authorizes the *internal* work (code fix, PR) but NOT posting a reply; always draft the reply and ask for explicit consent before each `gh issue comment` / `gh api ... comments` POST.
 
 **2. Do NOT create GitHub issues for internal tracking — use `plan/issues/<id>-slug.md`.**
 This project tracks all work in markdown issue files under `plan/issues/`, NOT in GitHub Issues. When a new issue/task is needed, create the `.md` file (frontmatter: id, title, status, priority, etc.) and add it to the dependency graph / backlog. Do not run `gh issue create`.

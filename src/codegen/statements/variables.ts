@@ -3,12 +3,12 @@
  * Variable declaration statement lowering.
  */
 import { ts, forEachChild } from "../../ts-api.js";
-import { isStringType, isVoidType } from "../../checker/type-mapper.js";
+import { isNullablePrimitiveType, isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { reportError } from "../context/errors.js";
-import { allocLocal } from "../context/locals.js";
-import type { CodegenContext, FunctionContext } from "../context/types.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
+import { allocLocal, getLocalType } from "../context/locals.js";
+import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
+import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
@@ -96,6 +96,63 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
  *  that resolveWasmType would produce for the TS return type (e.g. string[]). */
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
+function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
+  return isNullablePrimitiveType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
+}
+
+function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) return "undefined";
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return "undefined";
+  return null;
+}
+
+function nullishPresenceOfType(type: ts.Type): { hasNull: boolean; hasUndefined: boolean } {
+  let hasNull = false;
+  let hasUndefined = false;
+  const parts = type.isUnion() ? type.types : [type];
+  for (const part of parts) {
+    if (part.flags & ts.TypeFlags.Null) hasNull = true;
+    if (part.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) hasUndefined = true;
+  }
+  return { hasNull, hasUndefined };
+}
+
+function excludesAllNullish(type: ts.Type, excludes: NullishExclusion): boolean {
+  const presence = nullishPresenceOfType(type);
+  if (!presence.hasNull && !presence.hasUndefined) return false;
+  if (presence.hasNull && excludes === "undefined") return false;
+  if (presence.hasUndefined && excludes === "null") return false;
+  return true;
+}
+
+function detectNullGuardAlias(ctx: CodegenContext, expr: ts.Expression): NullGuardFact | null {
+  if (!ts.isBinaryExpression(expr)) return null;
+  const op = expr.operatorToken.kind;
+  const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+  const isLooseNeq = op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+  const isLooseEq = op === ts.SyntaxKind.EqualsEqualsToken;
+  const isNeq = isStrictNeq || isLooseNeq;
+  const isEq = isStrictEq || isLooseEq;
+  if (!isNeq && !isEq) return null;
+
+  const rightNullish = nullishLiteralKind(expr.right);
+  const leftNullish = nullishLiteralKind(expr.left);
+  if (!rightNullish && !leftNullish) return null;
+
+  const comparedNullish = rightNullish ?? leftNullish;
+  const nonNullSide = rightNullish ? expr.left : expr.right;
+  if (!ts.isIdentifier(nonNullSide)) return null;
+  const excludes: NullishExclusion = isLooseEq || isLooseNeq ? "nullish" : comparedNullish!;
+  return {
+    varName: nonNullSide.text,
+    narrowedBranch: isNeq ? "then" : "else",
+    excludes,
+    provesNonNull: excludesAllNullish(ctx.checker.getTypeAtLocation(nonNullSide), excludes),
+  };
+}
+
 /** Check if an expression is a string method call that returns a host array (externref). */
 function isStringMethodReturningHostArray(ctx: CodegenContext, expr: ts.Expression): boolean {
   // With native strings, split returns a native string array, not externref
@@ -138,6 +195,44 @@ function isPromiseHostCall(_ctx: CodegenContext, expr: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * (#1337) Check if an initializer is a `Function.prototype.bind` call whose
+ * result is a real JS bound-function exotic (externref), NOT a wasm closure
+ * struct. In JS-host mode `fn.bind(...)` / `Function.prototype.bind.call(fn, ...)`
+ * lower to `__bind_function` which returns a host bound function as externref.
+ *
+ * Such a variable MUST get an `externref` local — `resolveWasmType` would
+ * otherwise type it as the target function's closure-struct ref (TS infers the
+ * bound result's type from the target's call signature), and the subsequent
+ * `coerceType(externref → struct ref)` emits a `ref.cast` that traps on the JS
+ * function, nulling the binding (the LHS-coerce blocker documented in #1337).
+ * With an externref local the value round-trips intact and calling it routes
+ * through the host externref-callee dispatch.
+ *
+ * Standalone mode degrades bind to identity (returns the receiver unchanged),
+ * so this override is intentionally scoped to JS-host mode by the caller.
+ */
+function isBindHostCall(expr: ts.Expression): boolean {
+  if (!ts.isCallExpression(expr)) return false;
+  const callee = expr.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  // Direct form: `<receiver>.bind(...)`.
+  if (callee.name.text === "bind") return true;
+  // Indirect form: `Function.prototype.bind.call(fn, ...)`.
+  if (
+    callee.name.text === "call" &&
+    ts.isPropertyAccessExpression(callee.expression) &&
+    callee.expression.name.text === "bind" &&
+    ts.isPropertyAccessExpression(callee.expression.expression) &&
+    callee.expression.expression.name.text === "prototype" &&
+    ts.isIdentifier(callee.expression.expression.expression) &&
+    callee.expression.expression.expression.text === "Function"
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.VariableStatement): void {
   for (const decl of stmt.declarationList.declarations) {
     if (ts.isObjectBindingPattern(decl.name)) {
@@ -157,10 +252,28 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
     const name = decl.name.text;
 
+    // #1690b: a `var`/`let`/`const` declaration inside a function body always
+    // introduces a function-local binding (ECMA-262 §10.2.10 for `var`;
+    // block scoping for let/const), which shadows any module-level global of
+    // the same name. The function-body hoister has already allocated that
+    // local, so it is present in `localMap`. When it is, the declaration's
+    // initializer must store into the LOCAL, never the module global —
+    // otherwise the inner declaration aliases and corrupts the module binding.
+    // (The module-init body compiles with an empty `localMap`, so this stays
+    // false there and the module-global store path is preserved.)
+    const hasLocalShadow = fctx.localMap.has(name);
+
     // Track const bindings for runtime enforcement (assignment throws TypeError)
     if (stmt.declarationList.flags & ts.NodeFlags.Const) {
       if (!fctx.constBindings) fctx.constBindings = new Set();
       fctx.constBindings.add(name);
+      if (decl.initializer) {
+        const alias = detectNullGuardAlias(ctx, decl.initializer);
+        if (alias) {
+          if (!fctx.nullGuardAliases) fctx.nullGuardAliases = new Map();
+          fctx.nullGuardAliases.set(name, alias);
+        }
+      }
     }
 
     // #1210: string-builder rewrite for `let s = "";` followed by an
@@ -200,7 +313,9 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
       // If this is a module-level variable, also store in the module global
       // so other functions can access the closure via global.get.
-      const modGlobalIdx = ctx.moduleGlobals.get(name);
+      // #1690b: skip the module-global path when a function-local shadow
+      // exists — the inner declaration must bind to the local, not the global.
+      const modGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
       if (modGlobalIdx !== undefined) {
         // Update the global's type to match the actual closure ref type
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
@@ -262,8 +377,9 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         if (!allComputedResolvable) {
           const actualType = compileExpression(ctx, fctx, decl.initializer);
           const objType = actualType ?? { kind: "externref" as const };
-          // Store to module global if available, otherwise local
-          const modGlobal = ctx.moduleGlobals.get(name);
+          // Store to module global if available, otherwise local.
+          // #1690b: a function-local shadow takes precedence over the global.
+          const modGlobal = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
           if (modGlobal !== undefined) {
             fctx.body.push({ op: "global.set", index: modGlobal });
             emitTdzInit(ctx, fctx, name);
@@ -285,8 +401,10 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       }
     }
 
-    // Check if this is a module-level global (already registered)
-    const moduleGlobalIdx = ctx.moduleGlobals.get(name);
+    // Check if this is a module-level global (already registered).
+    // #1690b: a function-local shadow (inner `var`/`let`/`const` of the same
+    // name) must bind to the local, so suppress the module-global store here.
+    const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
     if (moduleGlobalIdx !== undefined) {
       // Shape-inferred array-like: compile {} as empty vec struct
       const shapeInfo = ctx.shapeMap.get(name);
@@ -399,7 +517,13 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
                 ? { kind: "externref" as const }
                 : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
                   ? { kind: "externref" as const }
-                  : resolveWasmType(ctx, varType)));
+                  : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
+                    // returns a host bound-function externref in JS-host mode;
+                    // force an externref local so the value isn't ref.cast to
+                    // the target's closure struct (which traps → null binding).
+                    decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                    ? { kind: "externref" as const }
+                    : localTypeForDeclaration(ctx, varType)));
 
     // If this var/let/const was already pre-hoisted at function entry, reuse that slot.
     // For let/const: the pre-pass (hoistLetConstWithTdz) always pre-allocates a slot
@@ -507,6 +631,22 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             if (localSlot && localSlot.type.kind !== "externref") localSlot.type = closureType;
           }
           stackType = closureType;
+        } else if (
+          closureType.kind === "externref" &&
+          !ctx.standalone &&
+          !noJsHost(ctx) &&
+          isBindHostCall(decl.initializer)
+        ) {
+          // (#1337) A `.bind(...)` result is a host bound-function exotic.
+          // Keep it as externref — do NOT match-and-recast it to a wasm
+          // closure struct (the JS function isn't a struct; the cast would
+          // trap and null the binding). Calling it dispatches through the
+          // host externref-callee path.
+          if (localIdx >= fctx.params.length) {
+            const localSlot = fctx.locals[localIdx - fctx.params.length];
+            if (localSlot) localSlot.type = { kind: "externref" };
+          }
+          stackType = { kind: "externref" };
         } else if (closureType.kind === "externref" && callSigs!.length > 0) {
           // The initializer returned externref but the type is callable.
           // This happens when a function returns a closure coerced to externref.
@@ -568,22 +708,40 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         const prevElemOverride = ctxAny._i32ElemArrayOverride;
         if (isI32SpecializedArray) ctxAny._i32ElemArrayOverride = true;
         let resultType: ValType | null;
+        const initializerExpectedType = getLocalType(fctx, localIdx) ?? wasmType;
         try {
-          resultType = compileExpression(ctx, fctx, decl.initializer, wasmType);
+          resultType = compileExpression(ctx, fctx, decl.initializer, initializerExpectedType);
         } finally {
           ctxAny._i32ElemArrayOverride = prevElemOverride;
         }
         stackType = resultType ?? wasmType;
+        if (
+          resultType &&
+          wasmType.kind === "externref" &&
+          (resultType.kind === "ref" || resultType.kind === "ref_null") &&
+          !isVar &&
+          !(fctx.tdzFlagLocals?.has(name) ?? false) &&
+          localIdx >= fctx.params.length
+        ) {
+          const localSlot = fctx.locals[localIdx - fctx.params.length];
+          if (localSlot?.type.kind === "externref") {
+            localSlot.type =
+              resultType.kind === "ref"
+                ? { kind: "ref_null", typeIdx: (resultType as { typeIdx: number }).typeIdx }
+                : resultType;
+          }
+        }
         // Coerce if the expression produced a type that doesn't match the local
-        if (resultType && !valTypesMatch(resultType, wasmType)) {
+        const targetType = getLocalType(fctx, localIdx) ?? wasmType;
+        if (resultType && !valTypesMatch(resultType, targetType)) {
           const bodyLenBeforeCoerce = fctx.body.length;
-          coerceType(ctx, fctx, resultType, wasmType);
+          coerceType(ctx, fctx, resultType, targetType);
           // Only update stackType if coercion actually emitted instructions.
           // If coerceType was a no-op (e.g. unrelated struct types), keep
           // the original resultType so emitCoercedLocalSet can detect the
           // mismatch and update the local's declared type accordingly.
           if (fctx.body.length > bodyLenBeforeCoerce) {
-            stackType = wasmType; // after coercion, stack is wasmType
+            stackType = targetType; // after coercion, stack is targetType
           }
         }
       }

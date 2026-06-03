@@ -12,7 +12,7 @@
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
 import { ts } from "../ts-api.js";
-import { isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
+import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -152,6 +152,31 @@ export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./
  * Used to determine whether the result needs Promise.resolve() wrapping (#919).
  */
 function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  // Built-in Promise static methods already return a Promise object. Wrapping
+  // `Promise.resolve(v)` in another `Promise.resolve(...)` is harmless in the
+  // JS host due to native assimilation, but standalone `$Promise` currently has
+  // no assimilation step, so the callback would receive the inner Promise
+  // object instead of `v` (#1326).
+  if (
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "Promise"
+  ) {
+    return false;
+  }
+  if (
+    isStandalonePromiseActive(ctx) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.name.text === "then"
+  ) {
+    const receiverType = ctx.checker.getTypeAtLocation(expr.expression.expression);
+    const receiverSym = receiverType.getSymbol()?.name;
+    const apparentSym = ctx.checker.getApparentType(receiverType).getSymbol()?.name;
+    if (receiverSym === "Promise" || apparentSym === "Promise") {
+      return false;
+    }
+  }
+
   if (ts.isIdentifier(expr.expression)) {
     if (ctx.asyncFunctions.has(expr.expression.text)) return true;
   }
@@ -187,6 +212,66 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
   }
 
   return false;
+}
+
+/**
+ * Decide whether an async call's result is consumed as a raw value (`T`) rather
+ * than as a `Promise<T>` (#1727).
+ *
+ * In the synchronous-wasm async model the async function body already returns
+ * the unwrapped `T` (e.g. an f64), and the export boundary calls it directly to
+ * get that raw value. But for an INTERNAL call (`f()` inside another wasm fn)
+ * the default lowering runs `wrapAsyncReturn` — boxing the f64 and wrapping it
+ * in a real `Promise.resolve(...)` object. When the surrounding code then
+ * consumes the result as a primitive (`f() as unknown as number` feeding a
+ * numeric return / arithmetic), the consuming `coerceType(externref → f64)`
+ * emits `__unbox_number(Promise{42})` === `Number(Promise{42})` === **NaN**.
+ *
+ * The existing `await` consumer (handled at the call site) skips the wrap and
+ * leaves the raw `T` on the stack. This helper generalises that skip to the
+ * primitive/non-Promise cast sink: walk the wrapper chain
+ * (`Parenthesized`/`As`/`NonNull`/`TypeAssertion`) from `expr.parent` and
+ * return `true` when the immediate semantic consumer is:
+ *
+ *   1. an `AwaitExpression` (the existing case), or
+ *   2. a cast/assertion (`as T`, `<T>x`, `x!`) whose target type is NOT
+ *      `Promise<…>` — e.g. `as any`, `as unknown as number`, `as number`.
+ *      `as any`/`as unknown` resolve to the `any`/`unknown` type → not a
+ *      Promise → treated as a value consumer. This is the repro and the 7
+ *      `tests/equivalence/async-function.test.ts` cases.
+ *
+ * Returning `true` means: skip both `wrapAsyncReturn` and
+ * `wrapAsyncCallInTryCatch`, leaving the raw `f64`/`T` the sink wants. Genuine
+ * Promise consumers (`f().then(...)`, `const p: Promise<T> = f();`,
+ * `Promise.all([f()])`, a bare `return f()` from an async/Promise-returning fn)
+ * have NO non-Promise cast in the chain, so this returns `false` and the
+ * Promise wrap fires as before. The cast gate keeps the blast radius minimal:
+ * we only skip when an explicit non-Promise cast/assertion is present (#1727
+ * minimal-diff variant — scope 2).
+ */
+function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  let sawNonPromiseCast = false;
+  let parent: ts.Node | undefined = expr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isNonNullExpression(parent) ||
+      ts.isTypeAssertionExpression(parent))
+  ) {
+    if (ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isTypeAssertionExpression(parent)) {
+      // The cast/assertion's resolved type. For `f() as unknown as number`,
+      // each layer is inspected; the value-consumer signal is that at least one
+      // cast in the chain targets a non-Promise type.
+      const castType = ctx.checker.getTypeAtLocation(parent);
+      if (!isPromiseType(castType)) sawNonPromiseCast = true;
+    }
+    parent = parent.parent;
+  }
+  // (case 1) await consumer — raw-T passthrough (folds in the existing skip).
+  if (parent && ts.isAwaitExpression(parent)) return true;
+  // (case 2) non-Promise cast/assertion sink — raw value wanted.
+  return sawNonPromiseCast;
 }
 
 /**
@@ -519,7 +604,7 @@ function compileExpressionBody(
   const bodyLenBefore = fctx.body.length;
   let result: InnerResult;
   try {
-    result = compileExpressionInner(ctx, fctx, expr);
+    result = compileExpressionInner(ctx, fctx, expr, expectedType);
   } catch (e) {
     fctx.body.length = bodyLenBefore;
     const msg = e instanceof Error ? e.message : String(e);
@@ -572,6 +657,17 @@ function compileExpressionBody(
           const funcIdx = ctx.funcMap.get("__any_box_bool");
           if (funcIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx });
+            return expectedType;
+          }
+        }
+      }
+      if (result.kind === "i32" && expectedType.kind === "externref") {
+        const tsType = ctx.checker.getTypeAtLocation(expr);
+        if (isBooleanType(tsType)) {
+          const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (boxBoolIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
             return expectedType;
           }
         }
@@ -697,7 +793,12 @@ export function coerceType(
   return coerceTypeImpl(ctx, fctx, from, to, toPrimitiveHint);
 }
 
-function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): InnerResult {
+function compileExpressionInner(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  expectedType?: ValType,
+): InnerResult {
   if (ts.isNumericLiteral(expr)) {
     const value = Number(expr.text.replace(/_/g, ""));
     if (ctx.fast && Number.isInteger(value) && value >= -2147483648 && value <= 2147483647) {
@@ -776,6 +877,75 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       if (emitLazyClassObjectGet(ctx, fctx, fctx.enclosingClassName)) {
         return { kind: "externref" };
       }
+    }
+    // (#1636-S1) Host-dispatched-closure fallback: when no local `this`
+    // binding exists and we're not in a static-class context, read the
+    // host-supplied receiver from the `__current_this` module global —
+    // but ONLY for closure bodies that can actually be dispatched through
+    // `__call_fn_method_N` (`fctx.readsCurrentThis`). Those dispatchers
+    // install the host receiver into `__current_this` before the inner
+    // `call_ref`, so this is the only context in which the global holds a
+    // meaningful value.
+    //
+    // The earlier (#1636-S1) version gated this on `ctx.currentThisGlobalIdx
+    // >= 0` alone, but `ensureCurrentThisGlobal` is called eagerly for every
+    // module that emits any closure, so that condition was true for the whole
+    // module. Named function declarations / methods / constructors (compiled
+    // via function-body.ts / class-bodies.ts, NOT through the closure-lift
+    // path) are called directly via `call $f`, where `__current_this` is never
+    // installed — they read its `ref.null.extern` initial value as `null`
+    // instead of the spec-correct `undefined` (strict) / globalObject (sloppy).
+    // That regressed 171 test262 cases (`function-code/10.4.3-1-*`,
+    // `Array/prototype/*` callback `this`). Gating on `readsCurrentThis`
+    // restricts the global read to exactly the lifted-closure / anonymous-
+    // callback bodies that the host can dispatch, leaving direct-call `this`
+    // to fall through to `undefined` as before.
+    if (fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0) {
+      // (#1702) Null-guard the `__current_this` read. A lifted closure body can
+      // be reached two ways:
+      //   (a) host dispatch via `__call_fn_method_N` — installs a real receiver
+      //       (a non-null externref) into `__current_this` before the call_ref;
+      //   (b) a *direct* call (`f1()` where `f1` is a closure local / module
+      //       global) — which never installs anything, so `__current_this` still
+      //       holds its `ref.null.extern` initial value (or a leftover from an
+      //       unrelated host dispatch that has since been restored to null).
+      //
+      // #1636-S1 / #895 narrowed this fallback to `readsCurrentThis` bodies, but
+      // for the *direct-call* case the raw `global.get` surfaces JS `null`, not
+      // the spec-correct `undefined`. That made strict free-function /
+      // function-expression `this` observe `null` (`typeof this === "object"`,
+      // `this === undefined` ⇒ false), regressing the residual
+      // `language/function-code/10.4.3-1-*-s` + class-method strict-`this`
+      // shapes (#873 follow-up).
+      //
+      // The receiver a host installs is always a non-null externref, so the
+      // null/non-null distinction cleanly separates the two reach paths: when
+      // the global is non-null use it (host dispatch), otherwise fall through to
+      // `undefined` (direct call — `undefined` for strict, and the prior
+      // pre-#1636-S1 fallback for sloppy free functions). This is additive to
+      // #895's gating: it only changes the *value* the existing
+      // `readsCurrentThis` branch yields when the global is null, never widening
+      // which bodies read the global. The Array.prototype.{every,…} callbacks
+      // and top-level strict `this` (#873/#895-fixed) are unaffected — those
+      // either bind `this` via a local or do not set `readsCurrentThis`.
+      const thisTmp = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: thisTmp });
+      fctx.body.push({ op: "ref.is_null" });
+      const elseBody: Instr[] = [{ op: "local.get", index: thisTmp }];
+      const savedBody = fctx.body;
+      const thenBody: Instr[] = [];
+      fctx.body = thenBody;
+      emitUndefined(ctx, fctx);
+      fctx.body = savedBody;
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenBody,
+        else: elseBody,
+      } as unknown as Instr);
+      releaseTempLocal(fctx, thisTmp);
+      return { kind: "externref" };
     }
     emitUndefined(ctx, fctx);
     return { kind: "externref" };
@@ -883,12 +1053,12 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isParenthesizedExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isCallExpression(expr)) {
     const callStart = fctx.body.length;
-    const callResult = compileCallExpression(ctx, fctx, expr);
+    const callResult = compileCallExpression(ctx, fctx, expr, expectedType);
     if (fctx.pendingCallbackWritebacks && fctx.pendingCallbackWritebacks.length > 0) {
       fctx.body.push(...fctx.pendingCallbackWritebacks);
       fctx.pendingCallbackWritebacks = undefined;
@@ -935,19 +1105,19 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
       // raw-T consumer, every other consumer as Promise consumer. Both
       // shapes are observable in test262 today; this PR keeps both
       // working while eliminating the `[object Promise]` stringification.
-      let parent: ts.Node | undefined = expr.parent;
-      while (
-        parent &&
-        (ts.isParenthesizedExpression(parent) ||
-          ts.isAsExpression(parent) ||
-          ts.isNonNullExpression(parent) ||
-          ts.isTypeAssertionExpression(parent))
-      ) {
-        parent = parent.parent;
-      }
-      if (parent && ts.isAwaitExpression(parent)) {
-        // Skip the wrap; await's passthrough lowering will leave the raw
-        // value on the stack for the consumer.
+      //
+      // (#1727) Generalised: ALSO skip the wrap when the result is consumed
+      // as a raw value through a non-Promise cast/assertion
+      // (`f() as unknown as number`, `as any`, `as number`). Otherwise the
+      // internal call boxes the f64 and wraps it in a real Promise object, and
+      // the consuming numeric sink unboxes `Number(Promise{42})` === NaN. The
+      // raw `T` already on the stack is exactly what the sink wants. Genuine
+      // Promise consumers (`.then`, `const p: Promise<T> = f()`,
+      // `Promise.all`, bare `return f()`) have no non-Promise cast, so the
+      // wrap still fires. See `asyncResultConsumedAsValue` above.
+      if (asyncResultConsumedAsValue(ctx, expr)) {
+        // Skip the wrap; the raw value on the stack is what the consumer
+        // (await passthrough or primitive cast sink) expects.
         return callResult;
       }
       const wrappedType = wrapAsyncReturn(ctx, fctx, callResult);
@@ -985,15 +1155,31 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isAsExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isNonNullExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isAwaitExpression(expr)) {
-    return compileExpressionInner(ctx, fctx, expr.expression);
+    // (#1042) When the async-CPS state machine is driving this function
+    // (`asyncCpsActive`), the single tail-position await is consumed by
+    // `splitBodyAtAwait` and never reaches this expression path. Any await
+    // that DOES reach here under an active state machine is a nested /
+    // non-tail await the PR1 lowering doesn't handle yet — fail loudly rather
+    // than silently emit the legacy synchronous pass-through (which would
+    // desync the continuation). Outside CPS mode (gate off / not async-CPS),
+    // keep the legacy pass-through: async fns are compiled synchronously.
+    if (fctx.asyncCpsActive) {
+      reportError(
+        ctx,
+        expr,
+        "internal: nested/non-tail await under async-CPS not yet supported (#1042 PR1 handles a single tail await)",
+      );
+      return { kind: "externref" };
+    }
+    return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 
   if (ts.isYieldExpression(expr)) {
@@ -1068,7 +1254,7 @@ function compileExpressionInner(ctx: CodegenContext, fctx: FunctionContext, expr
   }
 
   if (ts.isSpreadElement(expr as any)) {
-    return compileExpressionInner(ctx, fctx, (expr as any as ts.SpreadElement).expression);
+    return compileExpressionInner(ctx, fctx, (expr as any as ts.SpreadElement).expression, expectedType);
   }
 
   reportError(ctx, expr, `Unsupported expression: ${ts.SyntaxKind[expr.kind]}`);

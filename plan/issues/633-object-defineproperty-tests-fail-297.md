@@ -17,8 +17,7 @@ files:
 ---
 # #633 — Object.defineProperty tests fail (297 FAIL)
 
-## Status: review
-
+## Status: in-review
 297 tests involving Object.defineProperty fail at runtime. Property descriptors (writable, enumerable, configurable, get/set) are not fully applied to struct-backed objects.
 
 ### Root cause

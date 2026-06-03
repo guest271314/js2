@@ -3,10 +3,7 @@ id: 1640
 title: "spec gap: Reflect.* invariant checks mirror internal-method bugs (47 test262 fails)"
 status: blocked
 created: 2026-05-08
-updated: 2026-05-28
-blocked_on: [1629, 1596]
-investigation_done: 2026-05-27
-reverified: 2026-05-28
+updated: 2026-05-28b
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -17,6 +14,9 @@ goal: spec-completeness
 sprint: 50
 renumbered_from: 1346
 parent: 1328
+blocked_on: [1629, 1596]
+investigation_done: 2026-05-27
+reverified: 2026-05-28
 related: [1334, 1629, 1596, 1630, 1631, 1130]
 ---
 # #1346 — Reflect: invariant checks mirror internal-method bugs
@@ -240,3 +240,25 @@ Symbol-key / proto-chain bucket worth its own carve.
 Task #178 (this re-verification) closed: *re-verified, still blocked, no
 action — pass rate unchanged at 106/153 / 69.3 %, all 47 fails attributable
 to #1629 and #1596*. No PR opened.
+
+## Re-verification (2026-05-28, dev-1525, task #242)
+
+Re-checked after the descriptor work that landed (#1629a / PR #835, #862).
+**Still blocked — the descriptor blocker is NOT resolved.** The full
+descriptor model issue **#1629** remains `status: ready` (only the narrow
+`#1629a` dynamic-descriptor slice landed), and **#1596** is still
+`status: in-progress`. The Cluster-A symptom still reproduces on current main
+(`c2295fd82`):
+
+```ts
+const o: any = {};
+Object.defineProperty(o, 'p', { get() { return 42; }, configurable: true });
+Reflect.get(o, 'p');   // → null/undefined (should be 42)
+```
+
+So the descriptor-attribute storage (`writable/enumerable/configurable/get/set`)
+on struct-backed objects is still missing, and Reflect inherits that gap.
+**Verdict unchanged: `status: blocked` on [1629, 1596].** No Reflect-layer
+patch exists; re-run the `built-ins/Reflect` suite and close once #1629 lands
+and the suite reaches ≥80%. Task #242 closed: *verified, still blocked, no
+action*.

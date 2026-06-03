@@ -10,8 +10,7 @@ sprint: 2
 ---
 # Issue #210: for-of destructuring with default values
 
-## Status: review
-
+## Status: in-review
 ## Problem
 7 for-of destructuring tests fail involving default values and `in` operator in
 destructuring patterns. Example: `for (var {x = 1} of [{}])` where the default

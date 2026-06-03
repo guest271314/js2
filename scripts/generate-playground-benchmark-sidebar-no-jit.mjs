@@ -45,6 +45,7 @@ const PUBLIC_PATH = resolve(
 const ARTIFACT_DIR = resolve(ROOT, ".tmp", "no-jit-bench");
 const CHILD_SCRIPT = resolve(import.meta.dirname, "no-jit-bench-child.mjs");
 const COMPILER_BUNDLE_PATH = resolve(import.meta.dirname, "compiler-bundle.mjs");
+const WASM_EXPERIMENTAL_FLAGS = ["--experimental-wasm-stringref", "--experimental-wasm-custom-descriptors"];
 
 const HELPERS_SOURCE = readFileSync(HELPERS_PATH, "utf8");
 
@@ -121,7 +122,7 @@ async function optimizeBenchmarkWasm(binary, entryPath) {
 }
 
 function runChild(v8Flags, args) {
-  const result = spawnSync(process.execPath, [...v8Flags, CHILD_SCRIPT, ...args], {
+  const result = spawnSync(process.execPath, [...WASM_EXPERIMENTAL_FLAGS, ...v8Flags, CHILD_SCRIPT, ...args], {
     cwd: ROOT,
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 8 * 1024 * 1024,
@@ -150,7 +151,7 @@ async function prepareArtifacts(entry) {
   const absEntryPath = resolve(ROOT, "website", "playground", entry.path);
   const source = readFileSync(absEntryPath, "utf8");
 
-  const result = compileMulti(
+  const result = await compileMulti(
     {
       [entry.path]: source,
       "examples/benchmarks/helpers.ts": HELPERS_SOURCE,

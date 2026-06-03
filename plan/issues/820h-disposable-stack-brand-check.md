@@ -1,9 +1,10 @@
 ---
 id: 820h
 title: "DisposableStack / AsyncDisposableStack brand-check and protocol stubs (~74 fails)"
-status: in-review
+status: done
 created: 2026-05-21
-updated: 2026-05-27
+updated: 2026-05-28
+completed: 2026-05-28
 priority: medium
 feasibility: medium
 reasoning_effort: medium

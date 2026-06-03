@@ -1,9 +1,10 @@
 ---
 id: 1335
 title: "Number.prototype formatting in pure Wasm: integer toString(radix), then Ryu for floats (standalone)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-08
+updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -11,7 +12,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: number-formatting
 goal: standalone-mode
-sprint: 50
+sprint: 58
 parent: 1321
 ---
 # #1335 — Number.prototype formatting in pure Wasm (standalone-mode follow-up)
@@ -103,3 +104,33 @@ than V8's exact-binary bignum expansion. Tests: `tests/issue-1321-standalone.tes
 
 **Still open for #1335**: integer `toString(radix)` standalone (Phase 1) and
 full Ryu/bignum float→shortest-string + exact-low-digit formatting (Phase 2).
+
+
+## Fix 2026-06-03 (issue-1335-number-fmt / dev-1623) — WASI number→string consumption
+
+Phase 1 (integer `toString(radix)`) and the toFixed/toPrecision/toExponential
+native helpers already landed (commits f5a8a4e08 / a1eb7e6fc); the native
+`number_toString[_radix]` helpers correctly return an `externref` wrapping a
+`$NativeString` (via `__num_fmt_finalize` → `extern.convert_any`). The
+**residual blocker** was the consumption contract: the `toString` call site in
+`expressions/calls.ts` reported the result type as `externref`, so any consumer
+that unwraps to a native string (`.charAt`, `+` concat, `return` in a
+nativeStrings module) applied a **second** `any.convert_extern` to the
+already-native ref — "any.convert_extern expected externref, found native ref"
+(invalid Wasm). `(255).toString(16)` worked only when stored in a `string`
+local first.
+
+**Fix.** In standalone/WASI nativeStrings mode, unwrap the externref result
+once at the `toString`/`toString(radix)` call site (`any.convert_extern` +
+`ref.cast $AnyString`) and report `nativeStringType(ctx)`. Downstream string
+consumers then see a native receiver and emit no further coercion. JS-host mode
+is unchanged (keeps the `externref` result). This mirrors the
+`__json_quote_string` consumption pattern already in the same file (#1599).
+
+Verified standalone: `(255).toString(16).charCodeAt(0) === 102`; `(42).toString()`,
+`(10).toString(2)`, chained `.charAt`, and `+ "!"` concat all validate and run.
+JS-host: `ff` / `1010` / `42` / chain `f` / `ff!`. Tests in
+`tests/issue-1335-standalone.test.ts` (chaining/concat describe block).
+
+**Phase 2 (Ryu/bignum shortest-round-trip float→string)** stays deferred —
+research-grade, senior-dev scope.

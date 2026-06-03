@@ -18,8 +18,7 @@ files:
 ---
 # #571 -- struct.new argument count mismatch (231 CE)
 
-## Status: review
-
+## Status: in-review
 231 tests fail Wasm validation because `struct.new` is called with the wrong number of arguments. This is residual from #516 which fixed the initial class constructor struct.new argument count.
 
 The root cause: struct types can have fields dynamically added during compilation (at four sites in `expressions.ts`), but existing `struct.new` instructions emitted for those types are not updated. When the module is validated, struct.new expects N arguments (matching the final field count) but only M < N values were pushed.

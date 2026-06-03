@@ -13,7 +13,6 @@ goal: ci-hardening
 sprint: 45
 parent: 1080
 required_by: [1077, 1078, 1081]
-pr: null
 net_improvement: 0
 ---
 # #1076 — Split merge job so push-to-main always refreshes baseline

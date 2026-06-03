@@ -22,8 +22,7 @@ files:
 ---
 # #572 — Internal compiler errors (152 CE)
 
-## Status: review
-
+## Status: in-review
 Multiple internal error patterns:
 
 | Pattern | Count |

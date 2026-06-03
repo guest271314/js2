@@ -18,8 +18,7 @@ files:
 ---
 # #591 — Split expressions.ts (24,427 lines) into focused modules
 
-## Status: review
-
+## Status: in-review
 `expressions.ts` is 24,427 lines — the largest file in the project. It mixes binary operations, call expressions, property access, array methods, type coercion, closure compilation, and destructuring.
 
 ## Proposed split

@@ -8,7 +8,7 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { isStrictFunction } from "../helpers/is-strict-function.js";
-import type { Instr, ValType } from "../../ir/types.js";
+import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
   collectFunctionOwnLocals,
   collectReferencedIdentifiers,
@@ -147,10 +147,15 @@ export function compileNestedClassDeclaration(
   }
 }
 
+interface CompileNestedFunctionOptions {
+  reuseReservedEntry?: WasmFunction;
+}
+
 export function compileNestedFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.FunctionDeclaration,
+  opts: CompileNestedFunctionOptions = {},
 ): void {
   if (!stmt.name || !stmt.body) return;
   const funcName = stmt.name.text;
@@ -249,6 +254,21 @@ export function compileNestedFunctionDeclaration(
   }[] = [];
   for (const name of referencedNames) {
     if (ownLocals.has(name)) continue;
+    // (#1702) A nested `FunctionDeclaration` establishes its OWN `this`
+    // binding per ECMA-262 §10.2.1.1 (OrdinaryCallBindThis) — `this` is
+    // never lexically captured the way an arrow function inherits it. When
+    // such a function is invoked without a receiver (e.g. a plain `inner()`
+    // call inside a class method body or another function), its `this` is
+    // `undefined` in strict code, NOT the enclosing method's receiver.
+    // Capturing the outer `this` here threaded the method's instance into
+    // the lifted body as param 0, so `inner()` saw the instance instead of
+    // `undefined` — the class-method half of the #873/#895 strict-`this`
+    // residual. Skipping `this`/`super` lets `ThisKeyword` fall through to
+    // the `undefined` / `__current_this` resolution path, which is correct
+    // for a free function. (Arrow functions are compiled via closures.ts,
+    // which keeps lexical `this` capture — this branch only handles
+    // `FunctionDeclaration`s.)
+    if (name === "this" || name === "super") continue;
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
     if (ctx.funcMap.has(name)) continue;
@@ -326,6 +346,27 @@ export function compileNestedFunctionDeclaration(
   // formal param count.
   if (stmt.body && bodyUsesArguments(stmt.body)) {
     ctx.funcUsesArguments.add(funcName);
+  }
+
+  if (captures.length > 0 && opts.reuseReservedEntry) {
+    opts.reuseReservedEntry.body = [];
+    appendDefaultReturn(
+      {
+        name: funcName,
+        params: [],
+        locals: [],
+        localMap: new Map(),
+        returnType,
+        body: opts.reuseReservedEntry.body,
+        blockDepth: 0,
+        breakStack: [],
+        continueStack: [],
+        labelMap: new Map(),
+        savedBodies: [],
+      },
+      returnType,
+    );
+    return;
   }
 
   if (captures.length === 0) {
@@ -457,19 +498,25 @@ export function compileNestedFunctionDeclaration(
     if (savedFunc) ctx.parentBodiesStack.pop();
     ctx.currentFunc = savedFunc;
 
-    // (#1312) No-captures branch keeps late funcMap registration (the
-    // pre-#1312 behaviour). Pre-registering here regressed 38
-    // Function.caller/arguments tests; see comment at the start of this
-    // branch for the full rationale.
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
-      name: funcName,
-      typeIdx: funcTypeIdx,
-      locals: liftedFctx.locals,
-      body: liftedFctx.body,
-      exported: false,
-    });
-    ctx.funcMap.set(funcName, funcIdx);
+    if (opts.reuseReservedEntry) {
+      opts.reuseReservedEntry.typeIdx = funcTypeIdx;
+      opts.reuseReservedEntry.locals = liftedFctx.locals;
+      opts.reuseReservedEntry.body = liftedFctx.body;
+    } else {
+      // (#1312) No-captures branch keeps late funcMap registration (the
+      // pre-#1312 behaviour). Pre-registering here regressed 38
+      // Function.caller/arguments tests; see comment at the start of this
+      // branch for the full rationale.
+      const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      ctx.mod.functions.push({
+        name: funcName,
+        typeIdx: funcTypeIdx,
+        locals: liftedFctx.locals,
+        body: liftedFctx.body,
+        exported: false,
+      });
+      ctx.funcMap.set(funcName, funcIdx);
+    }
   } else {
     // Has captures — lift with captures as leading parameters, use direct call
     // For mutable captures, use ref cell types so writes propagate back
@@ -721,24 +768,35 @@ export function hoistFunctionDeclarations(
 ): void {
   for (const stmt of stmts) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
-      if (!ctx.funcMap.has(stmt.name.text)) {
+      const funcName = stmt.name.text;
+      const hasReservedBodylessEntry = ctx.preRegisteredBodyless?.has(funcName) ?? false;
+      const reservedFuncIdx = hasReservedBodylessEntry ? ctx.funcMap.get(funcName) : undefined;
+      const reservedEntry =
+        reservedFuncIdx !== undefined ? ctx.mod.functions[reservedFuncIdx - ctx.numImportFuncs] : undefined;
+      if (!ctx.funcMap.has(funcName) || reservedEntry) {
         // Save state so we can roll back if compilation fails
         const errorsBefore = ctx.errors.length;
         const funcsBefore = ctx.mod.functions.length;
-        const funcName = stmt.name.text;
 
-        compileNestedFunctionDeclaration(ctx, fctx, stmt);
+        compileNestedFunctionDeclaration(ctx, fctx, stmt, reservedEntry ? { reuseReservedEntry: reservedEntry } : {});
 
         // If new errors were added during hoisting, roll back
         if (ctx.errors.length > errorsBefore) {
           ctx.errors.length = errorsBefore;
           ctx.mod.functions.length = funcsBefore;
-          ctx.funcMap.delete(funcName);
-          ctx.nestedFuncCaptures.delete(funcName);
-          ctx.funcOptionalParams.delete(funcName);
+          if (reservedEntry) {
+            reservedEntry.locals = [];
+            reservedEntry.body = [];
+          } else {
+            ctx.funcMap.delete(funcName);
+            ctx.nestedFuncCaptures.delete(funcName);
+            ctx.funcOptionalParams.delete(funcName);
+          }
           // Track failed hoist so compileStatement doesn't re-attempt
           if (!ctx.hoistFailedFuncs) ctx.hoistFailedFuncs = new Set();
           ctx.hoistFailedFuncs.add(funcName);
+        } else if (reservedEntry) {
+          ctx.preRegisteredBodyless?.delete(funcName);
         }
       }
     }
@@ -970,6 +1028,29 @@ export function ensureArgcGlobal(ctx: CodegenContext): number {
     init: [{ op: "i32.const", value: -1 }],
   });
   ctx.argcGlobalIdx = globalIdx;
+  return globalIdx;
+}
+
+/**
+ * (#1636-S1) Lazily register a `(mut externref)` module global
+ * `__current_this` used by `__call_fn_method_N` to thread a host-supplied
+ * `this`-value into a Wasm closure body. The dispatcher save+restores the
+ * previous value across the inner `call_ref`, and `ThisKeyword` resolution
+ * reads this global when no local `this` binding is in scope (free-closure
+ * fallback). Default value is `ref.null.extern` (= JS `null`), which is
+ * compatible with the prior "undefined fallback" behaviour for the vast
+ * majority of references that compare strictly against null/undefined.
+ */
+export function ensureCurrentThisGlobal(ctx: CodegenContext): number {
+  if (ctx.currentThisGlobalIdx >= 0) return ctx.currentThisGlobalIdx;
+  const globalIdx = nextModuleGlobalIdx(ctx);
+  ctx.mod.globals.push({
+    name: "__current_this",
+    type: { kind: "externref" },
+    mutable: true,
+    init: [{ op: "ref.null.extern" } as Instr],
+  });
+  ctx.currentThisGlobalIdx = globalIdx;
   return globalIdx;
 }
 

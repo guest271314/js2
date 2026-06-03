@@ -23,9 +23,9 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
-# Only intercept `git worktree add`. Other worktree subcommands and any
-# non-git command pass through.
-if ! echo "$CMD" | grep -qE '(^|[;&|])[[:space:]]*git[[:space:]]+worktree[[:space:]]+add'; then
+# Only intercept `git worktree add` (including `git -C <dir> worktree add`).
+# Other worktree subcommands and any non-git command pass through.
+if ! echo "$CMD" | grep -qE '(^|[;&|])[[:space:]]*git([[:space:]][^;&|]+)*[[:space:]]+worktree[[:space:]]+add'; then
   exit 0
 fi
 
