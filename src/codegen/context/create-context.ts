@@ -131,6 +131,7 @@ export function createCodegenContext(
     anyValueTypeIdx: -1,
     anyHelpers: new Map(),
     anyHelpersEmitted: false,
+    moduleInitGuardApplied: false,
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,

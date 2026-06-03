@@ -1,9 +1,10 @@
 ---
 id: 1788
 title: "standalone/WASI module-level const/let initializers never run before exported functions → TDZ trap on any module-const object access"
-status: ready
+status: done
 created: 2026-06-03
 updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: hard
 task_type: bugfix
@@ -174,3 +175,47 @@ threading two init funcs through `addWasiStartExport` + dead-elimination +
 late-import index shifting (`index.ts:7474`). Escalated to tech-lead /
 architect for the split design before implementing. Repro:
 `$CLAUDE_JOB_DIR/tmp/top1.ts` (valueOf), `top4.ts` (counter double-init guard).
+
+## Resolution (sd-1665, 2026-06-03) — idempotent-init guard (the #907 alternative)
+
+The clean init-split hit a real **complexity wall**: classifying every
+top-level statement as pure binding-init vs side-effecting is ambiguous (e.g.
+`const o = sideEffect()` is both), and threading two init bodies through the
+late-import index-shift machinery is high-risk. Per the tech-lead's
+"prefer the split unless you hit a wall" guidance, landed the safer
+guard design instead — it satisfies the same correctness with the 14
+`wasi.test.ts` stdout tests as a tight regression guard.
+
+**Implementation** (`addWasiStartExport` → new `applyModuleInitGuard`,
+`src/codegen/index.ts`):
+1. Add an `__init_done` i32 global (0). Prepend a self-guard prologue to
+   `__module_init`: `if (__init_done) return; __init_done = 1; …`. This makes
+   init **idempotent**.
+2. Prepend `call __module_init` to every exported function body (except
+   `__module_init` itself). The first entry called — a direct export OR
+   `_start` — runs init exactly once; later calls no-op.
+
+Why it satisfies both modes:
+- **test262 standalone**: harness calls `test()` directly → its prologue runs
+  init → module-const object is initialized → no TDZ trap. (target repro
+  `(o as any)*1` now returns 42.)
+- **WASI hosts**: `_start` is called first → init (incl. top-level
+  `console.log`/stdout) runs at `_start`, exactly as before → all 24
+  `wasi.test.ts` tests stay green; observable side-effect timing unchanged.
+- **No double-init**: the `__init_done` self-guard caps init to one run
+  regardless of how many exports (or `_start`) are invoked (verified with a
+  top-level counter: stays 5, not 10).
+
+Cost: one `call __module_init` (cheap, immediately returns after the first
+run) at the top of each export — the per-call branch the clean split would
+avoid. Acceptable for the correctness it buys; the split remains a viable
+future optimization but is not required.
+
+**Files**: `src/codegen/index.ts` (`applyModuleInitGuard` + call in
+`addWasiStartExport`), `src/codegen/context/types.ts` +
+`create-context.ts` (`moduleInitGuardApplied` flag),
+`tests/issue-1788-standalone-module-init.test.ts` (4 tests).
+
+**Validation**: `tests/issue-1788-standalone-module-init.test.ts` (4 pass) +
+`tests/wasi.test.ts` (24 pass) + standalone sweep
+(issue-1618/1653/1597/1321/1335/865, 46 pass). tsc clean.
