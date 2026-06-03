@@ -74,28 +74,36 @@ categories file, then emit the two summary tables (step 8).
 2. Parse all results and categorize errors:
    - **Compile errors**: group by pattern (undefined .kind, stack underflow, local.set mismatch, struct error, call mismatch, missing import, stack fallthrough, unsupported, missing property, yield outside gen, await outside async, etc.)
    - **Runtime failures**: group by pattern (returned wrong with assert info, null pointer deref, timeout, illegal cast, array OOB, unreachable, uncaught exception)
-   - **Standalone lane only — bucket on `host_import_leak_class`** (this is the
-     primary signal for standalone, ahead of the compile/runtime split). The
-     actual field values emitted today (verify against the live data — they
-     evolve) and where they route:
-     - `host_import` → generic host-import-gate refusal (#1524 gate); the
-       catch-all when no more specific class applies. Largest bucket.
-     - `dynamic_object_property` → dynamic property access lowering without host.
-     - `iterator_protocol` → standalone iterator protocol (#1471 boxing family).
-     - `regexp` → RegExp literals/constructor refused standalone (#1474).
-     - `dynamic_code` → eval/dynamic-import (deferred; wont-fix family).
-     Note: most standalone `compile_error` records do **not** carry a leak class
-     — they surface as `wasm_compile` ("invalid Wasm binary") instead, which is
-     the standalone codegen emitting invalid Wasm for constructs the host lane
-     would route through an import. Sub-bucket those by error signature too.
+   - **Standalone lane — PRIMARY signal is the `#NNNN` issue number embedded in
+     the error string.** Standalone codegen refusals self-cite their tracking
+     issue, e.g. `Codegen error: Proxy not supported in standalone mode
+     (#1472 Phase…)`. Extract every `#\d{3,4}` from each failing record's
+     `error` (dedupe per record) and rank issues by record count — this is the
+     most accurate standalone cross-reference and needs no guessing. Typical
+     ranking (verify live): **#1472 Proxy** (by far the largest — Proxy is used
+     pervasively in test262 abrupt-completion harness patterns, so it cascades),
+     #1474 RegExp, #682 dual-RegExp-backend, #681 dual-string-backend, #1387
+     with-statement, #1599 JSON, #1525 ToPrimitive, #1696 eval/dynamic-import.
+   - **Secondary: `host_import_leak_class`** (only ~10–15k records carry it;
+     many refusals don't). Actual field values today (verify — they evolve):
+     `host_import` (generic #1524 gate, catch-all), `dynamic_object_property`,
+     `iterator_protocol` (#1471 family), `regexp` (#1474), `dynamic_code`
+     (deferred). **Do NOT lead with this** — it has no `proxy` value, so leading
+     on leak_class silently drops #1472, the #1 standalone blocker (learned the
+     hard way 2026-06-03).
+   - The remaining standalone `compile_error`s surface as `wasm_compile`
+     ("invalid Wasm binary") — standalone codegen emitting invalid Wasm for
+     constructs the host lane routes through an import. Sub-bucket by signature.
    - For each pattern, count occurrences and collect 3 sample file paths
 
 3. Cross-reference with existing issues:
    - Read issue files in `plan/issues/`
    - Match error patterns to existing issue titles/descriptions
-   - **Standalone lane**: standalone issues carry `goal: standalone-mode` and sit
-     under umbrella **#1781**. Match `host_import_leak_class` buckets to the
-     per-class issues listed in step 2 first.
+   - **Standalone lane**: the embedded `#NNNN` citations from step 2 ARE the
+     cross-reference — each refusal names its tracking issue directly. Confirm
+     each cited issue's status in `plan/issues/`; standalone issues carry
+     `goal: standalone-mode` under umbrella **#1781**. Use `host_import_leak_class`
+     only for the residual records that carry no citation.
    - Mark each pattern as: ADDRESSED (`status: done`), IN PROGRESS (`status: ready` / `in-progress` / `in-review`), or NEW
 
 4. For NEW patterns with >50 occurrences:
@@ -124,13 +132,14 @@ categories file, then emit the two summary tables (step 8).
    ...
    ```
 
-   **Standalone lane** (lead with `host_import_leak_class`):
+   **Standalone lane** (lead with embedded `#NNNN` citation counts):
    ```
-   Leak class / Pattern | Count | Status | Issue #
-   ---------------------|-------|--------|--------
-   regexp | 1,210 | #1474 ready | tracked (umbrella #1781)
-   json | 540 | #1599 in-progress | tracked
-   proxy | 330 | #1472 ready | tracked
+   Cited issue | Records | Status | Feature
+   ------------|---------|--------|--------
+   #1472 | 26,923 | ready | Proxy not supported (standalone)
+   #1474 |  1,793 | ready | RegExp not supported (standalone)
+   #682  |  1,614 | done  | dual RegExp backend
+   #1387 |    283 | ready | with-statement
    ...
    ```
 
