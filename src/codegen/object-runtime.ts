@@ -1786,6 +1786,125 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __defineProperty_value (#1629 S6 — native data-descriptor define) ─────
+  //
+  // `Object.defineProperty(obj, key, { value, writable?, enumerable?,
+  // configurable? })` and `Reflect.defineProperty` for a DATA descriptor under
+  // `--target standalone`. In JS-host mode this is the `env::__defineProperty_value`
+  // host import backed by the JS descriptor sidecar; standalone has no host, so we
+  // store the value + attribute flags directly into the `$Object`/`$PropEntry`
+  // runtime that the native `__extern_get` already reads back.
+  //
+  // The compiler passes `flags` as an f64 in the host encoding
+  // (`computeRuntimeFlags`, object-ops.ts):
+  //   bit 0: writable          bit 3: writable specified
+  //   bit 1: enumerable        bit 4: enumerable specified
+  //   bit 2: configurable      bit 5: configurable specified
+  //   bit 6: is accessor       bit 7: has value
+  // We translate to the native `$PropEntry.flags` bits (FLAG_WRITABLE / _ENUMERABLE
+  // / _CONFIGURABLE). Per CompletePropertyDescriptor (ES §6.2.6.4) a NEW
+  // property's omitted attributes default to false — and the host f64 encoding
+  // already reflects that (an unspecified attr has neither its specified-bit nor
+  // its value-bit set, so the `& value-bit` test yields 0 → false). So the
+  // translation is a straight per-attribute mask of bits 0/1/2 onto the native
+  // bit positions, which happen to coincide (native WRITABLE=0x1, ENUMERABLE=0x2,
+  // CONFIGURABLE=0x4 == host value bits 0,1,2). The only divergence from
+  // __extern_set is the explicit flag word instead of FLAG_DEFAULT.
+  //
+  // Accessor descriptors (`{ get, set }`, host flag bit 6) are NOT handled here —
+  // they stay refused under standalone (deferred S6 follow-up: accessor slots +
+  // call_ref invocation). The accessor path keeps emitting __defineProperty_accessor,
+  // which remains in STANDALONE_REFUSED_IMPORT.
+  //
+  // params: 0=obj 1=key 2=value 3=flagsF64
+  // locals: 4=o(ref null $Object) 5=any(anyref) 6=cap 7=load 8=nflags(i32) 9=hf(i32)
+  {
+    const NATIVE_ATTR_MASK = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE; // 0x07
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return obj (lenient no-op,
+      // matches the host import returning O unchanged)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 5 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 4 },
+      // hf = trunc_s(flagsF64)  (the host encoding is a small non-negative int)
+      { op: "local.get", index: 3 },
+      { op: "i32.trunc_f64_s" },
+      { op: "local.set", index: 9 },
+      // nflags = hf & (WRITABLE|ENUMERABLE|CONFIGURABLE)
+      // Host value bits 0/1/2 line up with native FLAG_* bit positions, so a
+      // direct mask is the translation. (Specified/hasValue/accessor bits 3-7
+      // are dropped.)
+      { op: "local.get", index: 9 },
+      { op: "i32.const", value: NATIVE_ATTR_MASK },
+      { op: "i32.and" },
+      { op: "local.set", index: 8 },
+      // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      { op: "i32.add" },
+      { op: "local.set", index: 7 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 6 },
+      // if (load + 1) * 10 >= cap * 7 → grow
+      { op: "local.get", index: 7 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "i32.const", value: 10 },
+      { op: "i32.mul" },
+      { op: "local.get", index: 6 },
+      { op: "i32.const", value: 7 },
+      { op: "i32.mul" },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 4 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
+      },
+      // __obj_insert(o, key, any.convert_extern(value), nflags)
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 2 },
+      { op: "any.convert_extern" },
+      { op: "local.get", index: 8 },
+      { op: "call", funcIdx: objInsertIdx },
+      // return obj (host import returns O)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__defineProperty_value",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "load", type: { kind: "i32" } },
+        { name: "nflags", type: { kind: "i32" } },
+        { name: "hf", type: { kind: "i32" } },
+      ],
+      body,
+    );
+  }
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -1942,4 +2061,9 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_preventExtensions",
   "__object_seal",
   "__object_freeze",
+  // #1629 S6 — native data-descriptor define (Object.defineProperty /
+  // Reflect.defineProperty with a { value, writable?, enumerable?, configurable? }
+  // descriptor). Accessor descriptors stay refused (see the __defineProperty_value
+  // note in ensureObjectRuntime).
+  "__defineProperty_value",
 ]);
