@@ -708,6 +708,53 @@ required so the feature is not host-only.
 `--target wasi` smoke test compiling a `defineProperty({get})` program and
 asserting the getter fires.
 
+> **S6 STATUS — data-descriptor sub-slice DONE (2026-06-03, senior-developer).**
+> `Object.defineProperty(obj, key, { value, writable?, enumerable?,
+> configurable? })` (and `Reflect.defineProperty` for a data descriptor) now
+> lowers to a **native** `__defineProperty_value` on the #1472 Phase B
+> `$Object`/`$PropEntry` runtime under `--target standalone`, instead of
+> refusing (#1472 Phase A). Zero `env::__defineProperty*` host imports; modules
+> instantiate with an empty import object.
+>
+> **What shipped (`src/codegen/object-runtime.ts`, `late-imports.ts`,
+> `object-ops.ts`):**
+> 1. New native helper `__defineProperty_value(obj, key, value, flags:f64) ->
+>    externref` — structurally a sibling of `__extern_set`: unwrap obj→$Object
+>    (lenient no-op on non-object), translate the host f64 flag word
+>    (`computeRuntimeFlags`: value bits 0/1/2) to the native `$PropEntry.flags`
+>    (`FLAG_WRITABLE/ENUMERABLE/CONFIGURABLE` — same bit positions), grow at the
+>    0.7 load factor, then `__obj_insert`. The existing native `__extern_get`
+>    reads the value back; no `$PropEntry` layout change was needed for the
+>    data path (value+flags slots already exist).
+> 2. Added `__defineProperty_value` to `OBJECT_RUNTIME_HELPER_NAMES` so
+>    `ensureLateImport` routes it native (the routing check precedes the
+>    `STANDALONE_REFUSED_IMPORT` `__defineProperty*` refusal, so the name in both
+>    sets resolves native first).
+>
+> **Latent bug fixed (shared, host + standalone): `emitObjectArgNullGuard`
+> (object-ops.ts) emitted `global.get index: stringGlobalMap.get(msg)` which is
+> the `-1` nativeStrings sentinel** → `Invalid global index: 4294967295` at
+> instantiate. This was dormant because the Object.* null-guard was previously
+> unreachable under standalone (defineProperty refused before reaching it). Now
+> the guard materializes its message via `stringConstantExternrefInstrs` (inline
+> `$NativeString` under nativeStrings, host `string_constants` global otherwise)
+> — same canonical fix family as #1623. `Object.defineProperty(null, …)` now
+> throws a catchable TypeError in standalone.
+>
+> **Deferred to S6 follow-up (NOT this slice):** accessor descriptors
+> (`{ get, set }`) — `__defineProperty_accessor` stays in `STANDALONE_REFUSED_IMPORT`.
+> Native accessor support needs `$PropEntry` accessor slots (`$get`/`$set` anyref
+> + isAccessor flag) and `call_ref` invocation on the stored closure at the read
+> site — the WasmGC analogue of the host `_maybeWrapCallable` path. Dynamic
+> (non-literal) descriptor objects (`__defineProperty_desc`) and
+> `Object.getOwnPropertyDescriptor` native read-back also remain follow-ups.
+>
+> **Tests:** `tests/issue-1629-S6.test.ts` (6 cases: full-attr define +
+> read-back, omitted-attr defaults, coexist with dynamic set/get, redefine
+> overwrite, null-throw TypeError, table grow/rehash). No-regression: the
+> existing #1472 (21) + #1629 S1/S2/S3 (23) suites stay green; host-mode
+> defineProperty still compiles.
+
 ## Cross-cutting risks & guardrails (apply to every slice)
 
 1. **Object hot path** — S3 is the danger. The accessor-read shim must be
