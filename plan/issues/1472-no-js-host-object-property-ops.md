@@ -715,3 +715,58 @@ Drops into object-runtime.ts once Blocker A lands. Uses $Object.$flags
 - Tests written (instantiate-and-run under Node WasmGC): isFrozen flips on
   freeze; freeze refuses update; preventExtensions refuses new key/allows
   update; seal isSealed+update; isExtensible flips; freeze returns same object.
+
+## Phase B Blocker B — native $ObjVec build/iterate foundation (sd-1472, 2026-06-03)
+
+Branch `issue-1472-blocker-b` off origin/main. Lands the standalone
+enumeration *foundation*: a growable externref vector + the three helpers the
+enumeration/indexed-access consumers read.
+
+### What landed
+- New WasmGC types in `object-runtime.ts` (registered by `ensureObjectRuntime`,
+  standalone-only — JS-host path never sees them):
+  - `$ObjVecArr` = `(array (mut externref))`
+  - `$ObjVec` = `(struct (field $len (mut i32)) (field $data (mut (ref $ObjVecArr))))`
+  - Added `objVecTypeIdx` / `objVecArrTypeIdx` to `ObjectRuntimeTypes`.
+- Internal helpers (defined funcs, no imports):
+  - `__objvec_new() -> externref` — empty vec (cap = INITIAL_CAP), wrapped via
+    `extern.convert_any`.
+  - `__objvec_push(externref vec, externref elem)` — append with doubling
+    growth (copies into a fresh `$ObjVecArr` when full). No-op on non-$ObjVec.
+- Standalone runtime helpers (routed via `OBJECT_RUNTIME_HELPER_NAMES`):
+  - `__object_keys(externref) -> externref` — walks the `$Object` PropMap,
+    pushes each LIVE (non-tombstone) **and enumerable** entry key (wrapped) into
+    a fresh `$ObjVec`. Non-`$Object` receiver → empty vec.
+  - `__extern_length(externref) -> f64` — wrapped `$ObjVec` → f64(len); any
+    other value → 0 (matches host import's null/non-array fallback).
+  - `__extern_get_idx(externref, f64) -> externref` — wrapped `$ObjVec` →
+    `data[i32(idx)]` for `0 <= i < len`, else null; non-`$ObjVec` → null.
+
+### Proven
+- `Object.keys(o)` over an `any` **function parameter** (TS can't narrow it to a
+  closed struct shape) lowers to the native `__object_keys`; an all-`any`
+  indexed read `(ks as any)[i]` lowers to native `__extern_get_idx`. All five
+  helpers (`__object_keys`, `__objvec_new`, `__objvec_push`,
+  `__extern_get_idx`, `__extern_length`) emit as **defined** functions, the
+  module **validates**, instantiates with `{}`, and leaks **zero** object/array
+  host imports. Test: `tests/issue-1472.test.ts` "Phase B Blocker B".
+
+### Scoping note (why this is a foundation, not the whole enumeration feature)
+Two consumer-side gaps remain — these are the stacked "enumeration consumer"
+slice, NOT this foundation:
+1. A locally-built `{}` is narrowed by TS to a **closed struct**, so
+   `Object.keys` over it routes to the struct fast path in
+   `compileObjectKeysOrValues` (builds a `__vec_externref`), never reaching the
+   open-`$Object` runtime. Reaching the open runtime for non-param receivers is
+   the **Blocker A** receiver-dispatch problem (routed to architect).
+2. Typed consumers don't yet reach the extern helpers:
+   - `ks.length` (direct member on `any`) routes through `__extern_get("length")`,
+     not `__extern_length`.
+   - `const ks: string[] = Object.keys(o); for (const k of ks)` triggers
+     `buildVecFromExternref`, which pulls in host-only `env::__array_from_iter`
+     and emits **invalid** Wasm in standalone.
+   The consumer slice must (a) bypass/standalone-implement `__array_from_iter`
+   when the source is already an `$ObjVec`, and (b) route `.length` / indexed
+   member-access on `any` to `__extern_length` / `__extern_get_idx`.
+`__object_values` / `__object_entries` / `__object_assign` / `__for_in_keys`
+stack trivially on the `$ObjVec` + `__objvec_*` primitives added here.
