@@ -408,3 +408,63 @@ Commit `4a4735eec` — runtime core, `tsc --noEmit` clean.
 `__hash_anyref` local layout is fixed post-hoc by `fixHashLocals` (indices
 1=nv,2=bits,3=h,4=i,5=flat,6=data,7=len). `nativeStrDataFieldIdx` reads the
 NativeString struct's last ref field for the i16 backing array.
+
+## Wiring recon (sd-1665, 2026-06-03) — #1103a dispatch, ready to implement
+
+PR #1072 merged the dormant runtime core. Mapped the exact wiring needed to
+make it live. Key correction to the earlier plan: gating only the
+`registerBuiltinExternClasses` Map entry (index.ts:8670) is **insufficient** —
+`Map` is ALSO registered as an externClass via the lib `.d.ts` scan, so
+`new Map()` still emits `Map_new`/`Map_get`/`Map_set`/`Map_get_size` host
+imports and the standalone module fails to instantiate
+(`env` not satisfiable). The wiring must intercept at the **call sites**,
+mirroring the RegExp native-backend precedent.
+
+Merged runtime API (src/codegen/map-runtime.ts, via `ensureMapHelpers(ctx)` →
+`ctx.mapHelpers`): `__map_new() -> ref$Map`, `__map_get(ref$Map, anyref)
+-> anyref`, `__map_set(ref$Map, anyref, anyref) -> ref$Map`,
+`__map_has -> i32`, `__map_delete -> i32`, `__map_size -> i32`,
+`__map_clear -> ()`, `__map_iter_new(ref$Map, i32 kind) -> ref$MapIter`,
+`__map_iter_next(ref$MapIter) -> ref$MapIterResult {value:anyref, done:i32}`.
+NOTE: there is **no `__map_new_from_arr`** in the merged core — `new Map(iter)`
+needs that helper added (slice 2) or a no-arg-only slice 1.
+
+Wiring points (all gate on `ctx.nativeStrings`):
+1. **index.ts:8670** — gate `registerBuiltinExternClasses` Map entry off when
+   nativeStrings (so the fallback path doesn't re-add it). Also prevent the
+   lib-scan externClass from driving dispatch — simplest: leave it registered
+   but intercept BEFORE the externClass path at the call sites (mirrors RegExp,
+   which keeps its externClass but the calls.ts:1885 `if
+   (!ctx.externClasses.has("RegExp"))` peephole routes `new RegExp` to the
+   native engine first).
+2. **calls.ts ~1885-1888** (`${externInfo.importPrefix}_new`) — add a
+   `className === "Map" && ctx.nativeStrings` branch BEFORE the externClass
+   `_new` emission: `ensureMapHelpers(ctx)`, then for no-arg `new Map()` emit
+   `call __map_new` (result `ref $Map`, store as the Map's wasm type, NOT
+   externref). The result type must propagate as `ref $ctx.mapTypeIdx` so the
+   member-dispatch site recognizes it.
+3. **property-access.ts ~953** (method dispatch, `${importPrefix}_get_*`) and
+   the member-call path — when the receiver type is `ref $Map` (or
+   className==="Map" && nativeStrings), branch to
+   `ctx.mapHelpers.get("__map_"+method)`: `.get/.set/.has/.delete/.clear` map
+   1:1; `.size` getter → `__map_size`. Key/value cross the anyref boundary:
+   number key → box via `__box_number` then `any.convert_extern`-free (it's
+   already anyref after box+convert); the runtime's `__hash_anyref` /
+   `__same_value_zero` handle boxed numbers/strings. `.get` returns anyref →
+   coerce to the binding's expected type (unbox_number for numeric).
+4. **loops.ts** for-of recognition of `ref $Map` → `__map_iter_new` +
+   `__map_iter_next` (slice 2; mirror the #1665 native-generator for-of driver
+   shape — read `{value,done}` from `$MapIterResult`).
+5. **$__obj_hash** hidden field on user structs (slice 2) — only needed for
+   OBJECT keys; numeric/string keys work via the runtime hash without it.
+
+Slice plan:
+- **Slice 1** (this PR): no-arg `new Map()` + `.set/.get/.has/.delete/.size/
+  .clear` for number/string keys. Gate + calls.ts intercept + property-access
+  dispatch + key/value boxing. Unit test: `m.set/get/has/size` round-trip
+  standalone, zero `Map_*` host imports.
+- **Slice 2**: for-of/forEach iteration, `new Map(iterable)` (needs
+  `__map_new_from_arr`), object keys ($__obj_hash), Set (#1103b).
+
+Status: wiring fully mapped + de-risked (confirmed gate-alone insufficient via
+probe). Ready to implement slice 1 on branch issue-1103a-map-wiring.

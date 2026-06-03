@@ -32,6 +32,7 @@ import type {
 } from "./context/types.js";
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
+import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import {
@@ -8305,6 +8306,16 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       return { kind: "ref", typeIdx: dateTypeIdx };
     }
 
+    // (#1103a) Map → WasmGC native Map struct (`$Map`) in standalone /
+    // nativeStrings mode. Mirrors Date above — a `Map`-typed binding/param
+    // becomes `ref $Map` so `new Map()` stores directly and method/.size
+    // dispatch reads a typed receiver (no externref round-trip / illegal cast).
+    // JS-host mode keeps Map as an externref-backed externClass (falls through).
+    if (sym?.name === "Map" && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
@@ -8733,8 +8744,16 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
-  // Map methods
-  if (!ctx.externClasses.has("Map")) {
+  // Map methods.
+  // (#1103a) In standalone / nativeStrings mode, `Map` is served by the
+  // WasmGC-native runtime (src/codegen/map-runtime.ts), intercepted at the
+  // new-expression / method-call / .size sites. Registering it as an
+  // externClass here would eagerly emit a `Map_new` host import the standalone
+  // module can't satisfy, so skip registration in that mode. JS-host mode keeps
+  // the externClass path unchanged. (Slice 1 covers number/string keys with
+  // new/get/set/has/delete/clear/size; forEach / iteration / new Map(iterable)
+  // are slice 2 — those fall through and currently have no standalone path.)
+  if (!ctx.externClasses.has("Map") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     methods.set("get", externMethod(1));
     methods.set("set", externMethod(2));
@@ -9321,6 +9340,12 @@ const ERROR_TYPES_SKIP = new Set([
 function collectExternFromDeclareVar(ctx: CodegenContext, decl: ts.VariableDeclaration): void {
   const className = (decl.name as ts.Identifier).text;
   if (ERROR_TYPES_SKIP.has(className)) return;
+  // (#1103a) In standalone / nativeStrings mode, `Map` is served by the
+  // WasmGC-native runtime (map-runtime.ts) intercepted at the call sites.
+  // Skip registering it as an externClass from the lib `declare var Map`
+  // declaration — otherwise `registerExternClassImports` eagerly emits a
+  // `Map_new` host import the standalone module can't satisfy.
+  if (className === "Map" && ctx.nativeStrings) return;
   if (ctx.externClasses.has(className)) return;
 
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);

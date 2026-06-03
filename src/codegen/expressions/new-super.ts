@@ -12,12 +12,14 @@ import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
   addStringConstantGlobal,
+  addUnionImports,
   ensureExnTag,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
+import { ensureMapHelpers } from "../map-runtime.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import {
@@ -1537,6 +1539,28 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       }
       fctx.body.push({ op: "ref.null.extern" } as Instr);
       return { kind: "externref" };
+    }
+  }
+
+  // (#1103a) `new Map()` in standalone / nativeStrings mode → the WasmGC-native
+  // Map runtime (map-runtime.ts) instead of a `Map_new` host import. `new Map()`
+  // is a NewExpression, so the interception must live here (not in the
+  // call-expression compiler). Slice 1: no-arg form only — `new Map(iterable)`
+  // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
+  // so the binding/receiver is typed (see resolveWasmType Map case + the
+  // method/.size dispatch in extern.ts / property-access.ts).
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Map" &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureMapHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
   }
 
