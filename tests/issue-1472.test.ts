@@ -236,6 +236,51 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(start).toBeGreaterThanOrEqual(0);
   });
 
+  it("Phase B Blocker B Slice 2: Object.keys(any) for-of consumer is host-free (no __array_from_iter)", async () => {
+    // #1472 Phase B Blocker B Slice 2 — the typed enumeration consumer chain.
+    // `const ks: string[] = Object.keys(o); for (const k of ks)` previously
+    // pulled in host-only env::__array_from_iter (via buildVecFromExternref) and
+    // emitted INVALID Wasm in standalone. The Slice 2 bypass: when the coerced
+    // source is already an indexable externref ($ObjVec from Object.keys), skip
+    // __array_from_iter and read it via the native __extern_get_idx. Module must
+    // validate and leak zero object/array host imports.
+    const source = `
+        export function n(o: any): number {
+          const ks: string[] = Object.keys(o);
+          let c = 0;
+          for (const k of ks) { c = c + 1; }
+          return c;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name.startsWith("__array_from"))).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
+  it("Phase B Blocker B Slice 2: .length on an any value routes to native __extern_length", async () => {
+    // `(ks.length)` on an `any`-typed value previously fell through to
+    // __extern_get("length") (returns 0 / mis-handled by the native string-key
+    // __extern_get). Slice 2 routes a standalone `.length` on an any/unknown
+    // receiver to the native __extern_length (the $ObjVec length reader). Module
+    // validates, leaks no host imports, and emits __extern_length as a defined fn.
+    const source = `
+        export function m(o: any): number {
+          const ks: any = Object.keys(o);
+          return (ks.length as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__extern_length\b/);
+    await WebAssembly.instantiate(r.binary, {});
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `

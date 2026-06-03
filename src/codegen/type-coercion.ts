@@ -200,11 +200,31 @@ export function buildVecFromExternref(
   flushLateImportShifts(ctx, fctx);
   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  // Materialize iterables (generators, custom @@iterator) via Array.from so
-  // the length/indexed-access loop below walks a real array. Throws from
-  // iterator .next() propagate to the caller (#1150).
-  const iterIdx = ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
+  // #1472 Phase B Blocker B Slice 2 — standalone enumeration consumer.
+  //
+  // `__array_from_iter` is a JS-host import (it invokes the Symbol.iterator
+  // protocol via the runtime). In standalone there is no host, and the source
+  // we are coercing here is already an indexable externref — the native
+  // `$ObjVec` produced by `__object_keys`/`values`/`entries` (Slice 1), which
+  // `__extern_length` + `__extern_get_idx` read directly. So under
+  // `ctx.standalone` we SKIP the materialization step (pass the externref
+  // through unchanged) and read it with the native indexed accessor below,
+  // never leaking `env::__array_from_iter`. (Generators / custom @@iterator
+  // standalone materialization is a separate slice — those don't reach an
+  // $ObjVec source.) The JS-host path is unchanged.
+  const useNativeObjVec = ctx.standalone;
+  const iterIdx = useNativeObjVec
+    ? undefined
+    : ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeObjVec) flushLateImportShifts(ctx, fctx);
+  // In standalone, indexed reads go through the native `__extern_get_idx`
+  // (f64 index → element) instead of `__extern_get(obj, boxed-index)` — the
+  // native `__extern_get` casts its key to $AnyString and would trap on a
+  // boxed number. (#1472 Phase B Blocker B Slice 2)
+  const getIdxIdx = useNativeObjVec
+    ? ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }])
+    : undefined;
+  if (useNativeObjVec) flushLateImportShifts(ctx, fctx);
 
   if (lenIdx === undefined || getIdx === undefined) {
     return [{ op: "ref.null", typeIdx: vecTypeIdx } as Instr];
@@ -304,14 +324,25 @@ export function buildVecFromExternref(
             { op: "local.get", index: arrLocal } as Instr,
             { op: "local.get", index: idxLocal } as Instr,
             { op: "local.get", index: matLocal } as Instr,
-            ...(boxIdx !== undefined
+            // Standalone: native __extern_get_idx(obj, f64(idx)) — reads the
+            // $ObjVec element by index without a boxed-string key. JS-host:
+            // __extern_get(obj, boxed-numeric-index) (host handles numeric keys).
+            ...(useNativeObjVec && getIdxIdx !== undefined
               ? [
                   { op: "local.get", index: idxLocal } as Instr,
                   { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: boxIdx } as Instr,
+                  { op: "call", funcIdx: getIdxIdx } as Instr,
                 ]
-              : [{ op: "ref.null.extern" } as Instr]),
-            { op: "call", funcIdx: getIdx } as Instr,
+              : [
+                  ...(boxIdx !== undefined
+                    ? [
+                        { op: "local.get", index: idxLocal } as Instr,
+                        { op: "f64.convert_i32_s" } as Instr,
+                        { op: "call", funcIdx: boxIdx } as Instr,
+                      ]
+                    : [{ op: "ref.null.extern" } as Instr]),
+                  { op: "call", funcIdx: getIdx } as Instr,
+                ]),
             ...buildElemCoerce(),
             { op: "array.set", typeIdx: vecInfo.arrTypeIdx } as Instr,
             { op: "local.get", index: idxLocal } as Instr,

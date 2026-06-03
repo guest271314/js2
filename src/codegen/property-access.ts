@@ -2121,6 +2121,37 @@ export function compilePropertyAccess(
       // Undo the compiled expression if it didn't match
       fctx.body.length = savedLen;
     }
+    // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
+    // receiver. None of the vec fast-paths matched, so the receiver is an opaque
+    // externref at runtime (e.g. the $ObjVec result of `Object.keys(o)` stored
+    // in an `any`). In standalone, `__extern_length` is the native $ObjVec
+    // reader (Blocker B Slice 1), so routing here keeps `.length` host-free and
+    // correct instead of falling through to `__extern_get("length")` (which the
+    // native `__extern_get` would mis-handle by casting "length" → key lookup,
+    // yielding 0). JS-host mode is unchanged (this gate is standalone-only; the
+    // host path's generic `__extern_get("length")` already works there).
+    if (ctx.standalone) {
+      const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      if (isAnyOrUnknown) {
+        const exprResult = compileExpression(ctx, fctx, expr.expression);
+        if (exprResult) {
+          if (exprResult.kind !== "externref") {
+            coerceType(ctx, fctx, exprResult, { kind: "externref" });
+          }
+          const lenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (lenFn !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
+            if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+          }
+          // No helper available — drop and yield 0.
+          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+          return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+        }
+      }
+    }
   }
 
   // Handle .raw on tagged template strings arrays (template vec struct)
