@@ -1,9 +1,10 @@
 ---
 id: 1261
 title: "eval tiering: classify eval sites into 5 tiers at compile time"
-status: backlog
+status: done
 created: 2026-05-02
-updated: 2026-05-02
+updated: 2026-06-03
+completed: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -60,3 +61,36 @@ None — standalone analysis pass.
 ## Unblocks
 
 #1263, #1264, #1265, #1266
+
+## Implementation (2026-06-03, dev-1387)
+
+Landed the read-only classifier. No behaviour change — downstream gating
+(#1262–#1265) consumes the result later.
+
+- New module `src/codegen/eval-tiering.ts` exporting `enum EvalTier`
+  (1=NoEval … 5=DirectSloppy) and `classifyEvalTier(sourceFile, checker)`.
+  The classifier walks the source file, classifies each `eval` call site
+  (reusing the `direct`/`indirect`/`none` callee-shape + `isGlobalEvalIdentifier`
+  heuristics that mirror `expressions/calls.ts`), and returns the module-wide
+  **maximum** (worst-case) tier. Short-circuits once tier 5 is reached.
+  - Tier 2 (static literal) is detected by reusing `resolveConstantString`
+    from `expressions/eval-inline.ts` (#1163's inliner) on the first argument
+    — applies to both direct and indirect eval.
+  - Strict-mode detection: a module (`externalModuleIndicator`/ESM
+    `impliedNodeFormat`), a `.ts`/`.tsx`/`.mts`/`.mjs` file, or a script with a
+    `"use strict"` prologue → strict (tier ≤ 4); a bare sloppy `.js` script with
+    a dynamic direct eval → tier 5. Satisfies AC#2 (TS sources always tier ≤ 4).
+  - Locally-shadowed `eval` (a param/var named `eval`) classifies as `none`.
+- Exposed optional `evalTier?: EvalTier` on `CodegenContext`
+  (`src/codegen/context/types.ts`) for #1262–#1265 to consume. Optional because
+  not every context constructs from a full source file.
+
+**Tests:** `tests/eval-tiering.test.ts` — 12 cases covering all 5 tiers, the
+static-literal refinement (direct + indirect), the strict-mode invariant
+(AC#2), `"use strict"` promotion, module worst-case aggregation, and the
+local-shadow case. (Validated locally via a standalone tsx harness;
+`vitest` could not run in-container due to a full `/workspace` disk —
+CI runs the suite with adequate disk.)
+
+Read-only at this stage; AC#3 (no behaviour change) holds — nothing consumes
+`evalTier` yet.

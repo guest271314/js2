@@ -487,13 +487,16 @@ export function destructureParamObjectExternref(
         }
       }
 
-      // Per ECMA-262 §13.15.5.5 RequireObjectCoercible / §8.4.2 GetIterator,
-      // destructuring null/undefined through a non-empty nested pattern must
-      // throw TypeError. Emit the guard BEFORE recursing so we throw even when
-      // the nested destructure path silently no-ops on null (#1225).
-      if (element.name.elements.length > 0) {
-        emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
-      }
+      // Per ECMA-262 8.6.2 BindingInitialization, both
+      // `BindingPattern : ObjectBindingPattern` (RequireObjectCoercible) and
+      // `BindingPattern : ArrayBindingPattern` (GetIterator) run their
+      // coercibility step FIRST — even for an empty nested pattern `{}` / `[]`.
+      // So `{ w: {} } = { w: null }` and `{ w: [] } = { w: null }` must throw
+      // TypeError. Emit the null/undefined guard unconditionally (the prior
+      // `length > 0` gate skipped empty nested patterns — #846). The guard only
+      // fires for null/undefined, so coercible primitive values still pass.
+      // (#1225 / #846)
+      emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
 
       if (ts.isObjectBindingPattern(element.name)) {
         destructureParamObjectExternref(ctx, fctx, nestedLocal, element.name, opts);
