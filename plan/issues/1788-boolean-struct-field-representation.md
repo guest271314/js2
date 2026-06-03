@@ -1,9 +1,10 @@
 ---
 id: 1788
 title: "boolean i32 struct fields boxed as number — typeof/=== mismatch on dynamic read"
-status: ready
+status: done
 created: 2026-06-03
 updated: 2026-06-03
+completed: 2026-06-03
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -97,3 +98,51 @@ This is part of the residual object-model representation work — sibling to
 **#1472 Phase B** (Wasm-native open-object runtime). The struct-field boolean
 tag is needed for faithful boolean round-tripping in standalone mode too, not
 just JS-host. Coordinate with #1130 / #1644 / #1472 representation efforts.
+
+## Implementation notes (sd-1665, 2026-06-03)
+
+Implemented as the mirror of the `i64.bigint` precedent (#1644). Four touch
+points, all gated on the new brand so non-boolean codegen is byte-identical:
+
+1. **`src/ir/types.ts`** — `{ kind: "i32"; boolean?: true }`. Structurally
+   inert: every existing `.kind === "i32"` check still matches, so boolean
+   locals / params / arithmetic keep bare-i32 codegen.
+2. **`src/checker/type-mapper.ts`** `mapTsTypeToWasm` — tag `Boolean` /
+   `BooleanLiteral` → `{ kind: "i32", boolean: true }`. This single point
+   covers struct fields (they resolve through `resolveWasmType`, which
+   delegates primitives to `mapTsTypeToWasm`) **and** the value-coercion
+   path, so `JSON.stringify(true)` now correctly yields `"true"` (was `"1"`)
+   because the i32→externref coercion site routes a branded i32 through
+   `__box_boolean`.
+3. **`src/codegen/index.ts` `fieldsHashKey`** — boolean-branded i32 fields hash
+   as `i32:bool`, distinct from numeric `i32`. **Why this matters:** the
+   structural dedup key only used `.kind` (both box as i32 at the Wasm type
+   level), so `{ x: true }` and `{ x: 1 }` would collapse to one struct and the
+   getter would inherit whichever boxing was registered first. Splitting the
+   key keeps the per-field getter-boxing decision sound. The two structs are
+   identical at the Wasm type level (both i32) — only their getters differ — so
+   the extra type index is harmless.
+4. **`src/codegen/index.ts` getter emission** — two coupled changes:
+   - the `returnMode` decision forces externref/box mode (`hasBool`) for any
+     all-i32 bucket that contains a boolean field. The raw-`i32` returnMode
+     returns a bare i32 the host reads back as a *number*; a boolean must box.
+   - `buildGetterExtract` routes a boolean-branded i32 field through the
+     existing `__box_boolean` import instead of `f64.convert_i32_s` +
+     `__box_number`.
+
+**Scope deliberately getter-only.** The setter side is already correct: a
+pure-boolean field bucket uses the `i32` valMode setter `(externref, i32)`, and
+the WebAssembly JS API coerces a passed `true` → 1 via ToInt32. Mixed
+boolean+ref buckets fall to the sidecar (skipped) exactly as before — no
+regression, no new setter path needed.
+
+**Regression check.** Equivalence suites covering structs / objects / typeof /
+ternary / logical / classes pass. The only behavioural change is the
+(correct) `JSON.stringify(true/false)` → `"true"`/`"false"`; that suite's two
+assertions were updated (they previously pinned the `"1"`/`"0"` bug as a known
+limitation). The residual #1461 `indexOf({1: true, length: 2}, true) === 1`
+test (`tests/issue-1461.test.ts`) was flipped from `it.fails` to `it` and now
+passes. Verified that the object-mutability `isFrozen`/`isSealed`/`isExtensible`
+and object-literal-setter / void-isNaN equivalence failures are **pre-existing
+on clean `origin/main`** (built and ran the baseline), not caused by this
+change. Tests: `tests/issue-1788.test.ts` (6 cases) + the flipped #1461 case.

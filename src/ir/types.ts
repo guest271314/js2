@@ -102,7 +102,7 @@ export interface FieldDef {
 }
 
 export type ValType =
-  | { kind: "i32" }
+  | { kind: "i32"; boolean?: true }
   | { kind: "i64"; bigint?: boolean }
   | { kind: "f32" }
   | { kind: "f64" }
