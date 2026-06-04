@@ -130,7 +130,7 @@ budget.
 
 Now tracked (the god-file debt is already #1098/#1172):
 
-1. **Backend naming symmetry** — **#1858** — rename so neither backend reads
+1. **Backend naming symmetry** — **#1860** — rename so neither backend reads
    as the "default" (`backend/gc` + `backend/linear`). `maintainability`,
    low effort. Consider bundling with #1172 to avoid a standalone large
    rename.

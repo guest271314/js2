@@ -1,5 +1,5 @@
 ---
-id: 1858
+id: 1860
 title: "Backend naming symmetry — rename codegen/ + codegen-linear/ to backend/gc + backend/linear (neither reads as the default)"
 status: backlog
 sprint: Backlog
@@ -14,7 +14,7 @@ language_feature: compiler-internals
 goal: maintainability
 related: [1172, 1527, 1713]
 ---
-# #1858 — Backend naming symmetry (`backend/gc` + `backend/linear`)
+# #1860 — Backend naming symmetry (`backend/gc` + `backend/linear`)
 
 **Source:** [`docs/architecture/structure-and-language-assessment.md`](../../docs/architecture/structure-and-language-assessment.md) — follow-up 1.
 

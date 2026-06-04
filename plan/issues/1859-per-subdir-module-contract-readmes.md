@@ -12,7 +12,7 @@ task_type: docs
 area: docs
 language_feature: compiler-internals
 goal: contributor-readiness
-related: [1172, 1858, 1527]
+related: [1172, 1860, 1527]
 ---
 # #1859 — Per-subdir module-contract READMEs
 
@@ -45,7 +45,7 @@ lines each:
 4. **Link** to the relevant architecture doc section.
 
 Subdirs to cover: `checker/`, `ir/`, `codegen/`, `codegen-linear/`, `emit/`,
-`link/`, `runtime/`, `compiler/` (rename-aware if #1858 lands first).
+`link/`, `runtime/`, `compiler/` (rename-aware if #1860 lands first).
 
 ## Acceptance criteria
 
