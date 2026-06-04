@@ -14,7 +14,7 @@ language_feature: node-builtins
 goal: npm-library-support
 parent: 1575
 related: [1044, 1032, 640, 1500]
-depends_on: [6403, 6404]
+depends_on: [1812, 1813]
 ---
 # node:http (+ https) — GET round-trip host import (axios unblocker)
 
