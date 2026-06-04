@@ -2387,11 +2387,21 @@ export function compileNativeStringMethodCall(
           return null;
         }
       }
-      // For non-literal args, compile and drop (can't validate at compile time)
+      // #1823 — evaluation order: the receiver (`this`) is evaluated BEFORE the
+      // argument per §13.3 / §22.1.3.13. Compile the receiver into a temp first
+      // (preserving its side effects in order), then compile + drop the form
+      // argument (still evaluated for its side effects, after the receiver),
+      // then read the receiver temp back as the (identity) result.
+      const recvType = compileExpression(ctx, fctx, propAccess.expression);
+      const recvValType = (recvType ?? nativeStringType(ctx)) as ValType;
+      const recvLocal = allocLocal(fctx, `__normalize_recv_${fctx.locals.length}`, recvValType);
+      fctx.body.push({ op: "local.set", index: recvLocal });
       const argType = compileExpression(ctx, fctx, formArg);
       if (argType) {
         fctx.body.push({ op: "drop" });
       }
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      return recvType;
     }
     return compileExpression(ctx, fctx, propAccess.expression);
   }
