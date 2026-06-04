@@ -7112,8 +7112,7 @@ function compileCallExpression(
       const method = propAccess.name.text;
       if (method === "toString") {
         compileExpression(ctx, fctx, propAccess.expression);
-        emitBoolToString(ctx, fctx);
-        return { kind: "externref" };
+        return emitBoolToString(ctx, fctx);
       }
       if (method === "valueOf") {
         // Boolean.valueOf() returns the boolean primitive — just compile the expression
@@ -7743,12 +7742,17 @@ function compileCallExpression(
 
     // String(x) — ToString coercion
     if (funcName === "String") {
+      // #1470: route every literal-string emission through compileStringLiteral
+      // so native-strings / standalone (`--target standalone` / WASI) materializes
+      // a NativeString GC struct inline. The old `addStringConstantGlobal` +
+      // `global.get` path reaches a JS-host string-constant global that is never
+      // registered in native-strings mode, so its index resolves to the -1
+      // sentinel and the module fails validation ("Invalid global index:
+      // 4294967295"). In JS-host mode compileStringLiteral keeps the existing
+      // global.get behaviour, so this is a no-op there.
       if (expr.arguments.length === 0) {
         // String() with no args → ""
-        addStringConstantGlobal(ctx, "");
-        const emptyIdx = ctx.stringGlobalMap.get("")!;
-        fctx.body.push({ op: "global.get", index: emptyIdx });
-        return { kind: "externref" };
+        return compileStringLiteral(ctx, fctx, "", expr) ?? { kind: "externref" };
       }
 
       // Check if argument is a null/undefined literal before compiling
@@ -7761,36 +7765,26 @@ function compileCallExpression(
 
       if (strArg0IsNull) {
         // String(null) → "null"
-        addStringConstantGlobal(ctx, "null");
-        const nullGIdx = ctx.stringGlobalMap.get("null")!;
-        fctx.body.push({ op: "global.get", index: nullGIdx });
-        return { kind: "externref" };
+        return compileStringLiteral(ctx, fctx, "null", strArg0) ?? { kind: "externref" };
       }
 
       if (strArg0IsUndefined) {
         // String(undefined) → "undefined"
-        addStringConstantGlobal(ctx, "undefined");
-        const undefGIdx = ctx.stringGlobalMap.get("undefined")!;
-        fctx.body.push({ op: "global.get", index: undefGIdx });
-        return { kind: "externref" };
+        return compileStringLiteral(ctx, fctx, "undefined", strArg0) ?? { kind: "externref" };
       }
 
       const argType = compileExpression(ctx, fctx, strArg0);
 
       if (argType === null) {
         // String(void-expr) → "undefined"
-        addStringConstantGlobal(ctx, "undefined");
-        const undefGIdx = ctx.stringGlobalMap.get("undefined")!;
-        fctx.body.push({ op: "global.get", index: undefGIdx });
-        return { kind: "externref" };
+        return compileStringLiteral(ctx, fctx, "undefined", strArg0) ?? { kind: "externref" };
       }
 
       if (argType?.kind === "i32") {
         // Check if it's a boolean type → "true"/"false"
         const argTsType = ctx.checker.getTypeAtLocation(strArg0);
         if (isBooleanType(argTsType)) {
-          emitBoolToString(ctx, fctx);
-          return { kind: "externref" };
+          return emitBoolToString(ctx, fctx);
         }
         // number (i32) → string via f64 conversion
         const toStrIdx = ctx.funcMap.get("number_toString");
@@ -7814,19 +7808,13 @@ function compileCallExpression(
         // Check TS type to determine what this externref actually is
         const argTsType = ctx.checker.getTypeAtLocation(strArg0);
         if (argTsType.flags & ts.TypeFlags.Null) {
-          // Drop the ref.null.extern, push "null" constant
+          // Drop the ref.null.extern, push "null" constant (#1470: native-aware)
           fctx.body.push({ op: "drop" });
-          addStringConstantGlobal(ctx, "null");
-          const nullGIdx = ctx.stringGlobalMap.get("null")!;
-          fctx.body.push({ op: "global.get", index: nullGIdx });
-          return { kind: "externref" };
+          return compileStringLiteral(ctx, fctx, "null", strArg0) ?? { kind: "externref" };
         }
         if (argTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
           fctx.body.push({ op: "drop" });
-          addStringConstantGlobal(ctx, "undefined");
-          const undefGIdx = ctx.stringGlobalMap.get("undefined")!;
-          fctx.body.push({ op: "global.get", index: undefGIdx });
-          return { kind: "externref" };
+          return compileStringLiteral(ctx, fctx, "undefined", strArg0) ?? { kind: "externref" };
         }
         if (isStringType(argTsType)) {
           // Already a string — return as-is
