@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -920,6 +921,11 @@ export function generateModule(
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
       registerWasiImports(ctx, ast.sourceFile);
+      // #1886 — pre-pass: classify which `Uint8Array` buffers are pure I/O
+      // (never escape the GC heap) so they can be backed by linear memory with
+      // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
+      // additive (empty result ⇒ emitted module identical to today).
+      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
     }
 
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
