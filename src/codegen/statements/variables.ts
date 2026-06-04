@@ -290,7 +290,11 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       // detector only fires under nativeStrings; ensure here too in case the
       // function body uses no other native-string helpers.
       ensureNativeStringHelpers(ctx);
-      compileStringBuilderInit(ctx, fctx, name);
+      // #1761: pass presize info (final-length proof) if the detector recorded
+      // it for this declaration, so the buffer is allocated once at the proven
+      // length and the append sites skip the per-append cap-check.
+      const presize = fctx.stringBuilderPresize?.get(decl);
+      compileStringBuilderInit(ctx, fctx, name, presize);
       // Mark as initialized for any TDZ flag captured by enclosing closures.
       // (compileStringBuilderInit didn't set localMap, so emitTdzInit only
       // touches the flag local if one was already allocated by the hoist
