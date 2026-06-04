@@ -1,7 +1,7 @@
 ---
 id: 1843
 title: "R_WASM_TAG_INDEX_LEB mismatch between emitter (11) and reader (10)"
-status: backlog
+status: ready
 created: 2026-06-04
 updated: 2026-06-04
 priority: low
@@ -9,7 +9,7 @@ feasibility: low
 task_type: bugfix
 area: link
 goal: correctness
-sprint: Backlog
+sprint: 59
 ---
 # #1843 — tag-index relocation type number disagrees (latent)
 

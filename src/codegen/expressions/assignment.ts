@@ -1802,7 +1802,10 @@ function emitAssignToTarget(
       const idxResult = compileExpression(ctx, fctx, target.argumentExpression);
       if (!idxResult) return;
       if (idxResult.kind === "f64") {
-        fctx.body.push({ op: "i32.trunc_f64_s" } as Instr);
+        // Saturating truncation: NaN/Infinity/out-of-range indices clamp
+        // instead of trapping the module. Matches every other index/length
+        // conversion in this file (#1834).
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
       }
       const idxTmp = allocLocal(fctx, `__dstr_idx_${fctx.locals.length}`, {
         kind: "i32",
@@ -2302,7 +2305,10 @@ function compilePropertyAssignment(
       // Convert f64 to i32 if needed
       const newLenTmp = allocLocal(fctx, `__arr_len_set_nl_${fctx.locals.length}`, { kind: "i32" });
       if (valType.kind === "f64") {
-        fctx.body.push({ op: "i32.trunc_f64_s" as any });
+        // Saturating truncation: NaN/Infinity/out-of-range lengths clamp
+        // instead of trapping the module. Matches every other length
+        // conversion in this file (#1834).
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" as any });
       }
       fctx.body.push({ op: "local.set", index: newLenTmp });
       // Set vec.length = newLen
@@ -3156,7 +3162,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const capturedIdx = ctx.capturedGlobals.get(name);
     if (capturedIdx !== undefined) {
-      const globalDef = ctx.mod.globals[capturedIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)];
       storage = {
         kind: "captured",
         index: capturedIdx,
@@ -3167,7 +3173,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const moduleIdx = ctx.moduleGlobals.get(name);
     if (moduleIdx !== undefined) {
-      const globalDef = ctx.mod.globals[moduleIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
       storage = {
         kind: "module",
         index: moduleIdx,

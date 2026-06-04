@@ -21,21 +21,19 @@ describe("#1128 — OrdinaryToPrimitive TypeError per §7.1.1.1", () => {
     expect(result).toBe("hello");
   });
 
-  test("_toPrimitiveSync falls back to [object Object] for WasmGC structs without sidecar", async () => {
-    // String concatenation uses _toPrimitiveSync in the concat host import.
-    // _toPrimitiveSync doesn't have callbackState, so it can't dispatch through
-    // Wasm exports. For WasmGC structs, it falls back to "[object Object]" which
-    // is safe (no crash, no TypeError) even though the struct has a compiled toString.
-    // This is a known limitation — full ToPrimitive requires callbackState.
+  test("string concat resolves a compiled toString to its return value", async () => {
+    // Previously a documented limitation: `_toPrimitiveSync` (used by the concat
+    // host import) had no callbackState and fell back to "[object Object]" for a
+    // WasmGC struct with a compiled toString. The #1470 any→string work now
+    // resolves the struct's toString at compile time, so this folds to the
+    // spec-correct "hello world".
     const result = await compileAndRun(`
       export function test(): string {
         const obj = { toString() { return "world"; } };
         return "hello " + obj;
       }
     `);
-    // Pre-existing limitation: _toPrimitiveSync can't dispatch compiled toString
-    // without callbackState, so falls back to "[object Object]".
-    expect(result).toBe("hello [object Object]");
+    expect(result).toBe("hello world");
   });
 
   test("_toPrimitiveSync throws TypeError for JS objects without valueOf/toString", () => {
