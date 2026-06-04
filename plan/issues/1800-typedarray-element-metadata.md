@@ -1,5 +1,5 @@
 ---
-id: 1785
+id: 1800
 title: "TypedArray element metadata for signedness, clamping, and storage"
 status: ready
 created: 2026-06-03
@@ -12,9 +12,9 @@ area: codegen
 language_feature: typedarray
 goal: compiler-architecture
 sprint: Backlog
-related: [608, 1199, 1700, 1767, 1784, 1786, 1787]
+related: [608, 1199, 1700, 1767, 1799, 1786, 1787]
 ---
-# #1785 - TypedArray element metadata for signedness, clamping, and storage
+# #1800 - TypedArray element metadata for signedness, clamping, and storage
 
 ## Problem
 
@@ -62,4 +62,4 @@ Candidate fields:
 ## Non-goals
 
 - Implementing every typed-array constructor in the same PR. This issue is the
-  representation cleanup that makes #1784 tractable.
+  representation cleanup that makes #1799 tractable.
