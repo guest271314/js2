@@ -2,6 +2,12 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Harvest re-run 2026-06-04 (post sprint-58/59 merge)
+
+Re-ran `/harvest-errors` after pulling 346 commits. Both prior-harvest issues are genuinely fixed (#1809 shift-walker 157→0; #1808 emit crash per-file clean). One baseline-accounting follow-up filed:
+
+- [#1862](../1862-residual-poison-burst-binary-emit-still-in-baseline.md) — residual poisoned-worker `Binary emit error` burst still in the published baseline (~269, barely down from 291) despite #1808's blast-radius cap; either the cap is incomplete or `promote-baseline` carried the entries forward without re-running. Over-counts the failure set by ~0.6%. medium, medium, **ready (backlog)**. Follow-up to #1808; ties to #1080 drift umbrella.
+
 ## Sprint 57 — acorn dogfood + backend-agnostic IR (2026-05-29)
 
 Architectural sprint (no pass-count target; zero-regression guard). Goals:
