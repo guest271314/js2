@@ -1,7 +1,7 @@
 ---
 id: 1847
 title: "for-of tentative rollback truncates fctx.locals but does not restore fctx.localMap"
-status: backlog
+status: ready
 created: 2026-06-04
 updated: 2026-06-04
 priority: low
@@ -9,7 +9,7 @@ feasibility: low
 task_type: bugfix
 area: codegen
 goal: correctness
-sprint: Backlog
+sprint: 59
 ---
 # #1847 — for-of rollback leaves stale localMap entries
 

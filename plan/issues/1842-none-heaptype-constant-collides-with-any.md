@@ -1,7 +1,7 @@
 ---
 id: 1842
 title: "none heap-type constant collides with any (0x6e); noextern/nofunc missing"
-status: backlog
+status: ready
 created: 2026-06-04
 updated: 2026-06-04
 priority: low
@@ -9,7 +9,7 @@ feasibility: low
 task_type: bugfix
 area: emit
 goal: correctness
-sprint: Backlog
+sprint: 59
 ---
 # #1842 — `none` heap-type constant is wrong (latent)
 
