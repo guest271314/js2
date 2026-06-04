@@ -175,6 +175,10 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
 
   emitClosureTable(ctx);
 
+  // Surface codegen diagnostics so compiler.ts fails the compile rather than
+  // emitting a structurally invalid binary for unsupported constructs (#1868).
+  if (ctx.errors.length > 0) mod.codegenErrors = ctx.errors;
+
   return mod;
 }
 
@@ -331,6 +335,10 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearO
   }
 
   emitClosureTable(ctx);
+
+  // Surface codegen diagnostics so compiler.ts fails the compile rather than
+  // emitting a structurally invalid binary for unsupported constructs (#1868).
+  if (ctx.errors.length > 0) mod.codegenErrors = ctx.errors;
 
   return mod;
 }
