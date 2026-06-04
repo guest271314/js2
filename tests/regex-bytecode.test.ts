@@ -57,6 +57,21 @@ const CORPUS: Array<{ p: string; f: string; inputs: string[] }> = [
   { p: "a.*?z", f: "", inputs: ["azaz", "abcz"] },
   { p: "\\.", f: "", inputs: ["a.b", "axb"] },
   { p: "[.]", f: "", inputs: ["a.b", "axb"] },
+  // #1539 Phase 2c — dotAll `s`: `.` matches line terminators too.
+  { p: "a.c", f: "s", inputs: ["a\nc", "a\rc", "abc", "a c"] },
+  { p: "a.*z", f: "s", inputs: ["a\nbz", "ab\ncz", "az"] },
+  { p: ".", f: "s", inputs: ["\n", "\r", "x", ""] },
+  { p: ".", f: "", inputs: ["\n", "\r", "x"] },
+  // #1539 Phase 2c — multiline `m`: `^`/`$` match at line boundaries.
+  { p: "^b", f: "m", inputs: ["a\nb", "b\na", "ab", "a\r\nb"] },
+  { p: "a$", f: "m", inputs: ["a\nb", "b\na", "ba", "a\r\nb"] },
+  { p: "^abc$", f: "m", inputs: ["x\nabc\ny", "abc", "xabc", "abcx"] },
+  { p: "^$", f: "m", inputs: ["a\n\nb", "ab", "\n"] },
+  // Non-multiline `^`/`$` are unaffected by interior newlines.
+  { p: "^b", f: "", inputs: ["a\nb", "b\na"] },
+  { p: "a$", f: "", inputs: ["a\nb", "b\na"] },
+  // Combined `m` + `s`.
+  { p: "^a.b$", f: "ms", inputs: ["a\nb", "x\na\nb\ny", "a b"] },
 ];
 
 describe("#1539 regex bytecode pipeline vs native RegExp", () => {

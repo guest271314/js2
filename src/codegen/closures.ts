@@ -3325,6 +3325,11 @@ export function emitObjectMethodAsClosure(
     userParamCount: userParams.length,
     wrapperUserParams: userParams,
     wrapperResult: results[0],
+    // (#1809) Record whether the target is already an import at registration.
+    // Import indices stay stable across late-import batches (new imports append
+    // at the end, so indices < importsBefore are never shifted), so an import
+    // target at finalize is EXPECTED, not a missed shift.
+    methodTargetsImport: methodFuncIdx < ctx.numImportFuncs,
   });
 
   // Emit: ref.func $trampoline, struct.new $closure_struct
@@ -3350,10 +3355,23 @@ export function emitObjectMethodAsClosure(
  */
 export function finalizeMethodTrampolines(ctx: CodegenContext): void {
   for (const t of ctx.pendingMethodTrampolines) {
-    // (#1525b) If the captured methodFuncIdx now resolves to an IMPORT (i.e.,
-    // < ctx.numImportFuncs at the time of finalize), the late-import shift
-    // machinery missed this entry. Fail loudly rather than emit invalid Wasm.
-    if (t.methodFuncIdx < ctx.numImportFuncs) {
+    // (#1525b / #1809) If the captured methodFuncIdx resolves to an IMPORT at
+    // finalize (< ctx.numImportFuncs), there are two distinct cases:
+    //
+    //   1. The target was ALREADY an import at registration (`methodTargetsImport`)
+    //      — e.g. a host/DOM global (`resizeTo`, `scrollBy`) or a `declare`d
+    //      function used as a first-class value. Import indices never shift
+    //      (new late imports append at the end, so indices < importsBefore are
+    //      left untouched by every shift walker), so the trampoline still
+    //      forwards into the correct import. `getFuncSignature` below resolves
+    //      the import's signature, and `call methodFuncIdx` against an import is
+    //      valid Wasm. This is EXPECTED — proceed with the normal rebuild.
+    //
+    //   2. The target was a DEFINED function at registration but now lands in
+    //      the import range. That can only mean the late-import shift machinery
+    //      missed this entry — a real #1525b regression. Fail loudly rather
+    //      than emit invalid Wasm (it would `call` the wrong import).
+    if (t.methodFuncIdx < ctx.numImportFuncs && !t.methodTargetsImport) {
       throw new Error(
         `pendingMethodTrampolines: methodFuncIdx ${t.methodFuncIdx} ` +
           `points at import "${ctx.mod.imports[t.methodFuncIdx]?.name}" — ` +
@@ -3599,6 +3617,8 @@ export function emitCachedMethodClosureAccess(
       userParamCount: userParams.length,
       wrapperUserParams: userParams,
       wrapperResult: results[0],
+      // (#1809) See the per-call-site push for rationale.
+      methodTargetsImport: methodFuncIdx < ctx.numImportFuncs,
     });
   }
 
@@ -3722,6 +3742,12 @@ export function emitCachedFuncClosureAccess(
       wrapperUserParams: userParams,
       wrapperResult: results[0],
       noThisParam: true,
+      // (#1809) A name resolved through `funcMap` can point at a host import
+      // (e.g. a DOM/host global `resizeTo`/`scrollBy`, or a `declare`d function)
+      // used as a first-class value. The forwarding trampoline legitimately
+      // `call`s the import, and import indices never shift, so flag it so the
+      // finalizer does not mistake the import target for a missed shift.
+      methodTargetsImport: funcIdx < ctx.numImportFuncs,
     });
   }
 

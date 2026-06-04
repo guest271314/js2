@@ -629,11 +629,26 @@ export function ensureRegexRun(ctx: CodegenContext): number {
   }
 
   function anchorArm(eol: boolean): Instr[] {
-    // BOL: sp==0 ; EOL: sp==slen
+    // Non-multiline: BOL matches sp==0, EOL matches sp==slen.
+    // Multiline (operand a != 0): BOL also matches right after a line
+    // terminator (the unit at sp-1 is a LT), EOL also matches right before a
+    // line terminator (the unit at sp is a LT). The neighbour read is guarded
+    // by an in-bounds check so it can never trap. `\r\n` is two terminators, so
+    // an anchor between them still matches. Mirrors anchorArm in regex/vm.ts.
+    //
+    // matched = baseEq || (a != 0 && multilineEq)
     return [
+      // baseEq: sp == (eol ? slen : 0)
       { op: "local.get", index: SP },
       eol ? ({ op: "local.get", index: SLEN } as Instr) : ({ op: "i32.const", value: 0 } as Instr),
       { op: "i32.eq" },
+      // | (a != 0 && multilineEq)
+      { op: "local.get", index: A },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+      ...multilineAnchorMatch(eol),
+      { op: "i32.and" },
+      { op: "i32.or" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -647,6 +662,34 @@ export function ensureRegexRun(ctx: CodegenContext): number {
           { op: "i32.const", value: 1 },
           { op: "local.set", index: FAILED },
         ],
+      },
+    ];
+  }
+
+  /** Push i32 1/0: is the line-boundary neighbour a line terminator? For EOL
+   *  the neighbour is the unit at sp (needs sp<slen); for BOL it is the unit at
+   *  sp-1 (needs sp>0). Reads are guarded so they never trap out of bounds. */
+  function multilineAnchorMatch(eol: boolean): Instr[] {
+    return [
+      // inBounds = eol ? (sp < slen) : (sp > 0)
+      { op: "local.get", index: SP },
+      eol ? ({ op: "local.get", index: SLEN } as Instr) : ({ op: "i32.const", value: 0 } as Instr),
+      eol ? ({ op: "i32.lt_s" } as Instr) : ({ op: "i32.gt_s" } as Instr),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          // ch = strData[soff + (eol ? sp : sp-1)]
+          { op: "local.get", index: SDATA },
+          { op: "local.get", index: SOFF },
+          { op: "local.get", index: SP },
+          { op: "i32.add" },
+          ...(eol ? [] : [{ op: "i32.const", value: 1 } as Instr, { op: "i32.sub" } as Instr]),
+          { op: "array.get_u", typeIdx: strDataIdx },
+          { op: "local.set", index: CH },
+          ...isLineTerm(CH),
+        ],
+        else: [{ op: "i32.const", value: 0 }],
       },
     ];
   }
