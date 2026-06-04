@@ -1,5 +1,5 @@
 ---
-id: 1784
+id: 1799
 title: "Generalize TypedArray storage to packed WasmGC lanes"
 status: ready
 created: 2026-06-03
@@ -12,9 +12,9 @@ area: codegen
 language_feature: typedarray
 goal: performance
 sprint: Backlog
-related: [389, 608, 1199, 1767, 1785, 1786, 1787]
+related: [389, 608, 1199, 1767, 1800, 1786, 1787]
 ---
-# #1784 - Generalize TypedArray storage to packed WasmGC lanes
+# #1799 - Generalize TypedArray storage to packed WasmGC lanes
 
 ## Problem
 
@@ -55,4 +55,4 @@ double storage.
 
 This should build on the scoped native `Uint8Array` packed-storage fix rather
 than reintroducing f64 conversion arrays. The broader design should probably
-land after #1785 introduces explicit typed-array element metadata.
+land after #1800 introduces explicit typed-array element metadata.
