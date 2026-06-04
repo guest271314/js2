@@ -187,3 +187,21 @@ time (the i32 hash path lever is DONE and already faster/char than V8). Two size
 
 - [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready (sprint 59)**
 - [#1762](../1762-linear-memory-string-backing-build-hash-hot-path.md) — Linear-memory string backing for the build/hash hot path — drop the WasmGC `(array i16)` GC barrier (strategic ceiling; dual-backend like #679/#682/#1714) — **high**, hard, **ready, likely needs arch spec**
+
+### Code-review findings — latent + redundancy (2026-06-04)
+
+From the full-codebase review on 2026-06-04
+(`plan/code-review/2026-06-04-compiler-review.md`). Reachable correctness bugs
+went into sprint 59 (#1815–#1839); these are latent (not-yet-wired paths),
+defense-in-depth, and cleanup:
+
+- [#1840](../1840-linker-leb-truncation-and-rewrite-gaps.md) — linker `writeLEB128` truncates growing indices; `call_indirect`/`memory` rewrite gaps (latent — `.o` linker) — low, medium, **backlog**
+- [#1841](../1841-element-section-flag-bitfield.md) — element-section flag bitfield only handles active flag-0 (latent — linker) — low, medium, **backlog**
+- [#1842](../1842-none-heaptype-constant-collides-with-any.md) — `none` heap-type constant collides with `any` (0x6e); `noextern`/`nofunc` missing (latent — emit) — low, low, **backlog**
+- [#1843](../1843-reloc-tag-index-leb-mismatch.md) — `R_WASM_TAG_INDEX_LEB` emitter (11) vs reader (10) mismatch (latent — linker) — low, low, **backlog**
+- [#1844](../1844-ir-verify-no-nested-buffer-recursion.md) — IR `verify` doesn't recurse nested if/try/loop buffers; return-type gate + SSA holes (residual #1798, defense-in-depth) — low, medium, **backlog**
+- [#1845](../1845-ir-propagate-bool-overclaim-seedconcrete.md) — IR propagate: `&&`/`||` over-claim `BOOL`; `seedConcrete` omits i32/u32 — low, low, **backlog**
+- [#1846](../1846-minor-typeof-conformance-notes.md) — minor `typeof`: i64→"number" in `with`-bindings; externref→null fallthrough — low, low, **backlog**
+- [#1847](../1847-forof-rollback-localmap-not-restored.md) — for-of tentative rollback doesn't restore `fctx.localMap` (robustness) — low, low, **backlog**
+- [#1848](../1848-dead-code-sweep.md) — dead-code sweep: identical branches, unused locals/params, obsolete scaffolding — low, low, **backlog**
+- [#1849](../1849-duplicate-logic-refactor.md) — refactor diverged copy-paste (super dispatch, closure drainers, `resolveVec`, `__extern_has`, typed-default) — low, medium, **backlog**
