@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 goal: compilable
 sprint: 59
-pr: 1808-PLACEHOLDER
+pr: 1129
 ---
 # #1808 — Binary emit error: "offset is out of bounds" (emitBinary crash)
 
