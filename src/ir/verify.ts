@@ -6,9 +6,10 @@
 //
 //   1. Single static assignment: every IrValueId defined exactly once.
 //   2. Use-before-def: every IrValueId referenced is either a param, a block
-//      arg of the containing block, or defined earlier in the same block.
-//      (Cross-block use checks are Phase 2 once we can express branches with
-//       SSA values reaching successor blocks.)
+//      arg of the containing block, defined earlier in the same block, or
+//      defined in a block that **dominates** the using block along all CFG
+//      paths (#1850 — cross-block dominance, the former Phase-2 TODO). A use
+//      reached by a non-dominating def is rejected as a dominance violation.
 //   3. Block termination: every block has exactly one terminator.
 //   4. Branch arg arity: each `br`/`br_if` passes exactly as many args as the
 //      target block declares.
@@ -62,6 +63,105 @@ function forEachInstrDeep(instr: IrInstr, visit: (i: IrInstr) => void): void {
   }
 }
 
+/**
+ * #1850 — successor block ids of a block, derived from its terminator.
+ * `return`/`unreachable` have none; `br` has one; `br_if` has two.
+ */
+function successors(block: IrBlock): readonly number[] {
+  const t = block.terminator;
+  switch (t.kind) {
+    case "br":
+      return [t.branch.target as number];
+    case "br_if":
+      return [t.ifTrue.target as number, t.ifFalse.target as number];
+    case "return":
+    case "unreachable":
+      return [];
+  }
+}
+
+/**
+ * #1850 — map every SSA value (instruction result or block arg) to the id of
+ * the block that defines/binds it. Recurses into nested if/try/loop buffers so
+ * a value defined inside one is attributed to its enclosing top-level block
+ * (its dominance scope is that block). Params are intentionally excluded — they
+ * are visible everywhere and the use check handles them separately.
+ */
+function buildDefBlockMap(func: IrFunction): Map<IrValueId, number> {
+  const m = new Map<IrValueId, number>();
+  for (const block of func.blocks) {
+    const id = block.id as number;
+    for (const arg of block.blockArgs) m.set(arg, id);
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (i) => {
+        if (i.result !== null) m.set(i.result, id);
+      });
+    }
+  }
+  return m;
+}
+
+/**
+ * #1850 — classic iterative dominator-set computation over the block CFG
+ * (Cooper/Harvey/Kennedy-style fixpoint on full sets — O(blocks²) but the
+ * functions the IR path claims are small). `dom[b]` is the set of blocks that
+ * dominate `b` (every path from entry to `b` passes through them), with `b`
+ * dominating itself. The entry block is `blocks[0]`; blocks unreachable from
+ * entry keep the conservative full set, which never produces a false dominance
+ * violation. Assumes block ids are the contiguous range 0..n-1 (checked by the
+ * caller).
+ */
+function computeDominators(func: IrFunction): ReadonlySet<number>[] {
+  const n = func.blocks.length;
+  if (n === 0) return [];
+
+  // Predecessor lists.
+  const preds: number[][] = Array.from({ length: n }, () => []);
+  for (const block of func.blocks) {
+    const from = block.id as number;
+    for (const s of successors(block)) {
+      if (s >= 0 && s < n) preds[s].push(from);
+    }
+  }
+
+  const all = new Set<number>();
+  for (let i = 0; i < n; i++) all.add(i);
+
+  // Init: entry dominated only by itself; every other block by all blocks.
+  const dom: Set<number>[] = [];
+  for (let i = 0; i < n; i++) dom.push(i === 0 ? new Set([0]) : new Set(all));
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let b = 1; b < n; b++) {
+      // newDom = {b} ∪ (∩ dom[p] for all preds p). Intersection over no preds
+      // is the universe (full set) — keeps unreachable blocks conservative.
+      let inter: Set<number> | null = null;
+      for (const p of preds[b]) {
+        if (inter === null) {
+          inter = new Set(dom[p]);
+        } else {
+          for (const x of [...inter]) if (!dom[p].has(x)) inter.delete(x);
+        }
+      }
+      const next = inter ?? new Set(all);
+      next.add(b);
+      if (!setsEqual(next, dom[b])) {
+        dom[b] = next;
+        changed = true;
+      }
+    }
+  }
+  return dom;
+}
+
+function setsEqual(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
 export interface IrVerifyError {
   readonly message: string;
   readonly func: string;
@@ -80,14 +180,26 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
   }
 
   // Validate block IDs form a contiguous range starting at 0.
+  let blockIdsContiguous = true;
   for (let i = 0; i < func.blocks.length; i++) {
     if ((func.blocks[i].id as number) !== i) {
       errors.push({ message: `block ${i} has id ${func.blocks[i].id}, expected ${i}`, func: func.name, block: i });
+      blockIdsContiguous = false;
     }
   }
 
+  // #1850 — cross-block dominance support. Map each SSA value (and block arg)
+  // to the id of the block that defines/binds it, and compute the dominator
+  // sets over the CFG, so `verifyBlock` can validate that a value used in a
+  // *different* block than its def is dominated by that def along all paths.
+  // Only meaningful when block ids are contiguous (we index by id); when they
+  // aren't, skip the dominance check (the id error above already fires) so we
+  // don't index out of bounds.
+  const defBlock = blockIdsContiguous ? buildDefBlockMap(func) : null;
+  const dominators = blockIdsContiguous ? computeDominators(func) : null;
+
   for (const block of func.blocks) {
-    verifyBlock(func, block, defs, errors);
+    verifyBlock(func, block, defs, errors, defBlock, dominators);
   }
 
   // Check branch-arg arity against target block signatures.
@@ -178,7 +290,34 @@ function describeKind(t: IrType): string {
   return t.kind;
 }
 
-function verifyBlock(func: IrFunction, block: IrBlock, defs: Set<IrValueId>, errors: IrVerifyError[]): void {
+function verifyBlock(
+  func: IrFunction,
+  block: IrBlock,
+  defs: Set<IrValueId>,
+  errors: IrVerifyError[],
+  defBlock: ReadonlyMap<IrValueId, number> | null,
+  dominators: readonly ReadonlySet<number>[] | null,
+): void {
+  const here = block.id as number;
+  // #1850 — cross-block dominance: a use whose value is defined in a *different*
+  // block is only valid if that defining block dominates `here` along all CFG
+  // paths. Returns true if the use is satisfied by a dominating cross-block def
+  // (so the local use-before-def check should not also flag it), false if it is
+  // either local (let the local check decide) or a dominance violation (which we
+  // report here).
+  const dominatedCrossBlockDef = (u: IrValueId, atBlock: number, what: string): boolean => {
+    if (!defBlock || !dominators) return false;
+    const db = defBlock.get(u);
+    if (db === undefined || db === atBlock) return false; // not a cross-block def
+    const doms = dominators[atBlock];
+    if (doms && doms.has(db)) return true; // def-block dominates use-block — OK
+    errors.push({
+      message: `use of SSA value ${u} in ${what} (block ${atBlock}) is not dominated by its def in block ${db}`,
+      func: func.name,
+      block: atBlock,
+    });
+    return true; // handled (reported) — don't double-report as use-before-def
+  };
   for (const arg of block.blockArgs) {
     if (defs.has(arg)) {
       errors.push({
@@ -202,13 +341,16 @@ function verifyBlock(func: IrFunction, block: IrBlock, defs: Set<IrValueId>, err
     const isParam = func.params.some((p) => p.value === u);
     const isBlockArg = block.blockArgs.includes(u);
     const isEarlier = localDefs.has(u);
-    if (!isParam && !isBlockArg && !isEarlier) {
-      errors.push({
-        message: `use of SSA value ${u} before def in block ${block.id as number}`,
-        func: func.name,
-        block: block.id as number,
-      });
-    }
+    if (isParam || isBlockArg || isEarlier) return;
+    // #1850 — value defined in another block: valid iff that block dominates
+    // `here`. `dominatedCrossBlockDef` reports a dominance violation itself and
+    // returns true so we don't also emit a spurious use-before-def.
+    if (dominatedCrossBlockDef(u, here, "instruction")) return;
+    errors.push({
+      message: `use of SSA value ${u} before def in block ${here}`,
+      func: func.name,
+      block: here,
+    });
   };
   const walkBuffer = (instrs: readonly IrInstr[]): void => {
     for (const instr of instrs) {
@@ -297,19 +439,20 @@ function verifyBlock(func: IrFunction, block: IrBlock, defs: Set<IrValueId>, err
   };
   walkBuffer(block.instrs);
 
-  // Terminator uses must resolve to params/blockargs/local defs.
+  // Terminator uses must resolve to params/blockargs/local defs, or to a value
+  // defined in a block that dominates this one (#1850).
   const termUses = collectTerminatorUses(block);
   for (const u of termUses) {
     const isParam = func.params.some((p) => p.value === u);
     const isBlockArg = block.blockArgs.includes(u);
     const isLocal = localDefs.has(u);
-    if (!isParam && !isBlockArg && !isLocal) {
-      errors.push({
-        message: `terminator uses undefined SSA value ${u} in block ${block.id as number}`,
-        func: func.name,
-        block: block.id as number,
-      });
-    }
+    if (isParam || isBlockArg || isLocal) continue;
+    if (dominatedCrossBlockDef(u, here, "terminator")) continue;
+    errors.push({
+      message: `terminator uses undefined SSA value ${u} in block ${here}`,
+      func: func.name,
+      block: here,
+    });
   }
 }
 
