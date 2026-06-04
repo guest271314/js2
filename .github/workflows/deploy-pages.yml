@@ -46,8 +46,17 @@ jobs:
             cp /tmp/js2wasm-baselines/test262-current.json   website/public/benchmarks/results/test262-report.json
             cp /tmp/js2wasm-baselines/test262-current.json   benchmarks/results/test262-current.json
             cp /tmp/js2wasm-baselines/test262-current.json   benchmarks/results/test262-report.json
-            [ -f /tmp/js2wasm-baselines/test262-current.jsonl ] && \
+            if [ -f /tmp/js2wasm-baselines/test262-current.jsonl ]; then
               cp /tmp/js2wasm-baselines/test262-current.jsonl website/public/benchmarks/results/test262-results.jsonl
+              # build:pages → generate-editions.ts regenerates test262-editions.json
+              # at deploy time and reads benchmarks/results/test262-current.jsonl
+              # (its CURRENT_RESULTS_JSONL input). Overwrite the STALE committed
+              # copy with the FRESH baseline so the regenerated #goals edition
+              # slider matches the live headline. Without this, the deploy falls
+              # back to the stale committed jsonl and the slider shows old
+              # cumulative numbers (~65%) while the donut shows ~71% (#1885).
+              cp /tmp/js2wasm-baselines/test262-current.jsonl benchmarks/results/test262-current.jsonl
+            fi
             [ -f /tmp/js2wasm-baselines/runs/index.json ] && \
               cp /tmp/js2wasm-baselines/runs/index.json benchmarks/results/runs/index.json
             echo "Fetched baseline data from js2wasm-baselines."

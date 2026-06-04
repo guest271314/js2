@@ -3467,10 +3467,28 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
   if (asVal(condType)?.kind !== "i32") {
     throw new Error(`ir/from-ast: ternary condition must be bool in ${cx.funcName}`);
   }
-  const whenTrue = lowerExpr(expr.whenTrue, cx, irVal({ kind: "f64" }));
-  const whenFalse = lowerExpr(expr.whenFalse, cx, irVal({ kind: "f64" }));
+
+  // #1820 — short-circuit semantics: only the selected arm may run. A prior
+  // implementation lowered both arms eagerly and combined them with Wasm
+  // `select`, which evaluates BOTH operands. That is fine for pure arms but
+  // wrong when an arm has side effects or recurses (e.g.
+  // `n <= 1 ? 1 : n * fact(n - 1)` recursed at the base case → non-termination).
+  // Lower each arm into its own body buffer and combine with `IrInstrIf`, so
+  // the lowerer emits a structured `if`/`else` that runs exactly one arm.
+  let whenTrue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    whenTrue = lowerExpr(expr.whenTrue, cx, irVal({ kind: "f64" }));
+  });
   const ttype = cx.builder.typeOf(whenTrue);
+
+  // Hint the false arm with the true arm's type so both land on the same
+  // carrier (matches the `lowerNullish` convention).
+  let whenFalse!: IrValueId;
+  const elseBody = cx.builder.collectBodyInstrs(() => {
+    whenFalse = lowerExpr(expr.whenFalse, cx, ttype);
+  });
   const ftype = cx.builder.typeOf(whenFalse);
+
   const tVal = asVal(ttype);
   const fVal = asVal(ftype);
   if (!tVal || !fVal || tVal.kind !== fVal.kind) {
@@ -3478,7 +3496,15 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
       `ir/from-ast: ternary branches have different types (${describeIrType(ttype)} vs ${describeIrType(ftype)}) in ${cx.funcName}`,
     );
   }
-  return cx.builder.emitSelect(cond, whenTrue, whenFalse, ttype);
+
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue: whenTrue,
+    else: elseBody,
+    elseValue: whenFalse,
+    resultType: ttype,
+  });
 }
 
 function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValueId {
@@ -3520,6 +3546,17 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // clean fallback for non-reference / mismatched-type operands.
   if (op === ts.SyntaxKind.QuestionQuestionToken) {
     return lowerNullish(expr, cx, hint);
+  }
+
+  // #1820 — `&&` / `||` short-circuit. A prior implementation lowered both
+  // operands eagerly and combined them with `i32.and` / `i32.or`, which
+  // evaluates the right operand unconditionally — losing JS short-circuit
+  // semantics (e.g. `guard && risky()` ran `risky()` even when `guard` was
+  // false). Lower the right operand into its own body buffer and combine with
+  // `IrInstrIf` so it runs only on the branch that needs it. Handled before
+  // the eager operand lowering below, like `??`.
+  if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+    return lowerLogicalAndOr(expr, op, cx);
   }
 
   // Slice 11 (#1169n) — early fallback for ops the selector accepts
@@ -3669,16 +3706,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
       binop = isF64 ? "f64.ne" : "i32.ne";
       resultType = irVal({ kind: "i32" });
       break;
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-      requireI32(isI32, "&&", cx.funcName);
-      binop = "i32.and";
-      resultType = irVal({ kind: "i32" });
-      break;
-    case ts.SyntaxKind.BarBarToken:
-      requireI32(isI32, "||", cx.funcName);
-      binop = "i32.or";
-      resultType = irVal({ kind: "i32" });
-      break;
+    // `&&` / `||` are intercepted at the top of `lowerBinary` (#1820) and
+    // lowered to a short-circuiting `IrInstrIf` before the eager operand
+    // lowering above — they never reach this switch.
     // Slice 11 (#1169n) — bitwise ops on f64 operands. Each lowers to
     // ToInt32 + i32 op + convert back; the lowerer's `case "binary"`
     // arm dispatches on the `js.*` prefix to emit the multi-instr
@@ -3802,12 +3832,69 @@ function lowerNullish(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): Ir
   });
 }
 
-function requireF64(isF64: boolean, op: string, fn: string): void {
-  if (!isF64) throw new Error(`ir/from-ast: operator '${op}' requires number operands in ${fn}`);
+/**
+ * #1820 — short-circuiting lowering for `&&` / `||`.
+ *
+ * The previous lowering eagerly evaluated both operands and combined them with
+ * `i32.and` / `i32.or`, running the right operand unconditionally. JS requires
+ * the right operand to be evaluated only when the left does not already decide
+ * the result:
+ *   - `a && b` → if `a` is truthy yield `b`, else yield `a` (the falsy value).
+ *   - `a || b` → if `a` is truthy yield `a`, else yield `b`.
+ *
+ * We keep the existing IR scope (both operands `i32`/bool); anything else
+ * throws clean fallback to legacy, exactly as the old `requireI32` did. The
+ * right operand is lowered into its own body buffer (only the taken branch
+ * runs it) and the two arms are combined with a structured `IrInstrIf`.
+ */
+function lowerLogicalAndOr(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId {
+  const isAnd = op === ts.SyntaxKind.AmpersandAmpersandToken;
+  const opName = isAnd ? "&&" : "||";
+
+  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "i32" }));
+  const lhsType = cx.builder.typeOf(lhs);
+  if (asVal(lhsType)?.kind !== "i32") {
+    throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
+  }
+
+  const resultType: IrType = irVal({ kind: "i32" });
+
+  // Lower the right operand into its own buffer so it executes only on the
+  // branch that needs it.
+  let rhs!: IrValueId;
+  const rhsBody = cx.builder.collectBodyInstrs(() => {
+    rhs = lowerExpr(expr.right, cx, resultType);
+  });
+  if (asVal(cx.builder.typeOf(rhs))?.kind !== "i32") {
+    throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
+  }
+
+  // `cond = lhs`. For `&&`, the rhs is the then-arm (lhs truthy) and lhs is the
+  // else-arm value. For `||`, lhs is the then-arm value and rhs is the
+  // else-arm. The empty arm yields the already-materialized `lhs` (the lowerer
+  // records it as a cross-block use, like `lowerNullish`'s else arm).
+  if (isAnd) {
+    return cx.builder.emitIfElse({
+      cond: lhs,
+      then: rhsBody,
+      thenValue: rhs,
+      else: [],
+      elseValue: lhs,
+      resultType,
+    });
+  }
+  return cx.builder.emitIfElse({
+    cond: lhs,
+    then: [],
+    thenValue: lhs,
+    else: rhsBody,
+    elseValue: rhs,
+    resultType,
+  });
 }
 
-function requireI32(isI32: boolean, op: string, fn: string): void {
-  if (!isI32) throw new Error(`ir/from-ast: operator '${op}' requires bool operands in ${fn}`);
+function requireF64(isF64: boolean, op: string, fn: string): void {
+  if (!isF64) throw new Error(`ir/from-ast: operator '${op}' requires number operands in ${fn}`);
 }
 
 function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {

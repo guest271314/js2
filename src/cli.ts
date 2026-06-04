@@ -43,6 +43,11 @@ Options:
   --standalone      Shorthand for --target standalone (pure WasmGC, no JS host,
                     no WASI). Forces nativeStrings: true and refuses to emit
                     wasm:js-string or env JS-host imports.
+  --allocator <a>   Linear backend allocator (#1856): bump (default,
+                    allocate-and-exit arena, smallest binary) or arena-reset
+                    (same arena + __arena_reset/__arena_used exports for hosts
+                    reusing one instance across short-lived tasks). Linear
+                    target only.
   --allow-fs        Allow node:fs JS-host imports (readFileSync, writeFileSync)
                     for non-WASI targets (#1491). Off by default to prevent
                     accidental capability leakage.
@@ -96,6 +101,7 @@ let emitDts = true;
 let watOnly = false;
 let optimize: boolean | 1 | 2 | 3 | 4 = false;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
+let allocator: "bump" | "arena-reset" | undefined;
 let emitWit = false;
 let witPackageName: string | undefined;
 let allowFs = false;
@@ -121,6 +127,14 @@ for (let i = 0; i < args.length; i++) {
     }
   } else if (arg === "--standalone") {
     target = "standalone";
+  } else if (arg === "--allocator") {
+    const a = args[++i];
+    if (a === "bump" || a === "arena-reset") {
+      allocator = a;
+    } else {
+      console.error(`Unknown allocator: ${a} (expected bump or arena-reset)`);
+      process.exit(1);
+    }
   } else if (arg === "--wat") {
     watOnly = true;
   } else if (arg === "--no-wat") {
@@ -210,6 +224,14 @@ if (target === "standalone" && allowFs) {
   process.exit(1);
 }
 
+// #1856 — the bump/arena allocator only exists on the linear backend. The
+// WasmGC targets delegate object lifetime to the host GC, so `--allocator`
+// has nothing to act on there; reject it rather than silently ignore.
+if (allocator !== undefined && target !== "linear") {
+  console.error("error: --allocator requires --target linear");
+  process.exit(1);
+}
+
 const absInput = resolve(inputPath);
 const source = readFileSync(absInput, "utf-8");
 const name = basename(absInput, ".ts");
@@ -218,6 +240,7 @@ const dir = outDir ? resolve(outDir) : dirname(absInput);
 const result = await compile(source, {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
+  ...(allocator ? { allocator } : {}),
   ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),

@@ -8,7 +8,7 @@ import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError, reportErrorNoNode } from "../context/errors.js";
-import { allocLocal, getLocalType } from "../context/locals.js";
+import { allocLocal, getLocalType, restoreLocals, snapshotLocals } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitExternrefDestructureGuard } from "../destructuring-params.js";
 import {
@@ -2381,10 +2381,10 @@ function arrayValuesReceiverForForOf(
 
   // Confirm the receiver lowers to a vec struct without leaving any code behind.
   const bodyLenBefore = fctx.body.length;
-  const localsLenBefore = fctx.locals.length;
+  const localsSnap = snapshotLocals(fctx); // #1847
   const recvType = compileExpression(ctx, fctx, callee.expression);
   fctx.body.length = bodyLenBefore;
-  fctx.locals.length = localsLenBefore;
+  restoreLocals(fctx, localsSnap); // #1847 — also drops stale localMap entries
   if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return undefined;
   if (getArrTypeIdxFromVec(ctx, recvType.typeIdx) < 0) return undefined;
   return callee.expression;
@@ -2576,7 +2576,7 @@ function compileForOfArrayTentative(
   const iterableExpr = iterableOverride ?? stmt.expression;
   // Tentatively compile just the expression to discover its Wasm type
   const bodyLenBefore = fctx.body.length;
-  const localsLenBefore = fctx.locals.length;
+  const localsSnap = snapshotLocals(fctx); // #1847
   const exprType = compileExpression(ctx, fctx, iterableExpr);
 
   // Check if it compiled to a ref to a vec struct (not just any struct —
@@ -2588,7 +2588,7 @@ function compileForOfArrayTentative(
       // Confirmed vec struct — undo the tentative compilation and use the
       // full array path (which compiles the expression again with proper setup)
       fctx.body.length = bodyLenBefore;
-      fctx.locals.length = localsLenBefore;
+      restoreLocals(fctx, localsSnap); // #1847
       compileForOfArray(ctx, fctx, stmt, iterableOverride);
       return true;
     }
@@ -2596,7 +2596,7 @@ function compileForOfArrayTentative(
 
   // Not a vec struct — undo tentative compilation, let caller use iterator path
   fctx.body.length = bodyLenBefore;
-  fctx.locals.length = localsLenBefore;
+  restoreLocals(fctx, localsSnap); // #1847
   return false;
 }
 
@@ -3439,7 +3439,7 @@ function findStructFieldsByTypeIdx(
 function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
   // Compile the iterable expression
   const bodyLenBefore = fctx.body.length;
-  const localsLenBefore = fctx.locals.length;
+  const localsSnap = snapshotLocals(fctx); // #1847
   const iterableType = compileExpression(ctx, fctx, stmt.expression);
   if (!iterableType) {
     reportError(ctx, stmt, "for-of: failed to compile iterable expression");
@@ -3483,7 +3483,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   // Fallback: host-delegated iterator protocol
   if (ctx.standalone || ctx.wasi) {
     fctx.body.length = bodyLenBefore;
-    fctx.locals.length = localsLenBefore;
+    restoreLocals(fctx, localsSnap); // #1847
     reportError(
       ctx,
       stmt,

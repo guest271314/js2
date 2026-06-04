@@ -57,7 +57,7 @@ import {
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
 import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
 import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
-import { detectStringBuilders } from "./string-builder.js";
+import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
 
@@ -2090,8 +2090,10 @@ export function compileArrowAsClosure(
   // #1210: detect string-builder patterns BEFORE hoisting so the hoist
   // pass can skip pre-allocating the matched binding's local.
   if (ts.isBlock(body) && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-    const builders = detectStringBuilders(ctx, body);
+    const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+    const builders = detectStringBuilders(ctx, body, presize);
     if (builders.size > 0) liftedFctx.pendingStringBuilders = builders;
+    if (presize.size > 0) liftedFctx.stringBuilderPresize = presize; // #1761
   }
 
   // Pre-hoist function-scoped `var` declarations into the closure's localMap

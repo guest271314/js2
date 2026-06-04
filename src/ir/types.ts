@@ -51,6 +51,15 @@ export interface WasmModule {
    * TypedArray types.
    */
   exportSignatures?: Record<string, ExportSignature>;
+  /**
+   * Codegen diagnostics produced while lowering this module (#1868). The
+   * linear-memory backend (`generateLinearModule` / `generateLinearMultiModule`)
+   * accumulates unsupported-construct errors into its `ctx.errors` array; it
+   * surfaces them here so `compiler.ts` can fail the compile instead of
+   * emitting a structurally invalid binary (e.g. a stack-underflowing
+   * `local.set` after an unhandled `String.prototype.repeat`).
+   */
+  codegenErrors?: { message: string; line: number; column: number }[];
 }
 
 /** TS-level kind hint for a single export parameter or result (#1700). */

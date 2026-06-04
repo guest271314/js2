@@ -1,10 +1,11 @@
 ---
 id: 1801
 title: "WASI process.exit(code) emits an invalid binary (i32/f64 stack mismatch in trunc)"
-status: ready
-sprint: Backlog
+status: done
+sprint: 59
 created: 2026-06-04
 updated: 2026-06-04
+completed: 2026-06-04
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -94,8 +95,35 @@ argument must round-trip through f64.
 
 ## Test sentinel already in place
 
-`tests/real-world-wasi.test.ts` carries an `it.fails(...)` sentinel asserting
-`WebAssembly.validate(...) === true` for `process.exit(0)`. It passes while the
-bug stands and will flip to a hard failure once codegen is fixed — at which
-point remove the `.fails` modifier (and the explanatory comment) so it becomes
-a normal regression guard.
+`tests/real-world-wasi.test.ts` carried an `it.fails(...)` sentinel asserting
+`WebAssembly.validate(...) === true` for `process.exit(0)`. It passed while the
+bug stood and flipped to a hard failure once codegen was fixed — at which point
+the `.fails` modifier was removed.
+
+## Resolution (2026-06-04)
+
+Applied fix option (1): the WASI `process.exit` special case in
+`src/codegen/expressions/calls.ts` already compiles the argument with expected
+type `{ kind: "i32" }` (so a numeric literal lowers to `i32.const N` and any
+f64-valued expression is truncated by `coerceType`), then redundantly pushed
+`i32.trunc_sat_f64_s` (which expects an **f64**) on top of the i32 already on
+the stack — failing `WebAssembly.validate()`. Removed the truncation push; the
+expected-type compile already delivers the i32 `proc_exit` needs.
+
+The `it.fails` sentinel was promoted to a real regression guard that asserts
+`WebAssembly.validate()` for `process.exit(0/1/42)` plus a non-literal numeric
+argument, and that `wasi_snapshot_preview1.proc_exit` is still imported.
+
+**Verified**: `process.exit(0)`, `(1)`, `(42)`, and `process.exit(c)` (number
+variable) all produce `success: true` + `WebAssembly.validate() === true` and
+keep the `proc_exit` import. `tests/real-world-wasi.test.ts` green (7 tests).
+
+### Separate pre-existing bug noticed (not in scope)
+
+`tests/real-world-wasi.test.ts`'s `"reads process.argv as a valid WASI module"`
+was already failing on `main` (independent of this fix): `process.argv.length`
+under `--target wasi` reports `success` but emits an invalid binary —
+instantiation fails in `__str_flatten` with `call[1] expected type (ref null 5),
+found i32.const of type i32` (a native-string codegen type mismatch). Converted
+that one assertion to a documented `it.fails` sentinel so the suite is green;
+the native-string argv defect should get its own issue.

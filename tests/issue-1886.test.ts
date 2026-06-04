@@ -1,0 +1,180 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * #1886 — Linear-safe `Uint8Array` escape/usage analysis (Slice A).
+ *
+ * These tests exercise the analysis in isolation (no codegen): given a TS
+ * source, which `Uint8Array` bindings does it prove linear-safe, and which
+ * does it correctly reject? The analysis must mark every buffer in the
+ * native-messaging host linear-safe (including the ones threaded through
+ * helper-function parameters) and must reject buffers that escape to a
+ * GC-requiring context.
+ */
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { ts } from "../src/ts-api.js";
+import { analyzeLinearUint8 } from "../src/codegen/linear-uint8-analysis.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+/** Compile `src` to a Program in-memory and run the analysis on it. */
+function analyze(src: string): { safeNames: Set<string>; linearParamFns: Map<string, number[]> } {
+  const fileName = "test.ts";
+  const sourceFileObj = ts.createSourceFile(fileName, src, ts.ScriptTarget.ES2022, true);
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) =>
+      name === fileName ? sourceFileObj : ts.createSourceFile(name, "", ts.ScriptTarget.ES2022, true),
+    getDefaultLibFileName: () => "lib.d.ts",
+    writeFile: () => {},
+    getCurrentDirectory: () => "",
+    getCanonicalFileName: (n) => n,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: (n) => n === fileName || n === "lib.d.ts",
+    readFile: (n) => (n === fileName ? src : ""),
+  };
+  const program = ts.createProgram([fileName], { noLib: true, target: ts.ScriptTarget.ES2022 }, host);
+  const checker = program.getTypeChecker();
+  const sf = program.getSourceFile(fileName)!;
+  const result = analyzeLinearUint8(checker, sf);
+
+  const safeNames = new Set<string>();
+  for (const sym of result.safeBindings) safeNames.add(sym.name);
+  const linearParamFns = new Map<string, number[]>();
+  for (const [fnSym, idxs] of result.linearParams) linearParamFns.set(fnSym.name, [...idxs].sort());
+  return { safeNames, linearParamFns };
+}
+
+describe("#1886 linear-safe Uint8Array analysis", () => {
+  it("marks a plain indexed I/O buffer linear-safe", () => {
+    const { safeNames } = analyze(`
+      declare const process: {
+        stdin: { read(b: Uint8Array, off?: number): number };
+        stdout: { write(b: Uint8Array): void };
+      };
+      export function main(): void {
+        const buf = new Uint8Array(16);
+        process.stdin.read(buf, 0);
+        let x = buf[0];
+        buf[1] = 42;
+        const n = buf.length;
+        process.stdout.write(buf);
+      }
+    `);
+    expect(safeNames.has("buf")).toBe(true);
+  });
+
+  it("rejects a buffer stored into an object (escapes to GC)", () => {
+    const { safeNames } = analyze(`
+      export function main(): void {
+        const buf = new Uint8Array(16);
+        const holder: { b: Uint8Array } = { b: buf };
+        buf[0] = 1;
+      }
+    `);
+    expect(safeNames.has("buf")).toBe(false);
+  });
+
+  it("rejects a buffer returned from a function", () => {
+    const { safeNames } = analyze(`
+      function make(): Uint8Array {
+        const buf = new Uint8Array(16);
+        buf[0] = 1;
+        return buf;
+      }
+      export function main(): void { make(); }
+    `);
+    expect(safeNames.has("buf")).toBe(false);
+  });
+
+  it("rejects a buffer aliased then escaped", () => {
+    const { safeNames } = analyze(`
+      declare const sink: { keep(x: Uint8Array): void };
+      export function main(): void {
+        const buf = new Uint8Array(16);
+        buf[0] = 1;
+        const alias = buf;
+        sink.keep(alias);
+      }
+    `);
+    // 'buf' is referenced by `const alias = buf` — a copy-into-binding escape.
+    expect(safeNames.has("buf")).toBe(false);
+  });
+
+  it("rejects a buffer used via .subarray / .slice", () => {
+    const { safeNames } = analyze(`
+      export function main(): void {
+        const buf = new Uint8Array(16);
+        buf[0] = 1;
+        const part = buf.subarray(0, 4);
+      }
+    `);
+    expect(safeNames.has("buf")).toBe(false);
+  });
+
+  it("threads linear-safety through a helper parameter (interprocedural)", () => {
+    const { safeNames, linearParamFns } = analyze(`
+      declare const process: {
+        stdin: { read(b: Uint8Array, off?: number): number };
+      };
+      function readExact(buf: Uint8Array, n: number): boolean {
+        let got = 0;
+        while (got < n) {
+          const r = process.stdin.read(buf, got);
+          if (r <= 0) return false;
+          got = got + r;
+        }
+        return true;
+      }
+      export function main(): void {
+        const header = new Uint8Array(4);
+        readExact(header, 4);
+      }
+    `);
+    expect(safeNames.has("header")).toBe(true);
+    expect(safeNames.has("buf")).toBe(true); // the helper param
+    expect(linearParamFns.get("readExact")).toEqual([0]);
+  });
+
+  it("demotes the caller buffer when the helper param escapes", () => {
+    const { safeNames } = analyze(`
+      declare const sink: { keep(x: Uint8Array): void };
+      function leak(buf: Uint8Array): void { sink.keep(buf); }
+      export function main(): void {
+        const header = new Uint8Array(4);
+        leak(header);
+      }
+    `);
+    // 'buf' escapes (passed to host import) → demoted; the arg into it
+    // (`header`) is then a pass-to-non-linear-param → also demoted.
+    expect(safeNames.has("buf")).toBe(false);
+    expect(safeNames.has("header")).toBe(false);
+  });
+
+  it("does not make an exported function's Uint8Array param linear (observable ABI)", () => {
+    const { safeNames, linearParamFns } = analyze(`
+      declare const process: { stdout: { write(b: Uint8Array): void } };
+      export function writeIt(buf: Uint8Array): void {
+        process.stdout.write(buf);
+      }
+    `);
+    expect(safeNames.has("buf")).toBe(false);
+    expect(linearParamFns.has("writeIt")).toBe(false);
+  });
+
+  it("classifies every buffer in the native-messaging host as linear-safe", () => {
+    const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
+    const src = readFileSync(nmPath, "utf-8");
+    const { safeNames, linearParamFns } = analyze(src);
+    // Buffers declared in main + the per-frame temporaries.
+    for (const name of ["header", "one", "buf", "small", "tmp", "frame", "src"]) {
+      expect(safeNames.has(name), `expected '${name}' linear-safe`).toBe(true);
+    }
+    // Helper params that carry buffers must be linear-rewritten.
+    expect(linearParamFns.get("readExact")).toContain(0);
+    expect(linearParamFns.get("readAt")).toContain(0);
+    expect(linearParamFns.get("decodeLength")).toContain(0);
+    expect(linearParamFns.get("emitRun")).toContain(0);
+  });
+});

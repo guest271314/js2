@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen+runtime
 language_feature: bigint
 goal: spec-completeness
-sprint: 50
+sprint: 59
 renumbered_from: 1350
 parent: 1328
 ---
@@ -328,3 +328,176 @@ the flag is optional (defaults to current behavior) and Slice A ships
 is byte-identical pre/post, and (2) a bigint literal round-trips as a JS bigint
 (`BigInt("10") === 10n`). Run `playground/examples/*i64*` as an additional
 native-i64 guard. Brand is dev-claimable now (Slice A first).
+
+## Architect Spec — Slice E: standalone (no-JS-host) BigInt representation (2026-06-04)
+
+**Status of the rest of the issue:** the i64-bigint-brand ValType decision is
+RATIFIED and Slices A–D are MERGED (verified on main 2026-06-04:
+`src/ir/types.ts:106` carries `{ kind: "i64"; bigint?: boolean }`;
+`type-coercion.ts:1372/1472` branch on `from.bigint`/`to.bigint`; `__box_bigint`
+/ `__to_bigint` / `__bigint_ctor` registered at `index.ts:7462-7476`). So the
+"needs the i64-bigint-brand decision" framing is satisfied. The genuinely-open
+architectural piece is the **standalone path** the Slice-A spec explicitly
+deferred (§5: "Slice A MAY land JS-host-first and defer the standalone struct to
+a follow-up `#1644-standalone`"). This section IS that follow-up spec.
+
+### Root cause (standalone gap)
+
+`__box_bigint` / `__to_bigint` / `__bigint_ctor` are **JS host imports**
+(`addImport(ctx, "env", ...)` at `index.ts:7465/7469/7476`). Under
+`--target wasi` / `nativeStrings` (auto-on, no JS runtime), the host cannot
+supply them. At the coercion site the dev guarded with `ctx.funcMap.get(...)`
+returning `undefined`, so a branded-bigint `i64 → externref` **silently falls
+through to the number-box fallback** (`type-coercion.ts:1479-1487`:
+`f64.convert_i64_s` + `__box_number`, or drop+`ref.null.extern`). Result in
+standalone: a bigint becomes a boxed *number* (precision loss > 2^53; wrong
+`typeof`), or null. This is the same dual-mode regression class as #1470
+(string literals emitting unbound globals in standalone) and violates the
+CLAUDE.md rule "Don't add new host imports without a standalone fallback."
+
+### Representation (standalone): a WasmGC brand struct
+
+Define one module-level GC type, allocated lazily like the other native runtime
+structs (mirror `getOrRegisterVecType` / the open-object struct registration in
+`object-runtime.ts`):
+
+```
+(type $BigInt (struct (field $v i64)))      ;; immutable; bigint is a value type
+```
+
+- **Why a 1-field struct, not bare i64-as-externref:** externref must carry a
+  *reference*; an i64 is not a ref. The struct gives bigint a distinct heap type
+  so `ref.test $BigInt` cleanly distinguishes it from $Vec, open-objects, boxed
+  numbers, and strings at any `externref`/`anyref` site — exactly what
+  `typeof`, `===`, and ToPrimitive need. (A boxed *number* in standalone is its
+  own struct/representation; do NOT reuse it — the whole defect is bigint vs
+  number confusion.)
+- The brand ValType is **unchanged** — still `{ kind: "i64"; bigint: true }`.
+  Only the i64↔externref frontier instructions differ by mode. This is the
+  invariant the Slice-A spec promised ("the ValType brand is identical in both
+  modes").
+
+### Changes (Slice E)
+
+**File: src/codegen/type-coercion.ts** — the two frontier sites already branch on the brand
+- `i64 → externref` (`:1472`, `if (from.bigint)`): when
+  `ctx.funcMap.get("__box_bigint") === undefined` (standalone), instead of
+  falling through to `__box_number`, emit the native box:
+  `struct.new $BigInt` (the i64 is already on the stack) then
+  `extern.convert_any`. Register `$BigInt` via a new
+  `getOrRegisterBigIntType(ctx)` helper (see below).
+- `externref → i64` (`:1372`, `if (to.bigint)`): when `__to_bigint` is absent,
+  emit the native unbox: `any.convert_extern` → `ref.test $BigInt` →
+  if true `ref.cast $BigInt` + `struct.get $BigInt 0`; else this is a ToBigInt
+  on a non-bigint → call the standalone `__throw_type_error` path (§7.1.13: a
+  Number/most types throw **TypeError**; a String must parse — see helper).
+- Keep the existing JS-host arms first; the standalone arm is the
+  `funcMap.get(...) === undefined` else-branch. Pattern mirrors how
+  `number_toString` etc. already pick host-vs-native by funcMap presence.
+
+**File: src/codegen/object-runtime.ts (or a new bigint-standalone.ts)** — native runtime helpers
+- `getOrRegisterBigIntType(ctx): number` — lazily registers `$BigInt` and
+  caches the type index on ctx (add `bigIntTypeIdx: number` to context/types.ts,
+  init `-1` in create-context.ts; mirror `extrasArgvVecTypeIdx`).
+- `__bigint_ctor` standalone equivalent — for the `BigInt(x)` constructor in
+  standalone, route string/number args through the **native ToNumber/ToString
+  string machinery** already built for #1685 (`Number(string)` native) and
+  #1335/#1836 (native number↔string). Specifically:
+  - `BigInt(string)` → reuse the standalone numeric-string parser, but with
+    BigInt grammar (decimal/`0x`/`0o`/`0b`, optional leading `-`, no fraction/
+    exponent); SyntaxError (standalone `__throw_syntax_error`) on malformed.
+  - `BigInt(number)` → integer-gate (the f64 is already in a local; check
+    `f64.floor == self && is-finite`) then `i64.trunc_sat_f64_s`; RangeError
+    (`__throw_range_error`) otherwise.
+  - `BigInt(boolean)` → `i64.extend_i32_u` (false→0n, true→1n).
+- `BigInt.prototype.toString(radix)` standalone — Slice D landed
+  `bigint_toString` / `bigint_toString_radix` as **host imports**; the standalone
+  twin reuses the native integer→string-radix routine from #1335
+  (`number_toString_radix`) generalised to i64 (it currently takes f64; add an
+  i64 entry point or widen). RangeError guard for radix ∉ [2,36] stays.
+
+**File: src/codegen/binary-ops.ts** — the mixed-operand TypeError gate (Slice A §6) is mode-agnostic
+- No change needed: the gate keys off the `InnerResult` brand, not on a host
+  import. Both-bigint → native i64 op (already correct in both modes); one-bigint
+  → TypeError via the standalone `__throw_type_error` path that Slice A wired.
+  Just confirm the i64 arithmetic ops (`i64.add` etc.) are what's emitted for
+  branded operands in standalone — they are (the brand never changes the op).
+
+**File: src/codegen/typeof-delete.ts** — `typeof x === "bigint"`
+- In standalone, `__typeof` is unavailable; the native typeof must add a
+  `ref.test $BigInt` arm returning the interned `"bigint"` string (mirror the
+  native typeof string arms added for #1594A / #1788). One arm.
+
+### Wasm IR pattern (standalone box / unbox)
+
+```wasm
+;; i64 → externref  (standalone bigint box)
+;; (i64 value already on stack)
+struct.new $BigInt          ;; (ref $BigInt)
+extern.convert_any          ;; externref
+
+;; externref → i64  (standalone bigint unbox / ToBigInt)
+;; (externref on stack)
+any.convert_extern
+local.tee $tmp_any
+ref.test (ref $BigInt)
+if (result i64)
+  local.get $tmp_any
+  ref.cast (ref $BigInt)
+  struct.get $BigInt 0
+else
+  ;; not a bigint → §7.1.13: number/etc → TypeError; string → parse
+  ... call __throw_type_error / native string-parse ...
+end
+```
+
+### Edge cases
+
+- `0n` falsy in standalone: `ToBoolean` reads the struct field and `i64.eqz`
+  (this is exactly what #1565 did for the JS-host i64 path — confirm it routes
+  through the struct unbox first in standalone).
+- `typeof 1n === "bigint"` in both modes (typeof arm above).
+- `1n === 1n` (value equality): strict-equals on two `$BigInt` structs must
+  compare the i64 fields, not ref identity — `===` lowering for branded-bigint
+  operands emits `struct.get`×2 + `i64.eq` (NOT `ref.eq`). Flag this for the dev;
+  it's the one place where "bigint is a value type but represented as a struct"
+  needs explicit field comparison. Cross-check with #1827 (loose-equality
+  precision, currently in progress) so the `==` path and this `===` path agree.
+- BigInt64Array / BigUint64Array (#838) read/write elements as branded i64 —
+  out of Slice E scope but the struct brand is what they'll box/unbox through;
+  note the dependency.
+
+### Slice breakdown (Slice E only — A–D are done)
+
+- **E1 — native box/unbox + `$BigInt` type + typeof arm.** The frontier
+  (type-coercion.ts both sites) + `getOrRegisterBigIntType` + typeof. Makes a
+  bigint round-trip correctly through externref in standalone. ~120 LOC.
+- **E2 — native `BigInt(x)` constructor** (string parse / number integer-gate /
+  boolean) reusing the #1685/#1335 native string↔number machinery. ~100 LOC.
+- **E3 — native `toString(radix)`** via the generalised-to-i64
+  `number_toString_radix`. ~60 LOC.
+- **E4 — `===` field-compare for branded bigint** (and reconcile with #1827's
+  `==`). ~30 LOC.
+- E1 is load-bearing and must land first; E2–E4 are independent after it.
+
+### Test files to verify (standalone)
+
+- Run the `built-ins/BigInt` tree under `--target wasi` (the JS-host runner
+  already covers JS-host mode post-Slices-A–D). Add
+  `tests/issue-1644-standalone.test.ts` compiling with `nativeStrings:true`:
+  - `BigInt("10") === 10n`, `10n + 20n === 30n`, `typeof 5n === "bigint"`,
+    `0n` falsy, `BigInt(1.5)` throws RangeError, `1n + 1` throws TypeError,
+    `(255n).toString(16) === "ff"`, `BigInt("0xff") === 255n`.
+- Native-i64 guard (regression): `playground/examples/*i64*` must compile +
+  run byte-identically in standalone — the `bigint` flag must NOT touch native
+  `type i64 = number` boxing (which has no struct).
+
+### Acceptance (closes #1644)
+
+The issue's ≥75% `built-ins/BigInt` bar is met in JS-host mode by Slices A–D
+(constructor 15/22 + toString + asIntN/asUintN already pass). Slice E brings
+standalone/WASI to parity so the dual-mode invariant holds and the remaining
+WASI-mode BigInt fails clear. Residual host-class items
+(`is-a-constructor`, wrapper-object) stay with #1568 (BigInt extern wrapper
+class) — explicitly out of #1644 scope per the Slice-B residual note above.
+

@@ -1259,17 +1259,41 @@ function _validatePropertyDescriptor(
   existingValue?: any,
 ): number {
   const existing = descs.get(_normalizeDescKey(prop));
-  // Compute new flags — for Object.defineProperty, unspecified attributes default to false
-  let newFlags = _SC_DEFINED;
-  if (desc.writable) newFlags |= _SC_WRITABLE;
-  if (desc.enumerable) newFlags |= _SC_ENUMERABLE;
-  if (desc.configurable) newFlags |= _SC_CONFIGURABLE;
-  if (desc.get !== undefined || desc.set !== undefined) newFlags |= _SC_ACCESSOR;
+
+  // Compute new flags. ECMA-262 §10.1.6.3 ValidateAndApplyPropertyDescriptor:
+  // a *redefine* keeps every attribute the descriptor omits — only fields
+  // explicitly present in `desc` overwrite the existing descriptor (#1831).
+  // On first definition, omitted attributes default to false. The previous code
+  // rebuilt the flags purely from `desc` truthiness, so a partial redefine like
+  // `Object.defineProperty(o,"k",{value:5})` wrongly cleared a previously-set
+  // writable/enumerable/configurable.
+  let newFlags = existing === undefined ? _SC_DEFINED : existing | _SC_DEFINED;
+  // helper: set/clear `bit` when the descriptor field is present; on first
+  // definition, an omitted field defaults to false (cleared).
+  const applyFlag = (present: boolean, value: boolean | undefined, bit: number): void => {
+    if (present) {
+      newFlags = value ? newFlags | bit : newFlags & ~bit;
+    } else if (existing === undefined) {
+      newFlags &= ~bit;
+    }
+  };
+  applyFlag(desc.writable !== undefined, desc.writable, _SC_WRITABLE);
+  applyFlag(desc.enumerable !== undefined, desc.enumerable, _SC_ENUMERABLE);
+  applyFlag(desc.configurable !== undefined, desc.configurable, _SC_CONFIGURABLE);
+  // Data<->accessor kind: explicit get/set ⇒ accessor; explicit value/writable
+  // ⇒ data; otherwise keep the existing kind (or default data on first def).
+  if (desc.get !== undefined || desc.set !== undefined) {
+    newFlags |= _SC_ACCESSOR;
+  } else if (desc.value !== undefined || desc.writable !== undefined) {
+    newFlags &= ~_SC_ACCESSOR;
+  } else if (existing === undefined) {
+    newFlags &= ~_SC_ACCESSOR;
+  }
 
   if (existing === undefined) return newFlags; // First definition
 
   const isConfigurable = !!(existing & _SC_CONFIGURABLE);
-  if (isConfigurable) return newFlags; // Configurable — any change OK
+  if (isConfigurable) return newFlags; // Configurable — change OK (omitted fields preserved above)
 
   // Non-configurable: validate constraints (ES spec 9.1.6.3 step 7)
   if (desc.configurable === true) {
@@ -1866,6 +1890,15 @@ function _sidecarDelete(obj: any, key: any): boolean {
 }
 
 /**
+ * Sentinel for OrdinaryToPrimitive's `tryMethod`: distinguishes "method is
+ * absent / returned an Object / dispatch trapped" (try the next method) from a
+ * method that legitimately returned the primitive `undefined`. Without it, a
+ * real `undefined` return is wrongly treated as "absent" and the next method is
+ * consulted (#1826). Per §7.1.1.1 steps 5-6, any non-Object return is the result.
+ */
+const _PRIM_ABSENT: unique symbol = Symbol("toPrimitive-method-absent");
+
+/**
  * ToPrimitive for WasmGC structs (#850).
  *
  * Implements the JS ToPrimitive abstract operation for opaque WasmGC struct
@@ -1939,7 +1972,11 @@ function _toPrimitive(
 
   const exports = callbackState?.getExports();
 
-  // Helper: try valueOf or toString from sidecar then Wasm exports
+  // Helper: try valueOf or toString from sidecar then Wasm exports.
+  // Returns the produced primitive (including a real `undefined`!) or the
+  // `_PRIM_ABSENT` sentinel when the method is absent, returned an Object, or
+  // dispatch trapped — only then should the caller consult the next method
+  // (§7.1.1.1 steps 5-6, #1826).
   const tryMethod = (name: string): any => {
     // Sidecar property (set via __extern_set)
     // User-thrown errors propagate — spec requires assert.throws to observe them.
@@ -1948,7 +1985,7 @@ function _toPrimitive(
       const prim = scFn.call(raw);
       if (prim == null || typeof prim !== "object") return prim;
       // Returned an object — not a valid primitive, try next method
-      return undefined;
+      return _PRIM_ABSENT;
     }
     // Sidecar value is a WasmGC closure struct — dispatch via generic callers (#1090)
     if (scFn != null && typeof scFn === "object" && _isWasmStruct(scFn) && exports) {
@@ -1958,7 +1995,7 @@ function _toPrimitive(
         try {
           const prim = callFn0(scFn);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined; // returned an object — not valid
+          return _PRIM_ABSENT; // returned an object — not valid
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1969,7 +2006,7 @@ function _toPrimitive(
         try {
           const prim = callFn(raw);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined;
+          return _PRIM_ABSENT;
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1985,7 +2022,7 @@ function _toPrimitive(
         try {
           field = sget(raw);
         } catch (e: any) {
-          if (e instanceof WebAssembly.RuntimeError) return undefined;
+          if (e instanceof WebAssembly.RuntimeError) return _PRIM_ABSENT;
           throw e;
         }
         if (typeof field === "function") {
@@ -2019,20 +2056,22 @@ function _toPrimitive(
         }
       }
     }
-    return undefined;
+    return _PRIM_ABSENT;
   };
 
-  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first
+  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first.
+  // A method that produces ANY primitive (including `undefined`) is the result;
+  // only `_PRIM_ABSENT` means "consult the next method" (#1826).
   if (hint === "string") {
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
   } else {
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
   }
 
   return undefined;
@@ -3097,9 +3136,11 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     if (prim != null && typeof prim !== "object") key = prim;
   }
   // Well-known symbol ID (i32 from compiler): only apply to WasmGC structs.
-  // For regular JS objects/arrays, numeric keys 1-12 are actual indices, not symbol IDs
+  // For regular JS objects/arrays, numeric keys 1-15 are actual indices, not symbol IDs
   // (e.g. getOwnPropertyNames conversion loop uses __extern_get with integer indices).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  // #1830 — the range must cover every id in `_symbolIdToKeys` (1-15, 15 =
+  // @@matchAll); `<= 14` silently dropped Symbol.matchAll on WasmGC structs.
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       const v = obj[symKeys.sym];
@@ -3180,12 +3221,13 @@ function _safeSet(
   }
   // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
   // ONLY apply this remapping to WasmGC structs — for regular JS objects/arrays,
-  // numeric keys 1-14 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // numeric keys 1-15 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // #1830 — range covers every id in `_symbolIdToKeys` (1-15, 15 = @@matchAll).
   // Without the _isWasmStruct guard, we would mis-route `arr[1]=v` to
   // `arr[Symbol.iterator]=v`, which under accumulated fork state could leak to
   // `Object.prototype[Symbol.iterator] = <number>` and trip every subsequent
   // compile that calls Array.from on a plain object (#1160 follow-up).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       try {
@@ -5217,9 +5259,10 @@ assert._isSameValue = isSameValue;
           }
           if (_sidecarGet(obj, idx) !== undefined) return 1;
           if (_sidecarGet(obj, strKey) !== undefined) return 1;
-          // _safeSet routes numeric keys 1-14 onto Symbol.<wellKnown> sidecar
-          // entries. Reverse that mapping so index 1-14 values remain visible.
-          if (idx >= 1 && idx <= 14) {
+          // _safeSet routes numeric keys 1-15 onto Symbol.<wellKnown> sidecar
+          // entries. Reverse that mapping so index 1-15 values remain visible.
+          // #1830 — range covers every id in `_symbolIdToKeys` (15 = @@matchAll).
+          if (idx >= 1 && idx <= 15) {
             const symKeys = _symbolIdToKeys.get(idx);
             if (symKeys) {
               if (_sidecarGet(obj, symKeys.sym) !== undefined) return 1;
@@ -5420,7 +5463,7 @@ assert._isSameValue = isSameValue;
       // Pass `null` (ref.null extern) to mark "Symbol() with no description".
       if (name === "__symbol_register_desc") {
         return (id: number, desc: any): void => {
-          if (id <= 14) return; // never override well-known symbols
+          if (id <= 15) return; // never override well-known symbols (#1830: 15 = @@matchAll)
           if (desc == null) {
             _symbolDescRegistry.set(id, null);
           } else {
@@ -9264,7 +9307,11 @@ assert._isSameValue = isSameValue;
         }
       };
     default:
-      return () => {};
+      // #1858 C9a: fail loud instead of silently binding an unhandled import
+      // intent to a no-op. A no-op `() => {}` returns `undefined` for every
+      // call, so a missing/misnamed intent produced a wrong answer with no
+      // diagnostic. Throw so the unhandled type surfaces at instantiation.
+      throw new Error(`Unhandled ImportIntent type: ${(intent as any).type}`);
   }
 }
 
@@ -9868,10 +9915,17 @@ function marshalTypedArrayArgs(
     const src = arg as ArrayLike<number>;
     const len = src.length | 0;
     const vec = newVecF64(len);
+    // #1829 — only byte-mask for Uint8Array. For any other TypedArray the
+    // `& 0xff` truncated every element to its low byte, silently corrupting
+    // Uint16Array/Uint32Array (and signed/float) inputs. The vec backing store
+    // is f64 and `__vec_set_byte` widens its i32 value arg via
+    // `f64.convert_i32_u`, so an unmasked write round-trips unsigned integers
+    // up to 2^32-1 at full precision. (Signed-negative and fractional float
+    // elements still need a full-f64 vec setter — tracked as a follow-up; this
+    // strictly improves on truncating every element to a byte.)
+    const maskByte = kind === "uint8array";
     for (let j = 0; j < len; j++) {
-      // Mask to byte range — matches `new Uint8Array(arr)` indexed-write
-      // semantics (and __vec_set_byte's i32-byte contract).
-      vecSetByte(vec, j, src[j]! & 0xff);
+      vecSetByte(vec, j, maskByte ? src[j]! & 0xff : src[j]!);
     }
     out[i] = vec;
   }

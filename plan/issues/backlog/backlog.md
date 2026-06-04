@@ -2,6 +2,12 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Harvest re-run 2026-06-04 (post sprint-58/59 merge)
+
+Re-ran `/harvest-errors` after pulling 346 commits. Both prior-harvest issues are genuinely fixed (#1809 shift-walker 157→0; #1808 emit crash per-file clean). One baseline-accounting follow-up filed:
+
+- [#1862](../1862-residual-poison-burst-binary-emit-still-in-baseline.md) — residual poisoned-worker `Binary emit error` burst still in the published baseline (~269, barely down from 291) despite #1808's blast-radius cap; either the cap is incomplete or `promote-baseline` carried the entries forward without re-running. Over-counts the failure set by ~0.6%. medium, medium, **ready (backlog)**. Follow-up to #1808; ties to #1080 drift umbrella.
+
 ## Sprint 57 — acorn dogfood + backend-agnostic IR (2026-05-29)
 
 Architectural sprint (no pass-count target; zero-regression guard). Goals:
@@ -205,6 +211,27 @@ defense-in-depth, and cleanup:
 - [#1847](../1847-forof-rollback-localmap-not-restored.md) — for-of tentative rollback doesn't restore `fctx.localMap` (robustness) — low, low, **backlog**
 - [#1848](../1848-dead-code-sweep.md) — dead-code sweep: identical branches, unused locals/params, obsolete scaffolding — low, low, **backlog**
 - [#1849](../1849-duplicate-logic-refactor.md) — refactor diverged copy-paste (super dispatch, closure drainers, `resolveVec`, `__extern_has`, typed-default) — low, medium, **backlog**
+
+### Compiler-design lessons — architectural recommendations (2026-06-04)
+
+From [`docs/architecture/compiler-design-lessons.md`](../../../docs/architecture/compiler-design-lessons.md)
+(vendor-neutral synthesis of general compiler/IR/runtime patterns) and
+[`docs/architecture/structure-and-language-assessment.md`](../../../docs/architecture/structure-and-language-assessment.md)
+(structure + language review). Net-new issues only; recommendations already
+tracked elsewhere are noted under "Already covered" below.
+
+- [#1850](../1850-ir-verifier-hardening-dominance-legality.md) — R1: harden the IR verifier into a hard between-pass contract (cross-block dominance + per-backend legality + fail-CI; umbrella over #1844) — high, medium, **backlog**
+- [#1851](../1851-backendemitter-legalization-boundary-type-converter.md) — R4: make `BackendEmitter` an explicit legalization boundary, extract a declared type-converter, add a backend-neutral mid-level — medium, hard, **backlog**
+- [#1852](../1852-per-backend-value-representation.md) — R5: per-backend dynamic-value representation (typed refs / `i31ref` on WasmGC; f64-value + i32-tag on linear) — medium, hard, **backlog**
+- [#1853](../1853-conformance-hard-error-stability-bucket.md) — R6: separate hard-error (compiler-crash / malformed-Wasm) stability bucket on the conformance dashboard — high, easy, **backlog**
+- [#1854](../1854-cross-backend-differential-testing.md) — R7a: cross-backend differential testing harness (WasmGC / linear / bytecode-VM must agree) — high, medium, **backlog**
+- [#1855](../1855-ub-free-ts-fuzzer-and-minimization.md) — R7b: UB-free TS program generator + automated validity-preserving minimization — medium, hard, **backlog**
+- [#1856](../1856-linear-bump-arena-allocator-mode.md) — R10: bump/arena allocator mode for short-lived linear programs; commit to one fixed linear-GC strategy — medium, medium, **backlog**
+- [#1857](../1857-ir-attributes-vs-operands-convention.md) — R11: carry compile-time-constant facts as IR node attributes, not synthetic SSA operands — low, easy, **backlog**
+- [#1860](../1860-backend-naming-symmetry-gc-linear.md) — structure review: rename `codegen/` + `codegen-linear/` → `backend/gc` + `backend/linear` so neither backend reads as the default (pure rename; consider bundling with #1172) — low, medium, **backlog**
+- [#1859](../1859-per-subdir-module-contract-readmes.md) — structure review: per-`src/`-subdir module-contract READMEs (responsibility, in/out, dependency direction) — low, easy, **backlog**
+
+**Already covered (no new issue):** R2 (make illegal states unrepresentable / retire `as unknown as Instr`) → **#1095**; R3 (finish the strangler: drive fallback buckets to zero, promote to strict) → **#1376** + the per-bucket program (#1370 done, #1371 done, #1372, #1373…) tracked in `plan/log/ir-adoption.md`; R8 (cheap mid-level SSA cleanup: fold/DCE/simplify-cfg + conservative inline) → **#1167a** / **#1167b**; R9 (host-import gate) → standing CLAUDE.md rule + audit **#1662**.
 
 ### Real-world test coverage findings (2026-06-04)
 

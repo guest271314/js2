@@ -360,6 +360,20 @@ export interface FunctionContext {
    */
   pendingStringBuilders?: Set<ts.VariableDeclaration>;
   /**
+   * #1761: presize info for those `pendingStringBuilders` whose final length
+   * is a provably runtime-known linear function of a loop bound. Keyed by the
+   * same declaration node. When present at the init site, the buffer is
+   * allocated once at `bound * unitsPerIter` and the append sites drop the
+   * per-append cap-check. Populated by `detectStringBuilders` (presize out-param).
+   */
+  stringBuilderPresize?: Map<
+    ts.VariableDeclaration,
+    {
+      boundExpr: ts.Expression; // loop-invariant bound, evaluated once at init
+      unitsPerIter: number; // constant code-units appended per iteration
+    }
+  >;
+  /**
    * #1210: live string-builder bindings keyed by binding name. While
    * present, `s += <expr>` routes to `compileStringBuilderAppend`
    * (in-place buffer write), and identifier reads materialize a fresh
@@ -373,6 +387,7 @@ export interface FunctionContext {
       lenLocalIdx: number; // i32 — current logical length
       capLocalIdx: number; // i32 — current physical capacity (== buf.length)
       materializedLocalIdx: number; // ref_null $AnyString — reserved for future cache
+      presized?: boolean; // #1761: true when buffer presized; appends skip cap-check
     }
   >;
 }
@@ -946,6 +961,17 @@ export interface CodegenContext {
   wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
+  /**
+   * #1886 — Linear-safe `Uint8Array` analysis result. Populated (WASI/standalone
+   * only) by `analyzeLinearUint8` as a pre-pass; `undefined` otherwise. Symbols
+   * in `linearUint8.safeBindings` are byte buffers proven to never escape the
+   * GC heap, so codegen backs them by linear memory (a `(ptr,len)` pair) with
+   * zero-copy `fd_read`/`fd_write`. Every consumer is additive — when this is
+   * `undefined` or a binding is absent, the existing GC-vec path is used
+   * unchanged. (Codegen consumers land in later slices; the analysis itself is
+   * side-effect free and safe to run unconditionally behind the WASI gate.)
+   */
+  linearUint8?: import("../linear-uint8-analysis.js").LinearUint8Result;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
   allowFs: boolean;
   /**

@@ -1,9 +1,10 @@
 ---
 id: 1821
 title: "delete obj.prop always returns true; delete obj['k'] skips __delete_property sidecar"
-status: ready
+status: done
 created: 2026-06-04
 updated: 2026-06-04
+completed: 2026-06-04
 priority: medium
 feasibility: medium
 task_type: bugfix

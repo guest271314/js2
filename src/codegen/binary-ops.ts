@@ -187,8 +187,17 @@ function tryFlattenBinaryChain(
       rightType = { kind: "f64" };
     }
 
-    // i32 path: fast mode or native type annotations
-    if ((ctx.fast || allNativeI32) && resultType.kind === "i32" && rightType.kind === "i32") {
+    // i32 path: fast mode or native type annotations.
+    // #1817: `>>>` must NOT use compileI32BinaryOp here — its bare i32 result
+    // (`i32.shr_u`) is later widened with the signed `f64.convert_i32_s`,
+    // dropping ToUint32's unsignedness. compileNumericBinaryOp routes `>>>`
+    // through compileBitwiseBinaryOp, which uses `f64.convert_i32_u`.
+    if (
+      (ctx.fast || allNativeI32) &&
+      op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
+      resultType.kind === "i32" &&
+      rightType.kind === "i32"
+    ) {
       resultType = compileI32BinaryOp(ctx, fctx, op, expr);
     } else {
       resultType = compileNumericBinaryOp(ctx, fctx, op, expr);
@@ -1399,7 +1408,20 @@ export function compileBinaryExpression(
     wrappedInToInt32 && isI32PureExpr(expr.left) && isI32PureExpr(expr.right) && outerMulI32Safe;
   // Bitwise op with i32-pure operands: emit native i32 op directly,
   // skipping the f64-ToInt32 round-trip in compileBitwiseBinaryOp.
-  const bitwiseI32 = isBitwiseOpKind(op) && isI32PureExpr(expr.left) && isI32PureExpr(expr.right);
+  //
+  // #1817: `>>>` is excluded as the *result* op. compileI32BinaryOp returns a
+  // bare i32 for `>>>` (`i32.shr_u`), which the consumer widens to f64 with the
+  // signed `f64.convert_i32_s` — wrong, since ToUint32 makes `>>>` unsigned
+  // (a high-bit result would read back negative). Routing `>>>` through
+  // compileBitwiseBinaryOp instead uses `f64.convert_i32_u`. `>>>` stays a
+  // valid i32-pure *leaf* (isI32PureExpr) so nested chains like `(x >>> 3) & m`
+  // keep the fast path — there the intermediate i32 bit pattern feeds another
+  // bitwise op and is never signed-widened.
+  const bitwiseI32 =
+    isBitwiseOpKind(op) &&
+    op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
+    isI32PureExpr(expr.left) &&
+    isI32PureExpr(expr.right);
   const numericHint: ValType | undefined = isNumericOp
     ? {
         kind:
@@ -2403,7 +2425,12 @@ function compileI32BinaryOp(
       fctx.body.push({ op: "i32.mul" });
       return { kind: "i32" };
     case ts.SyntaxKind.PercentToken:
-      fctx.body.push({ op: "i32.rem_s" });
+      // Guard the trapping cases of i32.rem_s. Wasm traps on `b == 0` and on
+      // `INT_MIN % -1` (signed overflow). JS yields NaN and 0 respectively; in
+      // i32 fast mode the result is an i32 (no NaN representation), so emit 0
+      // for both trapping cases (0 is the mathematically-correct INT_MIN % -1
+      // result, and truncating JS's NaN result to i32 is also 0). See #1825.
+      emitSafeI32Rem(fctx);
       return { kind: "i32" };
     case ts.SyntaxKind.EqualsEqualsEqualsToken:
     case ts.SyntaxKind.EqualsEqualsToken:
@@ -2673,6 +2700,53 @@ export function emitModulo(fctx: FunctionContext): void {
     then: thenInstrs,
     else: elseInstrs,
   });
+  releaseTempLocal(fctx, tmpA);
+  releaseTempLocal(fctx, tmpB);
+}
+
+/**
+ * Emit `a % b` on i32 operands without the Wasm traps of bare `i32.rem_s`.
+ *
+ * `i32.rem_s` traps when `b == 0` and on the signed-overflow case
+ * `INT_MIN % -1`. JS yields NaN and 0 respectively for the corresponding
+ * Number operation; in i32 fast mode the result must be an i32 (no NaN
+ * representation), so we emit 0 for both trapping cases. 0 is the
+ * mathematically-correct value for `INT_MIN % -1`, and the i32 truncation of
+ * JS's NaN result is also 0, so this is the least-surprising i32 behaviour.
+ *
+ * Stack: [a_i32, b_i32] -> [result_i32]. See #1825.
+ */
+export function emitSafeI32Rem(fctx: FunctionContext): void {
+  const tmpB = allocTempLocal(fctx, { kind: "i32" });
+  const tmpA = allocTempLocal(fctx, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: tmpB });
+  fctx.body.push({ op: "local.set", index: tmpA });
+
+  // safeToRem = (b != 0) && !(a == INT_MIN && b == -1)
+  // b == 0  -> trap (div by zero)
+  fctx.body.push({ op: "local.get", index: tmpB });
+  fctx.body.push({ op: "i32.eqz" });
+  // a == INT_MIN
+  fctx.body.push({ op: "local.get", index: tmpA });
+  fctx.body.push({ op: "i32.const", value: -2147483648 });
+  fctx.body.push({ op: "i32.eq" });
+  // b == -1
+  fctx.body.push({ op: "local.get", index: tmpB });
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "i32.eq" });
+  // (a == INT_MIN) & (b == -1)
+  fctx.body.push({ op: "i32.and" });
+  // (b == 0) | (overflow)  -> the "trapping" condition
+  fctx.body.push({ op: "i32.or" });
+
+  // if (trapping) 0 else a % b
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "i32.const", value: 0 }],
+    else: [{ op: "local.get", index: tmpA }, { op: "local.get", index: tmpB }, { op: "i32.rem_s" }],
+  });
+
   releaseTempLocal(fctx, tmpA);
   releaseTempLocal(fctx, tmpB);
 }

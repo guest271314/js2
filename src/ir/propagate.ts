@@ -312,8 +312,18 @@ export function buildTypeMap(sourceFile: ts.SourceFile, checker: ts.TypeChecker)
       }
       let newReturn: LatticeType = seed.returnType;
       if (fn.body) {
+        // #1845 — a concrete seed keeps its authority over a `dynamic` body
+        // inference (our expression inference is deliberately narrow, so
+        // `dynamic` usually just means "couldn't see through the local
+        // structure"). The integer subdomains `i32`/`u32` are every bit as
+        // concrete as `f64`/`bool`/`string`/`object` and must be listed here
+        // too — otherwise, once integer-domain seeding is enabled
+        // (`JS2WASM_IR_I32_DOMAIN=1`), an i32/u32 seed would be silently
+        // widened to `dynamic` by an unresolved body return.
         const seedConcrete =
           seed.returnType.kind === "f64" ||
+          seed.returnType.kind === "i32" ||
+          seed.returnType.kind === "u32" ||
           seed.returnType.kind === "bool" ||
           seed.returnType.kind === "string" ||
           seed.returnType.kind === "object";
@@ -614,7 +624,20 @@ function inferExpr(
         return DYNAMIC;
       case ts.SyntaxKind.AmpersandAmpersandToken:
       case ts.SyntaxKind.BarBarToken:
-        return boolCompatible(l) && boolCompatible(r) ? BOOL : DYNAMIC;
+        // #1845 — `a && b` / `a || b` evaluate to one of the *operand values*
+        // (per ECMAScript §13.13/§13.14 ShortCircuit), NOT a coerced boolean.
+        // The previous rule claimed `BOOL` whenever both sides were merely
+        // `boolCompatible`, which also accepts `unknown` — so an unresolved
+        // (possibly non-boolean) param/return got seeded as `bool`, and
+        // `lowerBinary` would then emit `i32.and`/`i32.or` on a non-integer
+        // value. Sound rule: the tightest type is the join of the two operand
+        // values, but only when both are *concrete* — `unknown` on either side
+        // means we cannot prove the result's shape (`join` would optimistically
+        // adopt the other side's type), so it falls to `DYNAMIC`.
+        if (l.kind === "unknown" || r.kind === "unknown" || l.kind === "dynamic" || r.kind === "dynamic") {
+          return DYNAMIC;
+        }
+        return join(l, r);
       default:
         return DYNAMIC;
     }

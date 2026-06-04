@@ -11,6 +11,7 @@ import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
+import type { WasmModule } from "./ir/types.js";
 import {
   buildImportManifest,
   checkJsTypeCoverage,
@@ -37,6 +38,37 @@ import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
 export { compileToObjectSource } from "./compiler/output.js";
 export type { ObjectCompileResult } from "./compiler/output.js";
+
+/**
+ * Propagate codegen diagnostics raised by the linear-memory backend (#1868).
+ *
+ * The WasmGC backend returns `{ module, errors }` and the caller fails the
+ * compile when any `Codegen error:` is present. The linear-memory backend
+ * historically only returned a `WasmModule` and accumulated its
+ * unsupported-construct diagnostics into `ctx.errors`, which the compiler
+ * never read — so an unhandled construct (e.g. `String.prototype.repeat`)
+ * silently produced a structurally invalid binary (a stack-underflowing
+ * `local.set`/`local.tee`) while reporting `success: true`. That invalid
+ * wasm then crashed downstream consumers (the benchmark harness, #1868).
+ *
+ * `mod.codegenErrors` now surfaces those diagnostics. Returns `true` when the
+ * linear backend reported at least one error (after copying them into
+ * `errors`), telling the caller to bail with `success: false` instead of
+ * emitting the invalid binary.
+ */
+function collectLinearCodegenErrors(mod: WasmModule, errors: CompileError[]): boolean {
+  const diags = mod.codegenErrors;
+  if (!diags || diags.length === 0) return false;
+  for (const err of diags) {
+    errors.push({
+      message: err.message.startsWith("Codegen error:") ? err.message : `Codegen error: ${err.message}`,
+      line: err.line,
+      column: err.column,
+      severity: "error",
+    });
+  }
+  return true;
+}
 
 const HARD_TS_DIAG_CODES = new Set([
   2322, // "Type 'X' is not assignable to type 'Y'"
@@ -648,7 +680,23 @@ export function compileSourceSync(
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearModule(ast);
+      mod = generateLinearModule(ast, { exposeArenaReset: options.allocator === "arena-reset" });
+      // Fail the compile on unsupported linear-backend constructs instead of
+      // emitting a structurally invalid binary (#1868).
+      if (collectLinearCodegenErrors(mod, errors)) {
+        return {
+          binary: new Uint8Array(0),
+          wat: "",
+          dts: "",
+          importsHelper: "",
+          success: false,
+          errors,
+          stringPool: [],
+          imports: [],
+          hasMain: false,
+          hasTopLevelStatements: false,
+        };
+      }
     } else {
       const result = generateModule(ast, {
         sourceMap: emitSourceMap,
@@ -725,7 +773,7 @@ export function compileSourceSync(
   // Step 2b: Apply C ABI transformations if requested
   let cHeader: string | undefined;
   if (options.abi === "c" && options.target === "linear") {
-    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module");
+    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module", ast);
     cHeader = cabiResult.cHeader;
   }
 
@@ -944,7 +992,23 @@ export async function compileMultiSource(
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearMultiModule(multiAst);
+      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
+      // Fail the compile on unsupported linear-backend constructs instead of
+      // emitting a structurally invalid binary (#1868).
+      if (collectLinearCodegenErrors(mod, errors)) {
+        return {
+          binary: new Uint8Array(0),
+          wat: "",
+          dts: "",
+          importsHelper: "",
+          success: false,
+          errors,
+          stringPool: [],
+          imports: [],
+          hasMain: false,
+          hasTopLevelStatements: false,
+        };
+      }
     } else {
       const result = generateMultiModule(multiAst, {
         sourceMap: emitSourceMap,
@@ -1202,7 +1266,23 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearMultiModule(multiAst);
+      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
+      // Fail the compile on unsupported linear-backend constructs instead of
+      // emitting a structurally invalid binary (#1868).
+      if (collectLinearCodegenErrors(mod, errors)) {
+        return {
+          binary: new Uint8Array(0),
+          wat: "",
+          dts: "",
+          importsHelper: "",
+          success: false,
+          errors,
+          stringPool: [],
+          imports: [],
+          hasMain: false,
+          hasTopLevelStatements: false,
+        };
+      }
     } else {
       const result = generateMultiModule(multiAst, {
         sourceMap: emitSourceMap,

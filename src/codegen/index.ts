@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -920,6 +921,11 @@ export function generateModule(
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
       registerWasiImports(ctx, ast.sourceFile);
+      // #1886 — pre-pass: classify which `Uint8Array` buffers are pure I/O
+      // (never escape the GC heap) so they can be backed by linear memory with
+      // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
+      // additive (empty result ⇒ emitted module identical to today).
+      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
     }
 
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
@@ -1253,8 +1259,15 @@ export function generateModule(
       // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
         const isStrict = isStrictIrBuildError(err.message);
+        // #1858 C4: keep the leading "IR path failed for …" text intact — many
+        // bridge tests filter on `e.message.startsWith("IR path failed")` — but
+        // append a concise, greppable `[IR-FALLBACK]` tag so a regression in the
+        // fallback rate is visible in logs/CI even when the diagnostic is
+        // demoted to severity-"warning". Message-only: this does NOT change
+        // codegen or promote the fallback to an error (that ratchet is owned by
+        // STRICT_IR_BUILD_ERRORS / #1530).
         ctx.errors.push({
-          message: `IR path failed for ${err.func}: ${err.message}`,
+          message: `IR path failed for ${err.func}: ${err.message} [IR-FALLBACK]`,
           line: 0,
           column: 0,
           severity: isStrict ? "error" : "warning",
@@ -6199,6 +6212,14 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const lb of ctx.liveBodies) {
       shiftFuncIndices(lb);
     }
+    // (#1839) The module-init body holds `call`/`ref.func` indices too. When
+    // the first string usage occurs inside a function body (not module-init),
+    // this body is NOT reachable via funcStack/liveBodies yet, so it would be
+    // missed and `__module_init` would call the wrong functions after the late
+    // string-import shift. Matches addUnionImports / shiftLateImportIndices.
+    if (ctx.pendingInitBody) {
+      shiftFuncIndices(ctx.pendingInitBody);
+    }
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
@@ -6216,6 +6237,21 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const t of ctx.pendingMethodTrampolines) {
       if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
       if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+    }
+    // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
+    // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
+    // on its own. All entries are defined functions (>= numImportFuncs), so
+    // every entry >= importsBefore moves up by `delta`. Omitting this left the
+    // map stale under plain `--nativeStrings` JS-host mode.
+    for (const [name, idx] of ctx.nativeStrHelpers) {
+      if (idx >= importsBefore) {
+        ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+    }
+    // (#1839) The module start function index also moves if it was a defined
+    // function at or above the insertion point. Matches addUnionImports.
+    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+      ctx.mod.startFuncIdx += delta;
     }
   }
 }
@@ -7656,6 +7692,35 @@ export function addUnionImports(ctx: CodegenContext): void {
  * the Wasm engine level.
  */
 function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
+  // #1807: settle any pending native-string finalize shift BEFORE registering
+  // the union helpers. `reconcileNativeStrFinalizeShift` applies a SINGLE
+  // uniform `(numImportFuncs - base)` delta to every defined function with a
+  // baked `call funcIdx >= base`. That uniform model is only correct when all
+  // those defined functions were registered at the SAME import count (`base`).
+  //
+  // The native-string helpers snapshot `base = numImportFuncs` at their first
+  // emission (often `numImportFuncs == 0`, before any host import). If another
+  // import is then added (e.g. `__make_callback`, or the generator-bridge
+  // imports) BEFORE this union-helper block runs, the union helpers are
+  // registered at a HIGHER import count — their `numImportFuncs + arrayPos`
+  // indices already bake in those intervening imports. The end-of-finalize
+  // reconcile would then over-shift them by exactly `(numImportFuncs_now -
+  // base)`, pushing every `__typeof_*` / `__unbox_*` call target in callers
+  // like the test262 `isSameValue` harness helper +N too high. After dead-import
+  // elimination compacts the index space that surfaces as
+  // `isSameValue ... call[0] expected type i32, found local.get of type
+  // externref` — a stale call into an adjacent boxing helper (277 standalone
+  // async-generator tests).
+  //
+  // Flushing here advances `base` to the current `numImportFuncs`, so the
+  // already-registered native-string helpers absorb the intervening imports now
+  // and the union helpers register at the SAME (re-based) `base`. The final
+  // reconcile then applies one consistent delta to BOTH groups. No-op on the
+  // default GC path (base stays -1) and when no import drifted the count.
+  if (ctx.nativeStrHelperImportBase >= 0 && ctx.numImportFuncs > ctx.nativeStrHelperImportBase) {
+    reconcileNativeStrFinalizeShift(ctx);
+  }
+
   // 1. Register the boxed-value struct types. Both are immutable singletons.
   const boxNumStructIdx = ctx.mod.types.length;
   ctx.mod.types.push({
