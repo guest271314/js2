@@ -1,5 +1,5 @@
 ---
-id: 1802
+id: 1813
 title: "node:events / EventEmitter — host class + closure-callback contract"
 status: ready
 sprint: Backlog

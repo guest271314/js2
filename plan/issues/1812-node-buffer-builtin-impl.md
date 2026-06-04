@@ -1,5 +1,5 @@
 ---
-id: 1801
+id: 1812
 title: "node:buffer + global Buffer — host class with from/concat/toString"
 status: ready
 sprint: Backlog
