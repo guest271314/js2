@@ -25,12 +25,7 @@ function constI32(id: number, value: number): IrInstr {
   return { kind: "const", value: { kind: "i32", value }, result: asValueId(id), resultType: I32 };
 }
 
-function block(
-  id: number,
-  instrs: IrInstr[],
-  terminator: IrBlock["terminator"],
-  blockArgs: number[] = [],
-): IrBlock {
+function block(id: number, instrs: IrInstr[], terminator: IrBlock["terminator"], blockArgs: number[] = []): IrBlock {
   return {
     id: asBlockId(id),
     blockArgs: blockArgs.map(asValueId),
