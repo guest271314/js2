@@ -1,5 +1,5 @@
 ---
-id: 1862
+id: 1866
 title: "JS→WASM standalone: compiled .js host emits undefined `env::__extern_get` import"
 status: ready
 sprint: Backlog
@@ -14,7 +14,7 @@ language_feature: js-input
 goal: correctness
 related: [1865, 1864]
 ---
-# #1862 — JS-compiled host emits undefined `env::__extern_get` import
+# #1866 — JS-compiled host emits undefined `env::__extern_get` import
 
 **Source:** GitHub issue #389 (guest271314).
 

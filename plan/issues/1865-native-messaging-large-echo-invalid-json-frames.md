@@ -67,6 +67,6 @@ column is renamed `exact?` → `validJSON?`.
 - The correct re-chunking holds the array body (1× message size) and is slow for
   large buffers — see #1863 (Uint8Array large-buffer perf).
 - The `.js`-compiled form of arbitrary hosts can still fail to instantiate —
-  see #1862 (`env::__extern_get`).
+  see #1866 (`env::__extern_get`).
 - Re-chunking is array-aware (top-level commas), matching the demo payload; a
   fully general JSON splitter is out of scope for the example.

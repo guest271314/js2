@@ -12,7 +12,7 @@ task_type: feature
 area: codegen
 language_feature: js-input
 goal: correctness
-related: [1862, 389]
+related: [1866, 389]
 ---
 # #1864 — JS→WASM parity with TS→WASM
 
@@ -28,7 +28,7 @@ input loses that information, so the same logic compiles worse — or wrong — 
 its `.ts` form. Observed symptoms:
 
 - **Broken host imports** — a JS host emits an undefined `env::__extern_get`
-  import under `--target wasi` (see #1862), because an untyped value falls back
+  import under `--target wasi` (see #1866), because an untyped value falls back
   to a JS-host path instead of a typed standalone lowering.
 - **Silent miscodegen** — transpiling our own `nm_js2wasm.ts` to JS with
   `esbuild` (which strips JSDoc) blanked the integer interpolation in a stderr
@@ -55,7 +55,7 @@ JSDoc-preserving path works; the gap is bare/untyped JS.
 - A built-in JS→TS normalization step (the role `ts-migrate` would play), so JS
   input is typed before codegen — "by any means necessary."
 - At minimum: never emit an unsatisfiable `env::*` import for standalone JS;
-  fail with a clear diagnostic pointing at the untyped construct (overlaps #1862).
+  fail with a clear diagnostic pointing at the untyped construct (overlaps #1866).
 
 ## Acceptance criteria
 
