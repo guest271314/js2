@@ -12,7 +12,7 @@ area: runtime, host-interop
 language_feature: typedarray
 goal: platform
 sprint: Backlog
-related: [1700, 1737, 1767, 1784, 1785]
+related: [1700, 1737, 1767, 1799, 1800]
 ---
 # #1786 - `wrapExports` ABI support for packed TypedArray vectors
 
@@ -41,5 +41,5 @@ implementation needs an ABI story for JS callers and JS-visible returns.
 
 ## Notes
 
-This may need typed-array metadata from #1785 so runtime marshalling knows
+This may need typed-array metadata from #1800 so runtime marshalling knows
 which allocator and write semantics to use.
