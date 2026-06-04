@@ -12,8 +12,13 @@ task_type: bugfix
 area: codegen
 language_feature: wasi-process-exit
 goal: correctness
+related: [1858]
 ---
 # #1801 — WASI `process.exit(code)` emits an invalid binary
+
+> Renumbered from a stray `6407-*` id (see #1858 allocator-hygiene note). Example
+> of the audit's "no `WebAssembly.validate()` in the pipeline → silent invalid
+> binary" theme.
 
 ## Problem
 
@@ -42,8 +47,7 @@ WebAssembly.validate(r.binary);     // false  <-- bug
 
 ## Root cause
 
-`src/codegen/expressions/calls.ts:3180-3186` (the WASI `process.exit`
-special case):
+`src/codegen/expressions/calls.ts` (the WASI `process.exit` special case):
 
 ```ts
 if (expr.arguments.length >= 1) {
@@ -63,8 +67,8 @@ an `i32`. Hence the validation failure. The `i32`-expected compile and the
 `f64→i32` truncation are mutually exclusive; the code does both.
 
 `proc_exit` itself takes an `i32` (`addFuncType(ctx, [{ kind: "i32" }], …)`,
-`src/codegen/index.ts:4716-4720`), so the call target type is correct — only
-the operand lowering is wrong.
+`src/codegen/index.ts`), so the call target type is correct — only the operand
+lowering is wrong. (Re-verify exact line numbers before editing.)
 
 ## Fix (one of)
 
