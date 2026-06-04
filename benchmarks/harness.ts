@@ -183,11 +183,26 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     return null;
   }
 
-  // Timed runs
-  for (let i = 0; i < iterations; i++) {
-    const t0 = performance.now();
-    fn();
-    timings.push(performance.now() - t0);
+  // Timed runs.
+  //
+  // Guard the same way as warmup (#1868): a strategy can pass warmup yet trap
+  // mid-loop — e.g. the linear-memory backend's bump allocator exhausts memory
+  // after many `split`/concat iterations, surfacing as a `memory access out of
+  // bounds` RuntimeError. Whether that trap lands in warmup (caught) or in a
+  // later timed iteration is non-deterministic across V8 versions, so an
+  // unguarded timed loop made the whole benchmark suite abort fatally on CI
+  // (Node 26) while passing locally (Node 25). Catching it here downgrades a
+  // mid-run trap to a skipped strategy, matching warmup's behaviour.
+  try {
+    for (let i = 0; i < iterations; i++) {
+      const t0 = performance.now();
+      fn();
+      timings.push(performance.now() - t0);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`\n    [${strategy} skipped (runtime, mid-loop): ${msg.split("\n")[0]}]\n`);
+    return null;
   }
 
   timings.sort((a, b) => a - b);
