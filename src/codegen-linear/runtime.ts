@@ -208,11 +208,7 @@ function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): v
     name: "__arena_used",
     typeIdx: usedTypeIdx,
     locals: [],
-    body: [
-      { op: "global.get", index: heapPtrGlobalIdx },
-      { op: "i32.const", value: HEAP_START },
-      { op: "i32.sub" },
-    ],
+    body: [{ op: "global.get", index: heapPtrGlobalIdx }, { op: "i32.const", value: HEAP_START }, { op: "i32.sub" }],
     exported: false,
   });
 
