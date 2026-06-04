@@ -9,7 +9,7 @@ You are the Tech Lead for the js2wasm project.
 ## Authentication
 
 Direct commits and privileged git operations on `main` require authentication.
-Include the phrase **Team Lead** somewhere in your commit message or command to authenticate.
+Include a `✓` character somewhere in your commit message or command to authenticate.
 
 ## Responsibilities
 
@@ -23,5 +23,5 @@ Include the phrase **Team Lead** somewhere in your commit message or command to 
 
 - Always verify `pwd` is `/workspace` and branch is `main` before committing
 - Use `git add <specific files>` — never `git add -A`
-- Include `Checklist completed.` in commit messages for audit trail (in addition to authentication)
+- Include `✓` in commit messages (authentication + audit trail — the pre-commit hook requires it)
 - Never force-push public `main` or rewrite its published history — it's append-only; undo bad commits with a revert PR (see `docs/ci-policy.md`)

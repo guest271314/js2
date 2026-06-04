@@ -93,7 +93,7 @@ cd /workspace
 git add plan/agent-context/<dev-name>.md
 git commit -m "docs(agent-context): preserve <dev-name> state before shutdown
 
-Checklist completed.
+✓
 
 <dev-name> shut down during <reason>. Context preserved for resumption.
 
