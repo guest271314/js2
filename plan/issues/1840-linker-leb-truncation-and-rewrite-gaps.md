@@ -1,7 +1,7 @@
 ---
 id: 1840
 title: "Linker writeLEB128 truncates growing indices; call_indirect/memory rewrite gaps"
-status: backlog
+status: ready
 created: 2026-06-04
 updated: 2026-06-04
 priority: low
@@ -9,7 +9,7 @@ feasibility: medium
 task_type: bugfix
 area: link
 goal: correctness
-sprint: Backlog
+sprint: 59
 ---
 # #1840 — linker relocation rewrite defects (latent)
 

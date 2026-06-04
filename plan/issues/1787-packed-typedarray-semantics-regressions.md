@@ -11,7 +11,7 @@ task_type: test
 area: testing
 language_feature: typedarray
 goal: correctness
-sprint: Backlog
+sprint: 59
 related: [608, 1767, 1799, 1800, 1786]
 ---
 # #1787 - Regression coverage for packed TypedArray integer semantics

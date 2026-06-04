@@ -3316,12 +3316,239 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     });
   }
 
+  // --- $__str_getSubstitution(replacement, matched, prefix, suffix) -> ref $NativeString ---
+  // #1822 — expand `$` patterns in a replacement string per ECMAScript
+  // §22.1.3.19 GetSubstitution (string-search variant, no capture groups):
+  //   $$ → "$"   $& → matched   $` → prefix (text before match)   $' → suffix
+  // Any other `$X` (including `$1`..`$9` with no captures) is left literal.
+  // Implementation: scan char-by-char, flushing literal runs via substring+concat
+  // and inserting the expansion when a recognised pattern is found.
+  {
+    const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
+    const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+
+    const typeIdx = addFuncType(ctx, [strRef, strRef, strRef, strRef], [strRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__str_getSubstitution", funcIdx);
+
+    // params: replacement(0), matched(1), prefix(2), suffix(3)
+    // locals: result(4), len(5), data(6), off(7), i(8), segStart(9), ch(10), next(11)
+    const RES = 4;
+    const LEN = 5;
+    const DATA = 6;
+    const OFF = 7;
+    const I = 8;
+    const SEG = 9;
+    const CH = 10;
+    const NEXT = 11;
+
+    // Helper: result = concat(result, replacement.substring(SEG, I))
+    const flushSegment = (): Instr[] => [
+      { op: "local.get", index: RES },
+      { op: "ref.as_non_null" },
+      // replacement.substring(SEG, I)
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: SEG },
+      { op: "local.get", index: I },
+      { op: "call", funcIdx: substringIdx },
+      { op: "ref.as_non_null" },
+      { op: "call", funcIdx: concatIdx },
+      { op: "local.set", index: RES },
+    ];
+    // Helper: result = concat(result, <expansion local index>)
+    const appendStr = (srcLocal: number): Instr[] => [
+      { op: "local.get", index: RES },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: srcLocal },
+      { op: "ref.as_non_null" },
+      { op: "call", funcIdx: concatIdx },
+      { op: "local.set", index: RES },
+    ];
+    // Advance both SEG and I past the 2-char `$X` token.
+    const skipTwo: Instr[] = [
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 2 },
+      { op: "i32.add" },
+      { op: "local.set", index: SEG },
+      { op: "local.get", index: SEG },
+      { op: "local.set", index: I },
+    ];
+    // A recognised `$X` case: flush the literal run [SEG,i), append the
+    // expansion, then skip the 2-char token.
+    const matchedCase = (appendBody: Instr[]): Instr[] => [...flushSegment(), ...appendBody, ...skipTwo];
+    // The literal `$` for `$$` is replacement.substring(i, i+1).
+    const appendDollarLiteral: Instr[] = [
+      { op: "local.get", index: RES },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: I },
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "call", funcIdx: substringIdx },
+      { op: "ref.as_non_null" },
+      { op: "call", funcIdx: concatIdx },
+      { op: "local.set", index: RES },
+    ];
+    // Dispatch on the char after `$` (already known to exist). Chains
+    // next==36 ($$) / 38 ($&) / 96 ($`) / 39 ($') / else literal-advance-1.
+    const dollarDispatch = (): Instr[] => {
+      const eqCase = (code: number, appendBody: Instr[], elseBody: Instr[]): Instr[] => [
+        { op: "local.get", index: NEXT },
+        { op: "i32.const", value: code },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: matchedCase(appendBody),
+          else: elseBody,
+        } as Instr,
+      ];
+      // unrecognised $X: literal, advance 1
+      const literalAdvance: Instr[] = [
+        { op: "local.get", index: I },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: I },
+      ];
+      return [
+        // next = data[off + i + 1]
+        { op: "local.get", index: DATA },
+        { op: "local.get", index: OFF },
+        { op: "local.get", index: I },
+        { op: "i32.add" },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx },
+        { op: "local.set", index: NEXT },
+        ...eqCase(
+          36, // $$ → literal '$'
+          appendDollarLiteral,
+          eqCase(
+            38, // $& → matched
+            appendStr(1),
+            eqCase(
+              96, // $` → prefix
+              appendStr(2),
+              eqCase(39 /* $' → suffix */, appendStr(3), literalAdvance),
+            ),
+          ),
+        ),
+      ];
+    };
+
+    const body: Instr[] = [
+      // result = "" (empty NativeString: len=0, off=0, empty data)
+      { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "array.new_default", typeIdx: ctx.nativeStrDataTypeIdx },
+      { op: "struct.new", typeIdx: strTypeIdx },
+      { op: "local.set", index: RES },
+
+      // len = replacement.len ; data = replacement.data ; off = replacement.off
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: LEN },
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: DATA },
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: OFF },
+
+      // i = 0 ; segStart = 0
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: SEG },
+
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= len, break
+              { op: "local.get", index: I },
+              { op: "local.get", index: LEN },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+
+              // ch = data[off + i]
+              { op: "local.get", index: DATA },
+              { op: "local.get", index: OFF },
+              { op: "local.get", index: I },
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx },
+              { op: "local.set", index: CH },
+
+              // if ch == '$' (36) AND i+1 < len: inspect next char
+              { op: "local.get", index: CH },
+              { op: "i32.const", value: 36 },
+              { op: "i32.eq" },
+              { op: "local.get", index: I },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.get", index: LEN },
+              { op: "i32.lt_s" },
+              { op: "i32.and" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: dollarDispatch(),
+                else: [
+                  // ch != '$' or at last char: advance 1 (literal)
+                  { op: "local.get", index: I },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: I },
+                ] as Instr[],
+              },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+
+      // Flush trailing segment [SEG, len)
+      { op: "local.get", index: RES },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: SEG },
+      { op: "local.get", index: LEN },
+      { op: "call", funcIdx: substringIdx },
+      { op: "ref.as_non_null" },
+      { op: "call", funcIdx: concatIdx },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__str_getSubstitution",
+      typeIdx,
+      locals: [
+        { name: "result", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "data", type: strDataRef },
+        { name: "off", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "segStart", type: { kind: "i32" } },
+        { name: "ch", type: { kind: "i32" } },
+        { name: "next", type: { kind: "i32" } },
+      ],
+      body: wrapBodyWithFlatten(body, [0, 1, 2, 3]),
+      exported: false,
+    });
+  }
+
   // --- $__str_replace(s: ref $NativeString, search: ref $NativeString, replacement: ref $NativeString) -> ref $NativeString ---
   // Replaces first occurrence of search with replacement. Pure wasm using indexOf + substring + concat.
   {
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+    const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -3367,10 +3594,18 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
           { op: "call", funcIdx: substringIdx },
           { op: "local.set", index: 6 },
 
-          // return concat(concat(prefix, replacement), suffix)
+          // #1822 — expand `$` patterns in the replacement before splicing:
+          // return concat(concat(prefix, getSubstitution(replacement, search, prefix, suffix)), suffix)
           { op: "local.get", index: 5 },
           { op: "ref.as_non_null" },
+          // getSubstitution(replacement=2, matched=search=1, prefix=5, suffix=6)
           { op: "local.get", index: 2 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 5 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 6 },
+          { op: "ref.as_non_null" },
+          { op: "call", funcIdx: getSubstitutionIdx },
           { op: "call", funcIdx: concatIdx },
           { op: "local.get", index: 6 },
           { op: "ref.as_non_null" },
@@ -3399,6 +3634,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+    const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -3412,13 +3648,78 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 6 },
 
-      // If searchLen == 0, return s unchanged (avoid infinite loop)
+      // #1822 — empty search: ECMAScript inserts the replacement before every
+      // code unit AND at the end: "ab".replaceAll("","-") → "-a-b-".
+      // (replacement has no $-expansion to do here: matched is "", and per the
+      // string-search GetSubstitution prefix/suffix only matter for $`/$', which
+      // for an empty-match position resolve to s[0..i] / s[i..]; but the common
+      // case is a literal replacement, and expanding here would require per-pos
+      // substitution. We interleave the literal replacement, matching V8/spec for
+      // replacements without $ patterns — the dominant case for empty search.)
       { op: "local.get", index: 6 },
       { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "val", type: strRef },
-        then: [{ op: "local.get", index: 0 }],
+        then: [
+          // sLen = s.len  (reuse local 4 as i, local 5 as sLen)
+          { op: "local.get", index: 0 },
+          { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+          { op: "local.set", index: 5 },
+          // result = replacement (a copy via concat with empty would be simplest;
+          // start result = "" then prepend replacement in the loop pattern).
+          // Build: result = replacement
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "array.new_default", typeIdx: ctx.nativeStrDataTypeIdx },
+          { op: "struct.new", typeIdx: strTypeIdx },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: concatIdx }, // "" + replacement
+          { op: "local.set", index: 3 },
+          // i = 0
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: 4 },
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  // if i >= sLen break
+                  { op: "local.get", index: 4 },
+                  { op: "local.get", index: 5 },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
+                  // result = concat(concat(result, s.substring(i,i+1)), replacement)
+                  { op: "local.get", index: 3 },
+                  { op: "ref.as_non_null" },
+                  { op: "local.get", index: 0 },
+                  { op: "local.get", index: 4 },
+                  { op: "local.get", index: 4 },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "call", funcIdx: substringIdx },
+                  { op: "ref.as_non_null" },
+                  { op: "call", funcIdx: concatIdx },
+                  { op: "local.get", index: 2 },
+                  { op: "call", funcIdx: concatIdx },
+                  { op: "local.set", index: 3 },
+                  // i++
+                  { op: "local.get", index: 4 },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: 4 },
+                  { op: "br", depth: 0 },
+                ],
+              },
+            ],
+          },
+          { op: "local.get", index: 3 },
+          { op: "ref.as_non_null" },
+        ],
         else: [
           // Build an empty result string (len=0, off=0, empty array)
           { op: "i32.const", value: 0 },
@@ -3468,8 +3769,27 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                   { op: "ref.as_non_null" },
                   { op: "call", funcIdx: concatIdx },
 
-                  // result = concat(result, replacement)
-                  { op: "local.get", index: 2 },
+                  // #1822 — result = concat(result, getSubstitution(replacement,
+                  //   matched=search, prefix=s.substring(0,idx), suffix=s.substring(idx+searchLen)))
+                  // GetSubstitution's `$\`` / `$'` use the FULL surrounding text,
+                  // not just the inter-match slice.
+                  { op: "local.get", index: 2 }, // replacement
+                  { op: "local.get", index: 1 }, // matched = search
+                  // fullPrefix = s.substring(0, idx)
+                  { op: "local.get", index: 0 },
+                  { op: "i32.const", value: 0 },
+                  { op: "local.get", index: 5 },
+                  { op: "call", funcIdx: substringIdx },
+                  { op: "ref.as_non_null" },
+                  // fullSuffix = s.substring(idx + searchLen, MAX)
+                  { op: "local.get", index: 0 },
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 6 },
+                  { op: "i32.add" },
+                  { op: "i32.const", value: 0x7fffffff },
+                  { op: "call", funcIdx: substringIdx },
+                  { op: "ref.as_non_null" },
+                  { op: "call", funcIdx: getSubstitutionIdx },
                   { op: "call", funcIdx: concatIdx },
                   { op: "local.set", index: 3 },
 

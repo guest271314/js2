@@ -1,9 +1,10 @@
 ---
 id: 1761
 title: "perf(string-hash): presize string-build buffer from static loop-trip-count to kill reallocs + per-append cap-check"
-status: ready
+status: done
 created: 2026-05-31
-updated: 2026-06-02
+updated: 2026-06-04
+completed: 2026-06-04
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -91,3 +92,54 @@ the final length and presize — "compile away, don't emulate".
   (linear-memory string backing). #1761 lands first; #1762 is the strategic
   follow-up that makes both the build and hash loops look like V8's
   sequential-string store.
+
+## Implementation (2026-06-04)
+
+Implemented in `src/codegen/string-builder.ts` as an additive layer on top of
+the existing #1210 string-builder rewrite (nativeStrings mode only):
+
+- **`computePresizeInfo`** proves `finalLen = bound * unitsPerIter` for a
+  canonical `for (let i = 0; i < BOUND; i++)` loop (step +1, init 0, `<`) whose
+  bound is loop-invariant (numeric literal or an identifier never written in the
+  body) and whose body appends a statically-fixed code-unit count per iteration
+  with NO `break`/`continue`/`return`/`throw` and no conditional/nested appends.
+  Per-append units: 1-char literal → 1, k-char literal → k, `X.charAt(i)` on a
+  static-string receiver → 1. Any failure → no presize, doubling buffer retained.
+- **`compileStringBuilderInit`** (presize path): evaluates the bound once at
+  buffer-init time (sound — proven loop-invariant), clamps to non-negative via
+  `select(bound, 0, bound>0)` (Wasm has no scalar `i32.max`), allocates the
+  buffer once at `cap = max(0,bound) * unitsPerIter`, and sets `sb.presized`.
+- **`compileStringBuilderAppend` / `emitStringBuilderAppendCodeUnit`**: when
+  `sb.presized`, the per-append `len+N > cap` grow branch (and its
+  `__str_buf_next_cap` call) is omitted entirely.
+- Threaded via a new `fctx.stringBuilderPresize` map populated at both detector
+  sites (`function-body.ts`, `closures.ts`) and consumed at the init site
+  (`statements/variables.ts`).
+- Escape hatch / A-B harness: `JS2WASM_DISABLE_STRING_PRESIZE=1` disables it.
+
+## Test Results (2026-06-04)
+
+- **Unit tests** — `tests/issue-1761.test.ts` (9 tests, all pass): presize fires
+  on the string-hash build loop (0 `__str_buf_next_cap` calls), byte-for-byte
+  parity with the JS reference across trip counts 0/1/2/5/33/100/1000/5000
+  including non-ASCII + surrogate-pair appends, literal-bound exact length,
+  negative/zero bound → empty string, and 5 no-presize-fallback cases
+  (variable-length append, break, continue, conditional append, `<=` bound) that
+  correctly retain the grow path.
+- **Regression** — existing string-builder suites all green:
+  `tests/issue-{1210,1580,1744,1175,1178}.test.ts` (28 tests).
+- **Warm benchmark** (#1760 in-process repeated-measure shape: 5 warmups + 40
+  measured iterations via `wasmtime run --invoke warm`, wasmtime 44.0.0, wasm-opt
+  -O3 normalized, 9 outer samples, presize OFF vs ON):
+  - **n=20000** (#1760 baseline arg): warm **7ms → <1ms** per call, sd 0 on both
+    legs (drop exceeds the 0ms combined sd — matches the cited 7.09ms baseline;
+    the build loop is essentially eliminated).
+  - **n=100000** (amplified, above ms granularity): warm **58ms → 3ms** per call
+    (~19×; drop 55ms ≫ combined sd 2.13ms).
+  - The drop far exceeds the combined standard deviation in both — honest
+    provenance, not a single-run artifact.
+- **Note**: the committed `benchmarks/results/wasm-host-wasmtime-hot-runtime.json`
+  warm number should be refreshed via `pnpm run refresh:benchmarks:wasmtime` in
+  the dedicated benchmark environment (it also drives the Javy / StarlingMonkey /
+  Rust cold-host lanes not reproducible here); the measured warm delta above is
+  the authoritative result for this change.

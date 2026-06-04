@@ -1866,6 +1866,15 @@ function _sidecarDelete(obj: any, key: any): boolean {
 }
 
 /**
+ * Sentinel for OrdinaryToPrimitive's `tryMethod`: distinguishes "method is
+ * absent / returned an Object / dispatch trapped" (try the next method) from a
+ * method that legitimately returned the primitive `undefined`. Without it, a
+ * real `undefined` return is wrongly treated as "absent" and the next method is
+ * consulted (#1826). Per §7.1.1.1 steps 5-6, any non-Object return is the result.
+ */
+const _PRIM_ABSENT: unique symbol = Symbol("toPrimitive-method-absent");
+
+/**
  * ToPrimitive for WasmGC structs (#850).
  *
  * Implements the JS ToPrimitive abstract operation for opaque WasmGC struct
@@ -1939,7 +1948,11 @@ function _toPrimitive(
 
   const exports = callbackState?.getExports();
 
-  // Helper: try valueOf or toString from sidecar then Wasm exports
+  // Helper: try valueOf or toString from sidecar then Wasm exports.
+  // Returns the produced primitive (including a real `undefined`!) or the
+  // `_PRIM_ABSENT` sentinel when the method is absent, returned an Object, or
+  // dispatch trapped — only then should the caller consult the next method
+  // (§7.1.1.1 steps 5-6, #1826).
   const tryMethod = (name: string): any => {
     // Sidecar property (set via __extern_set)
     // User-thrown errors propagate — spec requires assert.throws to observe them.
@@ -1948,7 +1961,7 @@ function _toPrimitive(
       const prim = scFn.call(raw);
       if (prim == null || typeof prim !== "object") return prim;
       // Returned an object — not a valid primitive, try next method
-      return undefined;
+      return _PRIM_ABSENT;
     }
     // Sidecar value is a WasmGC closure struct — dispatch via generic callers (#1090)
     if (scFn != null && typeof scFn === "object" && _isWasmStruct(scFn) && exports) {
@@ -1958,7 +1971,7 @@ function _toPrimitive(
         try {
           const prim = callFn0(scFn);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined; // returned an object — not valid
+          return _PRIM_ABSENT; // returned an object — not valid
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1969,7 +1982,7 @@ function _toPrimitive(
         try {
           const prim = callFn(raw);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined;
+          return _PRIM_ABSENT;
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1985,7 +1998,7 @@ function _toPrimitive(
         try {
           field = sget(raw);
         } catch (e: any) {
-          if (e instanceof WebAssembly.RuntimeError) return undefined;
+          if (e instanceof WebAssembly.RuntimeError) return _PRIM_ABSENT;
           throw e;
         }
         if (typeof field === "function") {
@@ -2019,20 +2032,22 @@ function _toPrimitive(
         }
       }
     }
-    return undefined;
+    return _PRIM_ABSENT;
   };
 
-  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first
+  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first.
+  // A method that produces ANY primitive (including `undefined`) is the result;
+  // only `_PRIM_ABSENT` means "consult the next method" (#1826).
   if (hint === "string") {
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
   } else {
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
   }
 
   return undefined;
@@ -9872,10 +9887,17 @@ function marshalTypedArrayArgs(
     const src = arg as ArrayLike<number>;
     const len = src.length | 0;
     const vec = newVecF64(len);
+    // #1829 — only byte-mask for Uint8Array. For any other TypedArray the
+    // `& 0xff` truncated every element to its low byte, silently corrupting
+    // Uint16Array/Uint32Array (and signed/float) inputs. The vec backing store
+    // is f64 and `__vec_set_byte` widens its i32 value arg via
+    // `f64.convert_i32_u`, so an unmasked write round-trips unsigned integers
+    // up to 2^32-1 at full precision. (Signed-negative and fractional float
+    // elements still need a full-f64 vec setter — tracked as a follow-up; this
+    // strictly improves on truncating every element to a byte.)
+    const maskByte = kind === "uint8array";
     for (let j = 0; j < len; j++) {
-      // Mask to byte range — matches `new Uint8Array(arr)` indexed-write
-      // semantics (and __vec_set_byte's i32-byte contract).
-      vecSetByte(vec, j, src[j]! & 0xff);
+      vecSetByte(vec, j, maskByte ? src[j]! & 0xff : src[j]!);
     }
     out[i] = vec;
   }

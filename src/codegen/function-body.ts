@@ -39,7 +39,7 @@ import {
 import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
-import { detectStringBuilders } from "./string-builder.js";
+import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
@@ -955,8 +955,10 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // synthetic buffer/len/cap/mat triple set up at declaration time.
       // Only runs in nativeStrings mode (JS-host concat avoids GC pressure).
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-        const builders = detectStringBuilders(ctx, decl.body);
+        const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+        const builders = detectStringBuilders(ctx, decl.body, presize);
         if (builders.size > 0) fctx.pendingStringBuilders = builders;
+        if (presize.size > 0) fctx.stringBuilderPresize = presize; // #1761
       }
       // #1195: array-reduce-fusion — detect the fill+reduce shape and
       // rewrite the AST to eliminate the temporary array. Runs BEFORE
