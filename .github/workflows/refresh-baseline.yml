@@ -339,11 +339,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage only the small JSON files and generated edition buckets (JSONL lives in baselines repo, not main)
+          # Stage only the small JSON files and generated edition buckets (JSONL lives in baselines repo, not main).
+          # Editions live under website/public/ (the vite publicDir) since #1656; the old public/ path no longer receives them.
           git add -f benchmarks/results/test262-current.json \
             benchmarks/results/test262-report.json \
             public/benchmarks/results/test262-report.json \
-            public/benchmarks/results/test262-editions.json
+            website/public/benchmarks/results/test262-editions.json \
+            website/public/benchmarks/results/test262-category-editions.json
           if git diff --cached --quiet; then
             echo "No baseline changes to commit."
             exit 0
@@ -364,7 +366,8 @@ jobs:
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-report.json \
-              public/benchmarks/results/test262-editions.json
+              website/public/benchmarks/results/test262-editions.json \
+              website/public/benchmarks/results/test262-category-editions.json
             git diff --cached --quiet && exit 0
             git commit -m "chore(test262): FORCED baseline refresh by ${ACTOR} — ${PASS}/${TOTAL} pass [skip ci]"
           fi

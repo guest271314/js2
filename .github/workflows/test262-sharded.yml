@@ -920,8 +920,10 @@ jobs:
           cp /tmp/js2wasm-baselines/test262-current.jsonl /tmp/js2wasm-baselines/test262-current.before.jsonl 2>/dev/null || true
           cp /tmp/js2wasm-baselines/test262-standalone-current.jsonl /tmp/js2wasm-baselines/test262-standalone-current.before.jsonl 2>/dev/null || true
 
-          # Copy fresh artifacts. Editions + categories are produced by
-          # scripts/generate-editions.ts (run earlier) into benchmarks/results/.
+          # Copy fresh artifacts. Editions are produced by
+          # scripts/generate-editions.ts (run earlier) into
+          # website/public/benchmarks/results/ (#1656 moved the public dir under
+          # website/; the old benchmarks/results/ path no longer receives them).
           cp shard-artifacts/test262-results-merged.jsonl /tmp/js2wasm-baselines/test262-current.jsonl
           cp shard-artifacts/test262-report-merged.json   /tmp/js2wasm-baselines/test262-current.json
           cp shard-artifacts/test262-report-merged.json   /tmp/js2wasm-baselines/test262-report.json
@@ -930,8 +932,8 @@ jobs:
           cp shard-artifacts/test262-standalone-report-merged.json   /tmp/js2wasm-baselines/test262-standalone-current.json
           cp shard-artifacts/test262-standalone-report-merged.json   /tmp/js2wasm-baselines/test262-standalone-report.json
           cp shard-artifacts/test262-standalone-results-merged.jsonl /tmp/js2wasm-baselines/test262-standalone-results.jsonl
-          [ -f benchmarks/results/test262-editions.json ] && \
-            cp benchmarks/results/test262-editions.json /tmp/js2wasm-baselines/test262-editions.json || true
+          [ -f website/public/benchmarks/results/test262-editions.json ] && \
+            cp website/public/benchmarks/results/test262-editions.json /tmp/js2wasm-baselines/test262-editions.json || true
           [ -f benchmarks/results/test262-categories.json ] && \
             cp benchmarks/results/test262-categories.json /tmp/js2wasm-baselines/test262-categories.json || true
 
@@ -1087,9 +1089,14 @@ jobs:
               benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-standalone-report.json
-            # editions JSON is regenerated into public/ by the earlier step
-            [ -f public/benchmarks/results/test262-editions.json ] && \
-              git add -f public/benchmarks/results/test262-editions.json || true
+            # editions JSON is regenerated into website/public/ (the vite
+            # publicDir, served by the landing page) by the earlier step. #1656
+            # moved the public dir under website/; staging the old public/ path
+            # silently no-op'd (file absent), freezing the #goals edition slider.
+            [ -f website/public/benchmarks/results/test262-editions.json ] && \
+              git add -f website/public/benchmarks/results/test262-editions.json || true
+            [ -f website/public/benchmarks/results/test262-category-editions.json ] && \
+              git add -f website/public/benchmarks/results/test262-category-editions.json || true
             # Conformance numbers in prose docs (synced just above). Staged so
             # the number and its derived docs land in ONE atomic commit.
             git add -f README.md ROADMAP.md CLAUDE.md plan/goals/goal-graph.md \
