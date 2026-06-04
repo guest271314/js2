@@ -1,8 +1,8 @@
 ---
 id: 1856
 title: "Bump/arena allocator mode for short-lived linear-memory programs (allocate-and-exit), plus commit to one fixed linear-GC strategy"
-status: backlog
-sprint: Backlog
+status: ready
+sprint: 59
 created: 2026-06-04
 updated: 2026-06-04
 priority: medium

@@ -108,6 +108,12 @@ function pathHas(record, patterns) {
 
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
+    id: "binary-emit-u32-out-of-range",
+    issues: ["#1858", "#1862"],
+    label: "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
+    match: (_record, text) => hasAny(text, ["u32 out of range", "binary emit error: u32"]),
+  },
+  {
     id: "numeric-separator-literal-values",
     issues: ["#1782", "#53"],
     label: "Numeric and BigInt separator literals evaluate to wrong values",
@@ -309,6 +315,18 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     label: "Function object name/length/prototype/call semantics",
     match: (record) =>
       pathHas(record, ["built-ins/function", "language/function", "language/expressions/arrow-function"]),
+  },
+  {
+    id: "symbol-builtin-semantics",
+    issues: ["#483", "#487", "#1564"],
+    label: "Symbol built-in semantics (keyFor/for arg validation, well-known symbols, registry)",
+    // Standalone Symbol built-ins lower their argument-type checks to internal
+    // traps (e.g. `Symbol.keyFor(null)` traps with "null is not a symbol")
+    // instead of throwing a proper TypeError, so test262's `assert.throws`
+    // assertion fails. The path-based match keeps this scoped to genuine
+    // built-ins/Symbol tests and does not poach the `bigint`/`toprimitive`
+    // text-matched buckets that run earlier in this list.
+    match: (record) => pathHas(record, ["built-ins/symbol"]),
   },
   {
     id: "assignment-private-short-circuit",

@@ -5859,6 +5859,23 @@ function compileArraySort(
     }
   }
 
+  // #1816: if a callable comparator is supplied, honor it. The default Timsort
+  // hard-codes numeric `<`/`<=` and ignores any comparefn, so route comparator
+  // sorts through a stable insertion sort that invokes the comparator closure
+  // via `call_ref` (§23.1.3.30 / SortIndexedProperties / CompareArrayElements).
+  if (callExpr.arguments.length >= 1) {
+    const cbArg = callExpr.arguments[0]!;
+    const isExplicitUndefined =
+      cbArg.kind === ts.SyntaxKind.UndefinedKeyword || (ts.isIdentifier(cbArg) && cbArg.text === "undefined");
+    if (!isExplicitUndefined) {
+      const comparatorResult = tryCompileComparatorSort(ctx, fctx, propAccess, cbArg, vecTypeIdx, arrTypeIdx, elemType);
+      if (comparatorResult) return comparatorResult;
+      // Fell through (comparator not a compilable closure) — fall back to the
+      // default numeric Timsort below. This keeps non-closure comparators
+      // (rare) compiling without a hard error, matching prior behaviour.
+    }
+  }
+
   const elemKind = elemType.kind as "i32" | "f64";
   const timsortIdx = ensureTimsortHelper(ctx, vecTypeIdx, arrTypeIdx, elemKind);
 
@@ -5875,6 +5892,202 @@ function compileArraySort(
   // Return the same vec ref (sort is in-place)
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "ref.as_non_null" });
+  return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+/**
+ * #1816 — comparator-aware sort. Emits an in-place stable insertion sort that
+ * invokes the user comparator closure via `call_ref` at every comparison,
+ * using the spec ordering: `comparator(a, b) > 0` ⇒ `a` sorts after `b`.
+ *
+ * Returns the result ValType on success, or `null` if the comparator is not a
+ * compilable Wasm closure (caller then falls back to the default Timsort).
+ *
+ * Insertion sort (not Timsort) is used here because (a) it is naturally stable,
+ * (b) correctness — not throughput — is the requirement for comparator sorts,
+ * and (c) it keeps the comparator-call site inline in the calling function so
+ * the closure local stays in scope (no closure-threading through module helpers).
+ */
+function tryCompileComparatorSort(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  cbArg: ts.Expression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  // Compile the comparator. Arrow/function expressions become closures; an
+  // identifier referencing a closure variable also resolves to one.
+  const cbResult =
+    ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+      ? compileArrowAsClosure(ctx, fctx, cbArg)
+      : compileExpression(ctx, fctx, cbArg);
+  if (!cbResult || (cbResult.kind !== "ref" && cbResult.kind !== "ref_null")) {
+    // Not a Wasm closure (e.g. a host externref function). Drop and bail so the
+    // caller falls back to the default sort.
+    if (cbResult) fctx.body.push({ op: "drop" });
+    return null;
+  }
+  const closureTypeIdx = (cbResult as { typeIdx: number }).typeIdx;
+  const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+  if (!closureInfo || closureInfo.paramTypes.length < 2) {
+    // Unknown closure shape or fewer than 2 params — can't drive a 2-arg
+    // comparator soundly. Drop and fall back.
+    fctx.body.push({ op: "drop" });
+    return null;
+  }
+
+  const cmpTmp = allocLocal(fctx, `__arr_sort_cmp_${fctx.locals.length}`, cbResult);
+  fctx.body.push({ op: "local.set", index: cmpTmp });
+
+  // Now compile the receiver (spec order: comparefn already evaluated above as
+  // the arg; receiver was the member-expression base, evaluated first at the
+  // call site — but here we evaluate it after for codegen simplicity, which is
+  // observationally identical for the array receiver, which has no getter).
+  const vecTmp = allocLocal(fctx, `__arr_sort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const dataTmp = allocLocal(fctx, `__arr_sort_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+  const lenTmp = allocLocal(fctx, `__arr_sort_len_${fctx.locals.length}`, { kind: "i32" });
+  const iTmp = allocLocal(fctx, `__arr_sort_i_${fctx.locals.length}`, { kind: "i32" });
+  const jTmp = allocLocal(fctx, `__arr_sort_j_${fctx.locals.length}`, { kind: "i32" });
+  const keyTmp = allocLocal(fctx, `__arr_sort_key_${fctx.locals.length}`, elemType);
+
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: vecTmp });
+  emitReceiverNullGuard(ctx, fctx, vecTmp);
+  // len = vec.length, data = vec.data
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: lenTmp });
+  fctx.body.push({ op: "local.get", index: vecTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dataTmp });
+
+  const getOp: Instr["op"] =
+    elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+
+  // Comparator-call instruction sequence with `data[j]` and `key` already
+  // on the stack as `elemType`; coerces each to the closure's declared param
+  // type, invokes call_ref, coerces the (f64/typed) result to f64, leaves an
+  // i32 `(result > 0)` on the stack.
+  // Comparator call convention (matches the other array-method call_ref sites):
+  // push the closure struct (`__self`, the 1st funcType param) FIRST, then the
+  // two user args, then re-fetch the funcref from the struct (field 0) and
+  // `call_ref`. The funcType is `[__self, p0, p1] -> ret`.
+  const cmpReturn: ValType = closureInfo.returnType ?? { kind: "f64" };
+  const buildCompareGtZero = (pushLeft: Instr[], pushRight: Instr[]): Instr[] => [
+    { op: "local.get", index: cmpTmp } as Instr, // __self
+    ...pushLeft,
+    ...coercionInstrs(ctx, elemType, closureInfo.paramTypes[0]!, fctx),
+    ...pushRight,
+    ...coercionInstrs(ctx, elemType, closureInfo.paramTypes[1]!, fctx),
+    { op: "local.get", index: cmpTmp } as Instr,
+    { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
+    ...guardedFuncRefCastInstrs(fctx, closureInfo.funcTypeIdx),
+    { op: "ref.as_non_null" } as Instr,
+    { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
+    ...coercionInstrs(ctx, cmpReturn, { kind: "f64" }, fctx),
+    { op: "f64.const", value: 0 } as Instr,
+    { op: "f64.gt" } as Instr,
+  ];
+
+  // for (i = 1; i < len; i++) { key = data[i]; j = i-1;
+  //   while (j >= 0 && cmp(data[j], key) > 0) { data[j+1] = data[j]; j--; }
+  //   data[j+1] = key; }
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: iTmp } as Instr);
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [
+      {
+        op: "loop",
+        blockType: { kind: "empty" },
+        body: [
+          // if (i >= len) break
+          { op: "local.get", index: iTmp } as Instr,
+          { op: "local.get", index: lenTmp } as Instr,
+          { op: "i32.ge_s" } as Instr,
+          { op: "br_if", depth: 1 } as Instr,
+          // key = data[i]
+          { op: "local.get", index: dataTmp } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "local.get", index: iTmp } as Instr,
+          { op: getOp, typeIdx: arrTypeIdx } as Instr,
+          { op: "local.set", index: keyTmp } as Instr,
+          // j = i - 1
+          { op: "local.get", index: iTmp } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.sub" } as Instr,
+          { op: "local.set", index: jTmp } as Instr,
+          // inner while
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  // if (j < 0) break
+                  { op: "local.get", index: jTmp } as Instr,
+                  { op: "i32.const", value: 0 } as Instr,
+                  { op: "i32.lt_s" } as Instr,
+                  { op: "br_if", depth: 1 } as Instr,
+                  // if (cmp(data[j], key) > 0) == 0 → break
+                  ...buildCompareGtZero(
+                    [
+                      { op: "local.get", index: dataTmp } as Instr,
+                      { op: "ref.as_non_null" } as Instr,
+                      { op: "local.get", index: jTmp } as Instr,
+                      { op: getOp, typeIdx: arrTypeIdx } as Instr,
+                    ],
+                    [{ op: "local.get", index: keyTmp } as Instr],
+                  ),
+                  { op: "i32.eqz" } as Instr,
+                  { op: "br_if", depth: 1 } as Instr,
+                  // data[j+1] = data[j]
+                  { op: "local.get", index: dataTmp } as Instr,
+                  { op: "ref.as_non_null" } as Instr,
+                  { op: "local.get", index: jTmp } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.get", index: dataTmp } as Instr,
+                  { op: "ref.as_non_null" } as Instr,
+                  { op: "local.get", index: jTmp } as Instr,
+                  { op: getOp, typeIdx: arrTypeIdx } as Instr,
+                  { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+                  // j--
+                  { op: "local.get", index: jTmp } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.sub" } as Instr,
+                  { op: "local.set", index: jTmp } as Instr,
+                  { op: "br", depth: 0 } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr,
+          // data[j+1] = key
+          { op: "local.get", index: dataTmp } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "local.get", index: jTmp } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "local.get", index: keyTmp } as Instr,
+          { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+          // i++
+          { op: "local.get", index: iTmp } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "local.set", index: iTmp } as Instr,
+          { op: "br", depth: 0 } as Instr,
+        ],
+      } as Instr,
+    ],
+  } as Instr);
+
+  // Return the same vec ref (sort is in-place).
+  fctx.body.push({ op: "local.get", index: vecTmp } as Instr);
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
   return { kind: "ref_null", typeIdx: vecTypeIdx };
 }
 

@@ -1,7 +1,7 @@
 ---
 id: 1841
 title: "Element-section flag bitfield: parser/emitter only handle active flag-0 (passive/declarative corrupt)"
-status: backlog
+status: ready
 created: 2026-06-04
 updated: 2026-06-04
 priority: low
@@ -9,7 +9,7 @@ feasibility: medium
 task_type: bugfix
 area: link
 goal: correctness
-sprint: Backlog
+sprint: 59
 ---
 # #1841 — element-section flags mis-handled (latent)
 
