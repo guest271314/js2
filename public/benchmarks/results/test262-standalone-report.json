@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-04T17:42:34.375Z",
-  "baseline_generated_at": "2026-06-04T17:42:33Z",
-  "baseline_sha": "4ee32a3ed02bebd683d97e3643e3d04ce485d428",
+  "timestamp": "2026-06-04T22:28:38.087Z",
+  "baseline_generated_at": "2026-06-04T22:28:37Z",
+  "baseline_sha": "9b5359e2571e265cd254a61ce0b58456132e43e4",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1222,15 +1222,15 @@
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
+          "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__proto_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/",
+          "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result1, \"#-#-09T01:#:#.123987Z\", \"roundingMode is halfTrunc (with # digits from smallestUnit)\");",
           "other:L#:## Codegen error: '__extern_is_undefined' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.ge"
@@ -1380,14 +1380,14 @@
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/parse/text-object-abrupt.js"
+          "test/built-ins/JSON/stringify/value-bigint-tojson.js"
         ],
         "sample_signatures": [
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
+          "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct"
         ]
       },
       {
@@ -1774,15 +1774,15 @@
         },
         "sample_files": [
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-94.js",
           "test/built-ins/Object/defineProperty/15.2.3.6-4-432.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');",
-          "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
           "other:L#:## Codegen error: '__defineProperties' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/s",
+          "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
           "other:L#:## Codegen error: '__hasOwnProperty' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "assertion_fail:returned # — assert ## at L#: verifySetFunc = value;"
         ]
