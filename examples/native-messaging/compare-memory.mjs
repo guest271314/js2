@@ -6,8 +6,10 @@
 // the source to standalone WASI, streams `--frames` Chrome-framed messages of
 // that many MiB each (a comma-laden `JSON.stringify(Array(N))` body — the shape
 // produced by `port.postMessage(Array(209715*64))`), reassembles the framed
-// stdout, and reports peak RSS, whether the echo round-tripped byte-exactly,
-// and wall time. One table is printed per size.
+// stdout, and reports peak RSS, whether every response frame is valid JSON
+// within the 1 MiB cap and the elements reassemble to the input (the actual
+// native-messaging contract — Chrome JSON-parses each frame), and wall time.
+// One table is printed per size.
 //
 // Every .ts source is ALSO transpiled to .js (TS types stripped, JSDoc @param
 // types kept so js2wasm still types it) and compiled, so the table shows both
@@ -37,6 +39,7 @@ import { performance } from "node:perf_hooks";
 import ts from "typescript";
 
 const WASMTIME_FLAGS = ["-W", "gc=y,function-references=y,tail-call=y,exceptions=y"];
+const FRAME_CHUNK = 1024 * 1024; // Chrome's host->extension per-message cap
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 
@@ -168,7 +171,8 @@ function compile(cli, source, outDir, key) {
 
 function jsonArrayBody(bytes) {
   const n = Math.max(0, Math.floor((bytes - 2) / 5)); // '[' + 'null'(,'null')* + ']'
-  return Buffer.from("[" + "null" + ",null".repeat(Math.max(0, n - 1)) + "]", "utf8");
+  const buf = Buffer.from("[" + "null" + ",null".repeat(Math.max(0, n - 1)) + "]", "utf8");
+  return { buf, elements: n }; // n `null` elements
 }
 
 function rssKb(pid) {
@@ -180,28 +184,43 @@ function rssKb(pid) {
   }
 }
 
-// Reassemble framed stdout (4-byte LE length + body, repeated) and tally bytes.
-function makeFrameSink(expected) {
+// Reassemble framed stdout (4-byte LE length + body, repeated). Each frame must
+// be a complete, valid JSON value (Chrome rejects anything else) within the
+// 1 MiB cap; the flattened array elements must equal what was sent. This is the
+// real native-messaging contract — NOT byte-for-byte equality, since a >1 MiB
+// array is re-chunked into several `[...]` frames whose elements concatenate.
+function makeFrameSink() {
   const head = Buffer.alloc(4);
   let headOff = 0;
   let bodyRemaining = 0;
+  let frameBuf = null;
+  let frameOff = 0;
   let bodyBytes = 0;
   let frames = 0;
-  let cmpOff = 0;
-  let mismatch = false;
+  let elements = 0;
+  let maxFrameBody = 0;
+  let allValid = true;
   return {
     push(buf) {
       let off = 0;
       while (off < buf.length) {
         if (bodyRemaining > 0) {
           const n = Math.min(bodyRemaining, buf.length - off);
-          for (let i = 0; i < n; i++) {
-            if (expected[cmpOff] !== buf[off + i]) mismatch = true;
-            cmpOff++;
-          }
+          buf.copy(frameBuf, frameOff, off, off + n);
+          frameOff += n;
           bodyBytes += n;
           bodyRemaining -= n;
           off += n;
+          if (bodyRemaining === 0) {
+            try {
+              const v = JSON.parse(frameBuf.toString("utf8"));
+              if (Array.isArray(v)) elements += v.length;
+              else allValid = false; // a frame must be a JSON array here
+            } catch {
+              allValid = false; // raw byte-chunk frames land here
+            }
+            frameBuf = null;
+          }
           continue;
         }
         const n = Math.min(4 - headOff, buf.length - off);
@@ -212,22 +231,33 @@ function makeFrameSink(expected) {
           bodyRemaining = head.readUInt32LE(0);
           headOff = 0;
           frames++;
+          maxFrameBody = Math.max(maxFrameBody, bodyRemaining);
+          if (bodyRemaining === 0)
+            allValid = false; // empty body is not valid JSON
+          else {
+            frameBuf = Buffer.allocUnsafe(bodyRemaining);
+            frameOff = 0;
+          }
         }
       }
     },
-    result() {
-      return { bodyBytes, frames, exact: !mismatch && bodyBytes === expected.length && cmpOff === expected.length };
+    result(expectedElements) {
+      return {
+        bodyBytes,
+        frames,
+        maxFrameBody,
+        elements,
+        valid: allValid && elements === expectedElements && maxFrameBody <= FRAME_CHUNK,
+      };
     },
   };
 }
 
-async function runOne(bin, version, wasm, body, frames, opts) {
+async function runOne(bin, version, wasm, body, elements, frames, opts) {
   const header = Buffer.alloc(4);
   header.writeUInt32LE(body.length, 0);
-  // Echo is the request repeated `frames` times.
-  const expected = Buffer.concat(Array.from({ length: frames }, () => body));
   const child = spawn(bin, [...WASMTIME_FLAGS, wasm], { stdio: ["pipe", "pipe", "pipe"] });
-  const sink = makeFrameSink(expected);
+  const sink = makeFrameSink();
   let first,
     peak = 0,
     killed = false;
@@ -259,14 +289,14 @@ async function runOne(bin, version, wasm, body, frames, opts) {
   const code = await new Promise((r) => child.once("close", (c) => r(c)));
   clearInterval(sampler);
   const wall = Math.round(performance.now() - t0);
-  const { bodyBytes, frames: outFrames, exact } = sink.result();
+  const { bodyBytes, frames: outFrames, valid } = sink.result(elements * frames);
   return {
     version,
     peakMb: peak / 1024,
     deltaMb: (peak - (first ?? peak)) / 1024,
     outMib: bodyBytes / 1048576,
     outFrames,
-    exact,
+    valid,
     wall,
     code,
     killed,
@@ -305,17 +335,17 @@ async function main() {
     const versions = opts.wasmtimes.map((w) => ({ ...w, ver: wasmtimeVersion(w.path) }));
 
     for (const mib of opts.sizes) {
-      const body = jsonArrayBody(mib * 1048576); // per-frame body ~mib MiB
+      const { buf: body, elements } = jsonArrayBody(mib * 1048576); // per-frame body ~mib MiB
       console.log(`\n# ${opts.frames} x ${(body.length / 1048576).toFixed(0)} MiB JSON-array frames (Array shape)\n`);
-      console.log("| host | wasmtime | peak RSS | Δ RSS | echoed | frames | exact? | wall |");
+      console.log("| host | wasmtime | peak RSS | Δ RSS | echoed | frames | validJSON? | wall |");
       console.log("|---|---|---:|---:|---:|---:|:--:|---:|");
       for (const { label, wasm } of wasms) {
         for (const v of versions) {
-          const r = await runOne(v.path, v.ver, wasm, body, opts.frames, opts);
+          const r = await runOne(v.path, v.ver, wasm, body, elements, opts.frames, opts);
           const tag = r.killed ? " ⚠KILLED" : r.code !== 0 ? ` ⚠exit=${r.code}` : "";
           console.log(
             `| ${label} | ${v.label} | ${r.peakMb.toFixed(0)} MB | ${r.deltaMb.toFixed(0)} MB | ` +
-              `${r.outMib.toFixed(0)} MiB | ${r.outFrames} | ${r.exact ? "✅" : "❌"} | ${(r.wall / 1000).toFixed(1)} s${tag} |`,
+              `${r.outMib.toFixed(0)} MiB | ${r.outFrames} | ${r.valid ? "✅" : "❌"} | ${(r.wall / 1000).toFixed(1)} s${tag} |`,
           );
         }
       }
