@@ -73,9 +73,39 @@ export interface ExportEntry {
 }
 
 export interface ElementEntry {
+  /**
+   * Raw element-segment flags field (#1841 — the 3-bit value 0-7 per the
+   * WebAssembly spec, not just active flag-0). Determines the segment mode
+   * (active / passive / declarative), whether a tableidx + offset-expr are
+   * present, and whether the payload is funcidx* or expr*.
+   */
+  flags: number;
   tableIdx: number;
-  offsetExpr: Uint8Array;
+  /**
+   * Active-segment offset constant-expression bytes (terminated by 0x0b),
+   * present only for active modes (flags 0, 2, 4, 6). `null` for
+   * passive/declarative (flags 1, 3, 5, 7), which have no offset.
+   */
+  offsetExpr: Uint8Array | null;
+  /**
+   * For funcidx-payload segments (flags 0-3): the resolved function indices.
+   * Empty for expr-payload segments (flags 4-7), which keep their raw
+   * expression bytes in `elemExprs` instead.
+   */
   funcIndices: number[];
+  /** Number of elements in the segment (funcidx count or expr count). */
+  elemCount: number;
+  /**
+   * elemkind (flags 1-3) or reftype (flags 5-7) byte, when the segment
+   * carries one explicitly. `null` for flag 0/4 (funcref implied).
+   */
+  kindByte: number | null;
+  /**
+   * For expr-payload segments (flags 4-7): the raw element-expression bytes
+   * (the `vec(expr)` body, excluding the leading count). Re-emitted verbatim.
+   * `null` for funcidx-payload segments.
+   */
+  elemExprs: Uint8Array | null;
 }
 
 export interface TagEntry {
@@ -468,36 +498,94 @@ function parseExportSection(r: ByteReader, _end: number, obj: ParsedObject): voi
   }
 }
 
+/**
+ * #1841 — parse the Element Section honoring the full 3-bit flags field (0-7)
+ * per the WebAssembly spec, not just active flag-0. The flag bits are:
+ *   bit0 (0x01): passive-or-declarative (no active table+offset)
+ *   bit1 (0x02): explicit tableidx (active) / declarative selector (passive)
+ *   bit2 (0x04): payload is element-expressions (expr*) and carries a reftype,
+ *                rather than funcidx* (which carries an elemkind for flags 1-3)
+ *
+ * The eight cases, with the fields that follow the flags byte:
+ *   0: e:expr  y*:funcidx          (active, table 0, funcref)
+ *   1: et:elemkind  y*:funcidx     (passive)
+ *   2: x:tableidx e:expr et:elemkind y*:funcidx  (active, explicit table)
+ *   3: et:elemkind  y*:funcidx     (declarative)
+ *   4: e:expr  el*:expr            (active, table 0, funcref expressions)
+ *   5: et:reftype  el*:expr        (passive)
+ *   6: x:tableidx e:expr et:reftype el*:expr      (active, explicit table)
+ *   7: et:reftype  el*:expr        (declarative)
+ * Reading the wrong fields for a non-0 flag previously desynced the cursor and
+ * corrupted every following section.
+ */
 function parseElementSection(r: ByteReader, _end: number, obj: ParsedObject): void {
   const count = r.u32();
   for (let i = 0; i < count; i++) {
     const flags = r.u32();
-    // Simple case: active element with table 0, funcref
+    const hasExplicitTable = (flags & 0x02) !== 0 && (flags & 0x01) === 0; // active w/ tableidx (2, 6)
+    const isActive = (flags & 0x01) === 0; // 0, 2, 4, 6
+    const usesExprs = (flags & 0x04) !== 0; // 4, 5, 6, 7
+    // elemkind/reftype byte is present for every flag except 0 and 4 (the two
+    // "active, table 0, funcref-implied" cases).
+    const hasKindByte = flags !== 0 && flags !== 4;
+
     let tableIdx = 0;
-    if (flags & 0x02) {
+    if (hasExplicitTable) {
       tableIdx = r.u32();
     }
-    // Read offset expression
-    const offsetStart = r.pos;
-    while (r.byte() !== 0x0b) {
-      // scan for end
-    }
-    const offsetExpr = r.data.slice(offsetStart, r.pos);
 
-    if (flags & 0x03) {
-      // Element kind or type
-      if (flags & 0x01) {
-        r.byte(); // element kind or ref type
+    let offsetExpr: Uint8Array | null = null;
+    if (isActive) {
+      const offsetStart = r.pos;
+      while (r.byte() !== 0x0b) {
+        // scan to the terminating `end` (0x0b) of the offset const-expr
       }
+      offsetExpr = r.data.slice(offsetStart, r.pos);
+    }
+
+    let kindByte: number | null = null;
+    if (hasKindByte) {
+      kindByte = r.byte(); // elemkind (funcidx variants) or reftype (expr variants)
     }
 
     const elemCount = r.u32();
     const funcIndices: number[] = [];
-    for (let j = 0; j < elemCount; j++) {
-      funcIndices.push(r.u32());
+    let elemExprs: Uint8Array | null = null;
+    if (usesExprs) {
+      // Payload is `vec(expr)` — capture the raw expression bytes verbatim so
+      // they can be re-emitted unchanged. Each expr is terminated by 0x0b.
+      const exprStart = r.pos;
+      for (let j = 0; j < elemCount; j++) {
+        while (r.byte() !== 0x0b) {
+          // scan to this expression's terminating `end`
+        }
+      }
+      elemExprs = r.data.slice(exprStart, r.pos);
+    } else {
+      for (let j = 0; j < elemCount; j++) {
+        funcIndices.push(r.u32());
+      }
     }
-    obj.elements.push({ tableIdx, offsetExpr, funcIndices });
+
+    obj.elements.push({ flags, tableIdx, offsetExpr, funcIndices, elemCount, kindByte, elemExprs });
   }
+}
+
+/**
+ * #1841 test hook — parse a raw element-section body (the bytes that follow the
+ * section id + size, i.e. starting at the segment count) and return the parsed
+ * segments plus the final cursor position. The cursor MUST land exactly at the
+ * end of `bytes`; any drift means a flag case desynced the reader. Kept narrow
+ * so the internal `ByteReader` / `parseElementSection` stay unexported.
+ */
+export function parseElementSegmentsForTest(bytes: Uint8Array): {
+  elements: ElementEntry[];
+  finalPos: number;
+} {
+  const r = new ByteReader(bytes, 0);
+  const obj = { elements: [] as ElementEntry[] } as unknown as ParsedObject;
+  parseElementSection(r, bytes.length, obj);
+  return { elements: obj.elements, finalPos: r.pos };
 }
 
 function parseCodeSection(r: ByteReader, _end: number, obj: ParsedObject): void {
