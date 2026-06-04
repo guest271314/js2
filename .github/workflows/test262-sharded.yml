@@ -840,6 +840,16 @@ jobs:
     name: promote merged report to main baseline
     needs: merge-report
     runs-on: ubuntu-latest
+    # Gate the MAIN_DEPLOY_KEY secret behind a GitHub Environment so only this
+    # job — running on a `push`/`workflow_dispatch` against main — can read it.
+    # The `baseline-promote` Environment restricts its deployment branches to
+    # `main` and stores MAIN_DEPLOY_KEY as an ENVIRONMENT secret, so PR/fork
+    # workflows (which never satisfy the branch restriction) cannot access the
+    # deploy key. `${{ secrets.MAIN_DEPLOY_KEY }}` resolves from this environment
+    # automatically once `environment:` is declared — no other change to the SSH
+    # wiring is needed. No required-reviewer gate is attached, so the automated
+    # promote-baseline run is never paused.
+    environment: baseline-promote
     permissions:
       contents: write
       pull-requests: write
@@ -1041,31 +1051,59 @@ jobs:
             fi
           fi
 
-      # RESTORED (2026-05-25): commit the small summary JSON files back to main.
+      # Commit the small summary JSON files back to main via the SSH deploy key.
       #
-      # History: this step was removed on 2026-05-22 (36d8eb849) because the
-      # merge_queue ruleset blocked the push with GH013 ('Changes must be made
-      # through the merge queue'). BUT those GH013 failures predated 15ff85dda
-      # (landed 37 min earlier), which switched the `Checkout` step above to
-      # `ssh-key: MAIN_DEPLOY_KEY` precisely so this push CAN bypass the ruleset
-      # (the deploy key is in the ruleset's bypass_actors). Removing the step
-      # threw out the working push and left the committed
-      # benchmarks/results/test262-current.json frozen at its 2026-05-22 value
-      # (28842/43159) while the baselines repo moved on — so `git status`, the
-      # dashboard build's committed-file fallback, and fresh clones all showed a
-      # phantom ~500-test regression. This step restores main/baselines parity.
+      # WHY A DEPLOY KEY (the GH013 saga, #1861): the repo ruleset "main: merge
+      # queue + required checks" (id 16700772) rejects any DIRECT push to
+      # refs/heads/main authenticated by GITHUB_TOKEN / persist-credentials
+      # (github-actions[bot]) with `remote: error: GH013: Repository rule
+      # violations found`. The ruleset's bypass_actors list, however, includes
+      # **DeployKey (always)** — so a push authenticated with a repo deploy key
+      # bypasses the rule. PR #490 (15ff85dda) first wired this via the checkout's
+      # `ssh-key: MAIN_DEPLOY_KEY`; PR #725/#896 (a8f72e6cf) regressed it back onto
+      # GITHUB_TOKEN — exactly what GH013 blocks — which silently froze the
+      # committed benchmarks/results/test262-current.json while the baselines repo
+      # moved on (phantom ~500-test regression in `git status`, the dashboard
+      # committed-file fallback, and fresh clones).
+      #
+      # This step RE-INSTATES the deploy-key push per #490, but sets the key up
+      # *inline* (ssh-agent + a dedicated SSH remote), mirroring the baselines-repo
+      # push step above, rather than via the checkout's `ssh-key:`. That keeps the
+      # checkout on its HTTPS origin (used by other steps / the artifact download)
+      # and confines the deploy-key auth to just this push. It KEEPS the #1156
+      # fixes intact: the `[skip ci]` commit (prevents self-retrigger of the shard
+      # matrix) and the fetch → rebase --autostash → retry loop (so the refresh
+      # lands on top of concurrent merge-queue advances instead of being dropped by
+      # a "fetch first" rejection).
       #
       # Only the *small* JSON files go to main (the large jsonl lives only in the
-      # baselines repo, per #1528). `[skip ci]` prevents self-retrigger. The PR
-      # path uses GITHUB_TOKEN — no deploy key needed. JSON-only changes skip
-      # test262 shards in the merge queue, so the PR lands in ~2 min.
+      # baselines repo, per #1528). MAIN_DEPLOY_KEY is the private half of the
+      # write-access deploy key registered on loopdive/js2; it is what the ruleset
+      # bypass relies on — do NOT swap this back to GITHUB_TOKEN/HTTPS or GH013
+      # returns (#1861).
       - name: Commit refreshed summary JSON to main repo
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}
         run: |
           set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # --- Set up the SSH deploy key for the main-repo push so it bypasses
+          # the ruleset's GH013 block. Mirrors the baselines-repo push step. ---
+          if [ -z "${MAIN_DEPLOY_KEY:-}" ]; then
+            echo "::error::MAIN_DEPLOY_KEY secret is empty/unset. The main-repo baseline push needs the private half of the loopdive/js2 'MAIN_DEPLOY_KEY' deploy key (GITHUB_TOKEN is blocked by ruleset GH013). Add it as an Actions secret named MAIN_DEPLOY_KEY."
+            exit 1
+          fi
+          eval "$(ssh-agent -s)"
+          echo "$MAIN_DEPLOY_KEY" | ssh-add -
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          # Add a dedicated SSH remote for the deploy-key push + its rebase fetch.
+          # The checkout's origin is HTTPS; we don't rewrite it (other steps may
+          # rely on it). github.repository is owner/name (e.g. loopdive/js2).
+          MAIN_SSH_REMOTE="git@github.com:${{ github.repository }}.git"
+          git remote remove deploykey 2>/dev/null || true
+          git remote add deploykey "$MAIN_SSH_REMOTE"
           PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.pass)")
           TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('benchmarks/results/test262-current.json','utf8')).summary.total)")
           # Sanity check: never promote a corrupt/empty report to main.
@@ -1135,23 +1173,25 @@ jobs:
           # push — without it, `git push HEAD:main` carried the unmodified
           # checkout and the committed baseline never moved. See #1861.)
           git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
-          # Push directly to main — the checkout uses persist-credentials so
-          # github-actions[bot] can write. Under heavy merge-queue throughput
-          # main advances between this job's checkout and the push, so a plain
-          # `git push origin HEAD:main` is rejected ("fetch first") and the
-          # refresh is silently dropped (#1861). Retry with fetch + rebase so
-          # the freshly-committed baseline lands on top of concurrent merges.
+          # Push directly to main over the SSH deploy-key remote — that auth path
+          # is in the ruleset's bypass_actors (DeployKey: always), so it is NOT
+          # rejected by GH013 the way a GITHUB_TOKEN push is. Under heavy
+          # merge-queue throughput main advances between this job's checkout and
+          # the push, so a plain push is rejected ("fetch first") and the refresh
+          # would be silently dropped (#1861). Retry with fetch + rebase --autostash
+          # so the freshly-committed baseline lands on top of concurrent merges.
+          # Both the fetch and the push go through the `deploykey` SSH remote.
           PUSHED=0
           for attempt in 1 2 3 4 5; do
-            git fetch origin main
-            if ! git rebase --autostash origin/main; then
+            git fetch deploykey main
+            if ! git rebase --autostash deploykey/main; then
               git rebase --abort || true
-              echo "rebase onto origin/main failed (attempt ${attempt}) — retrying"
+              echo "rebase onto deploykey/main failed (attempt ${attempt}) — retrying"
               sleep $((attempt * 5))
               continue
             fi
-            if git push origin HEAD:main; then
-              echo "Pushed baseline directly to main (${PASS}/${TOTAL} pass, attempt ${attempt})."
+            if git push deploykey HEAD:main; then
+              echo "Pushed baseline directly to main via deploy key (${PASS}/${TOTAL} pass, attempt ${attempt})."
               PUSHED=1
               break
             fi

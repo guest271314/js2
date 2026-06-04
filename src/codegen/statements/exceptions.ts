@@ -10,6 +10,7 @@ import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { addUnionImports } from "../index.js";
 import { addStringConstantGlobal, ensureExnTag } from "../registry/imports.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "../shared.js";
+import { walkChildren } from "../walk-instructions.js";
 import {
   compileExternrefArrayDestructuringDecl,
   compileExternrefObjectDestructuringDecl,
@@ -20,48 +21,63 @@ import { adjustRethrowDepth, restoreBlockScopedShadows, saveBlockScopedShadows }
 
 /**
  * Walk an Instr tree and bump the `depth` field of `br`/`br_if`/`br_table`
- * instructions by `delta` if their depth equals one of the values in
- * `outerDepths`. Used to retarget cloned finally-body branches when the
- * finally is inserted at a deeper position than where it was compiled
- * (e.g. inside an inner try/catch_all wrapping a catch body — see #993).
+ * instructions by `delta` when they target a label OUTSIDE the finally body.
+ * Used to retarget cloned finally-body branches when the finally is inserted
+ * at a deeper position than where it was compiled (e.g. inside an inner
+ * try/catch_all wrapping a catch body — see #993).
  *
- * Internal labels emitted DURING finally compilation (loops/switches inside
- * the finally) push their own depth values onto break/continue stacks; those
- * are NOT in `outerDepths`, so their `br` instructions are left untouched —
- * the relative depth from the br to its internal target is preserved when
- * the whole finally block moves with its labels intact.
+ * "Outside the finally body" is decided relative to the branch's own local
+ * nesting: as we descend into label-creating blocks WITHIN the finally clone
+ * (`block`/`loop`/`if`/`try`), we accumulate `localDepth`. A `br N` then
+ * targets an outer label iff `N - localDepth` is one of the original outer
+ * break/continue depths in `outerDepths`. Internal branches (to a loop/block
+ * defined inside the finally) have `N < localDepth`, so `N - localDepth` is
+ * below any outer depth and is correctly left untouched — the relative depth
+ * from the br to its internal target is preserved when the whole finally block
+ * moves with its labels intact.
  *
- * Note: br_table's `defaultDepth` and per-target depths are also bumped.
+ * #1858 C6: the previous implementation had two compounding defects that
+ * together miscompiled `try { … } finally { if (c) {…} else { break outer; } }`
+ * (and `continue outer`) into an INFINITE LOOP / invalid module:
+ *   1. it recursed via `(instr as any).body` / `(instr as any).elseBody`, but
+ *      the IR `if` op stores its arms in `then` / `else` (ir/types.ts:224) —
+ *      so a branch nested inside an `if` was never visited at all; and
+ *   2. it compared the branch's RAW depth against `outerDepths` with no local
+ *      nesting correction, so even a visited nested branch (e.g. `br 4` at one
+ *      `if` level deep, with `outerDepths = {3,1}`) failed the membership test
+ *      and was left un-bumped — landing on the wrong label (the `loop`, i.e.
+ *      "continue") instead of the outer `block` ("break").
+ * Routing descent through `walkChildren` fixes (1) (canonical `then`/`else`
+ * traversal); carrying `localDepth` fixes (2).
+ *
+ * Note: br_table's `defaultDepth` and per-target depths are corrected the same
+ * way (no br_table is emitted on the IR finally path today, but the handling is
+ * kept symmetric and defensive).
  */
-function bumpOuterBranchDepths(instrs: Instr[], outerDepths: Set<number>, delta: number): void {
+function bumpOuterBranchDepths(instrs: Instr[], outerDepths: Set<number>, delta: number, localDepth = 0): void {
   for (const instr of instrs) {
     const op = (instr as any).op as string;
     if (op === "br" || op === "br_if") {
       const d = (instr as any).depth as number;
-      if (outerDepths.has(d)) (instr as any).depth = d + delta;
+      if (outerDepths.has(d - localDepth)) (instr as any).depth = d + delta;
     } else if (op === "br_table") {
       const targets = (instr as any).targets as number[] | undefined;
       if (Array.isArray(targets)) {
         for (let i = 0; i < targets.length; i++) {
-          if (outerDepths.has(targets[i]!)) targets[i] = targets[i]! + delta;
+          if (outerDepths.has(targets[i]! - localDepth)) targets[i] = targets[i]! + delta;
         }
       }
       const dd = (instr as any).defaultDepth;
-      if (typeof dd === "number" && outerDepths.has(dd)) (instr as any).defaultDepth = dd + delta;
+      if (typeof dd === "number" && outerDepths.has(dd - localDepth)) (instr as any).defaultDepth = dd + delta;
     }
-    // Recurse into nested instr arrays (block/loop/if/try bodies)
-    const body = (instr as any).body as Instr[] | undefined;
-    if (Array.isArray(body)) bumpOuterBranchDepths(body, outerDepths, delta);
-    const elseBody = (instr as any).elseBody as Instr[] | undefined;
-    if (Array.isArray(elseBody)) bumpOuterBranchDepths(elseBody, outerDepths, delta);
-    const catches = (instr as any).catches as { body: Instr[] }[] | undefined;
-    if (Array.isArray(catches)) {
-      for (const c of catches) {
-        if (Array.isArray(c.body)) bumpOuterBranchDepths(c.body, outerDepths, delta);
-      }
-    }
-    const catchAll = (instr as any).catchAll as Instr[] | undefined;
-    if (Array.isArray(catchAll)) bumpOuterBranchDepths(catchAll, outerDepths, delta);
+    // Descend into every nested instr array (block/loop body, if then/else,
+    // catches, catchAll) via `walkChildren` so the field names stay in sync
+    // with the canonical traversal. Each of these container ops introduces
+    // exactly one Wasm label, so any branch found inside a child array is one
+    // level deeper than `instr` itself — hence `localDepth + 1`.
+    const isLabelOp = op === "block" || op === "loop" || op === "if" || op === "try";
+    const childLocalDepth = isLabelOp ? localDepth + 1 : localDepth;
+    walkChildren(instr, (children) => bumpOuterBranchDepths(children, outerDepths, delta, childLocalDepth));
   }
 }
 

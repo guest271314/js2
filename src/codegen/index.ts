@@ -1253,8 +1253,15 @@ export function generateModule(
       // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
         const isStrict = isStrictIrBuildError(err.message);
+        // #1858 C4: keep the leading "IR path failed for …" text intact — many
+        // bridge tests filter on `e.message.startsWith("IR path failed")` — but
+        // append a concise, greppable `[IR-FALLBACK]` tag so a regression in the
+        // fallback rate is visible in logs/CI even when the diagnostic is
+        // demoted to severity-"warning". Message-only: this does NOT change
+        // codegen or promote the fallback to an error (that ratchet is owned by
+        // STRICT_IR_BUILD_ERRORS / #1530).
         ctx.errors.push({
-          message: `IR path failed for ${err.func}: ${err.message}`,
+          message: `IR path failed for ${err.func}: ${err.message} [IR-FALLBACK]`,
           line: 0,
           column: 0,
           severity: isStrict ? "error" : "warning",

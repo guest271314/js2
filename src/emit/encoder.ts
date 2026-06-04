@@ -12,6 +12,14 @@ export class WasmEncoder {
 
   /** Unsigned LEB128 */
   u32(value: number): void {
+    // #1858 P0.6: this encoder is the last line of defense before bytes hit the
+    // wasm binary. Previously a value >= 2^32 silently truncated and a negative
+    // value (e.g. -1 from a stale/underflowed index) encoded as 0xFFFFFFFF —
+    // plausible-but-wrong bytes that produce an invalid module caught (if at
+    // all) only at instantiation. Fail loud on out-of-range input instead.
+    if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+      throw new RangeError(`u32 out of range: ${value}`);
+    }
     do {
       let b = value & 0x7f;
       value >>>= 7;

@@ -1,7 +1,7 @@
 ---
 id: 1858
 title: "Compiler correctness & production-hardening audit (fail-loud, validate, gate)"
-status: ready
+status: in-progress
 created: 2026-06-04
 updated: 2026-06-04
 priority: high
@@ -127,3 +127,92 @@ to `instantiate`, be hit by a test, *and* exceed 199 siblings before anyone noti
 ## Provenance
 Six-reviewer hostile audit, 2026-06-04. Reviewer transcripts summarized above;
 all line numbers verified against HEAD. Companion to #1561 (modular decomposition).
+
+## P0 implementation notes (2026-06-04, senior-dev)
+
+PR `issue-1858-p0-fixes` lands the **safe, proven** fail-loud quick wins
+(P0.2 / P0.4 / P0.5 / P0.6). **C1 (P0.1) is split out** — see the dedicated
+section below.
+
+### Landed in this PR
+
+- **P0.5 (C6) — try/finally else-branch break depth.** `src/codegen/statements/exceptions.ts`,
+  `bumpOuterBranchDepths`. The proven field-name bug (`(instr as any).elseBody`
+  vs the IR `if` op's `else`) turned out to be **necessary but not sufficient**.
+  Two compounding defects together miscompiled a `break/continue outer` reached
+  from a nested `if` inside a finally into an **infinite loop** (a far worse
+  symptom than the audit's "wrong jump target"):
+  1. The walk recursed via `.body`/`.elseBody`, so a branch nested in an `if`
+     was never visited (the `then` arm was missed too — `if` has no `.body`).
+  2. The membership test compared the branch's RAW depth against `outerBreakDepths`
+     with **no local-nesting correction**. A nested `br 4` (one `if` deep,
+     `outerBreakDepths = {3,1}`) failed `has(4)` and was left un-bumped at the
+     `cloneFinallyAtDepth(+1)` site (the inner catch_all that wraps a catch
+     body). It then landed on the `loop` label ("continue") instead of the
+     outer `block` ("break") → endless loop. Verified: `test(0)` on the repro
+     hangs on buggy code, returns `11000` (matching Node) with the fix.
+
+  Fix: route descent through `walkChildren` (canonical `then`/`else`/`catches`/
+  `catchAll` traversal) AND carry a `localDepth` counter incremented when
+  descending into a label-creating op (`block`/`loop`/`if`/`try`); the
+  membership test becomes `outerDepths.has(d - localDepth)`. This preserves the
+  existing "internal labels untouched" invariant (internal branches have
+  `d < localDepth` → `d - localDepth` below any outer depth). Value-asserting
+  regression test: `tests/issue-1858-finally-else-break.test.ts` (the CRITICAL
+  cases force the catch body to re-throw so the inner catch_all clone runs;
+  proven red — hang/timeout — without the fix).
+
+- **P0.2 (C9a) — `resolveImport` default no-op → throw.** `src/runtime.ts`
+  (~L9266) `default: return () => {};` → `throw new Error("Unhandled
+  ImportIntent type: …")`. **Regression-safety verified statically:** all 33
+  `ImportIntent` union members in `src/index.ts` are handled by an explicit
+  switch case (diff of union-types vs switch-cases is empty), so the default is
+  unreachable for any valid intent today — the throw only fires on a genuine
+  unhandled type (a bug). Expected CI impact: none. (If CI flips a test red, it
+  was relying on a no-op import = a latent bug; report, don't paper over.)
+
+- **P0.6 (u32 LEB128 garbage).** `src/emit/encoder.ts` `u32()` — added
+  `if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new
+  RangeError(...)` at the top. Pure additive guard; only fires on
+  already-broken input (negative/truncating/non-integer). Unit test:
+  `tests/issue-1858-u32-guard.test.ts` (round-trips the full valid range,
+  throws on `-1`, `>=2^32`, non-integer).
+
+- **P0.4 (C4) — IR fallback visibility.** `src/codegen/index.ts` (~L1254) —
+  appended a greppable ` [IR-FALLBACK]` tag to the per-fallback diagnostic
+  message. Kept the leading `"IR path failed for …"` text intact because many
+  bridge tests filter on `e.message.startsWith("IR path failed")` (issue-1182,
+  -1183, -1169*, etc.). Message-only; does NOT change codegen or promote the
+  fallback to an error (that ratchet stays owned by `STRICT_IR_BUILD_ERRORS` /
+  #1530).
+
+### C1 implementation notes (split out — follow-up)
+
+C1 (P0.1, `stack-balance.ts` `fixBranchType`, the drop-and-default keystone) is
+**deliberately NOT in this PR.** Reasons:
+
+1. **Cannot be landed without a measured test262 delta**, which only CI
+   produces. Per the issue's own risk-management guidance, C1 must be measured;
+   a blind change can trip the catastrophic-regression gate (≥200 pass→fail) by
+   converting today's silent-wrong "passing" entries into compile errors.
+2. **The correct fix (coerce-where-possible) needs non-trivial plumbing.** The
+   real box/unbox coercion logic lives in `coerceArgType` (`stack-balance.ts:1182`,
+   body at `:1235-1304`) and requires `boxNumberIdx` / `unboxNumberIdx` (the
+   `__box_number` / `__unbox_number` import indices). `fixBranchType`
+   (`stack-balance.ts:678`) and `fixBranch` (`:773`) currently have **no access
+   to those indices** — they receive only `(body, blockType, types, sigs)`. So
+   C1 requires threading the two indices from the whole-function fixup call site
+   down through `fixBranch` → `fixBranchType`, then replacing the lossy arms:
+   - `f64 → externref` (`:709-715`): `drop` + `ref.null.extern` → `call boxNumberIdx`
+   - `i32 → externref` (`:717-722`): `drop` + `ref.null.extern` → `f64.convert_i32_s` + `call boxNumberIdx`
+   - `externref → f64` (`:724-729`): `drop` + `f64.const 0` → `call unboxNumberIdx`
+   - `externref/ref → i32` (`:750-755`): `drop` + `i32.const 0` → `call unboxNumberIdx` + `i32.trunc_sat_f64_s`
+   - genuinely-impossible mismatches (e.g. struct `ref` → f64 with no box import,
+     `:737-742`): keep a fallback but make it a **`throw`** carrying the
+     function/op context instead of silent drop-and-zero.
+3. **Recommended rollout:** implement coerce-where-possible first (indices
+   non-null path), measure the CI test262 delta; only convert the
+   genuinely-impossible arms to `throw` once the coercion paths are confirmed
+   net-positive/neutral. If the throw causes a large pass→compile_error
+   regression, gate it behind a dev/test flag and surface (don't gate-prod)
+   until measured — mirror P0.3's "surface, don't gate-prod" approach.
