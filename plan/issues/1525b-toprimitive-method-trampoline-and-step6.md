@@ -1,7 +1,7 @@
 ---
 id: 1525b
 title: "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError"
-status: in-review
+status: ready
 created: 2026-05-27
 updated: 2026-06-02
 priority: medium
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: to-primitive, abstract-operations
 goal: spec-completeness
-sprint: Backlog
+sprint: 59
 related: [1525, 1602, 1669, 1130, 983, 1253]
 test262_fail: 142
 ---

@@ -128,7 +128,9 @@
     "dispatch:queue": "node scripts/dispatch-channel.mjs queue",
     "dispatch:request-claude": "node scripts/dispatch-channel.mjs request-claude",
     "dispatch:inbox": "node scripts/dispatch-channel.mjs inbox",
-    "claude:symphony-channel": "node scripts/claude-symphony-channel.mjs"
+    "claude:symphony-channel": "node scripts/claude-symphony-channel.mjs",
+    "check:issue-ids": "node scripts/check-issue-ids.mjs",
+    "check:issue-ids:staged": "node scripts/check-issue-ids.mjs --staged"
   },
   "dependencies": {
     "typescript": "^5.7"

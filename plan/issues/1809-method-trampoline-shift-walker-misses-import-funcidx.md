@@ -114,6 +114,51 @@ Regression: `tests/issue-1340.test.ts` + `tests/issue-1394.test.ts`
 (cached-closure-identity) — 11/11 pass. `tests/equivalence/` suite — no new
 failures attributable to this change.
 
+## Not the same as #1669
+
+#1669 (done) was trampoline **argument coercion** producing *invalid Wasm*
+inside `__obj_meth_tramp_*`. This is the **late-import index-shift walker**
+(the `addUnionImports` machinery in `src/codegen/index.ts` /
+`src/codegen/expressions/late-imports.ts`) failing to update a trampoline
+funcIdx that targets an import — a different stage and a different failure mode
+(hard assertion, not invalid Wasm).
+
+## Affected surface (157, top dirs)
+
+| Count | Path prefix |
+|------:|-------------|
+| 33 | `built-ins/Array/prototype/*` (esp. resizable-buffer-{grow,shrink}-mid-iteration) |
+| 26 | `language/statements/class/*` |
+| 24 | `language/expressions/class/*` |
+| 20 | `language/statements/for-await-of/*` |
+| 12 | `built-ins/TypedArray/prototype/*` |
+
+Representative samples:
+- `built-ins/Array/prototype/map/resizable-buffer-grow-mid-iteration.js`
+- `built-ins/Array/prototype/reduceRight/resizable-buffer-shrink-mid-iteration.js`
+- `language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-obj-prop-id.js`
+
+The common trigger is a method trampoline whose `methodFuncIdx` lands on a host
+import after late-import insertion shifts indices.
+
+## Where to look
+
+- `src/codegen/index.ts` — `addUnionImports` and the `pendingMethodTrampolines`
+  shift walker (the throw site).
+- `src/codegen/expressions/late-imports.ts` — late-import insertion / index
+  rewrite.
+- The walker must also rewrite (or correctly leave) `methodFuncIdx` entries that
+  resolve to imports, instead of asserting they were missed.
+
+## Acceptance criteria
+
+- [ ] The shift walker handles method-trampoline `methodFuncIdx` values that
+      point at imports (rewrite or correctly skip — no spurious throw).
+- [ ] The 157 affected tests no longer hit
+      `pendingMethodTrampolines … shift walker missed this`.
+- [ ] No new invalid-Wasm regressions in the object-method trampoline path
+      (guard against re-introducing #1669).
+
 ## Notes
 
 Surfaced by `/harvest-errors` 2026-06-03. The harvest's default-lane
