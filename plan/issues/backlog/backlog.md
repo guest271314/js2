@@ -205,3 +205,10 @@ defense-in-depth, and cleanup:
 - [#1847](../1847-forof-rollback-localmap-not-restored.md) — for-of tentative rollback doesn't restore `fctx.localMap` (robustness) — low, low, **backlog**
 - [#1848](../1848-dead-code-sweep.md) — dead-code sweep: identical branches, unused locals/params, obsolete scaffolding — low, low, **backlog**
 - [#1849](../1849-duplicate-logic-refactor.md) — refactor diverged copy-paste (super dispatch, closure drainers, `resolveVec`, `__extern_has`, typed-default) — low, medium, **backlog**
+
+### Real-world test coverage findings (2026-06-04)
+
+Found while adding `tests/real-world-*.test.ts` (real-world code patterns
+test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
+
+- [#6407](../6407-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **ready (backlog)**

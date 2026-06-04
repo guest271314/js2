@@ -719,7 +719,23 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // in a variable and later called via call_ref.
   // Only wrap user-defined functions (skip internal helpers and class constructors).
   const funcRefIdx = ctx.funcMap.get(name);
-  if (funcRefIdx !== undefined && !name.startsWith("__") && !ctx.classSet.has(name)) {
+  // (#1809) Only wrap DEFINED functions (index >= numImportFuncs) in a funcref
+  // closure. A host import (e.g. the ambient DOM global `resizeTo`/`resizeBy`
+  // from lib.dom.d.ts) has no in-module body to forward to via `ref.func`, so
+  // building a cached/per-site closure trampoline around its import index is
+  // never correct. When the funcMap entry resolves to an import, the captured
+  // `methodFuncIdx` later trips the `finalizeMethodTrampolines` guard
+  // ("methodFuncIdx N points at import …— shift walker missed this") as a hard
+  // compile error (157 default-lane tests, #1525b-regression-tagged). This is
+  // not a shift-walker miss — the index was an import from the start. Skip the
+  // closure path for imports so the identifier falls through to the
+  // type-appropriate graceful default below (valid Wasm, no spurious throw).
+  if (
+    funcRefIdx !== undefined &&
+    funcRefIdx >= ctx.numImportFuncs &&
+    !name.startsWith("__") &&
+    !ctx.classSet.has(name)
+  ) {
     // Check if there's already a closure registered (e.g. from closureMap)
     const existingClosure = ctx.closureMap.get(name);
     if (existingClosure) {
