@@ -1008,7 +1008,35 @@ jobs:
             echo "No baseline changes to push."
           else
             git commit -m "chore(test262): refresh baselines — ${PASS}/${TOTAL} host, ${STANDALONE_PASS}/${STANDALONE_TOTAL} standalone (${{ github.sha }})"
-            git push
+            # The baselines repo can advance under us when two promote-baseline
+            # runs (from concurrent main pushes) race. Retry with
+            # fetch + rebase so the refreshed baseline lands on top of the
+            # concurrent run instead of being dropped (#1861). The clone is
+            # shallow (--depth=1); --unshallow on first fetch so the rebase has
+            # a merge base.
+            BR=$(git rev-parse --abbrev-ref HEAD)
+            BASELINE_PUSHED=0
+            for attempt in 1 2 3 4 5; do
+              git fetch --unshallow origin "$BR" 2>/dev/null \
+                || git fetch origin "$BR"
+              if ! git rebase --autostash "origin/$BR"; then
+                git rebase --abort || true
+                echo "baselines rebase failed (attempt ${attempt}) — retrying"
+                sleep $((attempt * 5))
+                continue
+              fi
+              if git push origin "HEAD:$BR"; then
+                echo "Pushed baselines (attempt ${attempt})."
+                BASELINE_PUSHED=1
+                break
+              fi
+              echo "baselines push race lost (attempt ${attempt}) — refetching and retrying"
+              sleep $((attempt * 5))
+            done
+            if [ "$BASELINE_PUSHED" != "1" ]; then
+              echo "::error::Failed to push baselines after 5 attempts (persistent, not a transient race)."
+              exit 1
+            fi
           fi
 
       # RESTORED (2026-05-25): commit the small summary JSON files back to main.
@@ -1094,11 +1122,39 @@ jobs:
             echo "Only volatile test262 report metadata changed — skipping main commit."
             exit 0
           fi
+          # Commit the staged summary JSON. The [skip ci] trailer prevents the
+          # push from re-triggering the shard matrix. (This commit was dropped
+          # by d630e3a04 when the step switched from the PR flow to a direct
+          # push — without it, `git push HEAD:main` carried the unmodified
+          # checkout and the committed baseline never moved. See #1861.)
+          git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
           # Push directly to main — the checkout uses persist-credentials so
-          # github-actions[bot] can write. The [skip ci] trailer prevents the
-          # push from re-triggering the shard matrix.
-          git push origin HEAD:main
-          echo "Pushed baseline directly to main (${PASS}/${TOTAL} pass)."
+          # github-actions[bot] can write. Under heavy merge-queue throughput
+          # main advances between this job's checkout and the push, so a plain
+          # `git push origin HEAD:main` is rejected ("fetch first") and the
+          # refresh is silently dropped (#1861). Retry with fetch + rebase so
+          # the freshly-committed baseline lands on top of concurrent merges.
+          PUSHED=0
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase --autostash origin/main; then
+              git rebase --abort || true
+              echo "rebase onto origin/main failed (attempt ${attempt}) — retrying"
+              sleep $((attempt * 5))
+              continue
+            fi
+            if git push origin HEAD:main; then
+              echo "Pushed baseline directly to main (${PASS}/${TOTAL} pass, attempt ${attempt})."
+              PUSHED=1
+              break
+            fi
+            echo "push race lost (attempt ${attempt}) — refetching and retrying"
+            sleep $((attempt * 5))
+          done
+          if [ "$PUSHED" != "1" ]; then
+            echo "::error::Failed to push refreshed baseline to main after 5 attempts (persistent, not a transient race)."
+            exit 1
+          fi
 
       - name: Audit forced baseline refresh
         if: github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES'
