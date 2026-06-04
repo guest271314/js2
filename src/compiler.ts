@@ -725,7 +725,7 @@ export function compileSourceSync(
   // Step 2b: Apply C ABI transformations if requested
   let cHeader: string | undefined;
   if (options.abi === "c" && options.target === "linear") {
-    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module");
+    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module", ast);
     cHeader = cabiResult.cHeader;
   }
 
