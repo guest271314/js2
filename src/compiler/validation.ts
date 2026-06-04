@@ -663,6 +663,18 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
       checkTDZInStatements(stmts);
     }
 
+    // Check references to a switch-case lexical binding outside the switch (#1805).
+    // ES spec: the LexicallyDeclaredNames of a CaseBlock are scoped to that block.
+    // `switch (0) { default: const x = 1; } x;` therefore throws a runtime
+    // ReferenceError on `x` — the binding does not exist in the enclosing scope.
+    // TS would flag this (TS2304 "Cannot find name 'x'") but the test262 runner
+    // compiles with skipSemanticDiagnostics, so we re-detect it syntactically and
+    // emit a warning (the runtime-negative path treats any warning as the expected
+    // error). We don't descend into nested functions; var-hoisting is unaffected.
+    if (ts.isSourceFile(node) || ts.isBlock(node)) {
+      checkSwitchLexicalLeak(node.statements);
+    }
+
     // Check 'with' statement — SyntaxError in strict mode (all modules are strict)
     if (ts.isWithStatement(node) && isStrictMode(node)) {
       addError(node, "Strict mode code may not include a with statement");
@@ -2453,6 +2465,161 @@ function detectEarlyErrors(sourceFile: ts.SourceFile): CompileError[] {
           // Check var/lex conflict
           if (varNames.has(name)) {
             addError(stmt.name, `Cannot redeclare block-scoped variable '${name}'`);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Collect the lexically-declared names of a switch CaseBlock (#1805).
+   * Per ES spec, the LexicallyDeclaredNames of a CaseBlock are the let/const,
+   * class, and function declarations directly inside its case/default clauses.
+   * These names are scoped to the switch block and must not leak to the
+   * enclosing scope. We do not descend into nested blocks/functions — only the
+   * top level of each clause contributes to the CaseBlock's lexical scope.
+   */
+  function collectSwitchClauseLexicalNames(caseBlock: ts.CaseBlock): Set<string> {
+    const names = new Set<string>();
+    for (const clause of caseBlock.clauses) {
+      for (const stmt of clause.statements) {
+        if (ts.isVariableStatement(stmt)) {
+          const flags = stmt.declarationList.flags;
+          if ((flags & ts.NodeFlags.Let) !== 0 || (flags & ts.NodeFlags.Const) !== 0) {
+            for (const decl of stmt.declarationList.declarations) {
+              if (ts.isIdentifier(decl.name)) names.add(decl.name.text);
+            }
+          }
+        } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+          names.add(stmt.name.text);
+        } else if (ts.isClassDeclaration(stmt) && stmt.name) {
+          names.add(stmt.name.text);
+        }
+      }
+    }
+    return names;
+  }
+
+  /**
+   * Collect names bound in the enclosing statement list (var/let/const,
+   * function, class, import). Used to decide whether a reference to a
+   * switch-scoped name is actually shadowed by an outer binding (in which
+   * case the reference is legal and must not be flagged).
+   */
+  function collectStatementListBoundNames(stmts: ts.NodeArray<ts.Statement>): Set<string> {
+    const names = new Set<string>();
+    const addBindingName = (name: ts.BindingName): void => {
+      if (ts.isIdentifier(name)) {
+        names.add(name.text);
+      } else {
+        // Destructuring pattern — collect each bound identifier.
+        for (const el of name.elements) {
+          if (ts.isBindingElement(el)) addBindingName(el.name);
+        }
+      }
+    };
+    for (const stmt of stmts) {
+      if (ts.isVariableStatement(stmt)) {
+        for (const decl of stmt.declarationList.declarations) addBindingName(decl.name);
+      } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+        names.add(stmt.name.text);
+      } else if (ts.isClassDeclaration(stmt) && stmt.name) {
+        names.add(stmt.name.text);
+      } else if (ts.isImportDeclaration(stmt) && stmt.importClause) {
+        const ic = stmt.importClause;
+        if (ic.name) names.add(ic.name.text);
+        if (ic.namedBindings) {
+          if (ts.isNamespaceImport(ic.namedBindings)) {
+            names.add(ic.namedBindings.name.text);
+          } else {
+            for (const el of ic.namedBindings.elements) names.add(el.name.text);
+          }
+        }
+      }
+    }
+    return names;
+  }
+
+  /**
+   * Detect a reference to a name within `node` (and its descendants),
+   * not crossing nested function/class scopes. Returns the first matching
+   * identifier reference, or undefined.
+   */
+  function findNameReference(node: ts.Node, name: string): ts.Identifier | undefined {
+    let found: ts.Identifier | undefined;
+    const walk = (n: ts.Node): void => {
+      if (found) return;
+      // Don't descend into nested function/class scopes — they create their
+      // own binding environments and may legitimately shadow or re-introduce
+      // the name. (A closure capturing an out-of-scope name is itself an
+      // error, but we keep this check narrow to avoid false positives.)
+      if (
+        ts.isFunctionDeclaration(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isArrowFunction(n) ||
+        ts.isClassDeclaration(n) ||
+        ts.isClassExpression(n) ||
+        ts.isMethodDeclaration(n) ||
+        ts.isConstructorDeclaration(n) ||
+        ts.isGetAccessorDeclaration(n) ||
+        ts.isSetAccessorDeclaration(n)
+      ) {
+        return;
+      }
+      if (ts.isIdentifier(n) && n.text === name) {
+        const parent = n.parent;
+        // Skip property names (obj.x), property-assignment keys ({ x: ... }),
+        // and binding positions — only count value references.
+        if (parent && ts.isPropertyAccessExpression(parent) && parent.name === n) return;
+        if (parent && ts.isPropertyAssignment(parent) && parent.name === n) return;
+        if (parent && ts.isQualifiedName(parent) && parent.right === n) return;
+        if (parent && ts.isBindingElement(parent) && parent.propertyName === n) return;
+        found = n;
+        return;
+      }
+      forEachChild(n, walk);
+    };
+    walk(node);
+    return found;
+  }
+
+  /**
+   * Flag references to a switch CaseBlock's lexically-declared names that
+   * appear in sibling statements *after* the switch in the same statement
+   * list (#1805). Such a reference resolves to no runtime binding and throws
+   * a ReferenceError. Emitted as a warning so compilation continues; the
+   * test262 runtime-negative path treats any warning as the expected error.
+   */
+  function checkSwitchLexicalLeak(stmts: ts.NodeArray<ts.Statement>): void {
+    // Find switch statements that are direct children of this statement list.
+    const switchPositions: { index: number; names: Set<string> }[] = [];
+    for (let i = 0; i < stmts.length; i++) {
+      const stmt = stmts[i]!;
+      if (ts.isSwitchStatement(stmt)) {
+        const names = collectSwitchClauseLexicalNames(stmt.caseBlock);
+        if (names.size > 0) switchPositions.push({ index: i, names });
+      }
+    }
+    if (switchPositions.length === 0) return;
+
+    const outerNames = collectStatementListBoundNames(stmts);
+
+    for (const { index, names } of switchPositions) {
+      for (const name of names) {
+        // If the enclosing scope also binds this name, the reference is legal.
+        if (outerNames.has(name)) continue;
+        // Scan statements after the switch for a reference to the leaked name.
+        for (let j = index + 1; j < stmts.length; j++) {
+          const ref = findNameReference(stmts[j]!, name);
+          if (ref) {
+            const p = pos(ref);
+            errors.push({
+              message: `'${name}' is not defined — switch-case lexical binding does not leak out of the switch block`,
+              line: p.line,
+              column: p.column,
+              severity: "warning",
+            });
+            break;
           }
         }
       }
