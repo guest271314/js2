@@ -187,8 +187,17 @@ function tryFlattenBinaryChain(
       rightType = { kind: "f64" };
     }
 
-    // i32 path: fast mode or native type annotations
-    if ((ctx.fast || allNativeI32) && resultType.kind === "i32" && rightType.kind === "i32") {
+    // i32 path: fast mode or native type annotations.
+    // #1817: `>>>` must NOT use compileI32BinaryOp here — its bare i32 result
+    // (`i32.shr_u`) is later widened with the signed `f64.convert_i32_s`,
+    // dropping ToUint32's unsignedness. compileNumericBinaryOp routes `>>>`
+    // through compileBitwiseBinaryOp, which uses `f64.convert_i32_u`.
+    if (
+      (ctx.fast || allNativeI32) &&
+      op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
+      resultType.kind === "i32" &&
+      rightType.kind === "i32"
+    ) {
       resultType = compileI32BinaryOp(ctx, fctx, op, expr);
     } else {
       resultType = compileNumericBinaryOp(ctx, fctx, op, expr);
@@ -1331,7 +1340,20 @@ export function compileBinaryExpression(
     wrappedInToInt32 && isI32PureExpr(expr.left) && isI32PureExpr(expr.right) && outerMulI32Safe;
   // Bitwise op with i32-pure operands: emit native i32 op directly,
   // skipping the f64-ToInt32 round-trip in compileBitwiseBinaryOp.
-  const bitwiseI32 = isBitwiseOpKind(op) && isI32PureExpr(expr.left) && isI32PureExpr(expr.right);
+  //
+  // #1817: `>>>` is excluded as the *result* op. compileI32BinaryOp returns a
+  // bare i32 for `>>>` (`i32.shr_u`), which the consumer widens to f64 with the
+  // signed `f64.convert_i32_s` — wrong, since ToUint32 makes `>>>` unsigned
+  // (a high-bit result would read back negative). Routing `>>>` through
+  // compileBitwiseBinaryOp instead uses `f64.convert_i32_u`. `>>>` stays a
+  // valid i32-pure *leaf* (isI32PureExpr) so nested chains like `(x >>> 3) & m`
+  // keep the fast path — there the intermediate i32 bit pattern feeds another
+  // bitwise op and is never signed-widened.
+  const bitwiseI32 =
+    isBitwiseOpKind(op) &&
+    op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
+    isI32PureExpr(expr.left) &&
+    isI32PureExpr(expr.right);
   const numericHint: ValType | undefined = isNumericOp
     ? {
         kind:
