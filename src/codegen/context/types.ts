@@ -811,6 +811,18 @@ export interface CodegenContext {
      * `this`-drop behaviour.
      */
     noThisParam?: boolean;
+    /**
+     * (#1809) True when `methodFuncIdx` already pointed at a host IMPORT at
+     * registration time — e.g. a DOM/host global (`resizeTo`, `scrollBy`) or
+     * any `declare`d function used as a first-class value, where the trampoline
+     * legitimately forwards into an imported function. The late-import shift
+     * walker keeps import indices stable (new imports append at the end, so it
+     * only bumps indices `>= importsBefore` and leaves existing import targets
+     * untouched), so an import target at finalize is EXPECTED here, not a missed
+     * shift. The #1525b guard must only fire when a target that was a DEFINED
+     * function at registration resolves to an import at finalize.
+     */
+    methodTargetsImport?: boolean;
   }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
