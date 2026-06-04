@@ -973,6 +973,74 @@ export function compileBinaryExpression(
         op === ts.SyntaxKind.GreaterThanToken ||
         op === ts.SyntaxKind.GreaterThanEqualsToken;
 
+      // #1827 — BigInt × Number loose (in)equality must use EXACT
+      // mathematical-value equality, not an f64 collapse. `f64.convert_i64_s`
+      // rounds a BigInt outside ±2^53 (e.g. 9007199254740993n → ...992.0), so
+      // `f64.eq` would wrongly report `9007199254740993n == 9007199254740992`
+      // as true. Spec §7.2.13: BigInt x == Number y iff y is finite & integral
+      // & ℝ(x) === ℝ(y). We compile the Number to f64 and the BigInt to i64,
+      // then test: y is integral (f64.nearest(y) == y, which also rejects NaN/±∞)
+      // AND y in [-2^63, 2^63) AND i64.trunc_sat_f64_s(y) == bigint.
+      const numberIsExactlyComparable =
+        (isLooseEq || isLooseNeq) &&
+        ((leftIsBigInt && isNumberType(rightTsType)) || (rightIsBigInt && isNumberType(leftTsType)));
+      if (numberIsExactlyComparable) {
+        // Compile the BigInt operand → i64, the Number operand → f64.
+        const bigintExpr = leftIsBigInt ? expr.left : expr.right;
+        const numberExpr = leftIsBigInt ? expr.right : expr.left;
+        // Evaluate left-to-right for side effects; store both in temps.
+        const bi = allocTempLocal(fctx, { kind: "i64" });
+        const nf = allocTempLocal(fctx, { kind: "f64" });
+        if (leftIsBigInt) {
+          const lt = compileExpression(ctx, fctx, bigintExpr, { kind: "i64" });
+          if (!lt) return null;
+          if (lt.kind !== "i64") coerceType(ctx, fctx, lt, { kind: "i64" });
+          fctx.body.push({ op: "local.set", index: bi });
+          const rt = compileExpression(ctx, fctx, numberExpr, { kind: "f64" });
+          if (!rt) return null;
+          if (rt.kind !== "f64") coerceType(ctx, fctx, rt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: nf });
+        } else {
+          const lt = compileExpression(ctx, fctx, numberExpr, { kind: "f64" });
+          if (!lt) return null;
+          if (lt.kind !== "f64") coerceType(ctx, fctx, lt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: nf });
+          const rt = compileExpression(ctx, fctx, bigintExpr, { kind: "i64" });
+          if (!rt) return null;
+          if (rt.kind !== "i64") coerceType(ctx, fctx, rt, { kind: "i64" });
+          fctx.body.push({ op: "local.set", index: bi });
+        }
+        // eq = (nearest(nf) == nf) && (nf >= -2^63) && (nf < 2^63) &&
+        //      (trunc_sat_f64_s(nf) == bi)
+        // integral & finite check (NaN/±Inf fail nearest==self or the range test)
+        fctx.body.push({ op: "local.get", index: nf });
+        fctx.body.push({ op: "f64.nearest" } as unknown as Instr);
+        fctx.body.push({ op: "local.get", index: nf });
+        fctx.body.push({ op: "f64.eq" }); // integral?
+        // range low: nf >= -9223372036854775808
+        fctx.body.push({ op: "local.get", index: nf });
+        fctx.body.push({ op: "f64.const", value: -9223372036854775808 });
+        fctx.body.push({ op: "f64.ge" });
+        fctx.body.push({ op: "i32.and" });
+        // range high: nf < 9223372036854775808
+        fctx.body.push({ op: "local.get", index: nf });
+        fctx.body.push({ op: "f64.const", value: 9223372036854775808 });
+        fctx.body.push({ op: "f64.lt" });
+        fctx.body.push({ op: "i32.and" });
+        // value: trunc_sat_f64_s(nf) == bi
+        fctx.body.push({ op: "local.get", index: nf });
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
+        fctx.body.push({ op: "local.get", index: bi });
+        fctx.body.push({ op: "i64.eq" });
+        fctx.body.push({ op: "i32.and" });
+        releaseTempLocal(fctx, bi);
+        releaseTempLocal(fctx, nf);
+        if (isLooseNeq) {
+          fctx.body.push({ op: "i32.eqz" });
+        }
+        return { kind: "i32" };
+      }
+
       if (isLooseEq || isLooseNeq || isComparison) {
         const leftIsStr = isStringType(leftTsType);
         const rightIsStr = isStringType(rightTsType);
