@@ -126,8 +126,57 @@ back onto `GITHUB_TOKEN`, re-introducing the GH013 block.
 - The baselines-repo push step and all required-check / regression-gate logic
   are untouched.
 
-**Operational dependency:** `MAIN_DEPLOY_KEY` must exist as an Actions secret
-holding the **private** half of the write-access deploy key registered on
-`loopdive/js2` (the deploy key titled `MAIN_DEPLOY_KEY`, id `152733867`,
-`read_only: false`, already exists on the repo). The step fails fast with an
-explicit error if the secret is empty/unset.
+**Operational dependency:** `MAIN_DEPLOY_KEY` must exist as a secret holding the
+**private** half of the write-access deploy key registered on `loopdive/js2`
+(the deploy key titled `MAIN_DEPLOY_KEY`, id `152733867`, `read_only: false`,
+already exists on the repo). The step fails fast with an explicit error if the
+secret is empty/unset. (Later hardened to an **environment secret** in a
+`baseline-promote` GitHub Environment restricted to branch `main` — see the
+`environment:` key on the job; PR/fork workflows can't read it.)
+
+## Follow-up 2 (2026-06-04) — push loop: rebase-on-dirty-tree → clean re-anchor
+
+With auth fixed (deploy key works; GH013 and `Permission denied (publickey)`
+both gone on the live run), the push then failed at the **rebase**, on every
+attempt:
+
+```
+error: cannot rebase: You have unstaged changes.
+fatal: no rebase in progress
+rebase onto deploykey/main failed (attempt 1..5) — retrying
+##[error]Failed to push refreshed baseline to main after 5 attempts (persistent, not a transient race).
+```
+
+**Root cause:** `git rebase --autostash deploykey/main` refuses to start because
+the working tree is dirty in a way `--autostash` does **not** cover.
+`--autostash` only stashes **tracked, top-level** changes; it does not stash
+**submodule** state or **untracked** files. The sharded run leaves the `test262`
+git submodule dirty (modified pointer/worktree), so rebase aborts on "unstaged
+changes" and the loop never reaches the push.
+
+**Fix (Option A — avoid rebase + the dirty tree entirely).** In the
+*"Commit refreshed summary JSON to main repo"* step the push loop is restructured
+to apply **only** the small baseline files onto a **clean tip of main** on every
+attempt:
+
+1. Log `git status --porcelain` + `git submodule status` (a `::group::`
+   diagnostic) right before the loop so the actual dirt is visible in the run.
+2. `git config submodule.test262.ignore all` + `git config diff.ignoreSubmodules
+   dirty` so the dirty submodule can't block subsequent git operations.
+3. Snapshot the staged promote files' **contents** to a temp dir.
+4. Per attempt: `git fetch deploykey main` → `git checkout -f -B _promote_tmp
+   deploykey/main` (a **clean tip, no rebase**; `-f` discards the dirty tracked
+   working tree) → re-copy the snapshot back, `git add -f` → `git commit
+   … [skip ci]` → `git push deploykey HEAD:main`. On a "fetch first"
+   race-loss, the next iteration re-anchors on the freshly-fetched tip, so a
+   concurrent merge-queue advance is preserved, not clobbered.
+
+This sidesteps **both** the dirty-submodule rebase failure **and** the
+shallow-clone missing-merge-base problem. Auth (deploy key + `MAIN_DEPLOY_KEY`),
+the `deploykey` SSH remote, the `[skip ci]` commit, and the `baseline-promote`
+environment gate are all unchanged; the GITHUB_TOKEN/GH013 path is not
+re-introduced.
+
+Validated locally with a throwaway repo that reproduces a divergent `main` + a
+dirty `test262` submodule: Option A pushed the fresh baseline on attempt 1 and
+preserved the concurrent commit that landed on `main` mid-run.
