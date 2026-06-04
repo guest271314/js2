@@ -3178,12 +3178,16 @@ function compileCallExpression(
       ctx.wasiProcExitIdx >= 0
     ) {
       if (expr.arguments.length >= 1) {
+        // #1801: `proc_exit` takes an i32 exit code. Compiling the argument
+        // with expected type `{ kind: "i32" }` already delivers an i32 on the
+        // stack (a numeric literal lowers directly to `i32.const N`, and
+        // f64-valued expressions are truncated by coerceType). The previous
+        // code *also* pushed `i32.trunc_sat_f64_s`, which expects an f64
+        // operand — so the i32 already on the stack made the module fail
+        // `WebAssembly.validate()` ("i32.trunc_sat_f64_s expected type f64,
+        // found ... i32"). The expected-type compile and the truncation are
+        // mutually exclusive; keep the former, drop the latter.
         compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "i32" });
-        // The expression might produce f64 — truncate to i32
-        const argType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-        if (isNumberType(argType)) {
-          fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-        }
       } else {
         fctx.body.push({ op: "i32.const", value: 0 } as Instr);
       }
