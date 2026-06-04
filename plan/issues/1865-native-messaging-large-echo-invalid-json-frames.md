@@ -1,5 +1,5 @@
 ---
-id: 1861
+id: 1865
 title: "Native Messaging host: large-message echo emits invalid-JSON frames Chrome rejects (#389)"
 status: done
 sprint: Backlog
@@ -15,7 +15,7 @@ language_feature: native-messaging
 goal: correctness
 related: [1530, 1651, 1723]
 ---
-# #1861 — Native Messaging large-message echo emits invalid-JSON frames
+# #1865 — Native Messaging large-message echo emits invalid-JSON frames
 
 **Source:** GitHub issue #389 (guest271314), field-tested 64 MiB round trip.
 

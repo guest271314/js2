@@ -12,7 +12,7 @@ task_type: performance
 area: codegen
 language_feature: typed-arrays
 goal: performance
-related: [1861, 389]
+related: [1865, 389]
 ---
 # #1863 — Uint8Array large-buffer ops are slow vs other runtimes
 

@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 language_feature: js-input
 goal: correctness
-related: [1861, 1864]
+related: [1865, 1864]
 ---
 # #1862 — JS-compiled host emits undefined `env::__extern_get` import
 
