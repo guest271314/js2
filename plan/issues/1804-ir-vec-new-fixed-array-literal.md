@@ -1,5 +1,5 @@
 ---
-id: 6406
+id: 1804
 title: "feat(IR): vec.new_fixed — lower fixed-length array literals through the IR path"
 status: ready
 created: 2026-06-03
@@ -13,7 +13,7 @@ goal: object-representation
 parent: 1530
 related: [1131, 1169o, 1713, 1714, 1376, 1530]
 ---
-# #6406 — IR `vec.new_fixed` array-literal construction
+# #1804 — IR `vec.new_fixed` array-literal construction
 
 ## Problem
 
@@ -216,9 +216,9 @@ lower vec for vec.new_fixed (${func.name})` if null, then
 ### 7. Adoption doc — `plan/log/ir-adoption.md`
 
 Update the `ArrayLiteralExpression` row (line 77): change the note to
-`Slice 12 + #6406 — fixed-length same-typed literals constructed via
+`Slice 12 + #1804 — fixed-length same-typed literals constructed via
 vec.new_fixed. Spread/sparse/mixed-type partial.` and update the tracking
-issue column to reference #6406.
+issue column to reference #1804.
 
 ### 8. IR fallback baseline ratchet
 

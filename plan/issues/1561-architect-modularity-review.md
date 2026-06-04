@@ -3,7 +3,7 @@ id: 1561
 title: "Architect review: decompose compiler into smaller, reviewable modules"
 status: ready
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-06-03
 priority: high
 feasibility: medium
 reasoning_effort: max
@@ -130,6 +130,389 @@ where they add clarity. The output should be long and thorough — this is a
 - [ ] Domain map covers all 124 source files
 - [ ] "What not to split" section prevents unnecessary churn
 - [ ] No code changes — analysis only, written to this issue file
+
+---
+
+## Refresh 2026-06-03 — current-HEAD decomposition plan
+
+> **Why this refresh exists.** The original analysis (`## Architect Analysis`, below,
+> 2026-05-21) is sound in *shape* but its line numbers are stale by thousands of
+> lines, and — critically — **zero of its 28 proposed extractions have shipped.**
+> The hot files have grown ~30 % (one by 87 %) in the two weeks since. This section
+> re-measures every file against current HEAD, re-derives the two worst files'
+> inventories with verified line numbers, merges the #1561 + #1172 backlogs into one
+> deduplicated priority list, and recommends a "stop-the-bleeding" first wave. All
+> line numbers below were verified with `grep -n` / `Read` against the working tree
+> at the time of writing; function names are quoted verbatim. The original analysis
+> is retained unaltered below as history.
+
+### R1. Delta table — every file currently > 2,000 LoC
+
+Measured with `find src -name '*.ts' | xargs wc -l | sort -rn`. "May-21 LoC" is from
+the original §2/header table (`n/a` where the file was not separately listed then).
+"Getting worse" = grew materially since 2026-05-21.
+
+| File | May-21 LoC | 2026-06-03 LoC | Δ | Worse? |
+|------|-----------:|---------------:|---:|:------:|
+| `src/codegen/expressions/calls.ts` | 8,502 | **10,914** | +28 % | 🔴 yes |
+| `src/codegen/index.ts` | 8,313 | **10,888** | +31 % | 🔴 yes |
+| `src/runtime.ts` | 5,335 | **9,962** | **+87 %** | 🔴🔴 worst |
+| `src/codegen/array-methods.ts` | 5,908 | **6,479** | +10 % | 🟡 yes |
+| `src/codegen/expressions/assignment.ts` | 5,143 | **5,615** | +9 % | 🟡 yes |
+| `src/codegen/native-strings.ts` | 3,361 | **4,831** | +44 % | 🔴 yes |
+| `src/codegen-linear/index.ts` | 4,813 | **4,822** | +0 % | ⚪ flat |
+| `src/ir/from-ast.ts` | 4,227 | **4,251** | +1 % | ⚪ flat |
+| `src/codegen/statements/loops.ts` | 3,212 | **4,024** | +25 % | 🟡 yes |
+| `src/codegen/declarations.ts` | 3,447 | **4,003** | +16 % | 🟡 yes |
+| `src/codegen/closures.ts` | 3,171 | **3,644** | +15 % | 🟡 yes |
+| `src/codegen/property-access.ts` | 3,013 | **3,632** | +21 % | 🟡 yes |
+| `src/codegen/expressions/new-super.ts` | 2,675 | **3,573** | +34 % | 🔴 yes |
+| `src/compiler/validation.ts` | 3,373 | **3,480** | +3 % | ⚪ flat |
+| `src/codegen/object-ops.ts` | 2,681 | **3,309** | +23 % | 🟡 yes |
+| `src/codegen-linear/runtime.ts` | 2,668 | **2,668** | 0 % | ⚪ flat |
+| `src/ir/lower.ts` | 2,310 | **2,656** | +15 % | 🟡 yes |
+| `src/codegen/binary-ops.ts` | 2,246 | **2,637** | +17 % | 🟡 yes |
+| `src/codegen/literals.ts` | 2,245 | **2,595** | +16 % | 🟡 yes |
+| `src/codegen/type-coercion.ts` | 2,513 | **2,577** | +3 % | ⚪ flat |
+| `src/codegen/stack-balance.ts` | 2,512 | **2,514** | 0 % | ⚪ flat |
+| `src/codegen/expressions/builtins.ts` | 1,804 | **2,347** | +30 % | 🔴 crossed 2k |
+| `src/codegen/string-ops.ts` | 1,880 | **2,216** | +18 % | 🔴 crossed 2k |
+| `src/ir/select.ts` | 2,038 | **2,068** | +1 % | ⚪ flat (stay) |
+| `src/codegen/class-bodies.ts` | 1,735 | **2,005** | +16 % | 🔴 crossed 2k |
+
+**Headline numbers.** The original "big four" (`calls.ts`, `codegen/index.ts`,
+`runtime.ts`, `array-methods.ts`) were ~27,758 LoC in May; they are now
+**38,243 LoC** — they grew by **10,485 LoC (+38 %)** while every proposed split sat
+unexecuted. Three files that the original analysis explicitly put on the
+*do-not-split* list (`builtins.ts`, `string-ops.ts`, `class-bodies.ts`) have now
+crossed 2,000 LoC — see §R6.
+
+### R2. Execution status — nothing has shipped
+
+Verified by directory/file existence checks against the working tree. **Neither plan
+has executed a single slice.**
+
+**#1561 proposed directories — none exist** (`test -d` all false):
+`src/codegen/expressions/calls/`, `src/codegen/array/`,
+`src/codegen/import-collectors/`, `src/codegen/exports/`, `src/codegen/wasi/`,
+`src/codegen/extern-classes/`, `src/codegen/expressions/assignment/`,
+`src/codegen/statements/loops/`, `src/codegen/property-access/`,
+`src/codegen/type-coercion/`, `src/codegen/literals/`, `src/codegen/binary-ops/`,
+`src/codegen/closures/`, `src/codegen/object-ops/`, `src/codegen/declarations/`,
+`src/codegen/stack-balance/`, `src/ir/from-ast/`, `src/ir/lower/`,
+`src/compiler/validation/`, `src/codegen/native-strings/`,
+`src/codegen-linear/runtime/`, `src/runtime/resolve-import/`.
+(`src/runtime/` exists but holds only the pre-existing `builtins.ts` — not the
+proposed `runtime/sidecar.ts` etc.)
+
+**#1172 slices A–J — none shipped:**
+
+| Slice | Proposed artifact | Status |
+|-------|-------------------|--------|
+| A | `src/codegen/registry/types-helpers.ts`, `registry/late-import-suites.ts`, `builtins-registry.ts` | **absent** (the `registry/` dir holds `error-types.ts`, `imports.ts`, `types.ts` — unrelated, pre-date the plan) |
+| B/H | `src/codegen/emit-exports.ts`, `declarations-hoist-scan.ts` | **absent** |
+| C1 | move `walk-instructions.ts` → `src/ir/walk-instructions.ts` | **not done** (still at `src/codegen/walk-instructions.ts`) |
+| E | move `ir/integration.ts` → `src/codegen/ir-bridge.ts` | **not done** (still at `src/ir/integration.ts`, still imports codegen — reverse-layering live) |
+| F/G | `interface WasiContext` / `interface NativeStringContext` in `context/types.ts` | **absent** (grep finds neither) |
+| J | delete dead `FunctionContext.hoistedFuncs` | **not done** (`context/types.ts:212` still declares it; 0 other refs) |
+
+**Conclusion:** treat this as a still-greenfield decomposition with *worse* starting
+sizes. The plans were never wrong — they were never picked up. The most likely
+reason: every proposed slice was framed as part of a multi-wave program, none was
+queued as a standalone, owner-pinned, one-PR task. §R5 fixes that by naming the
+specific first slices to enqueue individually.
+
+### R3. Re-derived inventories for the two worst files
+
+The original §2.1 / §2.2 line ranges are off by thousands of lines. These are
+re-derived from current source.
+
+#### R3.1 `src/codegen/expressions/calls.ts` — now 10,914 LoC (was 8,502)
+
+`compileCallExpression` is now at **line 1805** and runs to **line 10202** =
+**8,397 LoC** in a single function (was 6,834 — it grew by 1,563 LoC inside one
+function). The structure is unchanged from §2.1 — a top-level `if`-cascade keyed on
+`expr.expression` shape — but every branch shifted. Verified top-level branch map
+(absolute line numbers; "sed-offset" is the relative offset inside the function):
+
+| Abs lines | Branch key (verbatim predicate) | Family |
+|----------:|---------------------------------|--------|
+| 1812 | `expr.questionDotToken && ts.isPropertyAccessExpression(...)` | optional method call |
+| 1822 | `ctx.jsxRuntime && ts.isIdentifier(...)` | JSX runtime call (new since May) |
+| ~1865 | `nodeProcessCall !== undefined` | `process.*` (new) |
+| 1913 | `!expr.questionDotToken && ...text === "Object"` | bare-`Object` guard (new) |
+| 2001 | `expr.questionDotToken && ts.isIdentifier(...)` | optional direct call |
+| 2097 | `expr.expression.kind === ts.SyntaxKind.ImportKeyword` | dynamic `import(...)` |
+| 2146 | `ts.isParenthesizedExpression(...)` | unwrap parens |
+| 2194 | `ts.isNonNullExpression(...)` | strip `!` |
+| 2250 | `ts.isIdentifier(_aggCallee) && ...==="AggregateError"` | `AggregateError` ctor (new) |
+| 2304 | `ts.isIdentifier(_suppCallee) && ...==="SuppressedError"` | `SuppressedError` ctor (new) |
+| **2330–~7237** | **`ts.isPropertyAccessExpression(expr.expression)`** | **the monster — ~4,907 LoC** (see R3.1a) |
+| 7238 | `!ctx.wasi && ...wasiNodeFsFuncs.has(...)` (readFileSync/writeFileSync) | node:fs (non-WASI) |
+| 7308 | `ctx.wasi && ...writeFileSync` | node:fs (WASI) |
+| 7347 | `ts.isIdentifier(expr.expression)` | **identifier callee #1** — isNaN/isFinite/parseInt/parseFloat/global fns |
+| 7802 | `ts.isIdentifier(expr.expression)` | **identifier callee #2** — closure call / direct fn call / rest params |
+| 8924 | `expr.expression.kind === ts.SyntaxKind.SuperKeyword` | super method call (alt) |
+| 8969 | `ts.isElementAccessExpression(expr.expression)` | `obj[name](...)` |
+| 9587 | `ts.isCallExpression(expr.expression)` | `f()()` |
+| 9747 | `ts.isCallExpression(expr.expression)` | curry chain |
+| 9885 | `ts.isConditionalExpression(expr.expression)` | `(c ? f : g)(...)` |
+
+**R3.1a — the PropertyAccess branch (abs 2330–~7237, ~4,907 LoC).** Verified
+sub-family boundaries (absolute lines, from `// Handle …` markers and predicate
+matches):
+
+| Abs lines | Sub-family | Maps to original |
+|----------:|-----------|------------------|
+| 2336–~3107 | `Array.prototype.X.call`, `fn.bind`, `.call`/`.apply` reflection | §2.1 "reflection" |
+| 3108–3228 | `Number.isNaN`, `Number.isInteger`, `Number.MAX_SAFE_INTEGER` | number-static |
+| 3229–3307 | `Array.isArray` | array-static |
+| 3308–3394 | `String.fromCharCode` / `fromCodePoint` | string-static |
+| 3395–3582 | `Array.fromAsync` (new ES2024), `Array.from`, `Array.of` | array-of-from |
+| 3583–4686 | `Object.{keys/values/entries/freeze/seal/isFrozen/isSealed/isExtensible/setPrototypeOf/getPrototypeOf/create/defineProperty/defineProperties/getOwnPropertyDescriptor(s)/getOwnPropertyNames/getOwnPropertySymbols/hasOwn/is/assign/fromEntries/groupBy}` | **object-statics (huge, ~1,100 LoC)** |
+| 4687–4956 | `Symbol.for/keyFor`, `ArrayBuffer.isView` | symbol/arraybuffer |
+| 4957–5148 | `Promise.{all/race/allSettled/any/resolve/reject}` | promise-static |
+| 5149–5251 | `JSON.stringify/parse` | json |
+| 5252–~5614 | `Date.now`/`Date.UTC` + Date statics/instance + generator next/return/throw | date + generator |
+| 5615–5720 | `Promise.prototype.{then,catch,finally}` | promise-instance |
+| 5721–~6332 | wrapper `valueOf` (Number/String/Boolean) + **user-class instance method dispatch** (union members at 5760+, `funcMap` lookups) | **class-method-dispatch (~600 LoC)** |
+| 6333–6685 | number/bigint `toString`(radix), `toFixed`, `toPrecision` | primitive-coercion |
+| 6686–~7237 | string `toString`/`valueOf` identity, native-string dispatch (6704), generic externref method-call fallback | coercion + string-dispatch |
+
+**Refreshed split proposal** (directory `src/codegen/expressions/calls/`; same
+target shape as §2.1, current ranges):
+
+| New file | Pulls (abs lines) | ~LoC | Risk |
+|----------|-------------------|-----:|------|
+| `calls/helpers.ts` | 184–1804 (all top helpers: `staticToBoolean`…`compileStandalonePromiseThenCallback`, incl. `usesArguments`, `flattenCallArgs`, `compileFunctionBind`, `emitBoundFunctionCall`, eval classifiers, `tryEmitInlineDynamicCall`, `emitVirtualMethodDispatchByTag`) | 1,620 | low — leaf helpers |
+| `calls/object-statics.ts` | 3,583–4,686 | 1,100 | medium — `funcMap`/struct registry deps |
+| `calls/reflection.ts` | 2,336–3,107 (`.call`/`.apply`/`.bind`) | 770 | low |
+| `calls/static-methods.ts` | 3,108–3,582 + 4,687–4,956 (Number/Array/String/Symbol/ArrayBuffer statics, Array.from/of) | 750 | low |
+| `calls/promise-json-date.ts` | 4,957–5,720 (Promise statics+instance, JSON, Date, generator) | 760 | low |
+| `calls/class-method-dispatch.ts` | 5,721–6,332 | 610 | medium — `funcMap`, `classParentMap` |
+| `calls/coercion-methods.ts` | 6,333–~7,237 (number/bigint/string toString/valueOf + native-string dispatch) | 900 | medium |
+| `calls/node-fs.ts` | 7,238–7,346 | 110 | low |
+| `calls/identifier-callee.ts` | 7,347–8,923 | 1,577 | **high** — only branch that calls `addUnionImports`/late-import shifts |
+| `calls/element-nested-callee.ts` | 8,924–9,884 (super-alt, element, `f()()`, curry) | 960 | medium |
+| `calls/conditional-callee.ts` | 9,885–10,201 + `compileConditionalCallee` (10,202) | 320 | low |
+| `calls/iife.ts` | `compileIIFE` 10,604–10,884 | 280 | low |
+| `calls/index.ts` (dispatcher) | shell of `compileCallExpression` + top-level branch routing + `compileExpressionCallee`, `compileWasiStringArgToLinearMemory` | ~600 | medium |
+
+After this, `calls.ts` (as `calls/index.ts`) drops to ~600 LoC. **First-wave-safe
+leaves** (no late-import-shift entanglement): `helpers.ts`, `node-fs.ts`,
+`conditional-callee.ts`, `iife.ts`, `static-methods.ts`, `promise-json-date.ts`.
+
+#### R3.2 `src/codegen/index.ts` — now 10,888 LoC (was 8,313)
+
+Same God-module structure as §2.2, with **~12 new top-level functions** since May
+(notably `emitStructFieldSetters`, `buildSetterNestedIfElse`, `buildSetterStore`,
+`emitClosureMethodCallExportN`, `emitIsClosureExport`, `emitVecSetByteExport`,
+`emitNewVecF64Export`, `registerJsxRuntimeImports`, `rejectTimersUnderWasi`,
+`emitDeferredWasiHelpers`, `emitWasiClockHelpers`, `ensureWasiWriteUint8ArrayHelper`,
+`ensureWasiWriteArrayBufferHelper`, `emitWasiSleepMsHelper`,
+`sourceContainsBindingPattern`, `sourceOverridesArrayIterator`,
+`classifyTypedArrayType`, `typedArrayVecStorage`). Verified current grouping:
+
+| Group | Abs lines | Key functions (verbatim) |
+|-------|----------:|--------------------------|
+| **Module orchestrators** | 187–1,472 + 4,131–4,418 | `generateModule` (898–1,472), `generateMultiModule` (4,131), `extractConstantDefault` (316), IR-bridge helpers (396–888: `latticeToIr`…`valTypeToIrField`, `isStrictIrBuildError`) |
+| **Export-table emit** | 1,519–4,130 | `addWasiStartExport` (1,519), `emitStructFieldGetters` (1,605), `emitStructFieldSetters` (1,722), `emitStructFieldNamesExport` (1,910), `emitIteratorMethodExport` (2,014), `emitToPrimitiveMethodExport` (2,137), `emitClosureCallExport{,1,2,3,4,N}` (2,260–2,675), `emitClosureMethodCallExportN` (2,946), `emitIsClosureExport` (3,190), `emitToPrimitiveMethodExports` (3,262), `emitVecAccessExports` (3,477), `emitVecSetByteExport` (3,686), `emitNewVecF64Export` (3,789), `emitDataViewByteExports` (3,884), `buildNestedIfElse` (4,005), `buildGetterExtract` (4,058) |
+| **WASI emit + helpers** | 4,488–5,679 | `registerWasiImports` (4,488), `emitDeferredWasiHelpers` (4,799), `emitWasiClockHelpers` (4,832), `emitWasiWriteStringHelper` (4,911), `emitWasiWriteStringStderrHelper` (4,951), `ensureWasiWriteAnyStringHelper` (5,020), `ensureWasiWriteUint8ArrayHelper` (5,213), `ensureWasiWriteArrayBufferHelper` (5,377), `emitWasiWriteFileSyncHelper` (5,530), `emitWasiSleepMsHelper` (5,613) |
+| **Import collectors** (largest concern) | 4,419–8,091 | `collectAllSourceImports` (4,419), `collectConsoleImports` (4,426), `collectPrimitiveMethodImports` (5,680), `collectStringMethodImports` (5,875), `addStringImports` (6,011), `parseRegExpLiteral` (6,168), `collectStringLiterals` (6,179), `collectForInStringLiterals` (6,283), `collectInExprStringLiterals` (6,332), `collectObjectMethodStringLiterals` (6,382), `collectMathImports` (6,471), `emitToUint32Helper` (6,538), `collectParseImports` (6,568), `collectUnknownConstructorImports` (6,717), `collectWrapperConstructors` (6,762), `collectStringStaticImports` (6,785), `collectPromiseImports` (6,831), `collectJsonImports` (6,948), `collectCallbackImports` (7,003), `collectGeneratorImports` (7,038), `collectFunctionalArrayImports` (7,180), `collectUnionImports` (7,249), `addUnionImports` (7,325), `addUnionImportsAsNativeFuncs` (7,595), `collectIteratorImports` (7,894), `addIteratorImports` (7,943), `addArrayIteratorImports` (7,978), `addGeneratorImports` (8,016), `addForInImports` (8,070) |
+| **Type resolution** | 8,092–8,684 | `isTupleType` (8,092), `getTupleElementTypes` (8,111), `tupleTypeKey` (8,131), `getOrRegisterTupleType` (8,145), `resolveNativeTypeAnnotation` (8,206), `resolveWasmType` (8,224 — **29 importers now, was 12**), `fieldsHashKey` (8,376), `ensureDateStructForCtx` (8,390), `ensureStructForType` (8,411) |
+| **Extern-class registry** | 8,685–9,679 | `externMethod` (8,685), `registerBuiltinExternClasses` (8,704), `getPseudoExternClassInfo` (9,089), `resolveMethodDispatchTarget` (9,116), `collectExternDeclarations` (9,130), `collectDeclareNamespace` (9,229), `collectExternClass` (9,245), `collectExternFromDeclareVar` (9,321), `collectInterfaceMembers` (9,403), `collectMixinMembers` (9,453), `registerExternClassImports` (9,484), `collectUsedExternImports` (9,520) |
+| **Lib globals** | 9,681–10,073 | `collectDeclaredGlobals` (9,681), `registerNodeBuiltinImports` (9,801), `registerJsxRuntimeImports` (9,855), `sourceUsesLibGlobals` (9,946), `checkWasiDomUsage` (9,972), `rejectTimersUnderWasi` (10,010) |
+| **Hoisting / TDZ** | 10,074–10,652 | `collectEnumDeclarations` (10,074), `hoistVarDeclarations` (10,136), `hoistBindingPattern` (10,150), `ensureLetConstBindingPatternTdzFlags` (10,194), `hoistVarDecl` (10,231), `walkStmtForVars` (10,289), `hoistLetConstWithTdz` (10,364), `needsTdzFlag` (10,379), `getContainingFunctionForTdz` (10,435), `isInsideLoopContainingForTdz` (10,456), `isDescendantOfNode` (10,501), `getLoopBodyNode` (10,510), `inferLetConstInitializerWasmType` (10,525), `walkStmtForLetConst` (10,550) |
+| **String pool + modifier predicates** | 10,653–10,808 | `cacheStringLiterals` (10,653), `collectStringCalls` (10,691), `replaceStringCalls` (10,713), `hasExportModifier` (10,737), `hasDeclareModifier` (10,742), `hasAsyncModifier` (10,747), `hasAbstractModifier` (10,752), `hasStaticModifier` (10,756), `isGeneratorFunction` (10,761), `unwrapGeneratorYieldType` (10,769), `ensureI32Condition` (10,792) |
+
+**Refreshed split proposal** (same targets as §2.2, current ranges):
+
+| New file | Pulls (abs lines) | ~LoC | Risk |
+|----------|-------------------|-----:|------|
+| `codegen/ts-modifiers.ts` | 10,737–10,791 (`has*Modifier`, `isGeneratorFunction`, `unwrapGeneratorYieldType`) | 55 | 🟢 trivial — **do first** |
+| `codegen/i32-coercion.ts` | 10,792–10,808 (`ensureI32Condition`) | 17 | 🟢 trivial |
+| `codegen/string-literal-pool.ts` | 10,653–10,736 (`cacheStringLiterals`, `collectStringCalls`, `replaceStringCalls`) | 84 | 🟢 low |
+| `codegen/wasi/*.ts` | 1,519 (`addWasiStartExport`) + 4,488–5,679 (all WASI emit/helpers) + 9,972–10,073 (`checkWasiDomUsage`, `rejectTimersUnderWasi`) | ~1,400 | 🟢 low |
+| `codegen/exports/*.ts` | 1,605–4,130 (all `emit*Export*` + setters + closure-call + vec + dataview + builders) | ~2,500 | 🟢 low |
+| `codegen/import-collectors/*.ts` | 4,419–7,248 (console, primitive, string-methods, string-literals, math, parse, constructors, string-static, promise, json, callbacks, generators, array-hof) — **excluding** unions/iterators | ~2,200 | 🟢 low (after ts-modifiers) |
+| `codegen/import-collectors/{unions,iterators}.ts` | 7,249–8,091 | ~840 | 🟡 medium — shift func indices |
+| `codegen/extern-classes/{registry,collect}.ts` | 8,685–9,679 | ~1,000 | 🟡 medium |
+| `codegen/lib-globals.ts` | 9,681–9,971 (`collectDeclaredGlobals`, `registerNodeBuiltinImports`, `registerJsxRuntimeImports`, `sourceUsesLibGlobals`) | ~290 | 🟢 low |
+| `codegen/hoisting.ts` | 10,074–10,652 | ~580 | 🟡 medium — TDZ logic |
+| `codegen/type-resolution.ts` | 8,092–8,684 | ~590 | 🟠 medium-high — `resolveWasmType` now has **29 importers**; needs a re-export shim during transition (was 12 importers in May; risk has roughly doubled) |
+| `codegen/index.ts` (slimmed) | orchestrators + IR-bridge helpers only | ~800 | medium |
+
+After full execution, `codegen/index.ts` drops to ~800 LoC.
+
+#### R3.3 Other > 2,000-LoC files — structure unchanged, ranges shifted
+
+Spot-checked the entry-point line of each (verified verbatim):
+
+| File | Entry point (current) | vs original §2.x | Split proposal |
+|------|----------------------|------------------|----------------|
+| `runtime.ts` | `resolveImport` @ **4295** (runs to `buildImports` @ 9547 = **~5,252 LoC** in one function; was ~3,030) | §2.4 | **still valid; now far more urgent** — see note below |
+| `array-methods.ts` | `compileArrayLikePrototypeCall` @ 458, `compileArrayPrototypeCall` @ 1713, `compileArrayMethodCall` @ 2417 | §2.3 | structure unchanged; ranges shifted ~+500; split into `array/` still valid |
+| `assignment.ts` | `compileAssignment` @ 100 | §2.5 | unchanged; split into `assignment/` still valid |
+| `native-strings.ts` | `ensureNativeStringHelpers` @ 194 | §2.10 | **grew +44 %**; per-helper `addFunc` shape unchanged; split into `native-strings/` still valid and more urgent |
+| `loops.ts` | `compileWhileStatement` @ 56, `compileForOfStatement` @ 2335 | §2.11 | unchanged; split into `loops/` still valid |
+| `declarations.ts` | `collectDeclarations` @ 2412, `compileDeclarations` @ 3533 | §2.8 | unchanged; split still valid |
+| `closures.ts` | `compileArrowAsClosure` @ 1247, `compileArrowAsCallback` @ 2353 | §2.12 | unchanged; split still valid |
+| `property-access.ts` | `compilePropertyAccess` @ 968, `compileElementAccess` @ 3217 | §2.13 | unchanged; split still valid |
+| `new-super.ts` | `compileNewFunctionDeclaration` @ 801 | §2.15 | **grew +34 %**; split into `new-super/` still valid |
+| `validation.ts` | `detectEarlyErrors` @ 171 | §2.9 | unchanged; split into `validation/early-errors/` still valid |
+| `object-ops.ts` | `compileObjectDefineProperty` @ 576, `compileObjectKeysOrValues` @ 2703 | §2.14 | unchanged; split still valid |
+| `ir/lower.ts` | `lowerIrFunctionToWasm` @ 260 | §2.19 | unchanged; split still valid |
+| `binary-ops.ts` | `compileBinaryExpression` @ 201 | §2.20 | unchanged; split still valid |
+| `literals.ts` | `compileObjectLiteral` @ 527, `compileArrayLiteral` @ 2154 | §2.21 | unchanged; split still valid |
+| `type-coercion.ts` | `coerceType` @ 951 | §2.17 | unchanged; split still valid |
+| `stack-balance.ts` | `stackBalance` @ 2275 | §2.18 | unchanged; split still valid |
+| `ir/from-ast.ts` | `lowerFunctionAstToIr` @ 231 | §2.7 | unchanged; split still valid |
+| `codegen-linear/index.ts` | `generateLinearModule` @ 40 | §2.6 | unchanged; split still valid |
+| `codegen-linear/runtime.ts` | `addArrayRuntime` @ 348, `addStringRuntime` @ 514 | §2.16 | unchanged; split still valid — **easiest win** |
+
+**runtime.ts note (the biggest single change since May).** The file nearly doubled
+(5,335 → 9,962). `resolveImport` alone is now ~5,252 LoC. One structural change worth
+flagging for the implementer: the **test262 harness shim is no longer a single string
+literal** buried in the `extern_class` case (as §2.4 described). It is now a block of
+**real JS function declarations** at lines **4945–5013** (`Test262Error`,
+`isSameValue`, `assert_sameValue`, `assert_throws`, `compareArray`, `verifyProperty`,
+etc.). This is *better* for extraction — they can move to `runtime/test262-shim.ts`
+as ordinary functions rather than a fragile whitespace-sensitive string — but the
+§2.4 instruction "keep it byte-identical as a string literal" is now obsolete.
+
+### R4. Unified, deduplicated, priority-ordered backlog
+
+#1561 and #1172 overlap heavily: both target `codegen/index.ts`; both touch the
+walker; both touch `as unknown as Instr` casts; #1172's Slice I is exactly #1561's
+§2.1. Merged into one ordered list below. "Rev." = reviewability gain. "Ver." =
+verifiability (can the slice get a focused isolated test?).
+
+| ID | Target → new module(s) | ~LoC moved | Risk | Depends on | Reviewability / Verifiability |
+|----|------------------------|-----------:|------|-----------|-------------------------------|
+| **U1** | `context/types.ts`: delete dead `hoistedFuncs` (#1172-J) | ~2 | 🟢 | — | Rev: removes a phantom field reviewers must reason about. Ver: `tsc --noEmit` proves 0 refs. |
+| **U2** | `codegen/index.ts` → `ts-modifiers.ts` (#1561-#1, §R3.2) | 55 | 🟢 | — | Rev: 7 widely-imported predicates leave the 10.9k file. Ver: trivially unit-testable (`hasStaticModifier(node)`). |
+| **U3** | `codegen/index.ts` → `i32-coercion.ts` + `string-literal-pool.ts` (§R3.2) | 100 | 🟢 | — | Rev: removes 2 unrelated concerns from the driver. Ver: pure functions, isolable. |
+| **U4** | `codegen-linear/runtime.ts` → `runtime/{array,uint8array,string,map,set,numeric-map,numeric-set}.ts` (#1561-#4, §2.16) | ~2,600 | 🟢 | — | Rev: each collection's runtime reviewable alone; secondary backend, low conflict. Ver: each `addXxxRuntime` emits a self-contained func set — snapshot-testable. |
+| **U5** | `codegen/index.ts` → `exports/*.ts` (#1561-#3 + #1172-B/H, §R3.2) | ~2,500 | 🟢 | — | Rev: ~2.5k of export-emit leaves the driver; export PRs stop colliding with import PRs. Ver: each emitter produces a named Wasm export — assertable on a tiny module. |
+| **U6** | `codegen/index.ts` → `wasi/*.ts` (#1561-#2, §R3.2) | ~1,400 | 🟢 | — | Rev: all WASI emit in one place, gated by `--target wasi`. Ver: compile a WASI fixture, assert imports/helpers present. |
+| **U7** | `calls.ts` first-wave leaves → `calls/{helpers,node-fs,conditional-callee,iife,static-methods,promise-json-date}.ts` (#1561-#5, §R3.1) | ~3,800 | 🟢 | — | Rev: the most-conflicted file sheds ~4k of disjoint branches; each branch reviewable alone. Ver: each call shape has a 1-line repro (`Array.of(1)`, `(c?f:g)()`) — focused equivalence tests. |
+| **U8** | `runtime.ts` → `runtime/{sidecar,descriptors,closure,toprimitive,struct-bridge,method-bridge,array-sparse,instantiate}.ts` (#1561-#6, §2.4) | ~1,500 | 🟢 | — | Rev: sidecar/descriptor/bridge concerns separable from the 5k `resolveImport`. Ver: pure host helpers — direct JS unit tests, no Wasm needed. |
+| **U9** | `array-methods.ts` → `array/{helpers,mutators,accessors,search,join-string,flatten,sort,es2023,iterator}.ts` (#1561-#7, §2.3) | ~2,700 | 🟢 | `array/helpers.ts` first | Rev: each method family reviewable alone. Ver: per-method equivalence tests already exist. |
+| **U10** | `codegen/index.ts` → `import-collectors/*.ts` (excl. unions/iterators) (#1561-#8 + #1172-A, §R3.2) | ~2,200 | 🟢 | U2 | Rev: 13 disjoint `(ctx,sf)=>void` collectors leave the driver. Ver: each collector scans an AST and registers imports — assert on `ctx.imports`. |
+| **U11** | move `walk-instructions.ts` → `ir/walk-instructions.ts`; fold 4 duplicate walkers into it; add typed `instrChildren` (#1172-C1/C3) | ~120 net | 🟢 | — | Rev: one canonical walker instead of 4 copies; fixes `emit/→codegen/` reverse layering. Ver: the slice *ships its own unit test* (visit every control-flow op once). |
+| **U12** | move `ir/integration.ts` → `codegen/ir-bridge.ts` (#1172-E) | ~0 (move) | 🟢 | — | Rev: removes the `ir/→codegen/` reverse-dependency; IR consumers stop pulling codegen. Ver: `tsc` errors if any import path missed. |
+| **U13** | `codegen/index.ts` → `import-collectors/{unions,iterators}.ts` (#1561-#15, §R3.2) | ~840 | 🟡 | U10 | Rev: isolates the index-shifting collectors. Ver: late-import-shift integration test (regressed before in #1109 — guard it). |
+| **U14** | consolidate the two `shiftFuncIndices` blocks in index.ts → `shiftLateImportIndices` (#1172-C2) | ~120 del | 🟡 | U11 | Rev: one shifter, not three. Ver: same late-import-shift test as U13. |
+| **U15** | `codegen/index.ts` → `extern-classes/{registry,collect}.ts` (#1561-#9, §R3.2) | ~1,000 | 🟡 | — | Rev: the static extern-class tables stop colliding with collector edits. Ver: register a `declare class`, assert `getPseudoExternClassInfo`. |
+| **U16** | `codegen/index.ts` → `hoisting.ts` + `lib-globals.ts` (#1561-#14, §R3.2) | ~870 | 🟡 | — | Rev: TDZ/hoist logic self-contained. Ver: hoist a `var`/`let` fixture, assert TDZ flags. |
+| **U17** | `assignment.ts` → `assignment/{destructuring,property,element,logical,compound,string-compound}.ts` (#1561-#10, §2.5) | ~4,400 | 🟡 | — | Rev: 6 assignment families reviewable alone. Ver: each form has direct equivalence tests. |
+| **U18** | `array-methods.ts` HOF families → `array/hof-{kernel,collectors,predicates}.ts` (#1561-#11, §2.3) | ~1,500 | 🟡 | U9 helpers | Rev: HOF kernel shared, collectors/predicates separate. Ver: map/filter/reduce equivalence tests. |
+| **U19** | `calls.ts` second wave → `calls/{object-statics,class-method-dispatch}.ts` (#1561-#12/#13, §R3.1) | ~1,710 | 🟡 | U7 | Rev: the two biggest PropertyAccess sub-blocks leave. Ver: `Object.keys`/class-method repros. |
+| **U20** | `WasiContext` + `NativeStringContext` carve-out of `CodegenContext` (#1172-F/G) | ~0 (reshape) | 🟡 | U6 (wasi extracted) | Rev: shrinks the 120-field God context; subsystem fields grouped + null-guarded. Ver: TS narrows `ctx.wasi` non-null inside guards. |
+| **U21** | `native-strings.ts` → `native-strings/{basic,search,transform,split-replace,concat,conversion,iteration,extern-bridge,test-runtime}.ts` (#1561-#18, §2.10) | ~2,900 | 🟡 | shared `addRuntimeFunc` | Rev: per-helper families reviewable. Ver: per-method native-string equivalence tests (standalone mode). |
+| **U22** | `loops.ts` → `statements/loops/{while-do,for,for-in,for-of/*}.ts` (#1561-#19, §2.11) | ~2,900 | 🟡 | — | Rev: for-of variants separable. Ver: per-loop-shape equivalence tests. |
+| **U23** | `closures.ts` → `closures/{scope-analysis,params,callback,funcref-wrapper}.ts` (#1561-#20, §2.12) | ~1,800 | 🟡 | — | Rev: scope analysis vs arrow lowering separated. Ver: closure-capture fixtures. |
+| **U24** | `object-ops.ts` → `object-ops/{define-property,define-properties,keys-values,introspection,guards}.ts` (#1561-#26, §2.14) | ~2,500 | 🟡 | — | Rev: defineProperty isolated from keys/values. Ver: per-op equivalence tests. |
+| **U25** | `binary-ops.ts` → `binary-ops/{numeric,i32,i64,bitwise,modulo,boolean,any-dispatch}.ts` (#1561-#27, §2.20) | ~1,900 | 🟡 | — | Rev: the 1.2k any-dispatch fallback isolated. Ver: per-op equivalence tests. |
+| **U26** | `literals.ts` → `literals/{object,array,constants,symbol}.ts` (#1561-#28, §2.21) | ~2,000 | 🟡 | — | Rev: object vs array literal separated. Ver: literal equivalence tests. |
+| **U27** | `codegen/index.ts` → `type-resolution.ts` (#1561-#16, §R3.2) | ~590 | 🟠 | re-export shim | Rev: `resolveWasmType` keystone isolated. Ver: type→ValType unit tests. **Caution: 29 importers now (was 12) — coordinated import-update PR.** |
+| **U28** | `property-access.ts` → `property-access/{struct-resolution,struct-get,optional,extern-get,element,null-guards}.ts` (#1561-#21, §2.13) | ~2,500 | 🟠 | — | Rev: central 2k dispatch body sectioned. Ver: property-read fixtures. **Needs section-labelling pass first.** |
+| **U29** | `type-coercion.ts` → `type-coercion/{vec,tuple,struct,to-f64,defaults,guards,to-primitive}.ts` (#1561-#22, §2.17) | ~2,200 | 🟠 | — | Rev: `coerceType` God function decomposed. Ver: per-conversion unit tests. **Hot path — extract leaves first, keep `coerceType` calling them.** |
+| **U30** | `calls.ts` third wave → `calls/{identifier-callee,element-nested-callee}.ts` (#1561-#23, §R3.1) | ~2,650 | 🟠 | U7 helpers | Rev: final big branches leave; `calls/index.ts` → ~600 LoC. Ver: closure-call/element-call repros. **High: `identifier-callee` is the only branch touching `addUnionImports`/late-import shifts.** |
+| **U31** | `runtime.ts` → `runtime/resolve-import/*.ts` (split `resolveImport` per `ImportIntent`) (#1561-#24, §2.4) | ~5,252 | 🟠 | U8 + test262-shim out first | Rev: the single biggest God function (now ~5.2k) decomposed by case-family. Ver: each case file is `(intent)=>Function` — directly unit-testable. **Extract `test262-shim.ts` (now real functions @4945–5013) first.** |
+| **U32** | `declarations.ts` → `declarations/{unified-collector,type-inference,shape-inference-bridge,struct-fields,interfaces}.ts` (#1561-#25, §2.8) | ~2,800 | 🟠 | — | Rev: collector vs type-inference separated. Ver: declaration-collection fixtures. **Type-inference passes are mutually recursive — extract together.** |
+| **U33** | `validation.ts` → `validation/early-errors/*.ts` (split `detectEarlyErrors`) (#1561-#17, §2.9) | ~2,800 | 🟠 | section-labelling pass | Rev: each early-error category reviewable. Ver: each category gets a "this throws / this doesn't" test. **Subdivision must be discovered by reading the 3,089-LoC function.** |
+| **U34** | `ir/from-ast.ts` → `from-ast/*.ts`; `ir/lower.ts` → `lower/*.ts` (§2.7/§2.19) | ~5,000 | 🟠 | IR coverage stable | Rev: IR builder/lowerer by phase. Ver: IR round-trip tests. **Do after the codegen splits; IR lowering is fragile.** |
+| **U35** | strip cargo-cult `as unknown as Instr` casts (#1172-D) | ~155 sites | 🟢 | — | Rev: removes type-system noise; `satisfies Instr` keeps the check. Ver: per-file `tsc --noEmit` proves each cast was a no-op. **Now 155 occurrences (was 158/312); one file per commit.** |
+| **U36** | reduce `shared.ts` register pairs (now **20**, was 22) toward ≤8 as the graph straightens (#1561 §3.1 + #1172-L) | n/a | 🟡 | U2/U5/U10/U27 | Rev: fewer mutable global delegates; dependency graph becomes statically visible. Ver: removing a register pair that's now a direct import is `tsc`-checked. |
+
+**Contradictions / reconciliations between the two source plans:**
+
+1. **`shared.ts` fate.** #1561 §3.1 says "reduce 22 registers to ≤8" (keep, prune);
+   #1172 Slice L says "remove the delegate registry" entirely (deferred until A/B
+   land). **Reconciliation (U36):** prune, don't delete — `shared.ts` is a legitimate
+   cycle-breaker; only the pairs that become redundant after the index.ts/calls.ts
+   splits should go. Target ≤8, re-evaluate full removal after.
+2. **Cast count.** #1172-D claimed 312 `as unknown as Instr` + 75 `as Instr` (387);
+   #1561 §3.4 cited 158. Current measured count is **155** `as unknown as Instr`. The
+   discrepancy is the pattern matched: #1172 counted a broader `as Instr[]`/literal
+   family. **Reconciliation:** U35 scopes to the 155 `as unknown as Instr`
+   single-instr sites (the cargo-cult ones), using `satisfies Instr` for the genuinely
+   ambiguous remainder — exactly #1172-D's D1/D2/D3 staging.
+3. **index.ts driver target.** #1172-B says "<2,500 LOC after slice B"; #1561 §2.2
+   says "~800 LoC orchestrator." **Reconciliation:** #1172-B was a *partial* slice
+   (export + hoist-scan only); #1561's ~800 is the *fully decomposed* end state. Both
+   are consistent waypoints — U5/U6/U10/U15/U16/U27 collectively reach ~800.
+4. **`integration.ts` / `walk-instructions.ts` layering.** Only #1172 (E, C1) addresses
+   the `ir/→codegen/` and `emit/→codegen/` reverse-layering; #1561 lists both files on
+   its *do-not-split* list (correct — they should *move*, not split). No conflict:
+   U11/U12 are moves, not splits.
+
+### R5. Sequencing recommendation — "stop the bleeding" first wave
+
+The files grew ~30 % in two weeks with nothing extracted; the priority is to land
+*mechanical, parallelizable, one-PR-each* slices that remove the most lines from the
+most-conflicted files **now**, before they grow further. Recommended first wave —
+each is independently mergeable by a different dev in a single PR:
+
+| Order | Slice | File relieved | LoC out | Why first |
+|------:|-------|---------------|--------:|-----------|
+| 1 | **U1 + U2 + U3** (one warm-up PR) | index.ts | ~160 | Trivial, validates the workflow + re-export shim pattern; `ts-modifiers` unblocks U10. |
+| 2 | **U4** | codegen-linear/runtime.ts | ~2,600 | Lowest risk in the codebase — self-contained `addXxxRuntime` cascades, secondary backend, near-zero conflict. Pure mechanical. |
+| 3 | **U7** | **calls.ts** | ~3,800 | The #1 conflict file. First-wave leaves only — no late-import-shift entanglement. Drops calls.ts below ~7,100. |
+| 4 | **U5 + U6** | **index.ts** | ~3,900 | The #2 conflict file. Export-emit + WASI are disjoint leaves; export-PRs and import-PRs stop colliding. Drops index.ts below ~7,000. |
+| 5 | **U8** (or **U11+U12** as a layering-only alt) | runtime.ts (or layering) | ~1,500 | runtime.ts is the worst grower (+87 %); U8 leaves are pure host helpers, JS-unit-testable. U11/U12 are equally safe pure moves if a dev prefers the layering fix. |
+
+**These five waves remove ~12,000 LoC from the three worst files in PRs that are all
+🟢-low-risk and have no inter-dependencies** (U2 → U10 is the only ordering edge, and
+U10 is not in the first wave). After the first wave: `calls.ts` ≈ 7,100,
+`codegen/index.ts` ≈ 6,900, `codegen-linear/runtime.ts` ≈ 60 (shell),
+`runtime.ts` ≈ 8,460.
+
+**Parallelizable one-PR-each by independent devs:** U4, U7, U5, U6, U8, U11, U12 touch
+disjoint files and can run fully concurrently. U1/U2/U3 should land first as a single
+warm-up PR (they establish the re-export-shim convention every later slice reuses).
+The only shared-file contention is U5↔U6 (both edit index.ts) — sequence them, or have
+one dev own both index.ts export-extractions.
+
+**Process root-cause fix (why nothing shipped before):** every prior slice was framed
+inside a multi-wave program with no individual owner. The tech lead should enqueue
+U1–U8 as **individual, owner-pinned TaskList items** (subject e.g.
+`refactor(#1561): extract codegen/ts-modifiers.ts (U2)`), not as one umbrella task.
+Each carries the §R3 line ranges so a dev can execute without re-deriving them.
+
+### R6. Refresh of "what NOT to split"
+
+The original §8 stay-as-is list still holds for the genuinely-atomic files
+(`peephole.ts` 231, `dead-elimination.ts` 429, `walk-instructions.ts` →move not split,
+`shared.ts` 560 router, `timsort.ts` 922, `string-builder.ts` 689,
+`math-helpers.ts` 1,606 name-keyed emitters, `any-helpers.ts` 1,170,
+`fixups.ts` 1,048, `function-body.ts` 1,000, `destructuring-params.ts` 1,686,
+`expressions.ts` 1,253 dispatcher, `ir/nodes.ts` 1,982 pure data,
+`ir/select.ts` 2,068, `ir/integration.ts` 1,707 →move not split,
+`emit/binary.ts` 1,597). **Confirmed: keep all of these as-is.**
+
+**Revisions (files that have outgrown their stay-as-is rationale):**
+
+| File | May LoC | Now | Revised verdict |
+|------|--------:|----:|-----------------|
+| `expressions/builtins.ts` | 1,804 | **2,347** | **Now a split candidate** (crossed 2k, +30 %). It is Date+Math+Console kernels — propose `builtins/{date,math,console}.ts` when it next grows; not first-wave. |
+| `string-ops.ts` | 1,880 | **2,216** | **Now a split candidate** (crossed 2k). Template + binary-string + tagged-template emitters → `string-ops/{template,binary,tagged}.ts`; low priority. |
+| `class-bodies.ts` | 1,735 | **2,005** | **Borderline** (just crossed 2k). Still a single coherent feature (class-body emit) — keep for now, watch; split only if it passes ~2,500. |
+| `async-scheduler.ts` | 232 | **1,260** | Grew 5× but still one feature (async state-machine scheduling). **Keep** — coherent single-purpose; revisit past ~1,800. |
+| `expressions/unary-updates.ts` | 1,643 | 1,590 | Keep (stable, cohesive). |
+| `number-format-native.ts` / `parse-number-native.ts` | n/a | 1,704 / 1,552 | **Keep** — each is a single native numeric-format/parse kernel; splitting scatters one algorithm. |
+
+**New rule of thumb for this codebase:** a file is a split candidate once it both
+(a) exceeds ~2,000 LoC **and** (b) contains ≥2 independently-conflicted concerns
+(distinct sprints touch distinct regions). Files that are large but single-concern
+(`timsort.ts`, `math-helpers.ts`, `number-format-native.ts`, `async-scheduler.ts`)
+stay whole — splitting them creates cross-file noise without reducing conflict
+frequency.
+
+— *Architect refresh, 2026-06-03. All line numbers verified against the working tree
+at time of writing; they will drift as soon as the first slice lands — re-derive with
+`grep -nE '^(export )?(async )?function'` before executing any slice.*
 
 ---
 
