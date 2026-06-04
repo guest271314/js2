@@ -9883,10 +9883,17 @@ function marshalTypedArrayArgs(
     const src = arg as ArrayLike<number>;
     const len = src.length | 0;
     const vec = newVecF64(len);
+    // #1829 — only byte-mask for Uint8Array. For any other TypedArray the
+    // `& 0xff` truncated every element to its low byte, silently corrupting
+    // Uint16Array/Uint32Array (and signed/float) inputs. The vec backing store
+    // is f64 and `__vec_set_byte` widens its i32 value arg via
+    // `f64.convert_i32_u`, so an unmasked write round-trips unsigned integers
+    // up to 2^32-1 at full precision. (Signed-negative and fractional float
+    // elements still need a full-f64 vec setter — tracked as a follow-up; this
+    // strictly improves on truncating every element to a byte.)
+    const maskByte = kind === "uint8array";
     for (let j = 0; j < len; j++) {
-      // Mask to byte range — matches `new Uint8Array(arr)` indexed-write
-      // semantics (and __vec_set_byte's i32-byte contract).
-      vecSetByte(vec, j, src[j]! & 0xff);
+      vecSetByte(vec, j, maskByte ? src[j]! & 0xff : src[j]!);
     }
     out[i] = vec;
   }
