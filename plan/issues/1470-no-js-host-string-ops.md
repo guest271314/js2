@@ -487,3 +487,46 @@ default (`gc`) and `fast`/`nativeStrings` host paths are unchanged.
 (`__str_from_mem`/`__str_to_mem`), full `__unbox_string` retargeting, the
 `string_method` ASCII-fold / refuse policy, and the spec-correct object
 `toString` dispatch (via #1472).
+
+### 2026-06-04 — `String(null/undefined/bool)` + no-arg `String()` standalone fix
+
+The `String()` builtin call handler (`src/codegen/expressions/calls.ts`
+~L7745) and the shared `emitBoolToString` helper (`src/codegen/string-ops.ts`
+~L900) pushed `global.get` of a JS-host string-constant global
+(`addStringConstantGlobal`) for the literal arms — `String()`, `String(null)`,
+`String(undefined)`, `String(<void>)`, and `String(<bool>)` /
+`bool.toString()`. Those globals are **never registered** in native-strings
+mode, so the index resolved to the `-1` sentinel (`4294967295`) and the module
+failed `WebAssembly.instantiate` / `wasmtime run` with **"Invalid global index:
+4294967295"** under `--target standalone` / `--target wasi`.
+
+- **Fix**: route every literal arm through `compileStringLiteral`, which
+  already branches on `ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0` and
+  materializes a `NativeString` GC struct inline (no host global). Made
+  `emitBoolToString` native-aware the same way (returns the selected
+  `NativeString` ref in native mode, the externref global in JS-host mode) and
+  threaded its return type back through both call sites so the result type
+  stays consistent. JS-host (`gc`) mode is unchanged — `compileStringLiteral`
+  still emits the externref `global.get` there.
+- **Side benefit**: the explicit `nativeStrings: true` ("fast-native") path,
+  which previously hit the same unbound-global defect for boolean concat /
+  `String(bool)`, now also works.
+
+**Verified** (compiled `--target standalone` + `wasi`, instantiated with an
+empty import object, read back via `.length`/`.charCodeAt`):
+
+| expression          | result      |
+|---------------------|-------------|
+| `String(true)`      | `"true"`    |
+| `String(false)`     | `"false"`   |
+| `String(null)`      | `"null"`    |
+| `String(undefined)` | `"undefined"`|
+| `String()`          | `""`        |
+| `String(42)`        | `"42"`      |
+| `b.toString()` (bool)| `"true"`   |
+
+Tests: `tests/issue-1470-string-coercion-standalone.test.ts` (4 cases —
+standalone + WASI + gc-default regression + explicit nativeStrings).
+`native-strings`, `native-strings-standalone`,
+`issue-1470-standalone-string-imports` (14) all green; default `gc` JS-host
+path unchanged.
