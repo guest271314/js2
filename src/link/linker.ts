@@ -17,6 +17,7 @@ import {
   SYMTAB_FUNCTION,
   SYMTAB_GLOBAL,
   SYMTAB_TABLE,
+  type ElementEntry,
   type MemoryEntry,
   type ParsedObject,
   type RelocEntry,
@@ -378,19 +379,27 @@ function emitLinked(
   }
 
   // ── Element section ───────────────────────────────────────────
-  const allElements: {
-    tableIdx: number;
-    offsetExpr: Uint8Array;
-    funcIndices: number[];
-  }[] = [];
+  // #1841 — preserve each segment's original flags/mode. Previously every
+  // segment was re-emitted as active flag-0, discarding passive/declarative
+  // modes (declarative `ref.func` declarations would have become active table
+  // inits) and dropping explicit tableidx / expr-payload variants.
+  const allElements: ElementEntry[] = [];
   for (let modIdx = 0; modIdx < parsed.length; modIdx++) {
     const obj = parsed[modIdx]!;
     const off = offsets[modIdx]!;
     for (const elem of obj.elements) {
       allElements.push({
+        flags: elem.flags,
         tableIdx: elem.tableIdx + off.tableOffset,
         offsetExpr: elem.offsetExpr,
+        // Only funcidx payloads are re-indexed; expr payloads (flags 4-7) keep
+        // their raw bytes (they reference funcs by `ref.func` inside the expr,
+        // which the existing relocation path does not rewrite here — preserved
+        // verbatim, matching the pre-#1841 behavior of never producing them).
         funcIndices: elem.funcIndices.map((i) => i + off.funcOffset),
+        elemCount: elem.elemCount,
+        kindByte: elem.kindByte,
+        elemExprs: elem.elemExprs,
       });
     }
   }
@@ -398,11 +407,33 @@ function emitLinked(
     enc.section(SECTION.element, (s) => {
       s.u32(allElements.length);
       for (const elem of allElements) {
-        s.byte(0x00); // active, table 0, funcref
-        s.bytes(elem.offsetExpr);
-        s.u32(elem.funcIndices.length);
-        for (const idx of elem.funcIndices) {
-          s.u32(idx);
+        const flags = elem.flags;
+        s.u32(flags);
+        // Per the spec flag table (see parseElementSection): explicit tableidx
+        // for flags 2 & 6; active offset-expr for flags 0,2,4,6; elemkind/
+        // reftype byte for every flag except 0 & 4; payload funcidx* (0-3) or
+        // expr* (4-7).
+        const hasExplicitTable = (flags & 0x02) !== 0 && (flags & 0x01) === 0;
+        const isActive = (flags & 0x01) === 0;
+        const usesExprs = (flags & 0x04) !== 0;
+        const hasKindByte = flags !== 0 && flags !== 4;
+        if (hasExplicitTable) {
+          s.u32(elem.tableIdx);
+        }
+        if (isActive && elem.offsetExpr) {
+          s.bytes(elem.offsetExpr);
+        }
+        if (hasKindByte && elem.kindByte !== null) {
+          s.byte(elem.kindByte);
+        }
+        if (usesExprs && elem.elemExprs) {
+          s.u32(elem.elemCount);
+          s.bytes(elem.elemExprs);
+        } else {
+          s.u32(elem.funcIndices.length);
+          for (const idx of elem.funcIndices) {
+            s.u32(idx);
+          }
         }
       }
     });
