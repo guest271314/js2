@@ -148,8 +148,12 @@ export function compileDeleteExpression(
           fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
 
           // (b) Sidecar / descriptor-map cleanup. Push receiver as externref +
-          // key as externref, then call __delete_property and drop its result —
-          // we always report `true` from the static struct-field path.
+          // key as externref, then call __delete_property and RETURN its result
+          // (#1821). The helper reports `false` (0) for a non-configurable
+          // descriptor entry (ECMA-262 §13.5.1 step 5) and `true` (1) otherwise
+          // — including a plain struct field with no descriptor (deletable).
+          // The previous code dropped the result and hardcoded `true`, so
+          // `delete obj.nonConfigurable` wrongly returned `true`.
           fctx.body.push({ op: "local.get", index: recvLocal });
           if (recvType.kind === "ref" || recvType.kind === "ref_null") {
             fctx.body.push({ op: "extern.convert_any" } as Instr);
@@ -171,11 +175,14 @@ export function compileDeleteExpression(
             flushLateImportShifts(ctx, fctx);
             if (delIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx: delIdx });
-              fctx.body.push({ op: "drop" });
-            } else {
-              fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "drop" });
+              // Leave __delete_property's i32 result on the stack as the
+              // `delete` expression value (spec-correct configurability check).
+              return { kind: "i32" };
             }
+            // No host import (standalone): drop receiver + key; struct.set
+            // already cleared the field, so report `true`.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
           } else {
             // String literal failed (shouldn't happen for a static field name);
             // discard the receiver/key and continue.
@@ -203,9 +210,53 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
-          compileExpression(ctx, fctx, inner.expression);
+          // (#1821) Mirror the property-access arm above: clear the struct
+          // field AND the sidecar/descriptor entry, then return
+          // __delete_property's result. The previous element-access arm only
+          // did the struct.set + hardcoded `true`, so `delete obj["x"]`
+          // diverged from `delete obj.x` — it left the `Object.defineProperty`
+          // descriptor in place (`hasOwnProperty("x")` stayed true) and
+          // reported `true` even for a non-configurable property.
+          const recvType = compileExpression(ctx, fctx, inner.expression);
+          if (!recvType) {
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, recvType);
+          fctx.body.push({ op: "local.set", index: recvLocal });
+
+          // (a) struct.set with sentinel — restores the field to undefined.
+          fctx.body.push({ op: "local.get", index: recvLocal });
           emitDeleteSentinel(fctx, fieldType);
           fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+
+          // (b) sidecar / descriptor-map cleanup, returning the helper result.
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+          } else if (recvType.kind !== "externref") {
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.argumentExpression);
+          if (keyResult) {
+            const delIdx = ensureLateImport(
+              ctx,
+              "__delete_property",
+              [{ kind: "externref" }, { kind: "externref" }],
+              [{ kind: "i32" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            if (delIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: delIdx });
+              return { kind: "i32" };
+            }
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
+          } else {
+            fctx.body.push({ op: "drop" });
+          }
           fctx.body.push({ op: "i32.const", value: 1 });
           return { kind: "i32" };
         }
