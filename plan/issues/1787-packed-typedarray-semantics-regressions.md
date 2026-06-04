@@ -12,7 +12,7 @@ area: testing
 language_feature: typedarray
 goal: correctness
 sprint: Backlog
-related: [608, 1767, 1784, 1785, 1786]
+related: [608, 1767, 1799, 1800, 1786]
 ---
 # #1787 - Regression coverage for packed TypedArray integer semantics
 
@@ -45,5 +45,5 @@ or by accidentally inserting f64 conversion arrays.
 ## Notes
 
 This issue is test-first guardrail work. It can be implemented before the full
-storage generalization in #1784 by marking unsupported constructors as pending
+storage generalization in #1799 by marking unsupported constructors as pending
 or by landing focused tests alongside each representation change.
