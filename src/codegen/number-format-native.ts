@@ -377,15 +377,18 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   if (needRadix && !ctx.funcMap.has("number_toString_radix")) {
     emitToStringRadix(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
   }
-  if (which.has("number_toString") && !ctx.funcMap.has("number_toString")) {
+  // number_toFixed needs number_toString for its |x| >= 1e21 branch (§21.1.3.3
+  // step 5 defers to ToString there), so emit it whenever toFixed/toPrecision is
+  // requested even if the program never calls .toString() directly.
+  const needPrecision = which.has("number_toPrecision");
+  const needFixed = which.has("number_toFixed") || needPrecision;
+  if ((which.has("number_toString") || needFixed) && !ctx.funcMap.has("number_toString")) {
     emitToString(ctx, strDataTypeIdx, i32, f64, extern, bufType);
   }
 
   // number_toPrecision delegates to number_toFixed + number_toExponential, so
   // those two must be emitted whenever toPrecision is requested — even if the
   // program never calls them directly.
-  const needPrecision = which.has("number_toPrecision");
-  const needFixed = which.has("number_toFixed") || needPrecision;
   const needExp = which.has("number_toExponential") || needPrecision;
 
   if (needFixed && !ctx.funcMap.has("number_toFixed")) {
@@ -919,8 +922,29 @@ function emitToFixed(
   const L_FDIG = 13; // fractional digit count (i32)
   const L_K = 14;
 
+  // §21.1.3.3 Number.prototype.toFixed step 5: if x >= 10^21, return ToString(x).
+  // Without this, the scaled fixed-point path below overflows the integer-digit
+  // emitter and prints a bogus 22-digit integer. number_toString is guaranteed
+  // emitted alongside toFixed (see emitNumberFormatHelpers).
+  const numToStrIdx = ctx.funcMap.get("number_toString");
+  const toStringFallback: Instr[] =
+    numToStrIdx !== undefined
+      ? [
+          { op: "local.get", index: L_ABS },
+          { op: "f64.const", value: 1e21 },
+          { op: "f64.ge" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "local.get", index: L_VALUE }, { op: "call", funcIdx: numToStrIdx }, { op: "return" }],
+          } as Instr,
+        ]
+      : [];
+
   const body: Instr[] = [
     ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+    // §21.1.3.3 step 5: |x| >= 1e21 → ToString(x) (defers to number_toString).
+    ...toStringFallback,
     // fdig = (i32)digits (truncated)
     { op: "local.get", index: L_DIGITS },
     { op: "i32.trunc_f64_s" },
