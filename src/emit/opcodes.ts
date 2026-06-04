@@ -477,7 +477,10 @@ export const RELOC = {
   R_WASM_GLOBAL_INDEX_LEB: 7,
   R_WASM_FUNCTION_OFFSET_I32: 8,
   R_WASM_SECTION_OFFSET_I32: 9,
-  R_WASM_TAG_INDEX_LEB: 11,
+  // #1843 — LLVM canonical for the tag-index relocation is 10 (historically
+  // R_WASM_EVENT_INDEX_LEB). This was 11, so a tag relocation written by the
+  // emitter was parsed as unknown by `src/link/reader.ts` (which uses 10).
+  R_WASM_TAG_INDEX_LEB: 10,
 } as const;
 
 /** Symbol flags for the linking section symbol table */
