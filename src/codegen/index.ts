@@ -6199,6 +6199,14 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const lb of ctx.liveBodies) {
       shiftFuncIndices(lb);
     }
+    // (#1839) The module-init body holds `call`/`ref.func` indices too. When
+    // the first string usage occurs inside a function body (not module-init),
+    // this body is NOT reachable via funcStack/liveBodies yet, so it would be
+    // missed and `__module_init` would call the wrong functions after the late
+    // string-import shift. Matches addUnionImports / shiftLateImportIndices.
+    if (ctx.pendingInitBody) {
+      shiftFuncIndices(ctx.pendingInitBody);
+    }
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
@@ -6216,6 +6224,21 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const t of ctx.pendingMethodTrampolines) {
       if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
       if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+    }
+    // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
+    // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
+    // on its own. All entries are defined functions (>= numImportFuncs), so
+    // every entry >= importsBefore moves up by `delta`. Omitting this left the
+    // map stale under plain `--nativeStrings` JS-host mode.
+    for (const [name, idx] of ctx.nativeStrHelpers) {
+      if (idx >= importsBefore) {
+        ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+    }
+    // (#1839) The module start function index also moves if it was a defined
+    // function at or above the insertion point. Matches addUnionImports.
+    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+      ctx.mod.startFuncIdx += delta;
     }
   }
 }
