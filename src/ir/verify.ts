@@ -18,9 +18,49 @@
 // On failure, returns a list of `IrVerifyError`s rather than throwing, so
 // callers can decide whether to bail or fall back to the legacy path.
 
-import type { IrBlock, IrFunction, IrType, IrValueId } from "./nodes.js";
+import type { IrBlock, IrFunction, IrInstr, IrType, IrValueId } from "./nodes.js";
 import { asVal } from "./nodes.js";
 import type { ValType } from "./types.js";
+
+/**
+ * #1844 — Yield every direct nested instruction buffer carried by `instr`
+ * (then/else arms, loop cond/body/update, for-of bodies, try/catch/finally
+ * bodies). These buffers hold SSA defs and uses that live in their own
+ * emission-internal scope but must still satisfy the global SSA single-def
+ * invariant and the #1798 return-type gate. Mirrors the traversal in
+ * `registerInstrDefs` (lower.ts) so the verifier and lowerer agree on which
+ * buffers exist; if a new buffer-bearing instr kind is added, extend both.
+ */
+function nestedBuffers(instr: IrInstr): readonly (readonly IrInstr[])[] {
+  switch (instr.kind) {
+    case "if":
+      return [instr.then, instr.else];
+    case "forof.vec":
+    case "forof.iter":
+    case "forof.string":
+      return [instr.body];
+    case "while.loop":
+      return [instr.cond, instr.body];
+    case "for.loop":
+      return [instr.cond, instr.body, instr.update];
+    case "try": {
+      const bufs: (readonly IrInstr[])[] = [instr.body];
+      if (instr.catchClause) bufs.push(instr.catchClause.body);
+      if (instr.finallyBody) bufs.push(instr.finallyBody);
+      return bufs;
+    }
+    default:
+      return [];
+  }
+}
+
+/** Recursively visit `instr` and every instruction inside its nested buffers. */
+function forEachInstrDeep(instr: IrInstr, visit: (i: IrInstr) => void): void {
+  visit(instr);
+  for (const buf of nestedBuffers(instr)) {
+    for (const sub of buf) forEachInstrDeep(sub, visit);
+  }
+}
 
 export interface IrVerifyError {
   readonly message: string;
@@ -150,75 +190,112 @@ function verifyBlock(func: IrFunction, block: IrBlock, defs: Set<IrValueId>, err
     defs.add(arg);
   }
 
+  // Walk this block's instruction buffer, threading a `localDefs` set that
+  // accumulates every SSA value defined so far in straight-line order. #1844:
+  // nested if/try/loop/for-of buffers are walked recursively with the same
+  // accumulator so (a) their SSA single-def invariant is enforced against the
+  // global `defs` set, (b) use-before-def inside a nested body sees params,
+  // the enclosing block args, and outer values defined before the nesting
+  // instr, and (c) box/unbox/tag.test structural checks fire inside them too.
   const localDefs = new Set<IrValueId>();
-  for (const instr of block.instrs) {
-    // Use-before-def check within block (params + block args always count).
-    const uses = collectUses(instr);
-    for (const u of uses) {
-      const isParam = func.params.some((p) => p.value === u);
-      const isBlockArg = block.blockArgs.includes(u);
-      const isEarlier = localDefs.has(u);
-      if (!isParam && !isBlockArg && !isEarlier) {
-        errors.push({
-          message: `use of SSA value ${u} before def in block ${block.id as number}`,
-          func: func.name,
-          block: block.id as number,
-        });
-      }
+  const checkUse = (u: IrValueId): void => {
+    const isParam = func.params.some((p) => p.value === u);
+    const isBlockArg = block.blockArgs.includes(u);
+    const isEarlier = localDefs.has(u);
+    if (!isParam && !isBlockArg && !isEarlier) {
+      errors.push({
+        message: `use of SSA value ${u} before def in block ${block.id as number}`,
+        func: func.name,
+        block: block.id as number,
+      });
     }
+  };
+  const walkBuffer = (instrs: readonly IrInstr[]): void => {
+    for (const instr of instrs) {
+      // `while.loop` / `for.loop` surface `condValue` in `collectUses`, but
+      // that value is *produced by the cond buffer* (which `collectUses` for
+      // these kinds does not contain). Walk the cond buffer first so its def
+      // is registered before we validate the `condValue` use — otherwise it
+      // would spuriously read as use-before-def. (#1844)
+      if (instr.kind === "while.loop" || instr.kind === "for.loop") {
+        walkBuffer(instr.cond);
+      }
 
-    // Structural checks for the newly-added tagged-union instructions.
-    // These are type-system-level, not SSA-scope — misuse should surface
-    // here rather than silently lowering to a trap.
-    if (instr.kind === "box") {
-      if (instr.toType.kind !== "union") {
-        errors.push({
-          message: `box target must be a union IrType, got ${instr.toType.kind}`,
-          func: func.name,
-          block: block.id as number,
-        });
-      } else {
-        // box requires the operand's ValType to be a member of the union.
-        const operandT = operandValType(func, block, instr.value, localDefs);
-        if (operandT && !unionContains(instr.toType.members, operandT)) {
+      // Use-before-def check (params + block args always count). Nested-body
+      // uses additionally see anything registered in `localDefs` so far,
+      // which by construction includes the outer values defined before the
+      // enclosing nesting instr.
+      for (const u of collectUses(instr)) checkUse(u);
+
+      // Structural checks for the tagged-union instructions. These are
+      // type-system-level, not SSA-scope — misuse should surface here rather
+      // than silently lowering to a trap.
+      if (instr.kind === "box") {
+        if (instr.toType.kind !== "union") {
           errors.push({
-            message: `box operand type ${operandT.kind} is not a member of union<${instr.toType.members.map((m) => m.kind).join(",")}>`,
+            message: `box target must be a union IrType, got ${instr.toType.kind}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        } else {
+          // box requires the operand's ValType to be a member of the union.
+          const operandT = operandValType(func, block, instr.value, localDefs);
+          if (operandT && !unionContains(instr.toType.members, operandT)) {
+            errors.push({
+              message: `box operand type ${operandT.kind} is not a member of union<${instr.toType.members.map((m) => m.kind).join(",")}>`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+      }
+      if (instr.kind === "unbox" || instr.kind === "tag.test") {
+        // value's defining IrType must be a union whose members contain `tag`.
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "union") {
+          errors.push({
+            message: `${instr.kind} operand must be a union IrType, got ${operandIr.kind}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        } else if (operandIr && !unionContains(operandIr.members, instr.tag)) {
+          errors.push({
+            message: `${instr.kind} tag ${instr.tag.kind} is not a member of union<${operandIr.members.map((m) => m.kind).join(",")}>`,
             func: func.name,
             block: block.id as number,
           });
         }
       }
-    }
-    if (instr.kind === "unbox" || instr.kind === "tag.test") {
-      // value's defining IrType must be a union whose members contain `tag`.
-      const operandIr = operandIrType(func, block, instr.value, localDefs);
-      if (operandIr && operandIr.kind !== "union") {
-        errors.push({
-          message: `${instr.kind} operand must be a union IrType, got ${operandIr.kind}`,
-          func: func.name,
-          block: block.id as number,
-        });
-      } else if (operandIr && !unionContains(operandIr.members, instr.tag)) {
-        errors.push({
-          message: `${instr.kind} tag ${instr.tag.kind} is not a member of union<${operandIr.members.map((m) => m.kind).join(",")}>`,
-          func: func.name,
-          block: block.id as number,
-        });
-      }
-    }
 
-    if (instr.result !== null) {
-      if (defs.has(instr.result)) {
-        errors.push({
-          message: `duplicate SSA def for value ${instr.result}`,
-          func: func.name,
-          block: block.id as number,
-        });
+      if (instr.result !== null) {
+        if (defs.has(instr.result)) {
+          errors.push({
+            message: `duplicate SSA def for value ${instr.result}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+        defs.add(instr.result);
+        localDefs.add(instr.result);
       }
-      defs.add(instr.result);
-      localDefs.add(instr.result);
+
+      // Descend into the remaining nested buffers (if-arms, loop body/update,
+      // for-of bodies, try/catch/finally). The nesting instr's own result is
+      // registered before we descend so an arm body may reference it. The
+      // loop `cond` buffer was already walked above, so skip it here.
+      if (instr.kind === "while.loop") {
+        walkBuffer(instr.body);
+      } else if (instr.kind === "for.loop") {
+        walkBuffer(instr.body);
+        walkBuffer(instr.update);
+      } else {
+        for (const buf of nestedBuffers(instr)) {
+          walkBuffer(buf);
+        }
+      }
     }
-  }
+  };
+  walkBuffer(block.instrs);
 
   // Terminator uses must resolve to params/blockargs/local defs.
   const termUses = collectTerminatorUses(block);
@@ -401,9 +478,17 @@ function operandIrType(
   }
   // Scan all blocks — the SSA invariant allows earlier-defined values from
   // predecessor blocks to be used here. A full dominator check is Phase-3.
+  // #1844: descend into nested if/try/loop/for-of buffers so a value defined
+  // inside one of them (e.g. an `if`-arm result feeding a `return`) is found
+  // here instead of returning `null` and silently bypassing the #1798
+  // return-type assignability gate.
+  let found: import("./nodes.js").IrType | null = null;
   for (const b of func.blocks) {
     for (const inst of b.instrs) {
-      if (inst.result === v && inst.resultType) return inst.resultType;
+      forEachInstrDeep(inst, (i) => {
+        if (found === null && i.result === v && i.resultType) found = i.resultType;
+      });
+      if (found !== null) return found;
     }
   }
   // Block args of the containing block carry types in `blockArgTypes`.
