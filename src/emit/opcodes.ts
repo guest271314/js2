@@ -441,7 +441,13 @@ export const TYPE = {
   i31: 0x6c,
   struct_ht: 0x6b,
   array_ht: 0x6a,
-  none: 0x6e, // alias – bottom of ref hierarchy
+  // #1842 — WasmGC abstract bottom heap types. `none` is the bottom of the
+  // `any` hierarchy and MUST be 0x71; it previously aliased `any` (0x6e), which
+  // would mis-encode any future bottom-type emission. `noextern`/`nofunc`
+  // (bottoms of the extern/func hierarchies) were absent entirely.
+  none: 0x71,
+  noextern: 0x72,
+  nofunc: 0x73,
   v128: 0x7b,
   i8: 0x78,
   i16: 0x77,
