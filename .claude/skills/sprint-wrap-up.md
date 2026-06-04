@@ -127,7 +127,7 @@ Update `/home/node/.claude/projects/-workspace/memory/project_next_session.md` w
 
 ```bash
 git add plan/issues/sprints/{N}/sprint.md plan/diary.md plan/log/retrospectives/sprint-{N}.md
-git commit -m "chore(sprint-{N}): close sprint — retro, diary entry, status closed. Checklist completed."
+git commit -m "chore(sprint-{N}): close sprint — retro, diary entry, status closed. ✓"
 ```
 
 ## Step 12: Push
