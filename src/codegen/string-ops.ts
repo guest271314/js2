@@ -21,6 +21,7 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -897,25 +898,8 @@ export function compileTaggedTemplateExpression(
  * Emit wasm code to convert a boolean (i32) on the stack to a string.
  * Produces "true" or "false" string constant (externref) via if/else.
  */
-export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): ValType {
-  // Native-strings / standalone (#1470): JS-host string-constant globals are
-  // never registered (their global index resolves to the -1 sentinel and the
-  // module fails validation with "Invalid global index: 4294967295"). Select
-  // a NativeString GC struct in each arm instead, built inline by
-  // `compileNativeStringLiteral`.
-  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-    const trueInstrs = nativeStringLiteralInstrs(ctx, "true");
-    const falseInstrs = nativeStringLiteralInstrs(ctx, "false");
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "val", type: nativeStringType(ctx) },
-      then: trueInstrs,
-      else: falseInstrs,
-    } as Instr);
-    return nativeStringType(ctx);
-  }
-
-  // JS-host mode: "true" / "false" are externref string-constant globals.
+export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): void {
+  // Ensure "true" and "false" string constants are registered
   addStringConstantGlobal(ctx, "true");
   addStringConstantGlobal(ctx, "false");
 
@@ -929,7 +913,6 @@ export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): Va
     then: [{ op: "global.get", index: trueIdx }],
     else: [{ op: "global.get", index: falseIdx }],
   } as any);
-  return { kind: "externref" };
 }
 
 // ── Batched string concat chains ─────────────────────────────────────
@@ -2432,6 +2415,15 @@ export function compileNativeStringMethodCall(
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
+  // static RegExp routes to the pure-WasmGC matcher (returns the match index or
+  // -1) instead of the host regex engine. The string-coercion form (string
+  // argument) is not a RegExp value and falls through to the refusal below.
+  if (ctx.standalone && method === "search") {
+    const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess);
+    if (searchResult !== undefined) return searchResult;
+  }
+
   if (ctx.standalone) {
     const alwaysRegExp = method === "match" || method === "matchAll" || method === "search";
     const symbolProtocolArgForm =

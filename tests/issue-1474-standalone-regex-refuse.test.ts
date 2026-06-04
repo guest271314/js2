@@ -50,8 +50,14 @@ describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
     await expectRefused(`export function f(s: string): number { return [...s.matchAll(/\\d/g)].length; }`);
   });
 
-  it("rejects s.search(regexLiteral) — String method (Phase 2c)", async () => {
-    await expectRefused(`export function f(s: string): number { return s.search(/\\d/); }`);
+  // #1539 Phase 2b landed `String.prototype.search(/re/)` on the pure-WasmGC
+  // matcher — it now compiles instead of refusing. (Equivalence vs native
+  // `search` lives in tests/issue-1539-standalone-regex.test.ts.)
+  it("compiles s.search(regexLiteral) — String method (Phase 2b)", async () => {
+    const r = await compile(`export function f(s: string): number { return s.search(/\\d/); }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
   it("rejects s.split(regexArg) — Phase 2c", async () => {

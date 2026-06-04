@@ -471,6 +471,156 @@ function isStandaloneRegExpValue(
   return valueType.typeIdx === ctx.structMap.get(STANDALONE_REGEXP_STRUCT_NAME);
 }
 
+/**
+ * Result of {@link emitRegexSearchCall}: locals holding the regex struct, the
+ * capture-slots array, and the struct type index used to read its fields.
+ */
+interface RegexSearchEmission {
+  /** Local holding the (non-null) `$NativeRegExp` struct ref. */
+  regexpLocal: number;
+  /** Local holding the populated caps array (length `2 * nGroups`). */
+  capsLocal: number;
+  /** The `$NativeRegExp` struct type index (== `ctx.structMap` entry). */
+  structTypeIdx: number;
+}
+
+/**
+ * Lower a `$NativeRegExp` receiver expression onto the stack and into a local.
+ *
+ * Compiles `regexpExpr`, narrowing an externref (backend-created RegExp value)
+ * back to the concrete `$NativeRegExp` struct, then stores it in a fresh local.
+ * Returns the local index and struct type index, or `null` after reporting a
+ * narrowed refusal when the value was not created by this backend.
+ */
+function loadStandaloneRegExpStruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  regexpExpr: ts.Expression,
+): { regexpLocal: number; structTypeIdx: number } | null {
+  const regexpType = compileExpression(ctx, fctx, regexpExpr);
+  let storedRegexpType = regexpType;
+  if (regexpType?.kind === "externref") {
+    if (!isKnownBackendCreatedRegExpReceiver(ctx, regexpExpr)) {
+      reportStandaloneRegExpUnsupported(ctx, regexpExpr, "RegExp values not created by this standalone backend");
+      return null;
+    }
+    const typeIdx = ensureStandaloneRegExpStruct(ctx);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx } as Instr);
+    storedRegexpType = { kind: "ref", typeIdx };
+  }
+  if (!isStandaloneRegExpValue(ctx, storedRegexpType)) {
+    reportStandaloneRegExpUnsupported(ctx, regexpExpr, "RegExp values not created by this standalone backend");
+    return null;
+  }
+
+  const reStructType: ValType = { kind: "ref", typeIdx: storedRegexpType.typeIdx };
+  const regexpLocal = allocLocal(fctx, `__re_${fctx.locals.length}`, reStructType);
+  if (storedRegexpType.kind === "ref_null") {
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: regexpLocal });
+  return { regexpLocal, structTypeIdx: storedRegexpType.typeIdx };
+}
+
+/**
+ * Emit the shared `__regex_search(...)` call sequence used by `.test`,
+ * `String.prototype.search`, and (later) the capture-array methods.
+ *
+ * `regexpExpr` is the `$NativeRegExp` source; `inputExpr` is the subject string.
+ * The search always starts at index 0 (`search`/`test` ignore `lastIndex` for
+ * the non-global/non-sticky case; sticky-at-0 is honored). On return the i32
+ * match flag (1/0) is left on the stack and the populated caps array is
+ * available via the returned `capsLocal`. Returns `null` after reporting a
+ * narrowed refusal if the regex value was not backend-created.
+ */
+function emitRegexSearchCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  regexpExpr: ts.Expression,
+  inputExpr: ts.Expression,
+): RegexSearchEmission | null {
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  if (flattenIdx === undefined) {
+    reportError(ctx, regexpExpr, "Codegen error: standalone RegExp backend missing native string helpers (#682).");
+    return null;
+  }
+  const searchIdx = ensureRegexSearch(ctx);
+  const i32Arr = regexI32ArrayType(ctx);
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+
+  // --- the compiled $NativeRegExp struct ---
+  const loaded = loadStandaloneRegExpStruct(ctx, fctx, regexpExpr);
+  if (loaded === null) return null;
+  const { regexpLocal, structTypeIdx } = loaded;
+
+  // --- input: flatten the subject string ---
+  const inputType = compileExpression(ctx, fctx, inputExpr, nativeStringType(ctx));
+  if (inputType?.kind === "ref_null") {
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  }
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const inputLocal = allocLocal(fctx, `__re_input_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: strTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: inputLocal });
+
+  // caps = array.new_default(2 * nGroups)
+  const capsLocal = allocLocal(fctx, `__re_caps_${fctx.locals.length}`, { kind: "ref", typeIdx: i32Arr });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.mul" });
+  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr } as Instr);
+  fctx.body.push({ op: "local.set", index: capsLocal });
+
+  // sticky = (flags & RE_FLAG_Y) != 0
+  const stickyLocal = allocLocal(fctx, `__re_sticky_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_FLAGS });
+  fctx.body.push({ op: "i32.const", value: RE_FLAG_Y });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ne" });
+  fctx.body.push({ op: "local.set", index: stickyLocal });
+
+  // __regex_search(prog, classTable, 2*nGroups, inData, inOff, inLen, 0, sticky, caps)
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
+  // nSlots = 2 * nGroups
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.mul" });
+  // input data / off / len
+  fctx.body.push({ op: "local.get", index: inputLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
+  fctx.body.push({ op: "local.get", index: inputLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
+  fctx.body.push({ op: "local.get", index: inputLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
+  // startIdx = 0 (test/search ignore lastIndex for non-global/non-sticky;
+  // sticky-at-0 is honored). The i32 match flag is left on the stack.
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: stickyLocal });
+  fctx.body.push({ op: "local.get", index: capsLocal });
+  fctx.body.push({ op: "call", funcIdx: searchIdx });
+  return { regexpLocal, capsLocal, structTypeIdx };
+}
+
+/** True when `argExpr`'s static type is string-like (or a String wrapper). */
+function isStringLikeArg(ctx: CodegenContext, argExpr: ts.Expression): boolean {
+  const argType = ctx.checker.getTypeAtLocation(argExpr);
+  return (
+    (argType.flags & ts.TypeFlags.StringLike) !== 0 ||
+    ((argType.flags & ts.TypeFlags.Object) !== 0 && argType.getSymbol()?.getName() === "String")
+  );
+}
+
 export function tryCompileStandaloneRegExpTest(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -491,112 +641,74 @@ export function tryCompileStandaloneRegExpTest(
     return null;
   }
 
-  const argType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-  const argIsString =
-    (argType.flags & ts.TypeFlags.StringLike) !== 0 ||
-    ((argType.flags & ts.TypeFlags.Object) !== 0 && argType.getSymbol()?.getName() === "String");
-  if (!argIsString) {
+  if (!isStringLikeArg(ctx, expr.arguments[0]!)) {
     reportStandaloneRegExpUnsupported(ctx, expr.arguments[0]!, "RegExp.prototype.test argument coercion");
     return null;
   }
 
-  ensureNativeStringHelpers(ctx);
-  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-  if (flattenIdx === undefined) {
-    reportError(ctx, expr, "Codegen error: standalone RegExp backend missing native string helpers (#682).");
-    return null;
-  }
-  const searchIdx = ensureRegexSearch(ctx);
-  const i32Arr = regexI32ArrayType(ctx);
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-
-  // --- receiver: the compiled $NativeRegExp struct ---
-  const regexpType = compileExpression(ctx, fctx, propAccess.expression);
-  let storedRegexpType = regexpType;
-  if (regexpType?.kind === "externref") {
-    if (!isKnownBackendCreatedRegExpReceiver(ctx, propAccess.expression)) {
-      reportStandaloneRegExpUnsupported(
-        ctx,
-        propAccess.expression,
-        "RegExp values not created by this standalone backend",
-      );
-      return null;
-    }
-    const typeIdx = ensureStandaloneRegExpStruct(ctx);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx } as Instr);
-    storedRegexpType = { kind: "ref", typeIdx };
-  }
-  if (!isStandaloneRegExpValue(ctx, storedRegexpType)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      propAccess.expression,
-      "RegExp values not created by this standalone backend",
-    );
-    return null;
-  }
-
-  const reStructType: ValType = { kind: "ref", typeIdx: storedRegexpType.typeIdx };
-  const regexpLocal = allocLocal(fctx, `__re_${fctx.locals.length}`, reStructType);
-  if (storedRegexpType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  }
-  fctx.body.push({ op: "local.set", index: regexpLocal });
-
-  // --- input: flatten the argument string ---
-  const inputType = compileExpression(ctx, fctx, expr.arguments[0]!, nativeStringType(ctx));
-  if (inputType?.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  }
-  fctx.body.push({ op: "call", funcIdx: flattenIdx });
-  const inputLocal = allocLocal(fctx, `__re_input_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: strTypeIdx,
-  });
-  fctx.body.push({ op: "local.set", index: inputLocal });
-
-  // caps = array.new_default(2 * nGroups)
-  const capsLocal = allocLocal(fctx, `__re_caps_${fctx.locals.length}`, { kind: "ref", typeIdx: i32Arr });
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: storedRegexpType.typeIdx, fieldIdx: RE_FIELD_NGROUPS });
-  fctx.body.push({ op: "i32.const", value: 2 });
-  fctx.body.push({ op: "i32.mul" });
-  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr } as Instr);
-  fctx.body.push({ op: "local.set", index: capsLocal });
-
-  // sticky = (flags & RE_FLAG_Y) != 0
-  const stickyLocal = allocLocal(fctx, `__re_sticky_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: storedRegexpType.typeIdx, fieldIdx: RE_FIELD_FLAGS });
-  fctx.body.push({ op: "i32.const", value: RE_FLAG_Y });
-  fctx.body.push({ op: "i32.and" });
-  fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push({ op: "i32.ne" });
-  fctx.body.push({ op: "local.set", index: stickyLocal });
-
-  // __regex_search(prog, classTable, 2*nGroups, inData, inOff, inLen, 0, sticky, caps)
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: storedRegexpType.typeIdx, fieldIdx: RE_FIELD_PROG });
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: storedRegexpType.typeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
-  // nSlots = 2 * nGroups
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: storedRegexpType.typeIdx, fieldIdx: RE_FIELD_NGROUPS });
-  fctx.body.push({ op: "i32.const", value: 2 });
-  fctx.body.push({ op: "i32.mul" });
-  // input data / off / len
-  fctx.body.push({ op: "local.get", index: inputLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
-  fctx.body.push({ op: "local.get", index: inputLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
-  fctx.body.push({ op: "local.get", index: inputLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
-  // startIdx = 0 (test ignores lastIndex for non-global/non-sticky; sticky-at-0 ok for 2a)
-  fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push({ op: "local.get", index: stickyLocal });
-  fctx.body.push({ op: "local.get", index: capsLocal });
-  fctx.body.push({ op: "call", funcIdx: searchIdx });
-  void strDataTypeIdx;
+  // __regex_search leaves the i32 match flag (1/0) on the stack — exactly the
+  // boolean `.test` returns; the caps array is discarded.
+  const emitted = emitRegexSearchCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
+  if (emitted === null) return null;
   return { kind: "i32" };
+}
+
+/**
+ * `String.prototype.search(regexp)` in standalone mode (#1539 Phase 2b).
+ *
+ * Per ECMA-262 §22.1.3.13 + §22.2.6.13 (`RegExp.prototype[@@search]`): search
+ * sets `lastIndex` to 0, runs `RegExpExec`, then restores `lastIndex`, returning
+ * the match's `.index` or `-1` on no match. It is unaffected by the `g` flag and
+ * never advances. Here the subject (string) is the receiver and the RegExp is
+ * the argument: `"abc".search(/b/)`. The argument must be a backend-created
+ * static RegExp; a string argument (which the spec coerces to `new RegExp(arg)`)
+ * stays a narrowed refusal in standalone for this slice.
+ *
+ * Returns f64 (the index, or -1). `caps[0]` holds the whole-match start.
+ * Never returns `VOID_RESULT`, so the type stays `ValType | null | undefined`
+ * to match the `compileNativeStringMethodCall` caller contract.
+ */
+export function tryCompileStandaloneStringSearch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "search") return undefined;
+
+  // Receiver must be string-like; argument must be a static RegExp value.
+  if (!isStringLikeArg(ctx, propAccess.expression)) return undefined;
+  if (expr.arguments.length !== 1) return undefined;
+  const argExpr = expr.arguments[0]!;
+  const argType = ctx.checker.getTypeAtLocation(argExpr);
+  if (!isGlobalRegExpType(argType) && !isKnownBackendCreatedRegExpReceiver(ctx, argExpr)) {
+    // Not a RegExp argument — let the generic string-method path handle the
+    // string-coercion case (it refuses in standalone, citing #1474).
+    return undefined;
+  }
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.search without an enabled standalone engine");
+    return null;
+  }
+
+  const i32Arr = regexI32ArrayType(ctx);
+
+  // emit __regex_search(...) — leaves the i32 match flag on the stack.
+  const emitted = emitRegexSearchCall(ctx, fctx, argExpr, propAccess.expression);
+  if (emitted === null) return null;
+
+  // matched ? f64(caps[0]) : -1
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "f64" } },
+    then: [
+      { op: "local.get", index: emitted.capsLocal },
+      { op: "i32.const", value: 0 },
+      { op: "array.get", typeIdx: i32Arr },
+      { op: "f64.convert_i32_s" },
+    ],
+    else: [{ op: "f64.const", value: -1 }],
+  } as Instr);
+  return { kind: "f64" };
 }
