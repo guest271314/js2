@@ -667,12 +667,36 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // switch (expr) { case ...: ... }
     compileSwitchStatement(ctx, fctx, stmt);
   } else if (ts.isTryStatement(stmt)) {
-    // Compile try body inline (wasm has no exception handling in MVP).
-    // The catch clause is skipped — wasm traps are not catchable.
-    for (const s of stmt.tryBlock.statements) {
-      compileStatement(ctx, fctx, s);
+    // #1838 — the linear backend does not yet lower JS exception handling. The
+    // previous behaviour silently inlined the try body and DISCARDED the catch
+    // clause, so `try { throw e } catch (e) { handler }` ran the (unreachable)
+    // throw and never the handler — a silent divergence from JS with no
+    // diagnostic. Until the EH `try`/`catch` lowering (the emitter supports it,
+    // src/emit/binary.ts) is wired through this backend, raise a clear compile
+    // error rather than miscompile. A try with no catch (try/finally) is still
+    // safe to inline: the finally always runs and there is no handler to drop.
+    if (stmt.catchClause) {
+      // Throw rather than push to ctx.errors: the linear backend's ctx.errors
+      // are not surfaced into the compile result, so a push would still
+      // silently miscompile. The compiler.ts try/catch around
+      // generateLinearM(ulti)Module converts a thrown Error into a
+      // `Codegen error:` failed result, which is what we want.
+      throw new Error(
+        "try/catch is not yet supported by the linear/standalone backend — emitting it " +
+          "would silently drop the catch handler (#1838). A Wasm-EH try/catch lowering is " +
+          "the planned fix; a bare `try { ... }` with only `finally` is supported.",
+      );
+    } else {
+      // try { ... } finally { ... } — no handler to lose; inline both blocks.
+      for (const s of stmt.tryBlock.statements) {
+        compileStatement(ctx, fctx, s);
+      }
+      if (stmt.finallyBlock) {
+        for (const s of stmt.finallyBlock.statements) {
+          compileStatement(ctx, fctx, s);
+        }
+      }
     }
-    // Skip catch clause — it would only fire on JS exceptions
   } else if (ts.isExpressionStatement(stmt)) {
     compileExpression(ctx, fctx, stmt.expression);
     // Only drop if the expression produces a value
