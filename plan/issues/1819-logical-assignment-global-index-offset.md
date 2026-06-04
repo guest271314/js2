@@ -59,4 +59,3 @@ Pre-existing unrelated failures in `tests/logical-assignment.test.ts` (11/11,
 `Import #0 "string_constants": module is not an object or function`) reproduce
 identically on the unpatched baseline — a test-harness instantiation gap, not a
 regression from this change.
-

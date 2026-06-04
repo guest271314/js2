@@ -240,6 +240,12 @@ mkdirSync(PAGES_DIST, { recursive: true });
 copyDirectory(PLAYGROUND_DIST, PAGES_DIST);
 copyDirectory(PLAYGROUND_EXAMPLES_DIR, join(PAGES_DIST, "examples"));
 
+// Static "Get started" docs page (public — always published, unlike the
+// dashboard which is gated behind private planning artifacts). It is a
+// self-contained HTML page that references the shared /components/site-nav.js
+// copied below, so no Vite processing is required.
+copyFile(join(WEBSITE, "getting-started", "index.html"), join(PAGES_DIST, "getting-started", "index.html"));
+
 // Overwrite Vite-built report pages with the latest public/ versions (which include
 // web components like <t262-donut> that Vite doesn't process).
 const PUBLIC_REPORT = join(WEBSITE, "public", "benchmarks", "results", "report.html");
