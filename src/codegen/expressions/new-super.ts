@@ -5,7 +5,12 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
  */
 import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
-import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
+import {
+  collectReferencedIdentifiers,
+  collectWrittenIdentifiers,
+  emitFuncRefAsClosure,
+  isOwnParamName,
+} from "../closures.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -1081,8 +1086,12 @@ function compileNewFunctionExpression(
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
     if (ctx.funcMap.has(name)) continue;
-    const isOwnParam = funcExpr.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === name);
-    if (isOwnParam) continue;
+    // #1832 — `isOwnParamName` recognises names bound by a destructuring
+    // (object/array binding) parameter, not just identifier params. The old
+    // identifier-only check missed `function({a}){ return a }`, so a
+    // destructured param name was wrongly treated as a free variable and
+    // captured from an outer scope that also declared it.
+    if (isOwnParamName(funcExpr, name)) continue;
     if (name === "arguments") continue;
     const type =
       localIdx < fctx.params.length
