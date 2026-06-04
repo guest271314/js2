@@ -1072,9 +1072,20 @@ jobs:
       # checkout on its HTTPS origin (used by other steps / the artifact download)
       # and confines the deploy-key auth to just this push. It KEEPS the #1156
       # fixes intact: the `[skip ci]` commit (prevents self-retrigger of the shard
-      # matrix) and the fetch → rebase --autostash → retry loop (so the refresh
-      # lands on top of concurrent merge-queue advances instead of being dropped by
-      # a "fetch first" rejection).
+      # matrix) and a fetch → re-anchor → retry loop (so the refresh lands on top
+      # of concurrent merge-queue advances instead of being dropped by a "fetch
+      # first" rejection).
+      #
+      # #1861 (2026-06-04 follow-up): the original loop used `git rebase
+      # --autostash deploykey/main`, which FAILED on every attempt with
+      # "cannot rebase: You have unstaged changes" — the shard run leaves the
+      # `test262` submodule dirty, and `--autostash` covers neither submodule
+      # state nor untracked files, so the rebase never started. The loop now
+      # (Option A) snapshots only the small promote JSON files, hard-checks-out a
+      # CLEAN tip of main (`git checkout -f -B`), re-applies the snapshot, commits
+      # `[skip ci]`, and pushes — sidestepping both the dirty submodule and the
+      # shallow-clone missing-merge-base problem. `submodule.test262.ignore all`
+      # keeps the dirty submodule from blocking the checkout.
       #
       # Only the *small* JSON files go to main (the large jsonl lives only in the
       # baselines repo, per #1528). MAIN_DEPLOY_KEY is the private half of the
@@ -1167,35 +1178,89 @@ jobs:
             echo "Only volatile test262 report metadata changed — skipping main commit."
             exit 0
           fi
-          # Commit the staged summary JSON. The [skip ci] trailer prevents the
-          # push from re-triggering the shard matrix. (This commit was dropped
-          # by d630e3a04 when the step switched from the PR flow to a direct
-          # push — without it, `git push HEAD:main` carried the unmodified
-          # checkout and the committed baseline never moved. See #1861.)
-          git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
-          # Push directly to main over the SSH deploy-key remote — that auth path
-          # is in the ruleset's bypass_actors (DeployKey: always), so it is NOT
-          # rejected by GH013 the way a GITHUB_TOKEN push is. Under heavy
-          # merge-queue throughput main advances between this job's checkout and
-          # the push, so a plain push is rejected ("fetch first") and the refresh
-          # would be silently dropped (#1861). Retry with fetch + rebase --autostash
-          # so the freshly-committed baseline lands on top of concurrent merges.
-          # Both the fetch and the push go through the `deploykey` SSH remote.
+          # The list of promote files we actually write back to main. Snapshot
+          # them by content so we can re-apply them onto a CLEAN tip of main on
+          # every retry (Option A, #1861). Only files that exist are listed.
+          PROMOTE_FILES=$(git diff --cached --name-only)
+          echo "Promote files staged for main:"; echo "$PROMOTE_FILES" | sed 's/^/  /'
+
+          # --- DIAGNOSTIC (#1861): show exactly what dirt is in the tree before
+          # we touch the remote. The previous `git rebase --autostash` failed with
+          # "cannot rebase: You have unstaged changes" on every attempt because
+          # --autostash only covers TRACKED top-level changes — NOT submodule
+          # state (the sharded run leaves the `test262` submodule with a dirty
+          # pointer/worktree) and NOT untracked files. So the rebase never even
+          # started. Logging this makes the actual cause visible in the run log. ---
+          echo "::group::pre-push working-tree state (#1861 diagnostic)"
+          echo "--- git status --porcelain ---"
+          git status --porcelain || true
+          echo "--- git submodule status ---"
+          git submodule status || true
+          echo "::endgroup::"
+
+          # Make git ignore the dirty `test262` submodule for all subsequent
+          # operations in this step. The shard runs leave the submodule dirty;
+          # without this, checkout/commit/diff trip over it. We don't need the
+          # submodule for the baseline push at all — only the small JSON files.
+          git config submodule.test262.ignore all || true
+          git config diff.ignoreSubmodules dirty || true
+
+          # Snapshot the promote file CONTENTS to a temp dir (Option A): we will
+          # discard the dirty working tree, hard-checkout a clean tip of main,
+          # then drop these files back in. This sidesteps BOTH the dirty-submodule
+          # rebase failure and the shallow-clone missing-merge-base problem.
+          PROMOTE_SNAPSHOT="$(mktemp -d)"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            mkdir -p "$PROMOTE_SNAPSHOT/$(dirname "$f")"
+            cp "$f" "$PROMOTE_SNAPSHOT/$f"
+          done <<< "$PROMOTE_FILES"
+
+          # Push to main over the SSH deploy-key remote — that auth path is in the
+          # ruleset's bypass_actors (DeployKey: always), so it is NOT rejected by
+          # GH013 the way a GITHUB_TOKEN push is. Under heavy merge-queue
+          # throughput main advances between this job's checkout and the push, so
+          # we re-anchor on a freshly-fetched clean tip of main on EVERY attempt
+          # (no rebase, no dirty-tree dependency). Both the fetch and the push go
+          # through the `deploykey` SSH remote.
+          reapply_promote_files() {
+            # Restore the snapshot onto the (now clean) checkout and stage it.
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              mkdir -p "$(dirname "$f")"
+              cp "$PROMOTE_SNAPSHOT/$f" "$f"
+              git add -f "$f"
+            done <<< "$PROMOTE_FILES"
+          }
           PUSHED=0
           for attempt in 1 2 3 4 5; do
+            # Fetch the current tip of main and hard-reset our branch to it. -B
+            # moves to a clean tip WITHOUT a rebase; --force (-f) on the checkout
+            # discards the dirty tracked working-tree state the shard run left
+            # behind. The `submodule.test262.ignore all` config keeps the dirty
+            # submodule from blocking the checkout.
             git fetch deploykey main
-            if ! git rebase --autostash deploykey/main; then
-              git rebase --abort || true
-              echo "rebase onto deploykey/main failed (attempt ${attempt}) — retrying"
+            git checkout -f -B _promote_tmp deploykey/main || {
+              echo "checkout of deploykey/main failed (attempt ${attempt}) — retrying"
               sleep $((attempt * 5))
               continue
+            }
+            # Re-apply the freshly-generated baseline files onto the clean tip and
+            # commit. The [skip ci] trailer prevents the push from re-triggering
+            # the shard matrix (#1156).
+            reapply_promote_files
+            if git diff --cached --quiet; then
+              echo "Baseline already current on main (no delta after re-anchor) — nothing to push."
+              PUSHED=1
+              break
             fi
+            git commit -m "chore(test262): refresh sharded baseline — ${PASS}/${TOTAL} pass [skip ci]"
             if git push deploykey HEAD:main; then
               echo "Pushed baseline directly to main via deploy key (${PASS}/${TOTAL} pass, attempt ${attempt})."
               PUSHED=1
               break
             fi
-            echo "push race lost (attempt ${attempt}) — refetching and retrying"
+            echo "push race lost (attempt ${attempt}) — re-anchoring on latest main and retrying"
             sleep $((attempt * 5))
           done
           if [ "$PUSHED" != "1" ]; then
