@@ -79,11 +79,6 @@ export function main(): void {
   // Long-lived port loop: read framed JSON messages off stdin until EOF and
   // echo each one back as valid JSON within Chrome's 1 MiB per-message cap.
   const header = new Uint8Array(4);
-  const open = new Uint8Array(1);
-  open[0] = OPEN_BRACKET;
-  const close = new Uint8Array(1);
-  close[0] = CLOSE_BRACKET;
-
   while (true) {
     // 4-byte LE length prefix. EOF (or a zero-length frame) = clean shutdown.
     if (!readExact(header, 4)) break;
@@ -118,11 +113,23 @@ export function main(): void {
         while (c > i && body[c - 1] !== COMMA) c = c - 1;
         if (c > i) stop = c - 1; // exclude the comma itself
       }
-      // Frame body = `[` + body[i..stop) + `]` (a valid JSON array).
-      writeLength(stop - i + 2);
-      process.stdout.write(open);
-      process.stdout.write(body.subarray(i, stop));
-      process.stdout.write(close);
+      // Frame body = `[` + body[i..stop) + `]` (a valid JSON array). Build it
+      // with an element-wise copy into an exact-size buffer and write the whole
+      // buffer once. We deliberately avoid `body.subarray(i, stop)`: under
+      // wasmtime the native `array.copy` it lowers to runs ~14x slower than this
+      // element loop for i8 GC arrays (#1863), while a whole-array stdout write
+      // hits the fast path.
+      const runLen = stop - i;
+      const frame = new Uint8Array(runLen + 2);
+      frame[0] = OPEN_BRACKET;
+      let k = 0;
+      while (k < runLen) {
+        frame[k + 1] = body[i + k];
+        k = k + 1;
+      }
+      frame[runLen + 1] = CLOSE_BRACKET;
+      writeLength(runLen + 2);
+      process.stdout.write(frame);
       i = stop;
       if (i < end && body[i] === COMMA) i = i + 1; // step over the separator
     }

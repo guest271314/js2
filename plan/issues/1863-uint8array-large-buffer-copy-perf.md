@@ -21,19 +21,33 @@ AssemblyScript, Javy, `qjs-wasi.wasm`."
 
 ## Problem
 
-The Native Messaging host's 64 MiB round trip takes ~7–8 s per message under
-wasmtime 45 (measured via `examples/native-messaging/compare-memory.mjs`),
-dominated by element-wise `Uint8Array` work:
+The Native Messaging host's 64 MiB round trip took ~7–8 s per message under
+wasmtime 45. Originally assumed to be element-wise typed-array work — but
+measurement showed the **opposite**: the bottleneck is wasmtime's native
+`array.copy` on i8 GC arrays (what `Uint8Array.prototype.subarray`/`slice` lower
+to), which runs ~14× **slower** than an equivalent element-wise loop.
 
-- `readExact` fills a 64 MiB WasmGC `i8` array via per-element `array.set` in a
-  read-until loop;
-- bulk reads from `fd_read` land in a linear scratch buffer and are copied byte
-  by byte into the GC array;
-- `subarray`/copy on large arrays appears to allocate/copy per element.
+### Measured (wasmtime 45, 64 MiB `Array(209715*64)`)
 
-The compiled representation is correct (packed byte lanes since the typed-array
-storage fix) but the per-byte loop is the bottleneck. Other WASM toolchains
-(AssemblyScript, Javy, qjs-wasi) process the same 64 MiB markedly faster.
+| operation | time |
+|---|---|
+| read 64 MiB into a GC array + one whole-array `process.stdout.write` (element-wise GC→linear in `__wasi_write`) | **0.3 s** |
+| 65 × `array.new_default(1 MiB)`, no copy | **0.2 s** |
+| 65 × `body.subarray(1 MiB)` (native `array.copy`) | **7.0 s** |
+| 64 × 1 MiB **explicit element-copy loop** (`dst[k]=src[k]`) | **0.5 s** |
+| null collector (no GC) — same loop | unchanged (GC is **not** the cause) |
+
+So js2wasm already emits the **bulk** `array.copy` instruction
+(`emitArrayCopy` in `src/codegen/array-methods.ts`); the slow part is wasmtime's
+*execution* of `array.copy` for i8 GC arrays (~9 MiB/s) — strikingly ~30× slower
+than the element-wise `array.get_u`+`i32.store8` loop in `__wasi_write` and ~14×
+slower than a guest element loop. Likely a wasmtime perf bug (array.copy not
+specialized to memmove for packed numeric arrays); worth an upstream report
+alongside the GC finding (#12942).
+
+The example host (#1865) was made fast by **avoiding** the copy: it builds each
+`[...]` frame with an element-wise loop and writes the whole buffer (1.2 s for
+64 MiB, down from 7.4 s).
 
 ## Why it matters
 
@@ -43,15 +57,24 @@ buffer/backpressure (a contributor to the originally reported freeze).
 
 ## Directions to investigate
 
-- Bulk-copy fd_read output into the GC array via `array.copy` / `array.init_data`
-  (bulk WasmGC array ops) instead of an element loop.
-- Make `Uint8Array.prototype.subarray` a true view (no copy) in standalone/WASI
-  lowering, or at least a bulk copy.
+- **`subarray`/`slice` as a true view (no copy).** JS `subarray` is spec'd as a
+  view over the same buffer; the vec model copies instead (`#1664`). A real view
+  (`{length, offset, data}`) would be zero-copy and spec-correct, sidestepping
+  `array.copy` entirely. Biggest, cleanest win; larger model change.
+- **Do NOT blanket-replace `array.copy` with an element loop in `emitArrayCopy`.**
+  It's ~14× faster *on wasmtime*, but on V8/browsers (the gc backend's main
+  target) native `array.copy` is memmove-fast and the loop would regress. Any
+  element-loop lowering would have to be target-aware — not worth it without data
+  on each runtime.
+- **Report the `array.copy` slowness upstream to wasmtime** (i8 GC array
+  `array.copy` ~9 MiB/s, ~30× slower than an element loop) — analogous to the
+  GC grow-vs-collect finding (#12942). This is the real lever.
 - Benchmark against AssemblyScript/Javy/qjs on the 1 MiB and 64 MiB cases and
   track the ratio in `compare-memory.mjs`.
 
 ## Acceptance criteria
 
-- 64 MiB round trip wall time reduced substantially (target: within ~2–3× of
-  AssemblyScript rather than the current order-of-magnitude gap).
+- 64 MiB round trip wall time within ~2–3× of AssemblyScript (the example host
+  is already at 1.2 s via the element-loop workaround; the general fix is the
+  view and/or the wasmtime `array.copy` improvement).
 - No correctness regression in `tests/issue-1530.test.ts` / `smoke-test.sh`.
