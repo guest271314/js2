@@ -1,9 +1,10 @@
 ---
 id: 1809
 title: "late-import shift walker misses method-trampoline funcIdx pointing at import (#1525b regression)"
-status: ready
+status: done
 created: 2026-06-03
-updated: 2026-06-03
+updated: 2026-06-04
+completed: 2026-06-04
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -88,3 +89,48 @@ import after late-import insertion shifts indices.
 Surfaced by `/harvest-errors` 2026-06-03. The harvest's default-lane
 `#NNNN`-citation extraction surfaces this as "#1525: 157" — the error embeds
 `#1525b`. Re-harvest after the fix to confirm the cluster clears.
+
+## Resolution (2026-06-04)
+
+**Root cause.** The `#1525b` guard in `finalizeMethodTrampolines`
+(`src/codegen/closures.ts`) threw whenever a pending trampoline's
+`methodFuncIdx` resolved into the import range at finalize, assuming the
+late-import shift walker had *missed* the entry. But there is a legitimate
+case it conflated: a value-position reference to a name that `funcMap`
+resolves to a **host import** — e.g. a DOM/host global like `resizeTo`
+(`Window.resizeTo` from `lib.dom.d.ts`), or the `wasm:js-string.length`
+helper (named `length`). `emitCachedFuncClosureAccess` /
+`emitObjectMethodAsClosure` register a trampoline whose target is *already*
+an import at registration time. Import indices never shift (new late imports
+`push` at the END of the import section, so every shift walker only bumps
+indices `>= importsBefore` and leaves existing import targets untouched), so
+that trampoline correctly still forwards into the same import — `call
+methodFuncIdx` against an import is valid Wasm and `getFuncSignature` already
+resolves an import's signature. The throw was therefore a false positive on
+157 default-lane tests.
+
+**Fix.** Record `methodTargetsImport: funcIdx < ctx.numImportFuncs` at all
+three trampoline-registration sites and tighten the guard to fire only when
+`methodFuncIdx < numImportFuncs && !methodTargetsImport` — i.e. only when a
+target that was a **defined function** at registration now lands in the
+import range (the genuine missed-shift / #1525b case). Import targets proceed
+through the normal signature-driven rebuild.
+
+Files: `src/codegen/closures.ts`, `src/codegen/context/types.ts` (new
+`methodTargetsImport?` field on the pending-trampoline record).
+
+## Test Results
+
+- `tests/issue-1809.test.ts` (new) — the four representative test262 files
+  (`Array/prototype/{map,reduceRight}/resizable-buffer-*-mid-iteration.js`
+  and `language/{expressions,statements}/class/dstr/gen-meth-static-ary-ptrn-rest-obj-prop-id.js`)
+  no longer surface `pendingMethodTrampolines … shift walker missed`; status
+  moves from `compile_error` to runtime (residual runtime failures are
+  separate, pre-existing harness/semantic gaps, out of scope).
+- All four repro cases confirmed to hit the new branch with
+  `methodTargetsImport=true` (verified via temporary instrumentation).
+- No regression in the trampoline guard path: `tests/issue-1525.test.ts`,
+  `issue-1525b.test.ts`, `issue-1669-trampoline-externref-coercion.test.ts`,
+  `issue-1671-trampoline-null-receiver.test.ts`,
+  `issue-1672-async-gen-method-trampoline.test.ts` (34 tests) all pass.
+- Closure/method/class equivalence batch (32 tests) passes.
