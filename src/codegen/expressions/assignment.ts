@@ -3156,7 +3156,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const capturedIdx = ctx.capturedGlobals.get(name);
     if (capturedIdx !== undefined) {
-      const globalDef = ctx.mod.globals[capturedIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)];
       storage = {
         kind: "captured",
         index: capturedIdx,
@@ -3167,7 +3167,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const moduleIdx = ctx.moduleGlobals.get(name);
     if (moduleIdx !== undefined) {
-      const globalDef = ctx.mod.globals[moduleIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
       storage = {
         kind: "module",
         index: moduleIdx,

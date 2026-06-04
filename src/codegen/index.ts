@@ -7656,6 +7656,35 @@ export function addUnionImports(ctx: CodegenContext): void {
  * the Wasm engine level.
  */
 function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
+  // #1807: settle any pending native-string finalize shift BEFORE registering
+  // the union helpers. `reconcileNativeStrFinalizeShift` applies a SINGLE
+  // uniform `(numImportFuncs - base)` delta to every defined function with a
+  // baked `call funcIdx >= base`. That uniform model is only correct when all
+  // those defined functions were registered at the SAME import count (`base`).
+  //
+  // The native-string helpers snapshot `base = numImportFuncs` at their first
+  // emission (often `numImportFuncs == 0`, before any host import). If another
+  // import is then added (e.g. `__make_callback`, or the generator-bridge
+  // imports) BEFORE this union-helper block runs, the union helpers are
+  // registered at a HIGHER import count — their `numImportFuncs + arrayPos`
+  // indices already bake in those intervening imports. The end-of-finalize
+  // reconcile would then over-shift them by exactly `(numImportFuncs_now -
+  // base)`, pushing every `__typeof_*` / `__unbox_*` call target in callers
+  // like the test262 `isSameValue` harness helper +N too high. After dead-import
+  // elimination compacts the index space that surfaces as
+  // `isSameValue ... call[0] expected type i32, found local.get of type
+  // externref` — a stale call into an adjacent boxing helper (277 standalone
+  // async-generator tests).
+  //
+  // Flushing here advances `base` to the current `numImportFuncs`, so the
+  // already-registered native-string helpers absorb the intervening imports now
+  // and the union helpers register at the SAME (re-based) `base`. The final
+  // reconcile then applies one consistent delta to BOTH groups. No-op on the
+  // default GC path (base stays -1) and when no import drifted the count.
+  if (ctx.nativeStrHelperImportBase >= 0 && ctx.numImportFuncs > ctx.nativeStrHelperImportBase) {
+    reconcileNativeStrFinalizeShift(ctx);
+  }
+
   // 1. Register the boxed-value struct types. Both are immutable singletons.
   const boxNumStructIdx = ctx.mod.types.length;
   ctx.mod.types.push({

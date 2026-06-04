@@ -33,11 +33,15 @@ const C_DOT = 46;
 const C_ZERO = 48;
 const C_NINE = 57;
 const C_UC_A = 65;
+const C_UC_B = 66;
 const C_UC_E = 69;
+const C_UC_O = 79;
 const C_UC_X = 88;
 const C_UC_Z = 90;
 const C_LC_A = 97;
+const C_LC_B = 98;
 const C_LC_E = 101;
+const C_LC_O = 111;
 const C_LC_X = 120;
 const C_LC_Z = 122;
 
@@ -834,100 +838,100 @@ function emitRadixPrefixParse(
   L_SAW: number,
   strDataTypeIdx: number,
 ): Instr[] {
-  const buildArm = (lc: number, uc: number, radix: number): Instr => ({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      // second char is lc/uc?
-      { op: "local.get", index: L_DATA },
-      { op: "local.get", index: L_I },
-      { op: "i32.const", value: 1 },
-      { op: "i32.add" },
-      { op: "array.get_u", typeIdx: strDataTypeIdx },
-      { op: "local.tee", index: L_C },
-      { op: "i32.const", value: lc },
-      { op: "i32.eq" },
-      { op: "local.get", index: L_C },
-      { op: "i32.const", value: uc },
-      { op: "i32.eq" },
-      { op: "i32.or" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: radix },
-          { op: "local.set", index: L_RADIX },
-          // advance past "0x"
-          { op: "local.get", index: L_I },
-          { op: "i32.const", value: 2 },
-          { op: "i32.add" },
-          { op: "local.set", index: L_I },
-          // require at least one digit
-          { op: "local.get", index: L_I },
-          { op: "local.get", index: L_END },
-          { op: "i32.ge_s" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "f64.const", value: NaN }, { op: "return" }],
-          },
-          { op: "f64.const", value: 0 },
-          { op: "local.set", index: L_RESULT },
-          // digit loop over [i, end)
-          {
-            op: "block",
-            blockType: { kind: "empty" },
-            body: [
-              {
-                op: "loop",
-                blockType: { kind: "empty" },
-                body: [
+  // Build a single prefix arm. Self-conditioned: it reads data[i+1] and uses
+  // the (== lc || == uc) test as its own `if` condition, so multiple arms can
+  // be sequenced inside the shared `0`-prefix guard — a non-matching arm is a
+  // no-op and control falls through to the next arm.
+  const buildArm = (lc: number, uc: number, radix: number): Instr[] => [
+    // second char is lc/uc?
+    { op: "local.get", index: L_DATA },
+    { op: "local.get", index: L_I },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "local.tee", index: L_C },
+    { op: "i32.const", value: lc },
+    { op: "i32.eq" },
+    { op: "local.get", index: L_C },
+    { op: "i32.const", value: uc },
+    { op: "i32.eq" },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: radix },
+        { op: "local.set", index: L_RADIX },
+        // advance past "0x"/"0o"/"0b"
+        { op: "local.get", index: L_I },
+        { op: "i32.const", value: 2 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_I },
+        // require at least one digit
+        { op: "local.get", index: L_I },
+        { op: "local.get", index: L_END },
+        { op: "i32.ge_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+        },
+        { op: "f64.const", value: 0 },
+        { op: "local.set", index: L_RESULT },
+        // digit loop over [i, end)
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_I },
+                { op: "local.get", index: L_END },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+                ...([
+                  { op: "local.get", index: L_DATA },
                   { op: "local.get", index: L_I },
-                  { op: "local.get", index: L_END },
-                  { op: "i32.ge_s" },
-                  { op: "br_if", depth: 1 },
-                  ...([
-                    { op: "local.get", index: L_DATA },
-                    { op: "local.get", index: L_I },
-                    { op: "array.get_u", typeIdx: strDataTypeIdx },
-                    { op: "local.set", index: L_C },
-                  ] as Instr[]),
-                  ...emitDigitValue(L_C, L_DIG),
-                  // invalid digit or >= radix → NaN
-                  { op: "local.get", index: L_DIG },
-                  { op: "i32.const", value: 0 },
-                  { op: "i32.lt_s" },
-                  { op: "local.get", index: L_DIG },
-                  { op: "i32.const", value: radix },
-                  { op: "i32.ge_s" },
-                  { op: "i32.or" },
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [{ op: "f64.const", value: NaN }, { op: "return" }],
-                  },
-                  { op: "local.get", index: L_RESULT },
-                  { op: "f64.const", value: radix },
-                  { op: "f64.mul" },
-                  { op: "local.get", index: L_DIG },
-                  { op: "f64.convert_i32_s" },
-                  { op: "f64.add" },
-                  { op: "local.set", index: L_RESULT },
-                  { op: "local.get", index: L_I },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.add" },
-                  { op: "local.set", index: L_I },
-                  { op: "br", depth: 0 },
-                ],
-              },
-            ],
-          },
-          { op: "local.get", index: L_RESULT },
-          { op: "return" },
-        ],
-      },
-    ],
-  });
+                  { op: "array.get_u", typeIdx: strDataTypeIdx },
+                  { op: "local.set", index: L_C },
+                ] as Instr[]),
+                ...emitDigitValue(L_C, L_DIG),
+                // invalid digit or >= radix → NaN
+                { op: "local.get", index: L_DIG },
+                { op: "i32.const", value: 0 },
+                { op: "i32.lt_s" },
+                { op: "local.get", index: L_DIG },
+                { op: "i32.const", value: radix },
+                { op: "i32.ge_s" },
+                { op: "i32.or" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+                },
+                { op: "local.get", index: L_RESULT },
+                { op: "f64.const", value: radix },
+                { op: "f64.mul" },
+                { op: "local.get", index: L_DIG },
+                { op: "f64.convert_i32_s" },
+                { op: "f64.add" },
+                { op: "local.set", index: L_RESULT },
+                { op: "local.get", index: L_I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_I },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        { op: "local.get", index: L_RESULT },
+        { op: "return" },
+      ],
+    },
+  ];
   void L_SAW;
   return [
     // guard: sign==1 (no sign consumed) && i+1 < end && data[i]=='0'
@@ -946,7 +950,14 @@ function emitRadixPrefixParse(
     { op: "i32.const", value: C_ZERO },
     { op: "i32.eq" },
     { op: "i32.and" },
-    buildArm(C_LC_X, C_UC_X, 16),
+    // §7.1.4.1 StringToNumber: 0x/0X → hex, 0o/0O → octal, 0b/0B → binary.
+    // Each arm re-reads data[i+1] and only acts on its prefix letter, so a
+    // non-matching arm is a no-op and control falls through to the next.
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...buildArm(C_LC_X, C_UC_X, 16), ...buildArm(C_LC_O, C_UC_O, 8), ...buildArm(C_LC_B, C_UC_B, 2)],
+    },
   ];
 }
 
