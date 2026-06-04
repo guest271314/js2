@@ -897,8 +897,25 @@ export function compileTaggedTemplateExpression(
  * Emit wasm code to convert a boolean (i32) on the stack to a string.
  * Produces "true" or "false" string constant (externref) via if/else.
  */
-export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): void {
-  // Ensure "true" and "false" string constants are registered
+export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): ValType {
+  // Native-strings / standalone (#1470): JS-host string-constant globals are
+  // never registered (their global index resolves to the -1 sentinel and the
+  // module fails validation with "Invalid global index: 4294967295"). Select
+  // a NativeString GC struct in each arm instead, built inline by
+  // `compileNativeStringLiteral`.
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const trueInstrs = nativeStringLiteralInstrs(ctx, "true");
+    const falseInstrs = nativeStringLiteralInstrs(ctx, "false");
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: nativeStringType(ctx) },
+      then: trueInstrs,
+      else: falseInstrs,
+    } as Instr);
+    return nativeStringType(ctx);
+  }
+
+  // JS-host mode: "true" / "false" are externref string-constant globals.
   addStringConstantGlobal(ctx, "true");
   addStringConstantGlobal(ctx, "false");
 
@@ -912,6 +929,7 @@ export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): vo
     then: [{ op: "global.get", index: trueIdx }],
     else: [{ op: "global.get", index: falseIdx }],
   } as any);
+  return { kind: "externref" };
 }
 
 // ── Batched string concat chains ─────────────────────────────────────
