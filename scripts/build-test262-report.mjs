@@ -108,6 +108,12 @@ function pathHas(record, patterns) {
 
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
+    id: "binary-emit-u32-out-of-range",
+    issues: ["#1858", "#1862"],
+    label: "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
+    match: (_record, text) => hasAny(text, ["u32 out of range", "binary emit error: u32"]),
+  },
+  {
     id: "numeric-separator-literal-values",
     issues: ["#1782", "#53"],
     label: "Numeric and BigInt separator literals evaluate to wrong values",
