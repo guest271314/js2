@@ -490,17 +490,23 @@ function rewriteCode(
   // Since we build test .o files with known structure, we scan the body
   // for call/global.get/global.set opcodes and rewrite their indices.
 
-  const result = new Uint8Array(body.length);
-  result.set(body);
+  // #1840 — emit into a fresh output buffer rather than patching in place.
+  // A resolved index that was 1 byte in the input (<128) but resolves to ≥128
+  // grows to 2+ bytes; patching it back at the original byte width silently
+  // truncated it. Re-encoding each rewritten immediate at its NATURAL width
+  // (appendLEB128) and copying everything else verbatim is correct regardless
+  // of growth.
+  const out: number[] = [];
 
   let pos = 0;
-  while (pos < result.length) {
-    const opcode = result[pos]!;
+  while (pos < body.length) {
+    const opcode = body[pos]!;
     switch (opcode) {
       case 0x10: {
-        // call: rewrite function index
+        // call: resolve + re-emit function index at natural width
+        out.push(opcode);
         pos++;
-        const { value: origIdx, size } = readLEB128(result, pos);
+        const { value: origIdx, size } = readLEB128(body, pos);
         const newIdx = resolveIndex(
           origIdx,
           SYMTAB_FUNCTION,
@@ -511,15 +517,16 @@ function rewriteCode(
           allParsed,
           resolution,
         );
-        writeLEB128(result, pos, newIdx, size);
+        appendLEB128(out, newIdx);
         pos += size;
         break;
       }
       case 0x23: // global.get
       case 0x24: {
         // global.set
+        out.push(opcode);
         pos++;
-        const { value: origIdx, size } = readLEB128(result, pos);
+        const { value: origIdx, size } = readLEB128(body, pos);
         const newIdx = resolveIndex(
           origIdx,
           SYMTAB_GLOBAL,
@@ -530,39 +537,90 @@ function rewriteCode(
           allParsed,
           resolution,
         );
-        writeLEB128(result, pos, newIdx, size);
+        appendLEB128(out, newIdx);
         pos += size;
         break;
       }
       case 0x3f: // memory.size
       case 0x40: {
-        // memory.grow
+        // memory.grow — the immediate is a LEB128 memidx (not a raw byte), so
+        // read it, offset it, and re-emit at natural width (#1840).
+        out.push(opcode);
         pos++;
-        // The next byte is the memory index (0x00 in single-memory)
-        if (pos < result.length) {
-          result[pos] = off.memoryOffset;
-          pos++;
-        }
+        const { value: memIdx, size } = readLEB128(body, pos);
+        appendLEB128(out, memIdx + off.memoryOffset);
+        pos += size;
         break;
       }
       case 0x11: {
-        // call_indirect: typeIdx + tableIdx
+        // call_indirect: typeidx + tableidx. The table index must be
+        // resolveIndex-resolved (it may reference an imported table), not just
+        // offset (#1840).
+        out.push(opcode);
         pos++;
-        const { value: typeIdx, size: typeSize } = readLEB128(result, pos);
-        writeLEB128(result, pos, typeIdx + off.typeOffset, typeSize);
+        const { value: typeIdx, size: typeSize } = readLEB128(body, pos);
+        appendLEB128(out, typeIdx + off.typeOffset);
         pos += typeSize;
-        const { value: tableIdx, size: tableSize } = readLEB128(result, pos);
-        writeLEB128(result, pos, tableIdx + off.tableOffset, tableSize);
+        const { value: tableIdx, size: tableSize } = readLEB128(body, pos);
+        const newTableIdx = resolveIndex(
+          tableIdx,
+          SYMTAB_TABLE,
+          obj,
+          modIdx,
+          off.tableOffset,
+          allOffsets,
+          allParsed,
+          resolution,
+        );
+        appendLEB128(out, newTableIdx);
         pos += tableSize;
         break;
       }
       default:
+        out.push(opcode);
         pos++;
         break;
     }
   }
 
-  return result;
+  return new Uint8Array(out);
+}
+
+/** #1840 — append an unsigned LEB128 value at its natural (minimal) width. */
+function appendLEB128(out: number[], value: number): void {
+  let v = value >>> 0;
+  do {
+    let b = v & 0x7f;
+    v >>>= 7;
+    if (v !== 0) b |= 0x80;
+    out.push(b);
+  } while (v !== 0);
+}
+
+/**
+ * #1840 test hook — rewrite a single function body applying only index offsets
+ * (no symbol resolution: pass empty symbols so `resolveIndex` falls through to
+ * `origIdx + baseOffset`). Lets a test verify LEB-width growth, call_indirect
+ * tableidx offsetting, and the memory.size/grow immediate rewrite without
+ * constructing a full multi-module link.
+ */
+export function rewriteCodeForTest(
+  body: Uint8Array,
+  off: { funcOffset: number; globalOffset: number; typeOffset: number; tableOffset: number; memoryOffset: number },
+): Uint8Array {
+  const obj = { symbols: [] } as unknown as ParsedObject;
+  const resolution = { resolved: new Map() } as unknown as Resolution;
+  return rewriteCode(
+    body,
+    [],
+    0,
+    obj,
+    0,
+    off as unknown as ModuleOffsets,
+    [off as unknown as ModuleOffsets],
+    [obj],
+    resolution,
+  );
 }
 
 /**
@@ -627,20 +685,11 @@ function readLEB128(data: Uint8Array, pos: number): { value: number; size: numbe
   return { value: result >>> 0, size };
 }
 
-/**
- * Write an unsigned LEB128 value into a fixed number of bytes.
- * Pads with continuation bits if the new value fits in fewer bytes.
- */
-function writeLEB128(data: Uint8Array, pos: number, value: number, size: number): void {
-  for (let i = 0; i < size; i++) {
-    let b = value & 0x7f;
-    value >>>= 7;
-    if (i < size - 1) {
-      b |= 0x80; // continuation bit
-    }
-    data[pos + i] = b;
-  }
-}
+// #1840 — the former fixed-width `writeLEB128(data, pos, value, size)` was
+// removed: it patched in place at the original byte width and silently
+// truncated any index that grew past its original width during relocation.
+// `rewriteCode` now re-emits each rewritten immediate via `appendLEB128` at its
+// natural (minimal) width into a fresh buffer.
 
 // ── WAT stub generation ───────────────────────────────────────────
 
