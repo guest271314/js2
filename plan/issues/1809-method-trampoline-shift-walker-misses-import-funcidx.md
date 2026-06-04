@@ -1,5 +1,5 @@
 ---
-id: 1785
+id: 1809
 title: "late-import shift walker misses method-trampoline funcIdx pointing at import (#1525b regression)"
 status: ready
 created: 2026-06-03
@@ -9,10 +9,10 @@ feasibility: medium
 task_type: bugfix
 area: codegen
 goal: compiler-correctness
-sprint: Backlog
+sprint: 59
 related: [1525, 1669]
 ---
-# #1785 — method-trampoline shift walker misses import funcIdx (#1525b regression)
+# #1809 — method-trampoline shift walker misses import funcIdx (#1525b regression)
 
 ## Symptom
 

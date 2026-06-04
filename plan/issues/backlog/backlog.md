@@ -73,8 +73,17 @@ only one new root-cause issue was needed.
 
 ## Harvest 2026-06-03 (default-lane codegen crashes from baselines-repo run)
 
-- [#1784](../1784-binary-emit-offset-out-of-bounds-codegen-crash.md) — `Binary emit error: offset is out of bounds`: `emitBinary()` crashes identically on **276** default-lane tests (Array/String/TypedArray/Temporal/DataView/eval-code) — one emit-layer back-patch/offset overflow, not 276 distinct bugs. High, medium, **ready (backlog)**. Distinct from done #203 (varint overflow). Surfaced harvesting the fresh `loopdive/js2wasm-baselines` data (gitHash f52502e9).
-- [#1785](../1785-method-trampoline-shift-walker-misses-import-funcidx.md) — `pendingMethodTrampolines … shift walker missed this (#1525b regression)`: late-import index-shift walker fails to rewrite a method-trampoline funcIdx pointing at an import (e.g. resizable-buffer `resizeTo`) — **157** default-lane compile errors. High, medium, **ready (backlog)**. Regression of done #1525b; distinct from done #1669. Was hiding in the `other` category (missed by the first harvest pass).
+- [#1808](../1808-binary-emit-offset-out-of-bounds-codegen-crash.md) — `Binary emit error: offset is out of bounds`: `emitBinary()` crashes identically on **290** default-lane tests (Array/String/TypedArray/Temporal/DataView/eval-code) — one emit-layer back-patch/offset overflow, not 290 distinct bugs. High, medium, **ready (sprint 59)**. Distinct from done #203 (varint overflow). Surfaced harvesting the fresh `loopdive/js2wasm-baselines` data (gitHash f692249d).
+- [#1809](../1809-method-trampoline-shift-walker-misses-import-funcidx.md) — `pendingMethodTrampolines … shift walker missed this (#1525b regression)`: late-import index-shift walker fails to rewrite a method-trampoline funcIdx pointing at an import (e.g. resizable-buffer `resizeTo`) — **157** default-lane compile errors. High, medium, **ready (sprint 59)**. Regression of done #1525b; distinct from done #1669.
+
+## Harvest 2026-06-04 (cross-lane error analysis, baselines-repo sha f692249d)
+
+Default lane:
+- [#1805](../1805-negative-test-fail-early-error-enforcement-gaps.md) — 75 `negative_test_fail` tests: early-error enforcement gaps (parse/TDZ/TypeError) not covered by done #774/#927 — medium, medium, **ready (sprint 59)**.
+
+Standalone lane:
+- [#1806](../1806-standalone-toprimitive-cannot-convert-object.md) — standalone `Cannot convert object to primitive value`: **2,136 tests** — `__toPrimitive` host import refused in standalone; needs Wasm-native ToPrimitive or a proper refusal cite — high, medium, **ready (sprint 59)**.
+- [#1807](../1807-standalone-issamevalue-async-gen-wasm-type-mismatch.md) — standalone isSameValue Wasm call type mismatch for async-generator parameters: **277 tests** — #1776 fixed the externref case but async-generator ref types produce a different call mismatch — medium, medium, **ready (sprint 59)**.
 
 ## IR / allowJs parity follow-ups (2026-06-03)
 

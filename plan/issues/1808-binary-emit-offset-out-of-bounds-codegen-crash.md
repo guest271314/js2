@@ -1,5 +1,5 @@
 ---
-id: 1784
+id: 1808
 title: "Binary emit error: offset is out of bounds — emitBinary() crash on 276 tests"
 status: ready
 created: 2026-06-03
@@ -9,9 +9,9 @@ feasibility: medium
 task_type: bugfix
 area: codegen
 goal: compilable
-sprint: Backlog
+sprint: 59
 ---
-# #1784 — Binary emit error: "offset is out of bounds" (emitBinary crash)
+# #1808 — Binary emit error: "offset is out of bounds" (emitBinary crash)
 
 ## Symptom
 
