@@ -9264,7 +9264,11 @@ assert._isSameValue = isSameValue;
         }
       };
     default:
-      return () => {};
+      // #1858 C9a: fail loud instead of silently binding an unhandled import
+      // intent to a no-op. A no-op `() => {}` returns `undefined` for every
+      // call, so a missing/misnamed intent produced a wrong answer with no
+      // diagnostic. Throw so the unhandled type surfaces at instantiation.
+      throw new Error(`Unhandled ImportIntent type: ${(intent as any).type}`);
   }
 }
 
