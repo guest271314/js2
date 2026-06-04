@@ -34,14 +34,28 @@ function isNumberArrayOrUint8ArrayUnionText(text: string): boolean {
 }
 
 /**
+ * Options for the linear-memory backend (#1856).
+ */
+export interface LinearOptions {
+  /**
+   * Expose the explicit arena-management exports `__arena_reset` /
+   * `__arena_used` on the bump allocator. Useful for embedders that reuse a
+   * single instance across many short-lived tasks; off by default so the
+   * common "allocate-and-exit" program pays nothing for them.
+   * See {@link import("./runtime.js").ArenaOptions}.
+   */
+  exposeArenaReset?: boolean;
+}
+
+/**
  * Generate a WasmModule using the linear-memory backend.
  * Compiles TS functions to standard Wasm with i32/f64 values.
  */
-export function generateLinearModule(ast: TypedAST): WasmModule {
+export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): WasmModule {
   const mod = createEmptyModule();
 
   // Add memory and runtime functions first
-  addRuntime(mod);
+  addRuntime(mod, { exposeArenaReset: opts.exposeArenaReset });
   addUint8ArrayRuntime(mod);
   addArrayRuntime(mod);
   addStringRuntime(mod);
@@ -168,10 +182,10 @@ export function generateLinearModule(ast: TypedAST): WasmModule {
  * Generate a WasmModule from multiple TS source files using the linear-memory backend.
  * Cross-file imports are resolved by the TypeScript checker; we iterate all source files.
  */
-export function generateLinearMultiModule(multiAst: MultiTypedAST): WasmModule {
+export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearOptions = {}): WasmModule {
   const mod = createEmptyModule();
 
-  addRuntime(mod);
+  addRuntime(mod, { exposeArenaReset: opts.exposeArenaReset });
   addUint8ArrayRuntime(mod);
   addArrayRuntime(mod);
   addStringRuntime(mod);

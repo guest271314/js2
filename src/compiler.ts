@@ -648,7 +648,7 @@ export function compileSourceSync(
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearModule(ast);
+      mod = generateLinearModule(ast, { exposeArenaReset: options.allocator === "arena-reset" });
     } else {
       const result = generateModule(ast, {
         sourceMap: emitSourceMap,
@@ -944,7 +944,7 @@ export async function compileMultiSource(
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearMultiModule(multiAst);
+      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
     } else {
       const result = generateMultiModule(multiAst, {
         sourceMap: emitSourceMap,
@@ -1202,7 +1202,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   let mod;
   try {
     if (useLinear) {
-      mod = generateLinearMultiModule(multiAst);
+      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
     } else {
       const result = generateMultiModule(multiAst, {
         sourceMap: emitSourceMap,

@@ -4,14 +4,53 @@ import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/t
 /** Heap starts at byte offset 1024 (leave low addresses for null/sentinel) */
 const HEAP_START = 1024;
 
+/** Wasm page size in bytes (64 KiB) — the unit `memory.grow` operates on. */
+const WASM_PAGE_SIZE = 65536;
+
+/**
+ * Options for the linear-memory bump/arena allocator (#1856).
+ *
+ * The linear backend owns allocation. Its allocator is a **bump/arena**:
+ * each `__malloc` advances a single heap pointer and **nothing is ever
+ * freed** — reclamation happens implicitly when the Wasm instance is
+ * dropped (process exit, for standalone/WASI CLI-style programs). This is
+ * the smallest-binary, fastest path and is exactly the "allocate-and-exit"
+ * mode recommended in R10 of `docs/architecture/compiler-design-lessons.md`.
+ *
+ * There is intentionally **no pluggable GC abstraction** (see ADR-0017):
+ * supporting tracing and reference-counting as swappable strategies is a
+ * documented trap. When reclamation is genuinely needed it will be a single
+ * fixed strategy added later; the bump arena is the default and only mode
+ * today.
+ */
+export interface ArenaOptions {
+  /**
+   * Emit the explicit arena-management exports `__arena_reset` and
+   * `__arena_used` (#1856). A host/embedder that reuses one instance across
+   * many short-lived tasks can call `__arena_reset()` to reclaim the whole
+   * arena in O(1) between tasks (it rewinds the bump pointer to
+   * `HEAP_START`). Off by default — most programs allocate and exit, so the
+   * exports are dead weight and are omitted to keep the binary minimal.
+   */
+  exposeArenaReset?: boolean;
+}
+
 /**
  * Add linear-memory runtime functions to the module.
- * - 1 page of memory (64 KiB)
- * - __heap_ptr global (mutable i32, starts at HEAP_START)
- * - __malloc(size: i32) → i32: bump allocator, 8-byte aligned
+ * - memory starts at 1 page (64 KiB) and grows on demand up to 256 pages
+ * - `__heap_ptr` global (mutable i32, starts at `HEAP_START`)
+ * - `__malloc(size: i32) → i32`: bump allocator, 8-byte aligned, grows
+ *   memory automatically when the request would overflow the current pages
+ *   (#1856 — previously it silently advanced the pointer past the addressable
+ *   region, corrupting memory for programs larger than one page)
+ * - optionally (`exposeArenaReset`) `__arena_reset()` / `__arena_used() → i32`
+ *
+ * This is the bump/arena "allocate-and-never-free" allocator — the single
+ * fixed strategy for the linear backend. See {@link ArenaOptions} and
+ * ADR-0017.
  */
-export function addRuntime(mod: WasmModule): void {
-  // Add memory (1 page = 64 KiB, growable to 256 pages)
+export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
+  // Add memory (1 page = 64 KiB, growable to 256 pages = 16 MiB)
   if (mod.memories.length === 0) {
     mod.memories.push({ min: 1, max: 256 });
     // Export memory so tests can inspect it
@@ -41,34 +80,75 @@ export function addRuntime(mod: WasmModule): void {
   };
   mod.types.push(mallocType);
 
-  // __malloc implementation:
-  // 1. Get current heap pointer (this will be the returned address)
-  // 2. Add size to heap pointer
-  // 3. Align to 8 bytes: (ptr + 7) & ~7
-  // 4. Store new heap pointer
-  // 5. Return old pointer
+  // __malloc implementation (bump allocator with on-demand memory growth):
+  // 1. ret  = __heap_ptr (the address handed back to the caller)
+  // 2. next = align8(ret + size)            ; new bump position
+  // 3. if next > (memory.size * PAGE_SIZE)   ; would overflow current pages?
+  //       grow memory by ceil((next - cur_bytes) / PAGE_SIZE) pages
+  // 4. __heap_ptr = next
+  // 5. return ret
+  //
+  // The growth check is what makes the arena usable for non-trivial
+  // short-lived programs (#1856). `memory.grow` returns -1 on failure; we do
+  // not branch on that here — a -1 means the engine's max was hit, and the
+  // subsequent store traps cleanly rather than corrupting live data.
+  const local_ret = 1; // local 0 is the `size` param
+  const local_next = 2;
   const mallocBody: Instr[] = [
-    // Save current heap pointer as return value
+    // ret = __heap_ptr
     { op: "global.get", index: heapPtrGlobalIdx },
-    // Compute new heap pointer: old + size
-    { op: "global.get", index: heapPtrGlobalIdx },
-    { op: "local.get", index: 0 }, // size param
+    { op: "local.set", index: local_ret },
+    // next = align8(ret + size) = (ret + size + 7) & ~7
+    { op: "local.get", index: local_ret },
+    { op: "local.get", index: 0 }, // size
     { op: "i32.add" },
-    // Align to 8: (ptr + 7) & ~7
     { op: "i32.const", value: 7 },
     { op: "i32.add" },
-    { op: "i32.const", value: -8 }, // ~7 = 0xFFFFFFF8 = -8 in two's complement
+    { op: "i32.const", value: -8 }, // ~7 = 0xFFFFFFF8
     { op: "i32.and" },
-    // Store new heap pointer
+    { op: "local.set", index: local_next },
+    // if (next > memory.size * PAGE_SIZE) grow
+    { op: "local.get", index: local_next },
+    { op: "memory.size" },
+    { op: "i32.const", value: WASM_PAGE_SIZE },
+    { op: "i32.mul" },
+    { op: "i32.gt_u" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // pages_needed = ceil((next - cur_bytes) / PAGE_SIZE)
+        //              = (next - cur_bytes + PAGE_SIZE - 1) / PAGE_SIZE
+        { op: "local.get", index: local_next },
+        { op: "memory.size" },
+        { op: "i32.const", value: WASM_PAGE_SIZE },
+        { op: "i32.mul" },
+        { op: "i32.sub" },
+        { op: "i32.const", value: WASM_PAGE_SIZE - 1 },
+        { op: "i32.add" },
+        { op: "i32.const", value: WASM_PAGE_SIZE },
+        { op: "i32.div_u" },
+        { op: "memory.grow" },
+        // discard memory.grow's result (prev page count, or -1 on failure)
+        { op: "drop" },
+      ],
+      else: [],
+    },
+    // __heap_ptr = next
+    { op: "local.get", index: local_next },
     { op: "global.set", index: heapPtrGlobalIdx },
-    // Return old pointer (already on stack from first global.get)
+    // return ret
+    { op: "local.get", index: local_ret },
   ];
 
   const mallocFuncIdx = mod.functions.length;
   mod.functions.push({
     name: "__malloc",
     typeIdx: mallocTypeIdx,
-    locals: [],
+    locals: [
+      { name: "__malloc_ret", type: { kind: "i32" } },
+      { name: "__malloc_next", type: { kind: "i32" } },
+    ],
     body: mallocBody,
     exported: false,
   });
@@ -76,6 +156,75 @@ export function addRuntime(mod: WasmModule): void {
   // Note: __malloc is NOT exported; it's internal. Register in a way
   // that codegen can find it. The function index will be:
   // numImportFuncs + mallocFuncIdx (but since we add early, it's just mallocFuncIdx for now)
+  void mallocFuncIdx;
+
+  if (opts.exposeArenaReset) {
+    addArenaManagementExports(mod, heapPtrGlobalIdx);
+  }
+}
+
+/**
+ * Emit the explicit arena-management exports (#1856):
+ * - `__arena_reset()`     — rewind the bump pointer to `HEAP_START`, freeing
+ *                           the entire arena in O(1). Lets a host reuse one
+ *                           instance across many short-lived tasks.
+ * - `__arena_used() → i32` — bytes currently allocated (`__heap_ptr - HEAP_START`),
+ *                           for diagnostics / high-water-mark tracking.
+ *
+ * These are off by default (see {@link ArenaOptions.exposeArenaReset}) so the
+ * "allocate-and-exit" common case pays nothing for them.
+ */
+function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): void {
+  // __arena_reset() -> void
+  const resetTypeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___arena_reset",
+    params: [],
+    results: [],
+  });
+  const resetFuncIdx = mod.functions.length;
+  mod.functions.push({
+    name: "__arena_reset",
+    typeIdx: resetTypeIdx,
+    locals: [],
+    body: [
+      { op: "i32.const", value: HEAP_START },
+      { op: "global.set", index: heapPtrGlobalIdx },
+    ],
+    exported: false,
+  });
+
+  // __arena_used() -> i32
+  const usedTypeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___arena_used",
+    params: [],
+    results: [{ kind: "i32" }],
+  });
+  const usedFuncIdx = mod.functions.length;
+  mod.functions.push({
+    name: "__arena_used",
+    typeIdx: usedTypeIdx,
+    locals: [],
+    body: [
+      { op: "global.get", index: heapPtrGlobalIdx },
+      { op: "i32.const", value: HEAP_START },
+      { op: "i32.sub" },
+    ],
+    exported: false,
+  });
+
+  const numImports = mod.imports.filter((i) => i.desc.kind === "func").length;
+  mod.exports.push({
+    name: "__arena_reset",
+    desc: { kind: "func", index: numImports + resetFuncIdx },
+  });
+  mod.exports.push({
+    name: "__arena_used",
+    desc: { kind: "func", index: numImports + usedFuncIdx },
+  });
 }
 
 /**
