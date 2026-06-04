@@ -940,18 +940,3 @@ helpers (the externref result loses its static type), and `Array.prototype.
 filter.call(arrayLike, …)` emits a module with independent standalone gaps. The
 helpers build correct structures (verified via the typed for-of consumer); the
 element-readback routing belongs with the Blocker A receiver-dispatch slice.
-
-## Phase C — open-any method dispatch + built-ins-as-static-globals → #1888
-
-The remaining large standalone buckets (`__get_builtin` ~6.5k,
-`__extern_method_call` ~7.5k, `__proto_method_call` ~0.7k,
-`__defineProperty_accessor` ~2.7k, bare method-call presence forms,
-`Object.setPrototypeOf`) all converge on **one architectural layer**:
-*invoke a string-named method on an open value, resolving it through the
-prototype chain, where built-in prototypes are Wasm data not JS*. That layer
-is specced in **[#1888](1888-openany-dispatch.md)** with an
-independent-slice breakdown (fast-path audit → `__apply_closure` arity
-bridge → open-`$Object` user-method dispatch → `__proto_method_call` →
-runtime brand arms → accessor descriptors → built-in singleton registry →
-`setPrototypeOf`). It is the largest addressable block toward the 57%
-standalone target. Implement #1888; this issue (#1472) stays the umbrella.
