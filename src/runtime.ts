@@ -3112,9 +3112,11 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     if (prim != null && typeof prim !== "object") key = prim;
   }
   // Well-known symbol ID (i32 from compiler): only apply to WasmGC structs.
-  // For regular JS objects/arrays, numeric keys 1-12 are actual indices, not symbol IDs
+  // For regular JS objects/arrays, numeric keys 1-15 are actual indices, not symbol IDs
   // (e.g. getOwnPropertyNames conversion loop uses __extern_get with integer indices).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  // #1830 — the range must cover every id in `_symbolIdToKeys` (1-15, 15 =
+  // @@matchAll); `<= 14` silently dropped Symbol.matchAll on WasmGC structs.
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       const v = obj[symKeys.sym];
@@ -3195,12 +3197,13 @@ function _safeSet(
   }
   // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
   // ONLY apply this remapping to WasmGC structs — for regular JS objects/arrays,
-  // numeric keys 1-14 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // numeric keys 1-15 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // #1830 — range covers every id in `_symbolIdToKeys` (1-15, 15 = @@matchAll).
   // Without the _isWasmStruct guard, we would mis-route `arr[1]=v` to
   // `arr[Symbol.iterator]=v`, which under accumulated fork state could leak to
   // `Object.prototype[Symbol.iterator] = <number>` and trip every subsequent
   // compile that calls Array.from on a plain object (#1160 follow-up).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       try {
@@ -5232,9 +5235,10 @@ assert._isSameValue = isSameValue;
           }
           if (_sidecarGet(obj, idx) !== undefined) return 1;
           if (_sidecarGet(obj, strKey) !== undefined) return 1;
-          // _safeSet routes numeric keys 1-14 onto Symbol.<wellKnown> sidecar
-          // entries. Reverse that mapping so index 1-14 values remain visible.
-          if (idx >= 1 && idx <= 14) {
+          // _safeSet routes numeric keys 1-15 onto Symbol.<wellKnown> sidecar
+          // entries. Reverse that mapping so index 1-15 values remain visible.
+          // #1830 — range covers every id in `_symbolIdToKeys` (15 = @@matchAll).
+          if (idx >= 1 && idx <= 15) {
             const symKeys = _symbolIdToKeys.get(idx);
             if (symKeys) {
               if (_sidecarGet(obj, symKeys.sym) !== undefined) return 1;
@@ -5435,7 +5439,7 @@ assert._isSameValue = isSameValue;
       // Pass `null` (ref.null extern) to mark "Symbol() with no description".
       if (name === "__symbol_register_desc") {
         return (id: number, desc: any): void => {
-          if (id <= 14) return; // never override well-known symbols
+          if (id <= 15) return; // never override well-known symbols (#1830: 15 = @@matchAll)
           if (desc == null) {
             _symbolDescRegistry.set(id, null);
           } else {
