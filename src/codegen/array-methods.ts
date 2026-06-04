@@ -4450,6 +4450,16 @@ function compileArraySplice(
   const tailCountTmp = allocLocal(fctx, `__arr_spl_tc_${fctx.locals.length}`, { kind: "i32" });
   const tailStartTmp = allocLocal(fctx, `__arr_spl_ts_${fctx.locals.length}`, { kind: "i32" });
 
+  // #1815 — items to insert at `start` (arguments[2..]). When present, the
+  // backing array must be rebuilt (it may need to grow), so we cannot use the
+  // in-place tail-shift path that only works when newLen <= len.
+  const insertCount = Math.max(0, callExpr.arguments.length - 2);
+  const newData =
+    insertCount > 0
+      ? allocLocal(fctx, `__arr_spl_ndata_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx })
+      : -1;
+  const writeTmp = insertCount > 0 ? allocLocal(fctx, `__arr_spl_w_${fctx.locals.length}`, { kind: "i32" }) : -1;
+
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
   fctx.body.push({ op: "local.tee", index: vecTmp });
@@ -4517,19 +4527,71 @@ function compileArraySplice(
   fctx.body.push({ op: "local.set", index: tailCountTmp });
   emitClampNonNeg(fctx, tailCountTmp);
 
-  // Shift tail left in-place: array.copy data[start..start+tailCount] = data[tailStart..tailStart+tailCount]
-  emitArrayCopy(fctx, arrTypeIdx, dataTmp, startTmp, dataTmp, tailStartTmp, tailCountTmp);
+  if (insertCount > 0) {
+    // #1815 — insertion path: rebuild the backing array in place.
+    // newLen = len - delCount + insertCount  (= start + insertCount + tailCount)
+    fctx.body.push({ op: "local.get", index: startTmp });
+    fctx.body.push({ op: "i32.const", value: insertCount });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.get", index: tailCountTmp });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: newLenTmp });
 
-  // newLen = len - delCount
-  fctx.body.push({ op: "local.get", index: lenTmp });
-  fctx.body.push({ op: "local.get", index: delCountTmp });
-  fctx.body.push({ op: "i32.sub" });
-  fctx.body.push({ op: "local.set", index: newLenTmp });
+    // newData = array.new_default(newLen)
+    fctx.body.push({ op: "local.get", index: newLenTmp });
+    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+    fctx.body.push({ op: "local.set", index: newData });
 
-  // Update vec length
-  fctx.body.push({ op: "local.get", index: vecTmp });
-  fctx.body.push({ op: "local.get", index: newLenTmp });
-  fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 });
+    // Part 1: head — newData[0..start] = data[0..start]
+    emitArrayCopy(fctx, arrTypeIdx, newData, null, dataTmp, null, startTmp);
+
+    // Part 2: items — newData[start..start+insertCount] = arguments[2..]
+    fctx.body.push({ op: "local.get", index: startTmp });
+    fctx.body.push({ op: "local.set", index: writeTmp });
+    for (let i = 0; i < insertCount; i++) {
+      fctx.body.push({ op: "local.get", index: newData });
+      fctx.body.push({ op: "local.get", index: writeTmp });
+      compileExpression(ctx, fctx, callExpr.arguments[2 + i]!, _elemType);
+      fctx.body.push({ op: "array.set", typeIdx: arrTypeIdx });
+      if (i < insertCount - 1) {
+        fctx.body.push({ op: "local.get", index: writeTmp });
+        fctx.body.push({ op: "i32.const", value: 1 });
+        fctx.body.push({ op: "i32.add" });
+        fctx.body.push({ op: "local.set", index: writeTmp });
+      }
+    }
+
+    // Part 3: tail — newData[start+insertCount..] = data[tailStart..tailStart+tailCount]
+    fctx.body.push({ op: "local.get", index: startTmp });
+    fctx.body.push({ op: "i32.const", value: insertCount });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: writeTmp });
+    emitArrayCopy(fctx, arrTypeIdx, newData, writeTmp, dataTmp, tailStartTmp, tailCountTmp);
+
+    // Write new backing array + length back into the same vec struct (in place)
+    fctx.body.push({ op: "local.get", index: vecTmp });
+    fctx.body.push({ op: "local.get", index: newData });
+    fctx.body.push({ op: "ref.as_non_null" });
+    fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    fctx.body.push({ op: "local.get", index: vecTmp });
+    fctx.body.push({ op: "local.get", index: newLenTmp });
+    fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  } else {
+    // No insertion: shift tail left in-place (newLen <= len, capacity suffices).
+    // array.copy data[start..start+tailCount] = data[tailStart..tailStart+tailCount]
+    emitArrayCopy(fctx, arrTypeIdx, dataTmp, startTmp, dataTmp, tailStartTmp, tailCountTmp);
+
+    // newLen = len - delCount
+    fctx.body.push({ op: "local.get", index: lenTmp });
+    fctx.body.push({ op: "local.get", index: delCountTmp });
+    fctx.body.push({ op: "i32.sub" });
+    fctx.body.push({ op: "local.set", index: newLenTmp });
+
+    // Update vec length
+    fctx.body.push({ op: "local.get", index: vecTmp });
+    fctx.body.push({ op: "local.get", index: newLenTmp });
+    fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  }
 
   // Return new vec with deleted elements: { delCount, delData }
   fctx.body.push({ op: "local.get", index: delCountTmp });
