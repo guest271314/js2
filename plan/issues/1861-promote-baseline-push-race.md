@@ -5,6 +5,7 @@ status: in-progress
 sprint: Backlog
 created: 2026-06-04
 updated: 2026-06-04
+status_note: "follow-up 2026-06-04 — main-repo push re-instated on MAIN_DEPLOY_KEY (SSH) to bypass GH013; see ## Follow-up"
 priority: high
 feasibility: easy
 reasoning_effort: low
@@ -86,3 +87,47 @@ the past PR #490, addressing the fast-forward race rather than authentication.
 - A push race (`fetch first` rejection) is retried, not dropped.
 - A persistent (non-race) push failure still fails the step.
 - No change to conformance thresholds, shard counts, or regression-gate logic.
+
+## Follow-up (2026-06-04) — main push auth: GITHUB_TOKEN → MAIN_DEPLOY_KEY (SSH)
+
+The #1156 fix above restored the dropped `git commit` and the
+fetch → `rebase --autostash` → retry loop, but deliberately left the push
+**auth** alone (it pushed `origin HEAD:main` over HTTPS with
+`persist-credentials: true`, i.e. as `github-actions[bot]` via `GITHUB_TOKEN`).
+That auth path is the remaining failure: the repo ruleset *"main: merge queue +
+required checks"* (id `16700772`) rejects any direct `GITHUB_TOKEN` push to
+`refs/heads/main`:
+
+```
+remote: error: GH013: Repository rule violations found for refs/heads/main
+```
+
+The ruleset's `bypass_actors` list, however, includes **DeployKey (always)**
+(`{"actor_id": null, "actor_type": "DeployKey", "bypass_mode": "always"}`), so a
+push authenticated with a repo **deploy key** bypasses it. PR #490 originally
+wired the main push onto `ssh-key: MAIN_DEPLOY_KEY`; PR #725/#896 regressed it
+back onto `GITHUB_TOKEN`, re-introducing the GH013 block.
+
+**This follow-up** re-instates the deploy-key push (per #490) while keeping the
+#1156 fixes intact. In the *"Commit refreshed summary JSON to main repo"* step:
+
+- The step env switches from `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` to
+  `MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}`.
+- The deploy key is loaded **inline** via `ssh-agent` + `ssh-add` +
+  `ssh-keyscan github.com`, mirroring the sibling *"Push baseline artifacts to
+  js2wasm-baselines repo"* step (which uses `BASELINE_DEPLOY_KEY` the same way).
+  This is done inline rather than on the checkout's `ssh-key:` so the checkout
+  keeps its HTTPS `origin` for other steps.
+- A dedicated SSH remote `deploykey` →
+  `git@github.com:${{ github.repository }}.git` is added; the fetch + rebase +
+  push loop now runs against `deploykey/main` / `git push deploykey HEAD:main`.
+- The `git commit … [skip ci]` and the 5-attempt fetch →
+  `rebase --autostash` → push retry loop from #1156 are unchanged.
+- The baselines-repo push step and all required-check / regression-gate logic
+  are untouched.
+
+**Operational dependency:** `MAIN_DEPLOY_KEY` must exist as an Actions secret
+holding the **private** half of the write-access deploy key registered on
+`loopdive/js2` (the deploy key titled `MAIN_DEPLOY_KEY`, id `152733867`,
+`read_only: false`, already exists on the repo). The step fails fast with an
+explicit error if the secret is empty/unset.
