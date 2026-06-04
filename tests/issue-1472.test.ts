@@ -459,6 +459,53 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__extern_has_idx\b/);
   });
 
+  it("Phase C: Object.create + getPrototypeOf round-trip native over $Object.$proto", async () => {
+    // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0).
+    // Object.create(proto) builds a fresh $Object whose $proto is `proto`;
+    // Object.getPrototypeOf reads it back. The reified prototype still resolves
+    // inherited properties through __extern_get's existing proto-walk. Both
+    // helpers are native; zero object host imports leak.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const kt = "tag";
+          proto[kt] = 7;
+          const o: any = Object.create(proto);
+          const p: any = Object.getPrototypeOf(o);
+          // p === proto identity + inherited read via the chain → 1 + 7 = 8
+          return (p === proto ? 1 : 0) + (p[kt] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getPrototypeOf")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_create")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(8);
+  });
+
+  it("Phase C: getPrototypeOf of a bare open object yields the null prototype", async () => {
+    // A bare `{}` open object has a null $proto in standalone (no built-in
+    // Object.prototype graph). Object.getPrototypeOf returns null → 5.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 1;
+          const p: any = Object.getPrototypeOf(o);
+          return p === null ? 5 : 0;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getPrototypeOf")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `
