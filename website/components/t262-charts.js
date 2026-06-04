@@ -7,6 +7,17 @@
  *   <t262-edition-bars src="./benchmarks/results/test262-editions.json">
  */
 
+// #1777 — minimal shims so the module's pure edition-timeline helpers can be
+// imported and unit-tested under Node (no DOM). In a browser HTMLElement and
+// customElements already exist, so these branches never run.
+const globalScope = typeof globalThis !== "undefined" ? globalThis : undefined;
+if (globalScope && typeof globalScope.HTMLElement === "undefined") {
+  globalScope.HTMLElement = class {};
+}
+if (globalScope && typeof globalScope.customElements === "undefined") {
+  globalScope.customElements = { define() {} };
+}
+
 /* ── <t262-donut> ─────────────────────────────────────────────── */
 
 class T262Donut extends HTMLElement {
@@ -590,6 +601,19 @@ const T262_EDITION_RELEASE_YEAR = new Map([
 ]);
 const T262_PUBLISHED_EDITION_RELEASE_MONTH = 6;
 
+// #1777 — The current draft / current-standard edition. Mirrors
+// CURRENT_DRAFT_EDITION in scripts/generate-editions.ts: the edition generator
+// buckets every not-yet-finalized standard-track feature into this year as the
+// draft edition (distinct from `Proposals`, which are scope_official === false).
+// The timeline must NOT promote the draft year to a published-edition notch
+// just because the wall clock has reached its (mid-year) spec freeze — an
+// ECMAScript edition is only ratified by the ECMA General Assembly later in its
+// year, so the draft stays in the distinct current-standard/proposal tail until
+// the following year. Bumping this constant alongside the generator's
+// CURRENT_DRAFT_EDITION is the single intentional switch that turns a draft year
+// into a published notch.
+const T262_CURRENT_DRAFT_EDITION_YEAR = 2026;
+
 function t262IsEditionScope(edition) {
   return (
     edition === "ES1" ||
@@ -672,9 +696,12 @@ function t262LegacyLimitRank(scope, rows, hasExplicitLegacyBreakdown) {
 
 function t262LatestPublishedEditionYear(referenceDate = new Date()) {
   const date = referenceDate instanceof Date && Number.isFinite(referenceDate.getTime()) ? referenceDate : new Date();
-  return date.getUTCMonth() + 1 >= T262_PUBLISHED_EDITION_RELEASE_MONTH
-    ? date.getUTCFullYear()
-    : date.getUTCFullYear() - 1;
+  const calendarYear =
+    date.getUTCMonth() + 1 >= T262_PUBLISHED_EDITION_RELEASE_MONTH ? date.getUTCFullYear() : date.getUTCFullYear() - 1;
+  // #1777 — never treat the current draft edition (or anything newer) as
+  // published. The draft year remains in the distinct current-standard/proposal
+  // tail; the latest *published* edition is the year before the draft.
+  return Math.min(calendarYear, T262_CURRENT_DRAFT_EDITION_YEAR - 1);
 }
 
 function t262ResolveLatestPublishedEdition(rows, referenceDate = new Date()) {
@@ -790,15 +817,25 @@ class T262EditionTimeline extends HTMLElement {
           position: relative;
           height: 92px;
           --edition-slider-thumb-size: 16px;
-          --edition-track-bleed: calc(var(--edition-slider-thumb-size) / 2);
           --edition-progress-scale: 0;
+          /* #1777 — single source of truth for thumb position. 0..1 fraction in
+             the SAME coordinate system as the tick markers and progress fill, so
+             the thumb sits exactly on a tick at every snap. Set from JS as
+             sliderPosition / fullTimelineSpan. */
+          --edition-thumb-fraction: 0;
         }
+        /* #1777 — the native range input is the keyboard / pointer hit target
+           only; its thumb is transparent. The visible thumb (.thumb) is a sibling
+           positioned from --edition-thumb-fraction in track coordinates, which
+           removes the per-browser thumb-inset guesswork that caused the thumb to
+           drift right of the ticks (the old bleed-widened input mapped a wider
+           travel range than the 0..100% tick coordinate system). */
         .slider {
           appearance: none;
           position: absolute;
-          left: calc(var(--edition-track-bleed) * -1);
+          left: 0;
           top: 24px;
-          width: calc(100% + (var(--edition-track-bleed) * 2));
+          width: 100%;
           height: 28px;
           margin: 0;
           outline: none;
@@ -818,23 +855,45 @@ class T262EditionTimeline extends HTMLElement {
           height: var(--edition-slider-thumb-size);
           margin-top: 6px;
           border-radius: 50%;
-          border: 1px solid rgba(255, 255, 255, 0.22);
-          background: #ffffff;
-          box-shadow:
-            0 2px 10px rgba(0, 0, 0, 0.28),
-            0 0 0 4px rgba(255, 255, 255, 0.08);
+          border: 0;
+          background: transparent;
           cursor: pointer;
         }
         .slider::-moz-range-thumb {
           width: var(--edition-slider-thumb-size);
           height: var(--edition-slider-thumb-size);
           border-radius: 50%;
+          border: 0;
+          background: transparent;
+          cursor: pointer;
+        }
+        .thumb {
+          position: absolute;
+          top: 24px;
+          /* center the thumb on the fraction position (markers use the same
+             translateX(-50%) centering at left: <pct>%). */
+          left: calc(var(--edition-thumb-fraction) * 100%);
+          margin-top: 6px;
+          width: var(--edition-slider-thumb-size);
+          height: var(--edition-slider-thumb-size);
+          transform: translateX(-50%);
+          border-radius: 50%;
           border: 1px solid rgba(255, 255, 255, 0.22);
           background: #ffffff;
           box-shadow:
             0 2px 10px rgba(0, 0, 0, 0.28),
             0 0 0 4px rgba(255, 255, 255, 0.08);
-          cursor: pointer;
+          pointer-events: none;
+          z-index: 6;
+        }
+        .slider:focus-visible ~ .thumb {
+          box-shadow:
+            0 2px 10px rgba(0, 0, 0, 0.28),
+            0 0 0 4px rgba(255, 255, 255, 0.08),
+            0 0 0 6px rgba(255, 255, 255, 0.12);
+        }
+        .slider:disabled ~ .thumb {
+          opacity: 0.5;
         }
         .slider::-moz-range-track {
           height: 28px;
@@ -843,20 +902,9 @@ class T262EditionTimeline extends HTMLElement {
         .slider:focus {
           outline: none;
         }
-        .slider:focus-visible::-webkit-slider-thumb {
-          box-shadow:
-            0 2px 10px rgba(0, 0, 0, 0.28),
-            0 0 0 4px rgba(255, 255, 255, 0.08),
-            0 0 0 6px rgba(255, 255, 255, 0.12);
-        }
-        .slider:focus-visible::-moz-range-thumb {
-          box-shadow:
-            0 2px 10px rgba(0, 0, 0, 0.28),
-            0 0 0 4px rgba(255, 255, 255, 0.08),
-            0 0 0 6px rgba(255, 255, 255, 0.12);
-        }
+        /* #1777 — the native thumb is transparent; the visible focus ring +
+           disabled dim are applied to the sibling .thumb (see above). */
         .slider:disabled {
-          opacity: 0.5;
           cursor: wait;
         }
         .progress-glow,
@@ -867,7 +915,8 @@ class T262EditionTimeline extends HTMLElement {
           border-radius: 999px;
           pointer-events: none;
           transform-origin: left center;
-          transform: scaleX(var(--edition-progress-scale));
+          /* #1777 — fill ends exactly under the thumb (same fraction). */
+          transform: scaleX(var(--edition-thumb-fraction, var(--edition-progress-scale)));
         }
         .progress-glow {
           top: 28px;
@@ -1032,6 +1081,7 @@ class T262EditionTimeline extends HTMLElement {
           <div class="progress-glow"></div>
           <div class="progress"></div>
           <input class="slider" type="range" min="0" max="1" step="any" value="0" disabled aria-label="ECMAScript edition timeline filter" />
+          <div class="thumb" aria-hidden="true"></div>
         </div>
         <p class="copy">Drag to snap to the nearest ECMAScript edition.</p>
       </div>
@@ -1041,6 +1091,8 @@ class T262EditionTimeline extends HTMLElement {
       value: this.shadowRoot.querySelector(".value"),
       track: this.shadowRoot.querySelector(".track"),
       slider: this.shadowRoot.querySelector(".slider"),
+      // .thumb is positioned purely via the --edition-thumb-fraction CSS var on
+      // .track, so it needs no JS reference — left in the DOM template only.
       copy: this.shadowRoot.querySelector(".copy"),
     };
     this._root.slider.addEventListener("input", this._sliderListener);
@@ -1126,6 +1178,7 @@ class T262EditionTimeline extends HTMLElement {
       this._root.slider.disabled = true;
       this._root.slider.value = "0";
       this._root.track.style.setProperty("--edition-progress-scale", "0");
+      this._root.track.style.setProperty("--edition-thumb-fraction", "0");
       this._root.value.textContent = "Unavailable";
       this._root.copy.textContent = "No ECMAScript edition data available.";
     }
@@ -1273,6 +1326,10 @@ class T262EditionTimeline extends HTMLElement {
       copy,
       captionMain,
       editionSliderStops,
+      // #1777 — full timeline weight (published editions + draft/proposal tail).
+      // The tick markers are laid out as position / totalTimelineWeight, so the
+      // slider thumb fraction MUST use the same denominator to stay on its tick.
+      totalTimelineWeight,
     };
   }
 
@@ -1378,6 +1435,7 @@ class T262EditionTimeline extends HTMLElement {
       this._root.slider.disabled = true;
       this._root.slider.value = "0";
       this._root.track.style.setProperty("--edition-progress-scale", "0");
+      this._root.track.style.setProperty("--edition-thumb-fraction", "0");
       this._root.value.textContent = "Unavailable";
       this._root.copy.textContent = "No ECMAScript edition data available.";
       this._renderTimeline([]);
@@ -1389,7 +1447,14 @@ class T262EditionTimeline extends HTMLElement {
       return this._syncUI();
     }
 
-    const maxStop = detail.proposalStop?.position ?? detail.publishedStop.position ?? 1;
+    // #1777 — the slider operates in the FULL timeline weight coordinate
+    // (published editions + draft/proposal tail), the same coordinate the tick
+    // markers use (position / totalTimelineWeight). Driving slider.max off the
+    // full span — rather than the last published-stop position — means the thumb
+    // fraction equals each stop's tick percent, so the thumb lands exactly on its
+    // tick. Without proposals shown the slider still spans the full timeline; the
+    // snap logic clamps drags to the published stops.
+    const maxStop = Math.max(detail.totalTimelineWeight || 0, detail.publishedStop.position || 0, 1);
     const activeStop = detail.editionSliderStops.find((stop) => stop.value === this._currentScope) || null;
     const sliderPosition =
       this._currentScope === "overall+proposal"
@@ -1401,9 +1466,7 @@ class T262EditionTimeline extends HTMLElement {
     this._root.slider.disabled = false;
     this._root.slider.min = "0";
     this._root.slider.max = String(maxStop);
-    this._root.slider.value = String(sliderPosition);
-    const progressScale = maxStop > 0 ? Math.max(0, Math.min(1, sliderPosition / maxStop)) : 0;
-    this._root.track.style.setProperty("--edition-progress-scale", String(progressScale));
+    this._applySliderPosition(sliderPosition, maxStop);
     this._root.value.textContent = detail.displayValue;
     this._root.copy.textContent = detail.copy;
     this._renderTimeline(
@@ -1413,6 +1476,19 @@ class T262EditionTimeline extends HTMLElement {
       detail.proposalEditionLabels,
       detail.scope,
     );
+  }
+
+  // #1777 — push a slider value + its 0..1 fraction into the DOM. The fraction
+  // drives both the visible thumb (left: fraction * 100%) and the progress fill
+  // (scaleX), keeping them pixel-aligned with the tick markers, which live in the
+  // same fraction coordinate. `max` is the full timeline weight (see _syncUI).
+  _applySliderPosition(position, max) {
+    const denominator = max > 0 ? max : 1;
+    const fraction = Math.max(0, Math.min(1, position / denominator));
+    this._root.slider.value = String(position);
+    this._root.track.style.setProperty("--edition-thumb-fraction", String(fraction));
+    // keep the legacy progress-scale var in sync as a fallback for any consumer.
+    this._root.track.style.setProperty("--edition-progress-scale", String(fraction));
   }
 
   _handleSliderInput() {
@@ -1431,7 +1507,10 @@ class T262EditionTimeline extends HTMLElement {
         nearestDistance = distance;
       }
     }
-    this._root.slider.value = String(nearestStop.position);
+    // #1777 — snap the thumb (and fraction) to the nearest stop immediately so
+    // the visible thumb rests on the tick rather than wherever the drag ended.
+    const max = Math.max(detail.totalTimelineWeight || 0, detail.publishedStop?.position || 0, 1);
+    this._applySliderPosition(nearestStop.position, max);
     if (detail.proposalStop && nearestStop.value === detail.proposalStop.value) {
       this._setScope("overall+proposal", { emit: true, reflect: true });
       return;
@@ -1689,3 +1768,14 @@ class T262EditionBars extends HTMLElement {
 }
 
 customElements.define("t262-edition-bars", T262EditionBars);
+
+// #1777 — named exports for the pure timeline helpers so the published-edition /
+// draft-edition classification can be unit-tested without a DOM. Browsers loading
+// this file via <script type="module"> simply ignore the unused named exports.
+export {
+  T262_CURRENT_DRAFT_EDITION_YEAR,
+  T262_EDITION_SCOPE_RANK,
+  t262IsEditionScope,
+  t262LatestPublishedEditionYear,
+  t262ResolveLatestPublishedEdition,
+};
