@@ -326,6 +326,20 @@ non-WASI and any escaping `Uint8Array` are byte-identical to today.
 - **Slice D** (optional follow-up) — loop-scoped arena reset for unbounded
   streams.
 
+**Landing plan (revised, esch 2026-06-05):** PR #1 = **Slice A** only (the
+analysis pass, wired behind `ctx.wasi`, with no codegen consumer — emitted
+WASI modules verified byte-identical to baseline via `cmp`). Tech lead approved
+splitting the risky signature-rewrite (Slice C) into its own PR; the same
+isolation logic applies to the codegen wiring (Slice B), so the bump allocator
++ `new`/index/`.length`/zero-copy I/O codegen lands as **PR #2** and the
+interprocedural signature rewrite as **PR #3**. This banks the analysis
+foundation (zero runtime risk) and keeps each codegen change independently
+reviewable + benchmarkable. The allocator design (page-4 arena at
+`LINEAR_U8_ARENA_START = 256 KiB`, a dedicated `$__lin_u8_arena_ptr` bump global
+— NOT the page-0 `$__wasi_bump_ptr`, which aliases string-literal data —
+emitted lazily reusing the #1856 align8 + page-grow idiom) is prototyped and
+typechecks; it ships with PR #2.
+
 Slices A+B+C are the core of this issue; D can be a follow-up if the per-message
 allocation proves to leak on infinite streams (the benchmark sends one large
 message, so A–C suffice to hit the acceptance numbers, but D is needed for
