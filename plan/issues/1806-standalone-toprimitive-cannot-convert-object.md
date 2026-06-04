@@ -1,9 +1,10 @@
 ---
 id: 1806
 title: "standalone: 2,136 tests fail with 'Cannot convert object to primitive value'"
-status: ready
+status: done
 created: 2026-06-04
 updated: 2026-06-04
+completed: 2026-06-04
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -97,3 +98,53 @@ rather than printing the bare message. Requires Option A guard.
 
 **Phase 1 (feature)**: numeric-hint ToPrimitive over `$Object` structs passes
 without touching the JS host. Target: >500 tests pass.
+
+## Implementation (Phase 0 — done)
+
+Took **Option A** (the issue's recommended quick win). The single chokepoint
+for the JS-host ToPrimitive dispatch is `toPrimitiveHostCallInstrs` in
+`src/codegen/type-coercion.ts`, which requests the `env::__to_primitive` import
+via `ensureLateImport`. Every `emitToPrimitiveHostCall` site funnels through
+that one function.
+
+Rather than scatter a `ctx.standalone` check across the ~6 call sites, the guard
+lives at the `ensureLateImport` chokepoint in
+`src/codegen/expressions/late-imports.ts` — the same place the #1472 Phase A
+object/property refusals already live (`refuseStandaloneObjectImport`). Added a
+sibling `refuseStandaloneToPrimitive(ctx, name)`:
+
+- Fires only when `ctx.standalone && name === "__to_primitive"`.
+- Deduplicated per import name via the existing `ctx.standaloneRefusedImports`
+  set, so a single source construct queues at most one error.
+- Queues a `"Codegen error:"`-prefixed message via `reportErrorNoNode`, which
+  forces `success: false` + empty module (same hard-failure contract as #1472).
+- Message: `Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion)
+  is not yet supported in standalone mode (#1806). A Wasm-native
+  numeric/string-hint ToPrimitive over the $Object struct is Phase 1 of #1806.`
+- The message deliberately does **not** begin with `Cannot ` / `Invalid `, so
+  the test262 classifier (`classifyError`) does not mis-bucket it as a stray
+  `runtime_error`; it lands as a `compile_error` (compile returns
+  `success: false`).
+
+Result: the 1,297 runtime errors and the opaque
+`"module is not an object or function"` instantiation failures become
+compile errors, and **all** 2,136 records now cite `#1806`.
+
+The JS-host (GC) lane is untouched — the guard is gated on `ctx.standalone`, so
+`__to_primitive` is still emitted and satisfied by the host runtime there.
+Compile-time-resolvable `valueOf`/`toString` (typed class methods) never reach
+`ensureLateImport("__to_primitive", …)`, so they are not affected.
+
+## Test Results
+
+`tests/issue-1806.test.ts` — all 5 pass:
+- 3× standalone host-ToPrimitive dispatch (plain object `- 0`, `* 2`, `& 3`):
+  compile fails with a `#1806`-citing, non-`Cannot`/`Invalid` message and no
+  leaked `__to_primitive` import.
+- compile-time-resolvable `valueOf(): number` class still compiles + runs in
+  standalone (returns 7) — no false refusal.
+- default GC lane still compiles the same dynamic object with no `#1806`
+  refusal.
+
+`typecheck` clean (exit 0), `prettier --check` + `biome lint` clean,
+`host-import-allowlist-{budget,gate}` tests pass (13).

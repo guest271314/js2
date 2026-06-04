@@ -97,6 +97,41 @@ function refuseStandaloneObjectImport(ctx: CodegenContext, name: string): boolea
 }
 
 /**
+ * #1806 Phase 0 — the abstract operation ToPrimitive (§7.1.1) is dispatched to
+ * the JS-host `env::__to_primitive` import for objects with a dynamic
+ * `[Symbol.toPrimitive]` / `valueOf` / `toString` (see
+ * `toPrimitiveHostCallInstrs` in type-coercion.ts). In `--target standalone`
+ * there is no JS host, so leaking this import either fails at instantiation
+ * with an opaque "module is not an object or function" linker error
+ * (runtime_error), or the JS-host runtime path throws the bare
+ * "Cannot convert object to primitive value" with no tracking cite — the
+ * 2,136-test #1806 failure cluster.
+ *
+ * Until a Wasm-native numeric/string-hint ToPrimitive over the `$Object`
+ * struct lands (#1806 Phase 1), refuse the import at compile time with a clear,
+ * trackable message. This converts the whole cluster (839 CE + 1,297 runtime)
+ * into compile errors that all cite #1806. Crucially the message does NOT begin
+ * with "Cannot " / "Invalid ", so the test262 classifier buckets it as a
+ * compile_error rather than a stray runtime_error.
+ *
+ * Deduplicated per import name via the shared `standaloneRefusedImports` set so
+ * a single source construct queues at most one error. Returns true if refused.
+ */
+function refuseStandaloneToPrimitive(ctx: CodegenContext, name: string): boolean {
+  if (!ctx.standalone || name !== "__to_primitive") return false;
+  if (!ctx.standaloneRefusedImports) ctx.standaloneRefusedImports = new Set<string>();
+  if (ctx.standaloneRefusedImports.has(name)) return true;
+  ctx.standaloneRefusedImports.add(name);
+  reportErrorNoNode(
+    ctx,
+    `Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is not ` +
+      `yet supported in standalone mode (#1806). A Wasm-native numeric/string-hint ` +
+      `ToPrimitive over the $Object struct is Phase 1 of #1806.`,
+  );
+  return true;
+}
+
+/**
  * Shift function indices after a late import addition. This must update all
  * already-compiled function bodies, the current function body, any saved bodies
  * from the savedBody swap pattern, and export descriptors.
@@ -280,6 +315,11 @@ export function ensureLateImport(
   // funcIdx) doesn't crash; the queued error makes the compile fail and the
   // module is never instantiated.
   refuseStandaloneObjectImport(ctx, name);
+  // #1806 Phase 0 — refuse the JS-host ToPrimitive dispatch (`__to_primitive`)
+  // under --target standalone with a trackable compile error, replacing the
+  // bare "Cannot convert object to primitive value" runtime failure / opaque
+  // instantiation linker error. Same register-anyway-then-fail contract.
+  refuseStandaloneToPrimitive(ctx, name);
   // Record importsBefore on the FIRST deferred addition in this batch
   if (ctx.pendingLateImportShift === null) {
     ctx.pendingLateImportShift = { importsBefore: ctx.numImportFuncs };
