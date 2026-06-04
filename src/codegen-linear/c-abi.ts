@@ -18,6 +18,33 @@
 
 import type { FuncTypeDef, Instr, ValType, WasmModule } from "../ir/types.js";
 
+// ── Linear-memory aggregate header layout (mirrors runtime.ts) ───────
+//
+// String: [header 8B][len:u32 @ +8][utf8 bytes @ +12...]
+// Array:  [header 8B][len:u32 @ +8][cap:u32 @ +12][elements: i32×cap @ +16...]
+//
+// These constants MUST stay in sync with addStringRuntime / addArrayRuntime
+// in src/codegen-linear/runtime.ts (#1835).
+const AGG_LEN_OFFSET = 8; // length field for both strings and arrays
+const STR_DATA_OFFSET = 12; // first UTF-8 byte of a string
+const ARR_DATA_OFFSET = 16; // first element of an array
+
+/** Locate a (defined or imported) function by name, returning its global func index. */
+function findFuncIndexByName(mod: WasmModule, name: string): number {
+  const numImportFuncs = mod.imports.filter((i) => i.desc.kind === "func").length;
+  // Imports first occupy indices [0, numImportFuncs); match by import name.
+  let importIdx = 0;
+  for (const imp of mod.imports) {
+    if (imp.desc.kind !== "func") continue;
+    if (imp.name === name) return importIdx;
+    importIdx++;
+  }
+  for (let i = 0; i < mod.functions.length; i++) {
+    if (mod.functions[i].name === name) return numImportFuncs + i;
+  }
+  return -1;
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 /** Describes the TS-level semantic type of a parameter */
@@ -38,6 +65,12 @@ export interface CabiParam {
   sourceParamIdx: number;
   /** "ptr" | "len" for expanded params, "direct" for scalar */
   role: "direct" | "ptr" | "len";
+  /**
+   * For expanded (ptr/len) params, the underlying aggregate kind so the
+   * wrapper can pick the right runtime constructor (`__str_from_data` for
+   * strings, `__arr_from_data` for arrays). Undefined for scalar/direct.
+   */
+  aggregate?: "string" | "array";
 }
 
 /** C ABI return value descriptor */
@@ -77,12 +110,14 @@ export function mapParamsToCabi(params: ParamDef[]): CabiParam[] {
           wasmType: { kind: "i32" },
           sourceParamIdx: i,
           role: "ptr",
+          aggregate: p.semantic,
         });
         result.push({
           name: `${p.name}_len`,
           wasmType: { kind: "i32" },
           sourceParamIdx: i,
           role: "len",
+          aggregate: p.semantic,
         });
         break;
       case "boolean":
@@ -227,18 +262,32 @@ export function emitCabiWrappers(mod: WasmModule, exportInfos: CabiExportInfo[])
     // Build wrapper body
     const body: Instr[] = [];
 
-    // For each original parameter, reconstruct the value from C ABI params
+    // Resolve runtime constructors used to rehydrate string/array params from
+    // the raw (ptr, len) the C caller provides. They are always present for
+    // the linear target (addStringRuntime / addArrayRuntime run unconditionally).
+    const strFromDataIdx = findFuncIndexByName(mod, "__str_from_data");
+    const arrFromDataIdx = findFuncIndexByName(mod, "__arr_from_data");
+
+    // For each original parameter, reconstruct the value from C ABI params.
     let cabiParamIdx = 0;
     for (let origIdx = 0; origIdx < (origType.params?.length ?? 0); origIdx++) {
       const cabiParam = info.params[cabiParamIdx];
       if (cabiParam && cabiParam.role === "ptr") {
-        // String/array: the original function expects an i32 pointer.
-        // In C ABI, we pass (ptr, len). The original function already
-        // works with a pointer to the string/array header in linear memory.
-        // For C interop, the caller provides a raw data pointer + length.
-        // We just pass the pointer — the length is available separately.
-        body.push({ op: "local.get", index: cabiParamIdx });
-        cabiParamIdx += 2; // skip the len param
+        // String/array param: the C ABI passes a raw (data ptr, len) pair, but
+        // the internal function expects a pointer to a linear-memory header
+        // object. Reconstruct it by calling the matching runtime constructor.
+        const ctorIdx = cabiParam.aggregate === "array" ? arrFromDataIdx : strFromDataIdx;
+        if (ctorIdx >= 0) {
+          // __{str,arr}_from_data(dataPtr, len) -> header ptr
+          body.push({ op: "local.get", index: cabiParamIdx }); // ptr
+          body.push({ op: "local.get", index: cabiParamIdx + 1 }); // len
+          body.push({ op: "call", funcIdx: ctorIdx });
+        } else {
+          // Constructor missing (should not happen for linear target) — fall
+          // back to forwarding the raw pointer to avoid emitting invalid Wasm.
+          body.push({ op: "local.get", index: cabiParamIdx });
+        }
+        cabiParamIdx += 2; // consumed both ptr and len
       } else {
         body.push({ op: "local.get", index: cabiParamIdx });
         cabiParamIdx++;
@@ -250,27 +299,23 @@ export function emitCabiWrappers(mod: WasmModule, exportInfos: CabiExportInfo[])
 
     // Handle return value marshaling
     if (info.result.semantic === "string" || info.result.semantic === "array") {
-      // The original function returns an i32 pointer to a string/array header.
-      // For C ABI, we need to return (ptr, len).
-      // The string header format: [length: i32 at offset 0] [data at offset 4]
-      // We load the length and compute the data pointer.
+      // The original function returns an i32 pointer to a string/array header:
+      //   string: [header 8B][len:u32 @ +8][utf8 bytes @ +12...]
+      //   array:  [header 8B][len:u32 @ +8][cap:u32 @ +12][elems @ +16...]
+      // For the C ABI we return (data ptr, len) so the host reads the payload
+      // directly without knowing the header layout (#1835).
+      const dataOffset = info.result.semantic === "array" ? ARR_DATA_OFFSET : STR_DATA_OFFSET;
       const retLocal = wrapperParamTypes.length;
-      // We need a local to store the returned pointer
       const wrapperLocals = [{ name: "__ret_ptr", type: { kind: "i32" } as ValType }];
 
-      // Store returned pointer
-      body.splice(body.length, 0); // placeholder
-      const callIdx = body.length - 1;
-      // Actually, we need to restructure: save the call result, then extract ptr and len
-      // Replace the end of body:
-      // After the call, the result (pointer) is on the stack
+      // After the call, the header pointer is on the stack.
+      // result[0] = data pointer = headerPtr + dataOffset
       body.push({ op: "local.tee", index: retLocal });
-      // Data pointer = ptr + 4 (skip the length header)
-      body.push({ op: "i32.const", value: 4 });
+      body.push({ op: "i32.const", value: dataOffset });
       body.push({ op: "i32.add" });
-      // Length = i32.load at ptr
+      // result[1] = length = i32.load at headerPtr + AGG_LEN_OFFSET
       body.push({ op: "local.get", index: retLocal });
-      body.push({ op: "i32.load", align: 2, offset: 0 });
+      body.push({ op: "i32.load", align: 2, offset: AGG_LEN_OFFSET });
 
       // Add the wrapper function with the extra local
       const wrapperFuncIdx = numImportFuncs + mod.functions.length;

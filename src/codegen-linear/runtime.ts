@@ -344,6 +344,7 @@ export function addUint8ArrayRuntime(mod: WasmModule): void {
  * - __arr_get(ptr: i32, idx: i32) → i32
  * - __arr_set(ptr: i32, idx: i32, val: i32) → void
  * - __arr_len(ptr: i32) → i32
+ * - __arr_from_data(dataPtr: i32, len: i32) → i32 (header ptr)
  */
 export function addArrayRuntime(mod: WasmModule): void {
   const mallocIdx = findFuncIndex(mod, "__malloc");
@@ -440,6 +441,90 @@ export function addArrayRuntime(mod: WasmModule): void {
     { op: "local.get", index: 0 }, // ptr
     { op: "i32.load", align: 2, offset: 8 },
   ]);
+
+  // __arr_from_data(dataPtr: i32, len: i32) → i32 (array header ptr)
+  // Build an internal array object from a raw, contiguous block of `len`
+  // i32 elements at `dataPtr`. Used by the C ABI wrapper to rehydrate an
+  // array parameter passed as a (ptr, len) pair (#1835).
+  // Layout written: [header 8B][len:u32 @ +8][cap:u32 @ +12][elems @ +16...]
+  // extra locals: local 2 = ptr (result), local 3 = i (loop counter)
+  addRuntimeFunc(
+    mod,
+    "__arr_from_data",
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const ptrLocal = firstLocalIdx;
+      const iLocal = firstLocalIdx + 1;
+      return [
+        // Allocate: 16 + len*4
+        { op: "i32.const", value: 16 },
+        { op: "local.get", index: 1 }, // len
+        { op: "i32.const", value: 4 },
+        { op: "i32.mul" },
+        { op: "i32.add" },
+        { op: "call", funcIdx: mallocIdx },
+        { op: "local.set", index: ptrLocal },
+        // Tag byte 0x01 (Array) at ptr+0
+        { op: "local.get", index: ptrLocal },
+        { op: "i32.const", value: 0x01 },
+        { op: "i32.store8", align: 0, offset: 0 },
+        // len at ptr+8
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 8 },
+        // cap = len at ptr+12
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 12 },
+        // Copy elements: for i=0; i<len; i++ { mem[ptr+16+i*4] = mem[dataPtr+i*4] }
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: iLocal },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= len
+                { op: "local.get", index: iLocal },
+                { op: "local.get", index: 1 }, // len
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // dest addr = ptr + i*4 (offset 16 applied at store)
+                { op: "local.get", index: ptrLocal },
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                // value = mem[dataPtr + i*4]
+                { op: "local.get", index: 0 }, // dataPtr
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                { op: "i32.load", align: 2, offset: 0 },
+                // store at dest+16
+                { op: "i32.store", align: 2, offset: 16 },
+                // i++
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: iLocal },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Return ptr
+        { op: "local.get", index: ptrLocal },
+      ];
+    },
+    2,
+  ); // 2 extra locals
 
   // __arr_slice(arr: i32, start: i32, end: i32) → i32 (new array)
   // Creates a new array containing elements [start, end) from arr
