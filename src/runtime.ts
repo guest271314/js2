@@ -1259,17 +1259,41 @@ function _validatePropertyDescriptor(
   existingValue?: any,
 ): number {
   const existing = descs.get(_normalizeDescKey(prop));
-  // Compute new flags — for Object.defineProperty, unspecified attributes default to false
-  let newFlags = _SC_DEFINED;
-  if (desc.writable) newFlags |= _SC_WRITABLE;
-  if (desc.enumerable) newFlags |= _SC_ENUMERABLE;
-  if (desc.configurable) newFlags |= _SC_CONFIGURABLE;
-  if (desc.get !== undefined || desc.set !== undefined) newFlags |= _SC_ACCESSOR;
+
+  // Compute new flags. ECMA-262 §10.1.6.3 ValidateAndApplyPropertyDescriptor:
+  // a *redefine* keeps every attribute the descriptor omits — only fields
+  // explicitly present in `desc` overwrite the existing descriptor (#1831).
+  // On first definition, omitted attributes default to false. The previous code
+  // rebuilt the flags purely from `desc` truthiness, so a partial redefine like
+  // `Object.defineProperty(o,"k",{value:5})` wrongly cleared a previously-set
+  // writable/enumerable/configurable.
+  let newFlags = existing === undefined ? _SC_DEFINED : existing | _SC_DEFINED;
+  // helper: set/clear `bit` when the descriptor field is present; on first
+  // definition, an omitted field defaults to false (cleared).
+  const applyFlag = (present: boolean, value: boolean | undefined, bit: number): void => {
+    if (present) {
+      newFlags = value ? newFlags | bit : newFlags & ~bit;
+    } else if (existing === undefined) {
+      newFlags &= ~bit;
+    }
+  };
+  applyFlag(desc.writable !== undefined, desc.writable, _SC_WRITABLE);
+  applyFlag(desc.enumerable !== undefined, desc.enumerable, _SC_ENUMERABLE);
+  applyFlag(desc.configurable !== undefined, desc.configurable, _SC_CONFIGURABLE);
+  // Data<->accessor kind: explicit get/set ⇒ accessor; explicit value/writable
+  // ⇒ data; otherwise keep the existing kind (or default data on first def).
+  if (desc.get !== undefined || desc.set !== undefined) {
+    newFlags |= _SC_ACCESSOR;
+  } else if (desc.value !== undefined || desc.writable !== undefined) {
+    newFlags &= ~_SC_ACCESSOR;
+  } else if (existing === undefined) {
+    newFlags &= ~_SC_ACCESSOR;
+  }
 
   if (existing === undefined) return newFlags; // First definition
 
   const isConfigurable = !!(existing & _SC_CONFIGURABLE);
-  if (isConfigurable) return newFlags; // Configurable — any change OK
+  if (isConfigurable) return newFlags; // Configurable — change OK (omitted fields preserved above)
 
   // Non-configurable: validate constraints (ES spec 9.1.6.3 step 7)
   if (desc.configurable === true) {
