@@ -1,5 +1,5 @@
 ---
-id: 1868
+id: 1880
 title: "ES-edition slider on #goals shows stale ~65% data (CI git-adds pre-#1656 path)"
 status: done
 created: 2026-06-04
