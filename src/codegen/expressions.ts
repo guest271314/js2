@@ -1246,8 +1246,16 @@ function compileExpressionInner(
     const selfIdx = fctx.localMap.get("this");
     if (selfIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: selfIdx });
-      const selfType = fctx.locals[selfIdx];
-      if (selfType) return selfType.type;
+      // (#1824) `this` is param 0, so its ValType lives in `fctx.params`, not
+      // `fctx.locals`. Mirror the ThisKeyword branch: params for param-range
+      // indices, locals (offset by the param count) otherwise. The old
+      // `fctx.locals[selfIdx]` read an unrelated non-param local (or undefined),
+      // which mis-drove downstream coercion of a bare `super` value.
+      if (selfIdx < fctx.params.length) {
+        return fctx.params[selfIdx]!.type;
+      }
+      const localDef = fctx.locals[selfIdx - fctx.params.length];
+      if (localDef) return localDef.type;
     }
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
