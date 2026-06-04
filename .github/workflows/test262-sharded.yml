@@ -840,6 +840,16 @@ jobs:
     name: promote merged report to main baseline
     needs: merge-report
     runs-on: ubuntu-latest
+    # Gate the MAIN_DEPLOY_KEY secret behind a GitHub Environment so only this
+    # job — running on a `push`/`workflow_dispatch` against main — can read it.
+    # The `baseline-promote` Environment restricts its deployment branches to
+    # `main` and stores MAIN_DEPLOY_KEY as an ENVIRONMENT secret, so PR/fork
+    # workflows (which never satisfy the branch restriction) cannot access the
+    # deploy key. `${{ secrets.MAIN_DEPLOY_KEY }}` resolves from this environment
+    # automatically once `environment:` is declared — no other change to the SSH
+    # wiring is needed. No required-reviewer gate is attached, so the automated
+    # promote-baseline run is never paused.
+    environment: baseline-promote
     permissions:
       contents: write
       pull-requests: write
