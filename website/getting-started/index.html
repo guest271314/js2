@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Get Started · JS²</title>
+    <meta
+      name="description"
+      content="Install the js2wasm compiler and compile your first TypeScript or JavaScript module to WebAssembly GC — run it in Node.js and the browser."
+    />
+    <style>
+      :root {
+        --bg: #060a14;
+        --bg-soft: #0c1220;
+        --fg: #ffffff;
+        --fg-soft: rgba(255, 255, 255, 0.68);
+        --fg-faint: rgba(255, 255, 255, 0.46);
+        --line: rgba(255, 255, 255, 0.12);
+        --line-strong: rgba(255, 255, 255, 0.22);
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --nav: rgba(6, 10, 20, 0.45);
+        --accent: #6c8aff;
+        --mono: "JetBrains Mono", "SF Mono", SFMono-Regular, Consolas, monospace;
+        --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+        color: var(--fg);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family: var(--font);
+        line-height: 1.6;
+        overflow-x: hidden;
+        background: radial-gradient(circle at 18% 0%, rgba(58, 41, 110, 0.28), transparent 34%), var(--bg);
+        background-repeat: no-repeat;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .layout {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 96px 32px 120px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 220px;
+        gap: 56px;
+        align-items: start;
+      }
+
+      .content {
+        min-width: 0;
+      }
+
+      /* ── Page header ── */
+      .doc-header {
+        margin-bottom: 48px;
+        padding-bottom: 36px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--fg-faint);
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0 0 18px;
+        font-size: clamp(36px, 5vw, 52px);
+        line-height: 1.04;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+
+      .lede {
+        margin: 0;
+        max-width: 64ch;
+        font-size: 18px;
+        color: var(--fg-soft);
+      }
+
+      .header-actions {
+        margin-top: 28px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 18px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        border: 1px solid var(--line);
+        color: var(--fg);
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease,
+          opacity 0.15s ease;
+      }
+
+      .btn:hover {
+        text-decoration: none;
+      }
+
+      .btn-solid {
+        color: var(--bg);
+        background: var(--fg);
+        border-color: var(--fg);
+      }
+
+      .btn-solid:hover {
+        opacity: 0.9;
+      }
+
+      .btn-outline:hover {
+        background: var(--surface-hover);
+        border-color: var(--line-strong);
+      }
+
+      /* ── Prose ── */
+      .content h2 {
+        margin: 56px 0 16px;
+        padding-top: 12px;
+        font-size: 26px;
+        letter-spacing: -0.02em;
+        scroll-margin-top: 88px;
+      }
+
+      .content h2 .step {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+        margin-right: 10px;
+      }
+
+      .content h3 {
+        margin: 32px 0 12px;
+        font-size: 18px;
+      }
+
+      .content p {
+        margin: 0 0 16px;
+        color: var(--fg-soft);
+      }
+
+      .content ul {
+        margin: 0 0 16px;
+        padding-left: 22px;
+        color: var(--fg-soft);
+      }
+
+      .content li {
+        margin: 6px 0;
+      }
+
+      .content strong {
+        color: var(--fg);
+      }
+
+      /* ── Code ── */
+      code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+      }
+
+      p code,
+      li code,
+      td code {
+        padding: 2px 6px;
+        border-radius: 5px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--fg);
+        white-space: nowrap;
+      }
+
+      pre {
+        margin: 0 0 22px;
+        padding: 18px 20px;
+        background: var(--bg-soft);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow-x: auto;
+        line-height: 1.55;
+      }
+
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+        white-space: pre;
+        color: var(--fg-soft);
+        font-size: 13.5px;
+      }
+
+      .code-label {
+        display: block;
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--fg-faint);
+        margin: 0 0 8px;
+      }
+
+      /* ── Tables ── */
+      .table-wrap {
+        overflow-x: auto;
+        margin: 0 0 22px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 11px 16px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+        color: var(--fg-soft);
+      }
+
+      th {
+        background: var(--surface);
+        color: var(--fg);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      tr:last-child td {
+        border-bottom: none;
+      }
+
+      .note {
+        margin: 0 0 22px;
+        padding: 14px 18px;
+        background: rgba(108, 138, 255, 0.08);
+        border: 1px solid rgba(108, 138, 255, 0.25);
+        border-radius: 10px;
+        color: var(--fg-soft);
+        font-size: 14px;
+      }
+
+      .note strong {
+        color: var(--fg);
+      }
+
+      /* ── On-this-page nav ── */
+      .toc {
+        position: sticky;
+        top: 96px;
+        font-size: 13px;
+      }
+
+      .toc-title {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--fg-faint);
+        margin: 0 0 12px;
+      }
+
+      .toc ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        border-left: 1px solid var(--line);
+      }
+
+      .toc a {
+        display: block;
+        padding: 6px 0 6px 16px;
+        margin-left: -1px;
+        color: var(--fg-soft);
+        border-left: 1px solid transparent;
+      }
+
+      .toc a:hover {
+        color: var(--fg);
+        text-decoration: none;
+        border-left-color: var(--line-strong);
+      }
+
+      /* ── Footer ── */
+      .doc-footer {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px;
+        border-top: 1px solid var(--line);
+        color: var(--fg-faint);
+        font-size: 13px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        justify-content: space-between;
+      }
+
+      @media (max-width: 900px) {
+        .layout {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 0;
+          padding: 88px 22px 96px;
+        }
+
+        .toc {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <site-nav
+      base="../"
+      links='[{"label":"Home","href":"../"},{"label":"Compatibility","href":"../#goals"},{"label":"Benchmarks","href":"../#benchmarks"},{"label":"FAQ","href":"../#faq"},{"label":"Roadmap","href":"../#roadmap"}]'
+    ></site-nav>
+
+    <div class="layout">
+      <main class="content">
+        <header class="doc-header">
+          <span class="eyebrow">Documentation</span>
+          <h1>Get started with JS²</h1>
+          <p class="lede">
+            <code>js2</code>
+            (
+            <code>@loopdive/js2</code>
+            ) is an ahead-of-time compiler that turns TypeScript and JavaScript into WebAssembly. There is no bundled
+            interpreter and no engine embedded in the output — the compiler emits WasmGC directly. This guide installs
+            the CLI, compiles a first module, and runs the result from Node.js and the browser.
+          </p>
+          <div class="header-actions">
+            <a class="btn btn-solid" href="../playground/">Try the playground</a>
+            <a class="btn btn-outline" href="https://github.com/loopdive/js2">View on GitHub</a>
+          </div>
+        </header>
+
+        <section>
+          <h2 id="install">
+            <span class="step">1</span>
+            Install
+          </h2>
+          <p>
+            The compiler ships as a single npm package. Install it globally, or run it on demand with
+            <code>npx</code>
+            :
+          </p>
+          <pre><code># Global install — adds the `js2wasm` binary to PATH
+npm install -g @loopdive/js2
+
+# One-shot — no global install
+npx @loopdive/js2 input.ts -o out/</code></pre>
+          <p>Verify the install:</p>
+          <pre><code>js2wasm --version
+js2wasm --help</code></pre>
+          <p>
+            <code>js2wasm</code>
+            is the CLI entry point; the npm package name is
+            <code>@loopdive/js2</code>
+            .
+          </p>
+        </section>
+
+        <section>
+          <h2 id="compile">
+            <span class="step">2</span>
+            Compile your first module
+          </h2>
+          <p>Write a tiny TypeScript file:</p>
+          <pre><code>cat &gt; add.ts &lt;&lt;'EOF'
+export function add(a: number, b: number): number {
+  return a + b;
+}
+EOF</code></pre>
+          <p>Compile it:</p>
+          <pre><code>js2wasm add.ts -o .</code></pre>
+          <p>
+            You should now see four files alongside
+            <code>add.ts</code>
+            :
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>add.wasm</code></td>
+                  <td>The compiled WebAssembly binary</td>
+                </tr>
+                <tr>
+                  <td><code>add.wat</code></td>
+                  <td>WebAssembly text format (human-readable)</td>
+                </tr>
+                <tr>
+                  <td><code>add.d.ts</code></td>
+                  <td>TypeScript declarations for the module's exports</td>
+                </tr>
+                <tr>
+                  <td><code>add.imports.js</code></td>
+                  <td>
+                    A
+                    <code>createImports()</code>
+                    helper that builds the import object
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The
+            <code>.imports.js</code>
+            helper centralises the JavaScript host glue (string builtins, boxed-number constructors, host calls). You
+            import it from your loader rather than constructing the import object by hand.
+          </p>
+        </section>
+
+        <section>
+          <h2 id="node">
+            <span class="step">3</span>
+            Run in Node.js
+          </h2>
+          <p>
+            Create a small loader,
+            <code>run.mjs</code>
+            :
+          </p>
+          <pre><span class="code-label">run.mjs</span><code>import { readFile } from "node:fs/promises";
+import { createImports } from "./add.imports.js";
+
+const bytes = await readFile("./add.wasm");
+const { instance } = await WebAssembly.instantiate(bytes, createImports());
+
+console.log(instance.exports.add(2, 3)); // 5</code></pre>
+          <p>Run it:</p>
+          <pre><code>node run.mjs</code></pre>
+          <div class="note">
+            <strong>Node 22 or newer</strong>
+            is recommended. Older versions may need the
+            <code>--experimental-wasm-gc</code>
+            flag to enable WasmGC.
+          </div>
+        </section>
+
+        <section>
+          <h2 id="browser">
+            <span class="step">4</span>
+            Run in the browser
+          </h2>
+          <p>The same module loads when fetched over HTTP:</p>
+          <pre><code>&lt;script type="module"&gt;
+  import { createImports } from "./add.imports.js";
+
+  const response = await fetch("./add.wasm");
+  const { instance } = await WebAssembly.instantiateStreaming(
+    response,
+    createImports(),
+  );
+
+  console.log(instance.exports.add(2, 3)); // 5
+&lt;/script&gt;</code></pre>
+          <p>
+            Any reasonably current Chromium, Firefox, or Safari handles WasmGC natively — there is no polyfill step.
+          </p>
+        </section>
+
+        <section>
+          <h2 id="flags">
+            <span class="step">5</span>
+            Common CLI flags
+          </h2>
+          <p>The flags you reach for most often:</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Flag</th>
+                  <th>What it does</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>-o, --out &lt;dir&gt;</code></td>
+                  <td>Output directory (default: same dir as the input file).</td>
+                </tr>
+                <tr>
+                  <td><code>-O, --optimize</code></td>
+                  <td>
+                    Run Binaryen
+                    <code>wasm-opt</code>
+                    (default
+                    <code>-O3</code>
+                    ). Smaller, faster.
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <code>-O1</code>
+                    ..
+                    <code>-O4</code>
+                  </td>
+                  <td>Pick the optimizer level explicitly.</td>
+                </tr>
+                <tr>
+                  <td><code>--target wasi</code></td>
+                  <td>
+                    Emit WASI imports (
+                    <code>fd_write</code>
+                    ,
+                    <code>proc_exit</code>
+                    ) instead of JS host glue.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>--target linear</code></td>
+                  <td>Emit linear-memory output instead of WasmGC.</td>
+                </tr>
+                <tr>
+                  <td><code>--allow-fs</code></td>
+                  <td>
+                    Permit
+                    <code>node:fs</code>
+                    host imports for non-WASI builds (off by default).
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>--wit</code></td>
+                  <td>Also emit a WIT interface file for the Component Model.</td>
+                </tr>
+                <tr>
+                  <td><code>--wat</code></td>
+                  <td>
+                    Print only the
+                    <code>.wat</code>
+                    text to stdout (skip binary output).
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>--mode production</code></td>
+                  <td>
+                    Set
+                    <code>process.env.NODE_ENV="production"</code>
+                    at compile time; drops dead branches.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>--define K=V</code></td>
+                  <td>Substitute an identifier path with a literal before parsing.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>A worked example:</p>
+          <pre><code>js2wasm add.ts -o dist/ -O3 --wit</code></pre>
+          <p>
+            This writes optimized
+            <code>dist/add.wasm</code>
+            ,
+            <code>dist/add.wat</code>
+            ,
+            <code>dist/add.d.ts</code>
+            ,
+            <code>dist/add.imports.js</code>
+            , and
+            <code>dist/add.wit</code>
+            . For the complete reference, see the
+            <a href="https://github.com/loopdive/js2/blob/main/docs/cli.md">CLI documentation</a>
+            .
+          </p>
+        </section>
+
+        <section>
+          <h2 id="next">
+            <span class="step">6</span>
+            Where to next
+          </h2>
+          <ul>
+            <li>
+              The
+              <a href="../playground/">playground</a>
+              compiles TypeScript to WasmGC live in the browser, with runnable examples for async/await, classes, and
+              algorithms.
+            </li>
+            <li>
+              The
+              <a href="../#faq">FAQ</a>
+              covers the project's stance on TypeScript types, runtime fallbacks, and Test262 conformance.
+            </li>
+            <li>
+              The
+              <a href="https://github.com/loopdive/js2">source on GitHub</a>
+              includes the full CLI reference, methodology notes, and architecture decision records.
+            </li>
+          </ul>
+        </section>
+      </main>
+
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-title">On this page</p>
+        <ul>
+          <li><a href="#install">Install</a></li>
+          <li><a href="#compile">Compile a module</a></li>
+          <li><a href="#node">Run in Node.js</a></li>
+          <li><a href="#browser">Run in the browser</a></li>
+          <li><a href="#flags">Common CLI flags</a></li>
+          <li><a href="#next">Where to next</a></li>
+        </ul>
+      </nav>
+    </div>
+
+    <footer class="doc-footer">
+      <span>JS² — JavaScript and TypeScript ahead-of-time compilation for WebAssembly GC.</span>
+      <span><a href="../">← Back to home</a></span>
+    </footer>
+
+    <script type="module" src="../components/site-nav.js"></script>
+  </body>
+</html>
