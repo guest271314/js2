@@ -545,6 +545,16 @@ export function lowerIrFunctionBody<S>(
       for (const sub of instr.body) allocLocalForInstr(sub);
       for (const sub of instr.update) allocLocalForInstr(sub);
     }
+    // #1820: walk into value-producing `if` then/else arm buffers. SSA values
+    // defined inside an arm that are referenced cross-block (e.g. the arm's
+    // carrier value, or a nested-ternary sub-result) need a Wasm local slot;
+    // without this recursion `localIdx.get(...)` is undefined and the carrier
+    // emission mis-targets an unrelated local. (Same recursion the for-of /
+    // try / loop buffers already get.)
+    if (instr.kind === "if") {
+      for (const sub of instr.then) allocLocalForInstr(sub);
+      for (const sub of instr.else) allocLocalForInstr(sub);
+    }
   };
   for (const block of func.blocks) {
     for (const instr of block.instrs) {

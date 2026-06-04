@@ -360,6 +360,20 @@ export interface FunctionContext {
    */
   pendingStringBuilders?: Set<ts.VariableDeclaration>;
   /**
+   * #1761: presize info for those `pendingStringBuilders` whose final length
+   * is a provably runtime-known linear function of a loop bound. Keyed by the
+   * same declaration node. When present at the init site, the buffer is
+   * allocated once at `bound * unitsPerIter` and the append sites drop the
+   * per-append cap-check. Populated by `detectStringBuilders` (presize out-param).
+   */
+  stringBuilderPresize?: Map<
+    ts.VariableDeclaration,
+    {
+      boundExpr: ts.Expression; // loop-invariant bound, evaluated once at init
+      unitsPerIter: number; // constant code-units appended per iteration
+    }
+  >;
+  /**
    * #1210: live string-builder bindings keyed by binding name. While
    * present, `s += <expr>` routes to `compileStringBuilderAppend`
    * (in-place buffer write), and identifier reads materialize a fresh
@@ -373,6 +387,7 @@ export interface FunctionContext {
       lenLocalIdx: number; // i32 — current logical length
       capLocalIdx: number; // i32 — current physical capacity (== buf.length)
       materializedLocalIdx: number; // ref_null $AnyString — reserved for future cache
+      presized?: boolean; // #1761: true when buffer presized; appends skip cap-check
     }
   >;
 }

@@ -311,6 +311,18 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       pathHas(record, ["built-ins/function", "language/function", "language/expressions/arrow-function"]),
   },
   {
+    id: "symbol-builtin-semantics",
+    issues: ["#483", "#487", "#1564"],
+    label: "Symbol built-in semantics (keyFor/for arg validation, well-known symbols, registry)",
+    // Standalone Symbol built-ins lower their argument-type checks to internal
+    // traps (e.g. `Symbol.keyFor(null)` traps with "null is not a symbol")
+    // instead of throwing a proper TypeError, so test262's `assert.throws`
+    // assertion fails. The path-based match keeps this scoped to genuine
+    // built-ins/Symbol tests and does not poach the `bigint`/`toprimitive`
+    // text-matched buckets that run earlier in this list.
+    match: (record) => pathHas(record, ["built-ins/symbol"]),
+  },
+  {
     id: "assignment-private-short-circuit",
     issues: ["#334", "#1456", "#540"],
     label: "Assignment targets, private refs, and short-circuit semantics",
