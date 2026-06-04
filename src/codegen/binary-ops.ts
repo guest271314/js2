@@ -1026,14 +1026,17 @@ export function compileBinaryExpression(
         fctx.body.push({ op: "f64.nearest" } as unknown as Instr);
         fctx.body.push({ op: "local.get", index: nf });
         fctx.body.push({ op: "f64.eq" }); // integral?
-        // range low: nf >= -9223372036854775808
+        // range low: nf >= -2^63 (= -9223372036854775808). Written as
+        // -(2 ** 63) because the decimal literal is not exactly representable
+        // as an f64 token (biome noPrecisionLoss); 2 ** 63 evaluates to
+        // exactly that f64 value, so this is behavior-identical.
         fctx.body.push({ op: "local.get", index: nf });
-        fctx.body.push({ op: "f64.const", value: -9223372036854775808 });
+        fctx.body.push({ op: "f64.const", value: -(2 ** 63) });
         fctx.body.push({ op: "f64.ge" });
         fctx.body.push({ op: "i32.and" });
-        // range high: nf < 9223372036854775808
+        // range high: nf < 2^63 (= 9223372036854775808); see note above.
         fctx.body.push({ op: "local.get", index: nf });
-        fctx.body.push({ op: "f64.const", value: 9223372036854775808 });
+        fctx.body.push({ op: "f64.const", value: 2 ** 63 });
         fctx.body.push({ op: "f64.lt" });
         fctx.body.push({ op: "i32.and" });
         // value: trunc_sat_f64_s(nf) == bi

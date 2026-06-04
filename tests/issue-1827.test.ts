@@ -42,7 +42,9 @@ describe("#1827 — BigInt == Number exact equality", () => {
   });
 
   it("constant-folded forms also correct", async () => {
-    expect(await run(`export function test(): number { return (9007199254740993n == 9007199254740992) ? 1 : 0; }`)).toBe(0);
+    expect(
+      await run(`export function test(): number { return (9007199254740993n == 9007199254740992) ? 1 : 0; }`),
+    ).toBe(0);
     expect(await run(`export function test(): number { return (12n == 12) ? 1 : 0; }`)).toBe(1);
   });
 });
