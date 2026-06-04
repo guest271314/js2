@@ -33,17 +33,52 @@ function sh(cmd) {
   return execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 }
 
-try { sh("git fetch origin --quiet"); } catch { /* offline */ }
-
-try { addFrom(readdirSync("plan/issues").join("\n")); } catch { /* skip */ }
+try {
+  sh("git fetch origin --quiet");
+} catch {
+  /* offline */
+}
 
 try {
-  const refs = sh("git for-each-ref --format='%(refname)' refs/remotes/origin")
-    .split("\n").filter(Boolean);
-  for (const ref of refs) {
-    try { addFrom(sh(`git ls-tree -r ${ref} --name-only -- plan/issues`)); } catch { /* skip */ }
-  }
-} catch { /* no remotes */ }
+  addFrom(readdirSync("plan/issues").join("\n"));
+} catch {
+  /* skip */
+}
 
-const max = ids.size ? Math.max(...ids) : 0;
+try {
+  const refs = sh("git for-each-ref --format='%(refname)' refs/remotes/origin").split("\n").filter(Boolean);
+  for (const ref of refs) {
+    try {
+      addFrom(sh(`git ls-tree -r ${ref} --name-only -- plan/issues`));
+    } catch {
+      /* skip */
+    }
+  }
+} catch {
+  /* no remotes */
+}
+
+// Exclude outlier ids separated from the main body by a large gap. A single
+// stray out-of-range file (e.g. a mis-typed `6406`/`6407` when the real range
+// is ~1800) must not poison `max + 1` and hand out a 6408 — that mis-allocation
+// is exactly what #1858 hit. Real issue numbering increments by 1 and never
+// jumps more than a few dozen, so anything beyond GAP above the running max is
+// treated as a stray and ignored (logged to stderr for visibility).
+const GAP = 1000;
+const sorted = [...ids].sort((a, b) => a - b);
+let max = 0;
+const ignored = [];
+for (const id of sorted) {
+  if (max > 0 && id - max > GAP) {
+    ignored.push(...sorted.filter((x) => x >= id));
+    break;
+  }
+  max = id;
+}
+if (ignored.length) {
+  process.stderr.write(
+    `next-issue-id: ignoring ${ignored.length} out-of-range stray id(s) ` +
+      `(>${GAP} above the contiguous body): ${ignored.join(", ")}\n`,
+  );
+}
 process.stdout.write(`${max + 1}\n`);
