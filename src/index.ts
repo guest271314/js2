@@ -235,6 +235,26 @@ export interface CompileOptions {
    * tracking issue that owns its Wasm-native replacement.
    */
   strictNoHostImports?: boolean;
+  /**
+   * Linear backend (`target: "linear"`) allocator behaviour (#1856).
+   *
+   * The linear backend always uses a **bump/arena** allocator — each
+   * allocation advances a single heap pointer and nothing is freed until
+   * the Wasm instance is dropped (the "allocate-and-exit" model that suits
+   * most standalone/WASI short-lived programs; see R10 in
+   * `docs/architecture/compiler-design-lessons.md` and ADR-0017). There is
+   * deliberately no pluggable GC abstraction.
+   *
+   * - `"bump"` (default): the plain allocate-and-exit arena, smallest binary.
+   * - `"arena-reset"`: same allocator, but also exports `__arena_reset()`
+   *   (O(1) rewind of the whole arena) and `__arena_used()` (bytes
+   *   allocated). Use this when an embedder reuses one instance across many
+   *   short-lived tasks and wants to reclaim between them.
+   *
+   * Ignored for non-`linear` targets — the WasmGC backends delegate object
+   * lifetime to the host GC and have no linear allocator.
+   */
+  allocator?: "bump" | "arena-reset";
 }
 
 import * as path from "path";
