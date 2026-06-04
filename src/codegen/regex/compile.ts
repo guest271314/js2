@@ -14,7 +14,7 @@
  * Greedy `x*` is `L1: SPLIT body, L2 ; body ; JMP L1 ; L2:` — body tried first.
  * Lazy `x*?` swaps the SPLIT targets so the exit is tried first.
  */
-import { INSTR_WIDTH, ReOp, RE_FLAG_I, type CompiledRegex } from "./bytecode.js";
+import { INSTR_WIDTH, ReOp, RE_FLAG_I, RE_FLAG_M, RE_FLAG_S, type CompiledRegex } from "./bytecode.js";
 import { parsePattern, type ParsedRegex, type ReNode } from "./parse.js";
 
 /** Bounded repetition expansion guard — `{n,m}` with large m is rewritten to
@@ -27,9 +27,15 @@ class Emitter {
   /** Flat class table; class offset = index of its rangeCount cell. */
   readonly classTable: number[] = [];
   private readonly caseInsensitive: boolean;
+  /** dotAll (`s` flag): `.` matches line terminators too. */
+  private readonly dotAll: boolean;
+  /** multiline (`m` flag): `^`/`$` match at line boundaries, not just BOS/EOS. */
+  private readonly multiline: boolean;
 
-  constructor(caseInsensitive: boolean) {
+  constructor(caseInsensitive: boolean, dotAll: boolean, multiline: boolean) {
     this.caseInsensitive = caseInsensitive;
+    this.dotAll = dotAll;
+    this.multiline = multiline;
   }
 
   /** Append an instruction, return its program-counter (instruction index). */
@@ -72,8 +78,9 @@ class Emitter {
         return;
       }
       case "any":
-        // `dotAll`=0 in 2a (the `s` flag is refused); excludes line terminators.
-        this.emit(ReOp.ANY, 0);
+        // `dotAll`=1 under the `s` flag (`.` matches line terminators too);
+        // otherwise 0 (the VM excludes \n \r U+2028 U+2029).
+        this.emit(ReOp.ANY, this.dotAll ? 1 : 0);
         return;
       case "class": {
         const ranges = this.caseInsensitive ? foldClassRangesAscii(node.ranges) : node.ranges;
@@ -82,10 +89,14 @@ class Emitter {
         return;
       }
       case "bol":
-        this.emit(ReOp.BOL);
+        // operand a = multiline flag: when 1, `^` also matches right after a
+        // line terminator, not only at position 0.
+        this.emit(ReOp.BOL, this.multiline ? 1 : 0);
         return;
       case "eol":
-        this.emit(ReOp.EOL);
+        // operand a = multiline flag: when 1, `$` also matches right before a
+        // line terminator, not only at the end of input.
+        this.emit(ReOp.EOL, this.multiline ? 1 : 0);
         return;
       case "concat":
         for (const part of node.parts) this.compileNode(part);
@@ -242,7 +253,9 @@ export function foldClassRangesAscii(ranges: Array<[number, number]>): Array<[nu
  */
 export function compileParsed(parsed: ParsedRegex, flags: number): CompiledRegex {
   const caseInsensitive = (flags & RE_FLAG_I) !== 0;
-  const em = new Emitter(caseInsensitive);
+  const dotAll = (flags & RE_FLAG_S) !== 0;
+  const multiline = (flags & RE_FLAG_M) !== 0;
+  const em = new Emitter(caseInsensitive, dotAll, multiline);
   // SAVE 0 (match start)
   emitRaw(em, ReOp.SAVE, 0);
   em.compileNode(parsed.root);

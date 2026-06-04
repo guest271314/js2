@@ -1,9 +1,9 @@
 ---
 id: 1470
 title: "host-independence: eliminate JS host string ops for standalone Wasm"
-status: in-review
+status: ready
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-06-04
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: strings
 goal: host-independence
-sprint: 52
+sprint: 59
 related: []
 ---
 # #1470 — Eliminate JS host string ops for standalone Wasm
@@ -417,3 +417,73 @@ This issue **must land before #1471, #1472, #1473** in terms of CLI
 plumbing — those four reuse the new `ctx.standalone` flag and the
 import-section assertion helper. The Wasm-native body of each can
 land in parallel.
+
+## Progress / Test Results
+
+### 2026-06-04 — `__any_to_string` + mixed-operand native concat (dependency step 2)
+
+Implemented the pure-Wasm `$__any_to_string(anyref) -> ref $AnyString`
+dispatcher (`src/codegen/native-strings.ts`, `ensureAnyToStringHelper`)
+and wired the native string-concat / template-substitution paths to use
+it under `noJsHost` (WASI / `--target standalone`):
+
+- **Root cause fixed**: the native `+`-concat path
+  (`compileStringBinaryOp`, `PlusToken`) and template substitution pushed
+  the **raw** operand (`f64` / `i32` / struct ref) straight into
+  `__str_concat`, which expects `(ref $AnyString, ref $AnyString)`. Any
+  non-string operand produced an **invalid module** (`call expected
+  (ref null N), found local.get of type i32`) — every standalone module
+  with `"x" + n`, `+ boolean`, `+ object`, or numeric template
+  substitution failed `WebAssembly.instantiate` / `wasmtime run`.
+- **Fix** (`src/codegen/string-ops.ts`, new `compileNativeConcatOperand`,
+  gated on `noJsHost(ctx)`): each operand is lowered to a native
+  `ref $AnyString` in pure Wasm — numbers via the native `number_toString`
+  helper, booleans/null/undefined via native literals, dynamic `any` /
+  object refs via `$__any_to_string`. The legacy JS-host `nativeStrings`
+  path (`fast` / explicit `nativeStrings: true`) is left on its original
+  raw-push behavior (its mixed-operand handling has separate, pre-existing
+  limitations; bridging via `__str_from_extern` mid-body shifts function
+  indices).
+- **`$__any_to_string` dispatch** (Phase 1): `ref.test $AnyString` →
+  passthrough; `$AnyValue` box → tag dispatch (null/undefined/number/
+  bool/string); else → `"[object Object]"`. Spec-correct vtable
+  `toString`/`@@toPrimitive` dispatch for ordinary objects remains
+  deferred to **#1472**.
+
+**Verified** (compiled `--target standalone`, instantiated with an empty
+import object, zero JS-host string imports, value read back via
+`s.length` / `s.charCodeAt`):
+
+| expression                              | result            |
+|-----------------------------------------|-------------------|
+| `"n=" + (42 as number)`                 | `n=42`            |
+| `"f=" + (-3.5 as number)`               | `f=-3.5`          |
+| `"b=" + true` / `+ false`               | `b=true`/`b=false`|
+| `"a" + 3 + "b" + 4`                     | `a3b4`            |
+| `` `val ${7}` ``                        | `val 7`           |
+| `"v=" + ("hi" as any)`                  | `v=hi`            |
+| `"n=" + (5 as any)`                     | `n=5`             |
+| `"o=" + ({a:1} as any)`                 | `o=[object Object]`|
+
+Tests: `tests/issue-1470-standalone-string-imports.test.ts` (14 passing —
+6 original import-section guards + 8 new behavioral cases that
+instantiate and read back values). `native-strings`,
+`native-strings-standalone`, `native-strings-roundtrip`, `issue-1759`,
+`issue-1321/1335-standalone`, `wasi-stdout` suites all green; the
+default (`gc`) and `fast`/`nativeStrings` host paths are unchanged.
+
+**Known Phase-1 limitations (deferred):**
+- A boolean boxed via `x as any` reads back as `1`/`0` rather than
+  `true`/`false` (the `$AnyValue` boxing site tags it as a number — a
+  boxing concern, not a ToString-dispatch one).
+- `null as any` / `undefined as any` literal substitutions in a template
+  still produce an invalid module (the `X as any` literal lowering emits
+  a typed `ref.null` while reporting kind `externref`); realistic
+  `null`/`undefined`-typed variables work.
+- `undefined`-literal lowering still pulls `env::__get_undefined`
+  (unrelated to string codegen; separate standalone-leak).
+
+**Still open for #1470** (later PRs): pure-Wasm UTF-8 codec
+(`__str_from_mem`/`__str_to_mem`), full `__unbox_string` retargeting, the
+`string_method` ASCII-fold / refuse policy, and the spec-correct object
+`toString` dispatch (via #1472).

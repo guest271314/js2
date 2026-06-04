@@ -6,6 +6,7 @@
  * Extracted from codegen/index.ts (#1013).
  */
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { ensureAnyValueType } from "./any-helpers.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureLateImport } from "./expressions/late-imports.js";
 import { addImport } from "./registry/imports.js";
@@ -75,7 +76,11 @@ export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string, en
   for (let i = 0; i < value.length; i++) {
     instrs.push({ op: "i32.const", value: value.charCodeAt(i) });
   }
-  instrs.push({ op: "array.new_fixed", typeIdx: strDataTypeIdx, length: value.length });
+  instrs.push({
+    op: "array.new_fixed",
+    typeIdx: strDataTypeIdx,
+    length: value.length,
+  });
   // struct.new $NativeString(len, off, data)
   instrs.push({ op: "struct.new", typeIdx: strTypeIdx });
   return instrs;
@@ -103,7 +108,11 @@ function utf8StringLiteralInstrs(ctx: CodegenContext, value: string): Instr[] {
   for (const b of bytes) {
     instrs.push({ op: "i32.const", value: b });
   }
-  instrs.push({ op: "array.new_fixed", typeIdx: ctx.utf8StrDataTypeIdx, length: bytes.length });
+  instrs.push({
+    op: "array.new_fixed",
+    typeIdx: ctx.utf8StrDataTypeIdx,
+    length: bytes.length,
+  });
   // struct.new $Utf8String(len, byteLen, off, data)
   instrs.push({ op: "struct.new", typeIdx: ctx.utf8StrTypeIdx });
   return instrs;
@@ -338,7 +347,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
           { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // data
           { op: "local.get", index: FLAT_OFF },
           { op: "local.get", index: FLAT_LEN },
-          { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
+          {
+            op: "array.copy",
+            dstTypeIdx: strDataTypeIdx,
+            srcTypeIdx: strDataTypeIdx,
+          },
 
           // return pos + flatLen
           { op: "local.get", index: 2 },
@@ -425,7 +438,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "array.len" } as Instr,
                           { op: "i32.const", value: 1 } as Instr,
                           { op: "i32.shl" } as Instr,
-                          { op: "array.new_default", typeIdx: wlArrTypeIdx } as Instr,
+                          {
+                            op: "array.new_default",
+                            typeIdx: wlArrTypeIdx,
+                          } as Instr,
                           { op: "local.set", index: NEW_WL } as Instr,
 
                           // array.copy(newWl, 0, worklist, 0, wlTop)
@@ -436,7 +452,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "ref.as_non_null" } as Instr,
                           { op: "i32.const", value: 0 } as Instr,
                           { op: "local.get", index: WL_TOP } as Instr,
-                          { op: "array.copy", dstTypeIdx: wlArrTypeIdx, srcTypeIdx: wlArrTypeIdx } as Instr,
+                          {
+                            op: "array.copy",
+                            dstTypeIdx: wlArrTypeIdx,
+                            srcTypeIdx: wlArrTypeIdx,
+                          } as Instr,
 
                           // worklist = newWl
                           { op: "local.get", index: NEW_WL } as Instr,
@@ -451,7 +471,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                       { op: "local.get", index: CUR },
                       { op: "ref.as_non_null" },
                       { op: "ref.cast", typeIdx: consStrTypeIdx },
-                      { op: "struct.get", typeIdx: consStrTypeIdx, fieldIdx: 2 },
+                      {
+                        op: "struct.get",
+                        typeIdx: consStrTypeIdx,
+                        fieldIdx: 2,
+                      },
                       { op: "array.set", typeIdx: wlArrTypeIdx },
 
                       // wlTop++
@@ -464,7 +488,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                       { op: "local.get", index: CUR },
                       { op: "ref.as_non_null" },
                       { op: "ref.cast", typeIdx: consStrTypeIdx },
-                      { op: "struct.get", typeIdx: consStrTypeIdx, fieldIdx: 1 },
+                      {
+                        op: "struct.get",
+                        typeIdx: consStrTypeIdx,
+                        fieldIdx: 1,
+                      },
                       { op: "local.set", index: CUR },
 
                       // continue inner loop
@@ -498,7 +526,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
               { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // data
               { op: "local.get", index: FLAT_OFF },
               { op: "local.get", index: FLAT_LEN },
-              { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
+              {
+                op: "array.copy",
+                dstTypeIdx: strDataTypeIdx,
+                srcTypeIdx: strDataTypeIdx,
+              },
 
               // pos += flatLen
               { op: "local.get", index: 2 },
@@ -664,7 +696,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "local.get", index: 5 },
                           { op: "i32.const", value: 1 },
                           { op: "i32.add" },
-                          { op: "array.get_u", typeIdx: ctx.utf8StrDataTypeIdx },
+                          {
+                            op: "array.get_u",
+                            typeIdx: ctx.utf8StrDataTypeIdx,
+                          },
                           { op: "i32.const", value: 0x3f },
                           { op: "i32.and" },
                           { op: "i32.const", value: 6 },
@@ -674,7 +709,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "local.get", index: 5 },
                           { op: "i32.const", value: 2 },
                           { op: "i32.add" },
-                          { op: "array.get_u", typeIdx: ctx.utf8StrDataTypeIdx },
+                          {
+                            op: "array.get_u",
+                            typeIdx: ctx.utf8StrDataTypeIdx,
+                          },
                           { op: "i32.const", value: 0x3f },
                           { op: "i32.and" },
                           { op: "i32.or" },
@@ -695,7 +733,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "local.get", index: 5 },
                           { op: "i32.const", value: 1 },
                           { op: "i32.add" },
-                          { op: "array.get_u", typeIdx: ctx.utf8StrDataTypeIdx },
+                          {
+                            op: "array.get_u",
+                            typeIdx: ctx.utf8StrDataTypeIdx,
+                          },
                           { op: "i32.const", value: 0x3f },
                           { op: "i32.and" },
                           { op: "i32.const", value: 12 },
@@ -705,7 +746,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "local.get", index: 5 },
                           { op: "i32.const", value: 2 },
                           { op: "i32.add" },
-                          { op: "array.get_u", typeIdx: ctx.utf8StrDataTypeIdx },
+                          {
+                            op: "array.get_u",
+                            typeIdx: ctx.utf8StrDataTypeIdx,
+                          },
                           { op: "i32.const", value: 0x3f },
                           { op: "i32.and" },
                           { op: "i32.const", value: 6 },
@@ -715,7 +759,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                           { op: "local.get", index: 5 },
                           { op: "i32.const", value: 3 },
                           { op: "i32.add" },
-                          { op: "array.get_u", typeIdx: ctx.utf8StrDataTypeIdx },
+                          {
+                            op: "array.get_u",
+                            typeIdx: ctx.utf8StrDataTypeIdx,
+                          },
                           { op: "i32.const", value: 0x3f },
                           { op: "i32.and" },
                           { op: "i32.or" },
@@ -799,7 +846,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       locals: [
         { name: "len", type: { kind: "i32" } },
         { name: "byteLen", type: { kind: "i32" } },
-        { name: "data", type: { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx } },
+        {
+          name: "data",
+          type: { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx },
+        },
         { name: "out", type: strDataRef },
         { name: "b", type: { kind: "i32" } },
         { name: "o", type: { kind: "i32" } },
@@ -1372,7 +1422,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
           { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // flatA.off
           { op: "local.get", index: 2 }, // lenA
-          { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
+          {
+            op: "array.copy",
+            dstTypeIdx: strDataTypeIdx,
+            srcTypeIdx: strDataTypeIdx,
+          },
 
           // array.copy(newArr, lenA, flatB.data, flatB.off, lenB)
           { op: "local.get", index: 5 }, // dst
@@ -1385,7 +1439,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
           { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // flatB.off
           { op: "local.get", index: 3 }, // lenB
-          { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
+          {
+            op: "array.copy",
+            dstTypeIdx: strDataTypeIdx,
+            srcTypeIdx: strDataTypeIdx,
+          },
 
           // result = struct.new $NativeString(newLen, 0, newArr)
           { op: "local.get", index: 4 }, // len = newLen
@@ -1496,7 +1554,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       { op: "i32.ne" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
 
       // aOff = a.off
       { op: "local.get", index: 0 },
@@ -1549,7 +1611,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
               { op: "i32.add" },
               { op: "array.get_u", typeIdx: strDataTypeIdx },
               { op: "i32.ne" },
-              { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+              },
 
               // i++
               { op: "local.get", index: 3 },
@@ -1669,13 +1735,21 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
               { op: "local.get", index: 10 },
               { op: "local.get", index: 11 },
               { op: "i32.lt_u" },
-              { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+              },
 
               // if ca > cb return 1
               { op: "local.get", index: 10 },
               { op: "local.get", index: 11 },
               { op: "i32.gt_u" },
-              { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
 
               // i++
               { op: "local.get", index: 5 },
@@ -1693,13 +1767,21 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "i32.lt_u" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+      },
 
       // if lenA > lenB return 1
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "i32.gt_u" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
 
       // return 0 (equal)
       { op: "i32.const", value: 0 },
@@ -2299,7 +2381,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.add" },
       { op: "local.get", index: 3 },
       { op: "i32.gt_s" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
       // sOff, pOff
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
@@ -2328,7 +2414,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
               { op: "local.get", index: 5 },
               { op: "local.get", index: 4 },
               { op: "i32.ge_s" },
-              { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
               // sData[sOff + position + i]
               { op: "local.get", index: 6 },
               { op: "local.get", index: 8 },
@@ -2408,7 +2498,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 7 },
       { op: "i32.const", value: 0 },
       { op: "i32.lt_s" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
       // sOff, xOff
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
@@ -2436,7 +2530,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
               { op: "local.get", index: 4 },
               { op: "local.get", index: 3 },
               { op: "i32.ge_s" },
-              { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
               // sData[sOff + startPos + i]
               { op: "local.get", index: 5 },
               { op: "local.get", index: 9 },
@@ -2782,7 +2880,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                       { op: "local.get", index: 6 }, // src array
                       { op: "local.get", index: 8 }, // src offset = sOff
                       { op: "local.get", index: 2 }, // length = sLen
-                      { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
+                      {
+                        op: "array.copy",
+                        dstTypeIdx: strDataTypeIdx,
+                        srcTypeIdx: strDataTypeIdx,
+                      },
 
                       // dst += sLen
                       { op: "local.get", index: 5 },
@@ -3590,7 +3692,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                       { op: "local.get", index: RARR },
                       { op: "i32.const", value: 0 },
                       { op: "local.get", index: RLEN },
-                      { op: "array.copy", dstTypeIdx: nstrArrTypeIdx, srcTypeIdx: nstrArrTypeIdx },
+                      {
+                        op: "array.copy",
+                        dstTypeIdx: nstrArrTypeIdx,
+                        srcTypeIdx: nstrArrTypeIdx,
+                      },
                       { op: "local.get", index: NEWARR },
                       { op: "local.set", index: RARR },
                     ] as Instr[],
@@ -3637,7 +3743,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
                   { op: "local.get", index: RARR },
                   { op: "i32.const", value: 0 },
                   { op: "local.get", index: RLEN },
-                  { op: "array.copy", dstTypeIdx: nstrArrTypeIdx, srcTypeIdx: nstrArrTypeIdx },
+                  {
+                    op: "array.copy",
+                    dstTypeIdx: nstrArrTypeIdx,
+                    srcTypeIdx: nstrArrTypeIdx,
+                  },
                   { op: "local.get", index: NEWARR },
                   { op: "local.set", index: RARR },
                 ] as Instr[],
@@ -3681,7 +3791,10 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
         { name: "pos", type: { kind: "i32" } },
         { name: "idx", type: { kind: "i32" } },
         { name: "part", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
-        { name: "resultArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+        {
+          name: "resultArr",
+          type: { kind: "ref_null", typeIdx: nstrArrTypeIdx },
+        },
         { name: "resultLen", type: { kind: "i32" } },
         { name: "resultCap", type: { kind: "i32" } },
         { name: "newArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
@@ -4870,7 +4983,197 @@ export function ensureEncodeIntoHelper(
     });
   }
 
-  return { encodeIntoIdx: ctx.funcMap.get(helperName)!, destVecTypeIdx, resultTypeIdx };
+  return {
+    encodeIntoIdx: ctx.funcMap.get(helperName)!,
+    destVecTypeIdx,
+    resultTypeIdx,
+  };
+}
+
+/**
+ * #1470 — Emit `$__any_to_string(v: anyref) -> ref $AnyString`, the standalone
+ * (no-JS-host) replacement for the `__extern_toString` host import. Dispatches
+ * on the concrete WasmGC type of `v`:
+ *   - ref $AnyString    → returned as-is (already a native string)
+ *   - ref $AnyValue     → switch on the boxed tag:
+ *       0 null      → "null"
+ *       1 undefined → "undefined"
+ *       2 i32 num   → number_toString(f64.convert_i32_s(i32val))
+ *       3 f64 num   → number_toString(f64val)
+ *       4 bool      → "true" / "false"
+ *       5 string    → externval → any.convert_extern → ref.cast $AnyString
+ *       6 ref / else→ "[object Object]"
+ *   - anything else     → "[object Object]"
+ *
+ * Spec-correct dispatch for ordinary objects (walking @@toPrimitive / toString
+ * via the object's vtable) lands with #1472; the Phase-1 fallback here is the
+ * canonical `"[object Object]"` so a standalone module never traps on a string
+ * coercion of an arbitrary value.
+ *
+ * Idempotent — caches the function index under `nativeStrHelpers["__any_to_string"]`.
+ */
+export function ensureAnyToStringHelper(ctx: CodegenContext): number {
+  ensureNativeStringHelpers(ctx);
+  const existing = ctx.nativeStrHelpers.get("__any_to_string");
+  if (existing !== undefined) return existing;
+
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const anyref: ValType = { kind: "anyref" };
+
+  // The $AnyValue box must exist for the tag-dispatch arm. It is registered
+  // lazily; ensure it here so the struct.get / ref.cast below resolve.
+  ensureAnyValueType(ctx);
+  const anyValueTypeIdx = ctx.anyValueTypeIdx;
+
+  // number_toString returns an externref that is really a `ref $AnyString` in
+  // native-strings mode; convert it back with any.convert_extern + ref.cast.
+  const numToStrIdx = ctx.funcMap.get("number_toString");
+
+  const litStr = (value: string): Instr[] => nativeStringLiteralInstrs(ctx, value);
+
+  // `box` (the $AnyValue ref) lives in local 1; the original anyref param in 0.
+  const L_V = 0;
+  const L_BOX = 1;
+
+  const numberArm = (loadNumeric: Instr[]): Instr[] =>
+    numToStrIdx !== undefined
+      ? [
+          ...loadNumeric,
+          { op: "call", funcIdx: numToStrIdx },
+          { op: "any.convert_extern" } as Instr,
+          { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+        ]
+      : litStr("[object Object]");
+
+  const tagEq = (tag: number): Instr[] => [
+    { op: "local.get", index: L_BOX },
+    { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: tag },
+    { op: "i32.eq" },
+  ];
+
+  // tag dispatch as a nested if/else chain producing `ref $AnyString`.
+  const boxDispatch: Instr[] = [
+    ...tagEq(0),
+    {
+      op: "if",
+      blockType: { kind: "val", type: strRef },
+      then: litStr("null"),
+      else: [
+        ...tagEq(1),
+        {
+          op: "if",
+          blockType: { kind: "val", type: strRef },
+          then: litStr("undefined"),
+          else: [
+            ...tagEq(2),
+            {
+              op: "if",
+              blockType: { kind: "val", type: strRef },
+              then: numberArm([
+                { op: "local.get", index: L_BOX },
+                { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 1 },
+                { op: "f64.convert_i32_s" },
+              ]),
+              else: [
+                ...tagEq(3),
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: strRef },
+                  then: numberArm([
+                    { op: "local.get", index: L_BOX },
+                    { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 2 },
+                  ]),
+                  else: [
+                    ...tagEq(4),
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: strRef },
+                      then: [
+                        { op: "local.get", index: L_BOX },
+                        {
+                          op: "struct.get",
+                          typeIdx: anyValueTypeIdx,
+                          fieldIdx: 1,
+                        },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: strRef },
+                          then: litStr("true"),
+                          else: litStr("false"),
+                        } as Instr,
+                      ],
+                      else: [
+                        ...tagEq(5),
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: strRef },
+                          then: [
+                            { op: "local.get", index: L_BOX },
+                            {
+                              op: "struct.get",
+                              typeIdx: anyValueTypeIdx,
+                              fieldIdx: 4,
+                            },
+                            { op: "any.convert_extern" } as Instr,
+                            { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                          ],
+                          // tag 6 / unknown → "[object Object]"
+                          else: litStr("[object Object]"),
+                        } as Instr,
+                      ],
+                    } as Instr,
+                  ],
+                } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+  ];
+
+  const body: Instr[] = [
+    // if (v is a $AnyString) return it directly
+    { op: "local.get", index: L_V },
+    { op: "ref.test", typeIdx: anyStrTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: strRef },
+      then: [{ op: "local.get", index: L_V }, { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr],
+      else: [
+        // else if (v is a $AnyValue) dispatch on its tag
+        { op: "local.get", index: L_V },
+        { op: "ref.test", typeIdx: anyValueTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "val", type: strRef },
+          then: [
+            { op: "local.get", index: L_V },
+            { op: "ref.cast", typeIdx: anyValueTypeIdx } as Instr,
+            { op: "local.set", index: L_BOX },
+            ...boxDispatch,
+          ],
+          // else (null ref, plain object, vec, …) → "[object Object]"
+          else: litStr("[object Object]"),
+        } as Instr,
+      ],
+    } as Instr,
+  ];
+
+  const typeIdx = addFuncType(ctx, [anyref], [strRef]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeStrHelpers.set("__any_to_string", funcIdx);
+  ctx.funcMap.set("__any_to_string", funcIdx);
+  ctx.mod.functions.push({
+    name: "__any_to_string",
+    typeIdx,
+    locals: [{ name: "box", type: { kind: "ref_null", typeIdx: anyValueTypeIdx } }],
+    body,
+    exported: false,
+  });
+  return funcIdx;
 }
 
 export function ensureNativeStringExternBridge(ctx: CodegenContext): void {

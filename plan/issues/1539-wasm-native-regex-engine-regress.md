@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: regular expressions
 goal: standalone-wasm
-sprint: 58
+sprint: 59
 depends_on: [1474]
 related: [1474, 682, 1535]
 ---
@@ -468,3 +468,40 @@ dodged this only incidentally (its field[1] was `flags:i32`).
 Remaining (later slices): `.exec`/`.match` capture arrays + named groups
 (2b); `.replace`/`.split`/`matchAll` + `m`/`s`/`d` (2c); `\p{}`/lookaround/
 backrefs (2d).
+
+## Implementation Notes (dev-1539-flags, 2026-06-04) — Phase 2c flags `m` + `s`
+
+Landed the `m` (multiline) and `s` (dotAll) flags on the existing pure-WasmGC
+bytecode VM. No new opcodes, no struct changes, no toolchain — the flags ride
+existing instruction operands, so the change is small and self-contained.
+
+- **`s` (dotAll)** — the `ANY` opcode already carries a `dotAll` flag in
+  operand `a` (the VM excludes `\n \r U+2028 U+2029` when `a==0`). The compiler
+  had hardcoded `0`; it now emits `a = (flags & RE_FLAG_S) ? 1 : 0`. Both the
+  reference VM (`regex/vm.ts`) and the Wasm VM (`native-regex.ts` `anyArm`)
+  already read operand `a`, so the run-time side needed no change for `s`.
+- **`m` (multiline)** — `BOL`/`EOL` previously matched only at string
+  start/end. The compiler now stores the multiline bit in their operand `a`.
+  Both VMs gained the multiline branch (§22.2.2.6/§22.2.2.7): `^` also matches
+  right after a line terminator (unit at `sp-1` is a LT), `$` also matches right
+  before one (unit at `sp`). The neighbour read in the Wasm `anchorArm` is
+  guarded by an in-bounds check (`sp>0` / `sp<slen`) so it can never trap.
+  `\r\n` is two terminators, so an anchor between them still matches (matches
+  native `RegExp`).
+- **Gate** — `regexp-standalone.ts` flag refusal narrowed from
+  `g|i|y` to `g|i|y|m|s`; `u`/`v` (code-point) and `d` (indices) stay refused
+  citing #1539 Phase 2d.
+
+Files: `src/codegen/regex/{compile,vm}.ts`, `src/codegen/native-regex.ts`
+(`anchorArm` + new `multilineAnchorMatch`), `src/codegen/regexp-standalone.ts`.
+
+Tests: `tests/regex-bytecode.test.ts` (141 pure-TS cases incl. new `m`/`s`/`ms`
+rows vs native `RegExp`), `tests/issue-1539-standalone-regex.test.ts` (78
+dual-run cases, real Wasm, empty import object — incl. `m`/`s`/`ms`), and the
+narrowed-refusal tests flipped from "refuses `m`" to "refuses `u`/`d` (Phase
+2d)".
+
+Still open for #1539 (issue stays `in-progress`): Phase 2b capture
+arrays/`.exec`/`.match`/named groups; Phase 2c `.replace`/`.split`/`matchAll`
+and the `d` indices flag; Phase 2d `u`/`v` code-point semantics + fancy
+features.

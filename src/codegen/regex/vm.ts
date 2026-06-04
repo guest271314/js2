@@ -134,12 +134,18 @@ export function runAt(
         break;
       }
       case ReOp.BOL: {
-        if (sp === 0) pc++;
+        // a = multiline: `^` matches at position 0, OR (multiline) right after
+        // a line terminator (§22.2.2.6). `\r\n` counts as two terminators, so a
+        // `^` between them still matches — the char before sp being any LT
+        // suffices.
+        if (sp === 0 || (a !== 0 && isLineTerminator(input.charCodeAt(sp - 1)))) pc++;
         else failed = true;
         break;
       }
       case ReOp.EOL: {
-        if (sp === len) pc++;
+        // a = multiline: `$` matches at end of input, OR (multiline) right
+        // before a line terminator (§22.2.2.7).
+        if (sp === len || (a !== 0 && isLineTerminator(input.charCodeAt(sp)))) pc++;
         else failed = true;
         break;
       }
