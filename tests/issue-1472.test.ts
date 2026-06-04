@@ -459,6 +459,50 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__extern_has_idx\b/);
   });
 
+  it("Phase C: `key in obj` routes to native __extern_has (own + proto) and runs", async () => {
+    // #1472 Phase C — keyed HasProperty (`key in obj`, §7.3.12) over the $Object
+    // hash-map: own props AND the prototype chain. Native via a proto-walk
+    // mirroring __extern_get (boolean instead of value). Present-but-undefined
+    // still reports 1 — but standalone conflates undefined/null, so we use a
+    // present non-null value to keep the test crisp. The receiver is an open
+    // `any` object (computed-key writes defeat closed-struct inference).
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 5;
+          return (ka in o ? 1 : 0) + ("missing" in o ? 10 : 0); // present:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_has")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
+  it("Phase C: Object.hasOwn(o, k) routes to native __object_hasOwn (own-only) and runs", async () => {
+    // #1472 Phase C — Object.hasOwn (§20.1.2.13): own-property presence only
+    // (no proto walk), native via __obj_find over the $Object props table.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 1;
+          return (Object.hasOwn(o, ka) ? 1 : 0) + (Object.hasOwn(o, "b") ? 10 : 0); // own:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_hasOwn")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
   it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
     const r = await compile(
       `
