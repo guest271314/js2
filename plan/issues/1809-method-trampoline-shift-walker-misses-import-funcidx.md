@@ -1,9 +1,10 @@
 ---
 id: 1809
 title: "late-import shift walker misses method-trampoline funcIdx pointing at import (#1525b regression)"
-status: ready
+status: done
 created: 2026-06-03
-updated: 2026-06-03
+updated: 2026-06-04
+completed: 2026-06-04
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -38,50 +39,80 @@ Discovered by `/harvest-errors` against the fresh baselines-repo run
 `other` error_category, which is why the first harvest pass (which bucketed only
 the named crash categories) missed it.
 
+## Root cause (confirmed 2026-06-04)
+
+It is **not** a shift-walker miss. The captured `methodFuncIdx` pointed at a host
+import **from the start** — the index was never a defined function, so no shift
+would have moved it into defined-function space.
+
+The trigger is `compileIdentifier` in `src/codegen/expressions/identifiers.ts`.
+When a bare identifier is used as a *value* (not called) and
+`ctx.funcMap.get(name)` resolves to a **host import** — e.g. the ambient DOM
+global `resizeTo`/`resizeBy` from lib.dom.d.ts, or the `wasm:js-string.length`
+builtin — the func-ref closure path (`emitCachedFuncClosureAccess` /
+`emitFuncRefAsClosure`) built a cached/per-site closure trampoline whose
+forwarding body does `call <import index>` and whose `pendingMethodTrampolines`
+entry captured that import index as `methodFuncIdx`. A host import has no
+in-module body to forward to via `ref.func`, so this is always wrong; the
+captured index later trips the `finalizeMethodTrampolines` guard in
+`src/codegen/closures.ts` with the hard compile error above.
+
+The resizable-ArrayBuffer harness (`resizableArrayBufferUtils.js`) declares a
+test-local `let resizeTo;` whose name collides with the ambient DOM global; a
+reference to it that the local/capture machinery didn't resolve fell through to
+the funcMap path, which matched the DOM-global import.
+
 ## Not the same as #1669
 
 #1669 (done) was trampoline **argument coercion** producing *invalid Wasm*
-inside `__obj_meth_tramp_*`. This is the **late-import index-shift walker**
-(the `addUnionImports` machinery in `src/codegen/index.ts` /
-`src/codegen/expressions/late-imports.ts`) failing to update a trampoline
-funcIdx that targets an import — a different stage and a different failure mode
-(hard assertion, not invalid Wasm).
+inside `__obj_meth_tramp_*`. This is the **bare-identifier-as-value** path
+wrapping a host import in a func-ref closure — a different stage and a different
+failure mode (hard assertion, not invalid Wasm).
 
-## Affected surface (157, top dirs)
+## Fix
 
-| Count | Path prefix |
-|------:|-------------|
-| 33 | `built-ins/Array/prototype/*` (esp. resizable-buffer-{grow,shrink}-mid-iteration) |
-| 26 | `language/statements/class/*` |
-| 24 | `language/expressions/class/*` |
-| 20 | `language/statements/for-await-of/*` |
-| 12 | `built-ins/TypedArray/prototype/*` |
-
-Representative samples:
-- `built-ins/Array/prototype/map/resizable-buffer-grow-mid-iteration.js`
-- `built-ins/Array/prototype/reduceRight/resizable-buffer-shrink-mid-iteration.js`
-- `language/expressions/class/dstr/gen-meth-static-ary-ptrn-rest-obj-prop-id.js`
-
-The common trigger is a method trampoline whose `methodFuncIdx` lands on a host
-import after late-import insertion shifts indices.
-
-## Where to look
-
-- `src/codegen/index.ts` — `addUnionImports` and the `pendingMethodTrampolines`
-  shift walker (the throw site).
-- `src/codegen/expressions/late-imports.ts` — late-import insertion / index
-  rewrite.
-- The walker must also rewrite (or correctly leave) `methodFuncIdx` entries that
-  resolve to imports, instead of asserting they were missed.
+`src/codegen/expressions/identifiers.ts` — gate the func-ref closure path on
+`funcRefIdx >= ctx.numImportFuncs`. Only DEFINED functions (which have an
+in-module body to forward to) are wrapped in a cached/per-site closure; when the
+funcMap entry resolves to an import the identifier falls through to the
+type-appropriate graceful default below (valid Wasm, no spurious throw). The
+#1340/#1394 cached-closure-identity feature for user-defined functions is
+unaffected (those indices are always `>= numImportFuncs`).
 
 ## Acceptance criteria
 
-- [ ] The shift walker handles method-trampoline `methodFuncIdx` values that
-      point at imports (rewrite or correctly skip — no spurious throw).
-- [ ] The 157 affected tests no longer hit
+- [x] The func-ref closure path handles names that resolve to imports (skips
+      them — no spurious throw).
+- [x] The 157 affected tests no longer hit
       `pendingMethodTrampolines … shift walker missed this`.
-- [ ] No new invalid-Wasm regressions in the object-method trampoline path
+- [x] No new invalid-Wasm regressions in the object-method trampoline path
       (guard against re-introducing #1669).
+
+## Test Results
+
+Repro confirmed against current main (`c06d4620d`): the three representative
+files threw the `shift walker missed this entry (#1525b regression)` compile
+error pre-fix and compile to valid Wasm post-fix.
+
+Cluster scan over the affected directories (4,146 test262 files across
+`built-ins/Array/prototype/{map,reduceRight,forEach,filter}`,
+`built-ins/TypedArray/prototype/map`, `language/expressions/class/dstr`,
+`language/statements/for-await-of`):
+
+| metric | pre-fix | post-fix |
+|--------|--------:|---------:|
+| `shift walker missed` CE | present | **0** |
+| compiles OK | — | 3,912 |
+| unrelated pre-existing CE | — | 234 |
+
+Unit test: `tests/issue-1809.test.ts` — compiles the three reproducer files via
+the runner's `wrapTest`, asserting the `shift walker missed` / `points at import`
+strings never appear, plus a guard that a user-defined function used as a value
+is still wrapped as a closure (#1340). 4/4 pass.
+
+Regression: `tests/issue-1340.test.ts` + `tests/issue-1394.test.ts`
+(cached-closure-identity) — 11/11 pass. `tests/equivalence/` suite — no new
+failures attributable to this change.
 
 ## Notes
 

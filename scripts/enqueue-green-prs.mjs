@@ -146,6 +146,34 @@ if (forming.length > 0) {
 const prs = openPrs();
 const enqueued = [];
 const skipped = [];
+const updated = [];
+
+// Auto-update BEHIND PRs: merge base branch in via GitHub API so they can
+// re-run CI and eventually become CLEAN. DIRTY PRs (merge conflicts) are
+// skipped — those need manual resolution. This prevents agents silently
+// stalling when main advances while their PR's CI is running.
+for (const pr of prs) {
+  if (pr.mergeStateStatus !== "BEHIND") continue;
+  const labels = (pr.labels || []).map((l) => (l.name || "").toLowerCase());
+  if (pr.isDraft || labels.some((l) => HOLD_LABELS.has(l))) continue;
+  if (DRY) {
+    updated.push([pr.number, "would-update-branch (BEHIND)"]);
+    continue;
+  }
+  try {
+    // gh pr update-branch requires gh ≥ 2.20; fall back to REST API PUT
+    gh(["api", "--method", "PUT", `/repos/${REPO}/pulls/${pr.number}/update-branch`]);
+    updated.push([pr.number, "updated-branch (was BEHIND)"]);
+  } catch (e) {
+    const msg = String(e.stderr || e.message || e)
+      .split("\n")[0]
+      .slice(0, 120);
+    // Conflicts → DIRTY, can't auto-update — skip silently
+    if (!msg.includes("conflict")) {
+      updated.push([pr.number, `update-failed: ${msg}`]);
+    }
+  }
+}
 
 for (const pr of prs) {
   const labels = (pr.labels || []).map((l) => (l.name || "").toLowerCase());
@@ -216,7 +244,8 @@ for (const pr of prs) {
 console.log(
   `enqueue-green-prs: ${prs.length} open, ${inQueue.size} already queued, grace=${GRACE_MINUTES}m${DRY ? " (DRY RUN)" : ""}`,
 );
+for (const [n, why] of updated) console.log(`  ~ #${n} ${why}`);
 for (const [n, why] of enqueued) console.log(`  + #${n} ${why}`);
 for (const [n, why] of skipped) console.log(`  - #${n} skip (${why})`);
-console.log(`Done: ${enqueued.length} ${DRY ? "would be " : ""}enqueued.`);
+console.log(`Done: ${updated.length} branch-updated, ${enqueued.length} ${DRY ? "would be " : ""}enqueued.`);
 process.exit(0);
