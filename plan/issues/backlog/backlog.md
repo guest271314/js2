@@ -222,7 +222,14 @@ tracked elsewhere are noted under "Already covered" below.
 - [#1855](../1855-ub-free-ts-fuzzer-and-minimization.md) — R7b: UB-free TS program generator + automated validity-preserving minimization — medium, hard, **backlog**
 - [#1856](../1856-linear-bump-arena-allocator-mode.md) — R10: bump/arena allocator mode for short-lived linear programs; commit to one fixed linear-GC strategy — medium, medium, **backlog**
 - [#1857](../1857-ir-attributes-vs-operands-convention.md) — R11: carry compile-time-constant facts as IR node attributes, not synthetic SSA operands — low, easy, **backlog**
-- [#1858](../1858-backend-naming-symmetry-gc-linear.md) — structure review: rename `codegen/` + `codegen-linear/` → `backend/gc` + `backend/linear` so neither backend reads as the default (pure rename; consider bundling with #1172) — low, medium, **backlog**
+- [#1860](../1860-backend-naming-symmetry-gc-linear.md) — structure review: rename `codegen/` + `codegen-linear/` → `backend/gc` + `backend/linear` so neither backend reads as the default (pure rename; consider bundling with #1172) — low, medium, **backlog**
 - [#1859](../1859-per-subdir-module-contract-readmes.md) — structure review: per-`src/`-subdir module-contract READMEs (responsibility, in/out, dependency direction) — low, easy, **backlog**
 
 **Already covered (no new issue):** R2 (make illegal states unrepresentable / retire `as unknown as Instr`) → **#1095**; R3 (finish the strangler: drive fallback buckets to zero, promote to strict) → **#1376** + the per-bucket program (#1370 done, #1371 done, #1372, #1373…) tracked in `plan/log/ir-adoption.md`; R8 (cheap mid-level SSA cleanup: fold/DCE/simplify-cfg + conservative inline) → **#1167a** / **#1167b**; R9 (host-import gate) → standing CLAUDE.md rule + audit **#1662**.
+
+### Real-world test coverage findings (2026-06-04)
+
+Found while adding `tests/real-world-*.test.ts` (real-world code patterns
+test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
+
+- [#6407](../6407-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **ready (backlog)**

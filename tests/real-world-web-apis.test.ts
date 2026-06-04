@@ -1,0 +1,140 @@
+import { describe, expect, it } from "vitest";
+import { compileValid, hostImportNames, instantiate } from "./real-world-helpers.js";
+
+/**
+ * Real-world browser / Web-platform APIs.
+ *
+ * These globals (`fetch`, `URL`, `TextEncoder`, `crypto`, timers, the DOM…)
+ * are not part of the ECMAScript spec, so test262 never touches them. Real
+ * apps use them constantly. The compiler lowers each to a host-import at the
+ * Wasm boundary; these tests pin down that the lowering produces a valid
+ * module and requests the expected `env.*` import.
+ */
+describe("real-world: Web APIs", () => {
+  it("lowers fetch() to a host import and awaits a Response", async () => {
+    const result = await compileValid(`
+      export async function fetchLength(url: string): Promise<number> {
+        const res = await fetch(url);
+        const text = await res.text();
+        return text.length;
+      }
+    `);
+    const hosts = hostImportNames(result);
+    expect(hosts).toContain("fetch");
+    expect(hosts).toContain("Response_text");
+  });
+
+  it("lowers timers to host imports", async () => {
+    const result = await compileValid(`
+      export function schedule(): void {
+        setTimeout(() => {
+          console.log("tick");
+        }, 100);
+      }
+    `);
+    expect(hostImportNames(result)).toContain("__timer_set_timeout");
+  });
+
+  it("compiles TextEncoder().encode()", async () => {
+    await compileValid(`
+      export function byteLength(s: string): number {
+        return new TextEncoder().encode(s).length;
+      }
+    `);
+  });
+
+  it("compiles URL parsing", async () => {
+    await compileValid(`
+      export function hostname(u: string): string {
+        return new URL(u).hostname;
+      }
+    `);
+  });
+
+  it("runs crypto.randomUUID() through the host boundary", async () => {
+    const result = await compileValid(`
+      declare const crypto: { randomUUID(): string };
+      export function id(): string {
+        return crypto.randomUUID();
+      }
+    `);
+    expect(hostImportNames(result)).toContain("__crypto_random_uuid");
+
+    const exports = await instantiate(
+      `
+        declare const crypto: { randomUUID(): string };
+        export function id(): string {
+          return crypto.randomUUID();
+        }
+      `,
+      { crypto },
+    );
+    const uuid = exports.id() as string;
+    expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  });
+
+  it("compiles assorted Web globals (structuredClone, queueMicrotask, btoa, AbortController)", async () => {
+    await compileValid(`
+      export function clone(o: any): any {
+        return structuredClone(o);
+      }
+      export function micro(): void {
+        queueMicrotask(() => {});
+      }
+      export function base64(s: string): string {
+        return btoa(s);
+      }
+      export function abortable(): any {
+        const c = new AbortController();
+        c.abort();
+        return c.signal;
+      }
+    `);
+  });
+
+  it("compiles a Headers map", async () => {
+    await compileValid(`
+      export function header(name: string, value: string): string | null {
+        const h = new Headers();
+        h.set(name, value);
+        return h.get(name);
+      }
+    `);
+  });
+
+  it("runs DOM manipulation against a host document", async () => {
+    const makeEl = (): Record<string, any> => {
+      const el: Record<string, any> = {
+        style: {},
+        textContent: "",
+        children: [] as any[],
+        append(child: any) {
+          el.children.push(child);
+          return child;
+        },
+      };
+      return el;
+    };
+    const body = makeEl();
+    const document = { createElement: () => makeEl(), body };
+
+    const exports = await instantiate(
+      `
+        declare const document: any;
+        export function render(label: string): number {
+          const box = document.createElement("div");
+          box.textContent = label;
+          box.style.color = "red";
+          document.body.append(box);
+          return 1;
+        }
+      `,
+      { document },
+    );
+
+    expect(exports.render("Hello")).toBe(1);
+    expect(body.children).toHaveLength(1);
+    expect(body.children[0].textContent).toBe("Hello");
+    expect(body.children[0].style.color).toBe("red");
+  });
+});
