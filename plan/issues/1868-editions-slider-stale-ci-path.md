@@ -21,7 +21,7 @@ On the landing page (`#goals`), dragging the **ES-edition slider** drops the
 displayed pass rate from the headline **70.9%** down to **~65.8%** the instant
 it leaves the default position — and the per-edition feature section showed
 **ES2025 = 61%**, which made the slider look doubly wrong (excluding a
-below-average edition should *raise*, not lower, a cumulative rate).
+below-average edition should _raise_, not lower, a cumulative rate).
 
 Reported by the user 2026-06-04:
 
@@ -34,7 +34,7 @@ Reported by the user 2026-06-04:
 The headline donut and the slider read **two different data sources**, and the
 slider's source was frozen:
 
-- **Default ("overall") donut** — `website/index.html` fetches the *live*
+- **Default ("overall") donut** — `website/index.html` fetches the _live_
   baseline `test262-current.json` from the `loopdive/js2wasm-baselines` repo
   (`report.summary`): 30,214 / 43,135 ≈ **70.0%** (≈70.9% on the slightly newer
   live run).
@@ -50,7 +50,7 @@ file was never committed because of a path break introduced by **#1656**
 - `scripts/generate-editions.ts` writes to
   `website/public/benchmarks/results/test262-editions.json` (its `OUTPUT_PATH`),
   the vite `publicDir` (`website/playground/vite.config.ts` → `publicDir:
-  website/public`) that the landing page actually serves.
+website/public`) that the landing page actually serves.
 - But the `promote-baseline` job in `test262-sharded.yml` still did
   `git add -f public/benchmarks/results/test262-editions.json` — the **pre-#1656
   path, which no longer exists**. The `[ -f … ] && git add … || true` guard
