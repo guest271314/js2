@@ -2,7 +2,7 @@
 id: 1801
 title: "WASI process.exit(code) emits an invalid binary (i32/f64 stack mismatch in trunc)"
 status: done
-sprint: 59
+sprint: 60
 created: 2026-06-04
 updated: 2026-06-04
 completed: 2026-06-04
