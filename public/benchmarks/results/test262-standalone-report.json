@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T11:53:31.560Z",
-  "baseline_generated_at": "2026-06-05T11:53:31Z",
-  "baseline_sha": "b15034cf527ef03649f5db2720e20e9c38eb51ec",
+  "timestamp": "2026-06-05T12:07:46.842Z",
+  "baseline_generated_at": "2026-06-05T12:07:46Z",
+  "baseline_sha": "d144f876764306597aa3fef1440528b67e16dbbf",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1225,9 +1225,9 @@
         "sample_files": [
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
@@ -1344,7 +1344,7 @@
           "test/language/statements/generators/unscopables-with-in-nested-fn.js",
           "test/language/statements/with/S12.10_A3.10_T2.js",
           "test/language/statements/with/S12.10_A4_T6.js",
-          "test/language/statements/with/S12.10_A1.11_T5.js",
+          "test/language/statements/with/S12.10_A3.12_T3.js",
           "test/language/statements/with/cptn-nrml.js"
         ],
         "sample_signatures": [
@@ -1419,15 +1419,15 @@
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
@@ -1498,8 +1498,8 @@
         "sample_files": [
           "test/language/statements/class/dstr/async-gen-meth-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-elem-ary-rest-iter.js",
-          "test/language/statements/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-rest-iter.js",
           "test/language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js",
+          "test/language/statements/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-rest-iter.js",
           "test/language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js"
         ],
         "sample_signatures": [
@@ -1535,14 +1535,14 @@
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
           "test/built-ins/TypedArrayConstructors/internals/Delete/BigInt/key-is-symbol.js",
-          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.get not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
           "other:L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1661,8 +1661,8 @@
           "test/language/statements/class/elements/set-access-of-missing-private-setter.js",
           "test/language/expressions/class/dstr/async-gen-meth-dflt-ary-ptrn-elem-ary-elem-init.js",
           "test/language/expressions/class/elements/private-getter-shadowed-by-setter-on-nested-class.js",
-          "test/language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-function-expression.js",
-          "test/language/expressions/class/elements/static-private-setter-access-on-inner-class.js"
+          "test/language/expressions/class/elements/static-private-setter-access-on-inner-class.js",
+          "test/language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-function-expression.js"
         ],
         "sample_signatures": [
           "wasm_compile:invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__str_flatten\" failed: call[#] expected type (ref null #), found i32.const of type i32 @+#) [in __str_flatten()] [@+#] [wat: (func $__str_flatten (param (ref null #)) (r",
