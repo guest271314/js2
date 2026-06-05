@@ -46,6 +46,10 @@ import { addFuncType } from "./registry/types.js";
 
 const BUF_CAP = 256;
 const MAX_SAFE_INTEGER = 9007199254740991;
+// Cap on fractional digits emitted by number_toString_radix (§6.1.6.1.20). f64
+// has ~52 bits of mantissa; 100 digits is well beyond what any radix 2..36 needs
+// to exhaust the representable fraction and keeps the buffer within BUF_CAP.
+const MAX_FRAC_DIGITS = 100;
 const C_ZERO = 48; // '0'
 const C_MINUS = 45; // '-'
 const C_PLUS = 43; // '+'
@@ -377,15 +381,18 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   if (needRadix && !ctx.funcMap.has("number_toString_radix")) {
     emitToStringRadix(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
   }
-  if (which.has("number_toString") && !ctx.funcMap.has("number_toString")) {
+  // number_toFixed needs number_toString for its |x| >= 1e21 branch (§21.1.3.3
+  // step 5 defers to ToString there), so emit it whenever toFixed/toPrecision is
+  // requested even if the program never calls .toString() directly.
+  const needPrecision = which.has("number_toPrecision");
+  const needFixed = which.has("number_toFixed") || needPrecision;
+  if ((which.has("number_toString") || needFixed) && !ctx.funcMap.has("number_toString")) {
     emitToString(ctx, strDataTypeIdx, i32, f64, extern, bufType);
   }
 
   // number_toPrecision delegates to number_toFixed + number_toExponential, so
   // those two must be emitted whenever toPrecision is requested — even if the
   // program never calls them directly.
-  const needPrecision = which.has("number_toPrecision");
-  const needFixed = which.has("number_toFixed") || needPrecision;
   const needExp = which.has("number_toExponential") || needPrecision;
 
   if (needFixed && !ctx.funcMap.has("number_toFixed")) {
@@ -397,6 +404,359 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   if (needPrecision && !ctx.funcMap.has("number_toPrecision")) {
     emitToPrecision(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
   }
+}
+
+/**
+ * #1836 — emit the §6.1.6.1.20 exponential-notation form `d[.ddd…]e±N` for a
+ * positive finite `abs` (the caller has already written any leading '-' decision
+ * to L_NEG and guarded `abs > 0`). Pure Wasm, no log10 (Wasm has none): the
+ * mantissa is normalised into [1,10) by iterative ×/÷10 while tracking the
+ * decimal exponent, then up to `SIG_DIGITS` significant digits are emitted
+ * (trailing zeros trimmed, the '.' dropped if none remain), followed by 'e', the
+ * exponent sign, and the exponent's decimal digits.
+ *
+ * The exponent magnitude is at most 3 decimal digits (|exp| <= 308 for a finite
+ * f64), so its digits are emitted MSB-first via a hundreds/tens/ones decomposition
+ * with leading-zero suppression — no reverse pass, so the buffer write cursor
+ * `L_POS` is never used as a shrinking high pointer.
+ *
+ * This is the bounded slice: it fixes the two concrete failures ((1e21) lacked
+ * 'e', (1e-7) collapsed to "0") and the wrong-output class for the exponential
+ * regime. Bit-perfect shortest-round-trip (Ryū/Grisu) remains #1335 Phase 2.
+ *
+ * Locals consumed: L_ABS (f64, in), L_NEG (i32, in), L_BUF (i16[]) / L_POS (i32)
+ * the write cursor, L_M (f64) normalised mantissa, L_EXP (i32) decimal exponent,
+ * L_SD (i32) significant-digit counter, L_DIGIT (f64) digit scratch, L_TMP (i32)
+ * exponent-magnitude scratch.
+ */
+function emitExponential(
+  strDataTypeIdx: number,
+  L: {
+    L_ABS: number;
+    L_NEG: number;
+    L_BUF: number;
+    L_POS: number;
+    L_EXP: number;
+    L_M: number;
+    L_SD: number;
+    L_DIGIT: number;
+    L_TMP: number; // exponent-magnitude scratch (i32)
+    finalizeIdx: number;
+  },
+): Instr[] {
+  // 15 significant digits is the safe precision floor for an IEEE-754 double
+  // (~15.95 decimal digits). Emitting more exposes the binary representation's
+  // noise (e.g. 9.5e-8 → 9.500000000000001e-8); 15 + round-half-up keeps the
+  // common exponential-regime values bit-exact with V8. Shortest-round-trip
+  // (Grisu/Ryū, which would also nail 16-17-digit extremes) is #1335 Phase 2.
+  const SIG_DIGITS = 15; // significant digits to emit (incl. the leading one)
+  // Half of the unit in the last emitted place, applied to the normalised
+  // mantissa in [1,10) before truncation so the final digit is rounded, not
+  // floored: 0.5 × 10^-(SIG_DIGITS-1).
+  const ROUND_BIAS = 0.5 * Math.pow(10, -(SIG_DIGITS - 1));
+
+  // Emit one mantissa digit: d = floor(L_M); write '0'+d; L_M = (L_M - d) * 10.
+  const emitMantissaDigit = (): Instr[] => [
+    { op: "local.get", index: L.L_M },
+    { op: "f64.floor" },
+    { op: "local.set", index: L.L_DIGIT },
+    { op: "local.get", index: L.L_BUF },
+    { op: "local.get", index: L.L_POS },
+    { op: "i32.const", value: C_ZERO },
+    { op: "local.get", index: L.L_DIGIT },
+    { op: "i32.trunc_f64_s" },
+    { op: "i32.add" },
+    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "local.get", index: L.L_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: L.L_POS },
+    { op: "local.get", index: L.L_M },
+    { op: "local.get", index: L.L_DIGIT },
+    { op: "f64.sub" },
+    { op: "f64.const", value: 10 },
+    { op: "f64.mul" },
+    { op: "local.set", index: L.L_M },
+  ];
+
+  // The exponent's decimal digits (hundreds/tens/ones) are emitted inline at the
+  // tail of the returned body, with L_SD tracking "has a digit been printed yet"
+  // for leading-zero suppression — see the comment block there.
+
+  return [
+    // m = abs; exp = 0.
+    { op: "local.get", index: L.L_ABS },
+    { op: "local.set", index: L.L_M },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L.L_EXP },
+
+    // while m >= 10: m /= 10; exp++.
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L.L_M },
+            { op: "f64.const", value: 10 },
+            { op: "f64.lt" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L.L_M },
+            { op: "f64.const", value: 10 },
+            { op: "f64.div" },
+            { op: "local.set", index: L.L_M },
+            { op: "local.get", index: L.L_EXP },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L.L_EXP },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // while m < 1: m *= 10; exp--.
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L.L_M },
+            { op: "f64.const", value: 1 },
+            { op: "f64.ge" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L.L_M },
+            { op: "f64.const", value: 10 },
+            { op: "f64.mul" },
+            { op: "local.set", index: L.L_M },
+            { op: "local.get", index: L.L_EXP },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "local.set", index: L.L_EXP },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // Round-half-up: bias the normalised mantissa by half a unit in the last
+    // emitted significant place, then re-normalise if the bias carried it to
+    // >= 10 (e.g. 9.999…95 → 10.0 → 1.0, exp++). Subsequent digit extraction is
+    // plain truncation, which now yields the rounded representation.
+    { op: "local.get", index: L.L_M },
+    { op: "f64.const", value: ROUND_BIAS },
+    { op: "f64.add" },
+    { op: "local.set", index: L.L_M },
+    { op: "local.get", index: L.L_M },
+    { op: "f64.const", value: 10 },
+    { op: "f64.ge" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.L_M },
+        { op: "f64.const", value: 10 },
+        { op: "f64.div" },
+        { op: "local.set", index: L.L_M },
+        { op: "local.get", index: L.L_EXP },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L.L_EXP },
+      ],
+    },
+
+    // Leading '-' if negative.
+    { op: "local.get", index: L.L_NEG },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L.L_BUF, L.L_POS, C_MINUS),
+    },
+
+    // Leading significant digit (the one before the '.').
+    ...emitMantissaDigit(),
+
+    // '.' then up to SIG_DIGITS-1 more digits.
+    ...putConst(strDataTypeIdx, L.L_BUF, L.L_POS, C_DOT),
+    { op: "i32.const", value: 1 },
+    { op: "local.set", index: L.L_SD },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L.L_SD },
+            { op: "i32.const", value: SIG_DIGITS },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            ...emitMantissaDigit(),
+            { op: "local.get", index: L.L_SD },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L.L_SD },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // Trim trailing '0' digits.
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: L.L_POS },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L.L_BUF },
+            { op: "local.get", index: L.L_POS },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "i32.const", value: C_ZERO },
+            { op: "i32.ne" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: L.L_POS },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "local.set", index: L.L_POS },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // Drop a trailing '.' if all fractional digits were trimmed.
+    { op: "local.get", index: L.L_BUF },
+    { op: "local.get", index: L.L_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.sub" },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "i32.const", value: C_DOT },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: "local.set", index: L.L_POS },
+      ],
+    },
+
+    // 'e'.
+    ...putConst(strDataTypeIdx, L.L_BUF, L.L_POS, C_LC_E),
+    // Exponent sign: '+' if exp >= 0 else '-'; then expmag = |exp| in L_TMP.
+    { op: "local.get", index: L.L_EXP },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...putConst(strDataTypeIdx, L.L_BUF, L.L_POS, C_MINUS),
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: L.L_EXP },
+        { op: "i32.sub" },
+        { op: "local.set", index: L.L_TMP },
+      ],
+      else: [
+        ...putConst(strDataTypeIdx, L.L_BUF, L.L_POS, C_PLUS),
+        { op: "local.get", index: L.L_EXP },
+        { op: "local.set", index: L.L_TMP },
+      ],
+    },
+    // Exponent digits, MSB-first. expmag (L_TMP) is 0..~308, i.e. at most three
+    // decimal digits, so render hundreds/tens/ones directly with leading-zero
+    // suppression (L_SD = "have we printed a digit yet"). No reverse pass, so the
+    // write cursor L_POS is never used as a shrinking high pointer.
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L.L_SD }, // L_SD: 0 until the first non-suppressed digit
+    // hundreds place: d = expmag / 100; if d != 0 print it and mark started.
+    { op: "local.get", index: L.L_TMP },
+    { op: "i32.const", value: 100 },
+    { op: "i32.div_u" },
+    { op: "i32.const", value: 0 },
+    { op: "i32.ne" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.L_BUF },
+        { op: "local.get", index: L.L_POS },
+        { op: "i32.const", value: C_ZERO },
+        { op: "local.get", index: L.L_TMP },
+        { op: "i32.const", value: 100 },
+        { op: "i32.div_u" },
+        { op: "i32.add" },
+        { op: "array.set", typeIdx: strDataTypeIdx },
+        { op: "local.get", index: L.L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L.L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: L.L_SD },
+      ],
+    },
+    // tens place: print if started OR the tens digit is non-zero.
+    { op: "local.get", index: L.L_SD },
+    { op: "local.get", index: L.L_TMP },
+    { op: "i32.const", value: 10 },
+    { op: "i32.div_u" },
+    { op: "i32.const", value: 10 },
+    { op: "i32.rem_u" },
+    { op: "i32.const", value: 0 },
+    { op: "i32.ne" },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.L_BUF },
+        { op: "local.get", index: L.L_POS },
+        { op: "i32.const", value: C_ZERO },
+        { op: "local.get", index: L.L_TMP },
+        { op: "i32.const", value: 10 },
+        { op: "i32.div_u" },
+        { op: "i32.const", value: 10 },
+        { op: "i32.rem_u" },
+        { op: "i32.add" },
+        { op: "array.set", typeIdx: strDataTypeIdx },
+        { op: "local.get", index: L.L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L.L_POS },
+      ],
+    },
+    // ones place: always printed (exponent has at least one digit).
+    { op: "local.get", index: L.L_BUF },
+    { op: "local.get", index: L.L_POS },
+    { op: "i32.const", value: C_ZERO },
+    { op: "local.get", index: L.L_TMP },
+    { op: "i32.const", value: 10 },
+    { op: "i32.rem_u" },
+    { op: "i32.add" },
+    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "local.get", index: L.L_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: L.L_POS },
+
+    { op: "local.get", index: L.L_BUF },
+    { op: "local.get", index: L.L_POS },
+    { op: "call", funcIdx: L.finalizeIdx },
+    { op: "return" },
+  ] as Instr[];
 }
 
 /**
@@ -436,6 +796,9 @@ function emitToString(
   const L_POW = 10;
   const L_DIGIT = 11;
   const L_K = 12;
+  const L_EXP = 13; // decimal exponent for the exponential-notation regime
+  const L_M = 14; // mantissa normalised to [1,10)
+  const L_SD = 15; // significant-digit counter
 
   const finalizeReturn = (): Instr[] => [
     { op: "local.get", index: L_BUF },
@@ -446,6 +809,40 @@ function emitToString(
 
   const body: Instr[] = [
     ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+
+    // §6.1.6.1.20 exponential-notation regime: ToString uses `d.dddde±N` when the
+    // decimal-point position falls outside (-6, 21]. We approximate that by the
+    // magnitude thresholds |x| >= 1e21 or 0 < |x| < 1e-6, which is exactly where
+    // V8 switches to exponential. (abs == 0 is already handled by the prologue's
+    // radix path below.) This eliminates (1e21).toString() rendering a 22-digit
+    // integer and (1e-7).toString() collapsing to "0".
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: 1e21 },
+    { op: "f64.ge" },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: 0 },
+    { op: "f64.gt" },
+    { op: "local.get", index: L_ABS },
+    { op: "f64.const", value: 1e-6 },
+    { op: "f64.lt" },
+    { op: "i32.and" },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: emitExponential(strDataTypeIdx, {
+        L_ABS,
+        L_NEG,
+        L_BUF,
+        L_POS,
+        L_EXP,
+        L_M,
+        L_SD,
+        L_DIGIT,
+        L_TMP,
+        finalizeIdx,
+      }),
+    },
 
     // Safe integers can reuse the radix-10 formatter exactly.
     { op: "local.get", index: L_ABS },
@@ -640,6 +1037,10 @@ function emitToString(
       { name: "pow", type: f64 },
       { name: "digit", type: f64 },
       { name: "k", type: i32 },
+      // #1836 exponential-notation regime (emitExponential):
+      { name: "exp", type: i32 }, // 13: decimal exponent
+      { name: "m", type: f64 }, // 14: mantissa normalised to [1,10)
+      { name: "sd", type: i32 }, // 15: significant-digit counter / exp-digit started flag
     ],
     body,
     exported: false,
@@ -652,8 +1053,11 @@ function emitToString(
  *
  * The call site has already applied `ToIntegerOrInfinity(radix)`'s truncating
  * shape for ordinary positive radices and rejected values outside 2..36. This
- * standalone slice handles non-finite values, ±0, and finite safe integers.
- * Fractional and unsafe-integer shortest formatting remains #1335 Phase 2.
+ * standalone slice handles non-finite values, ±0, finite safe integers, AND
+ * finite fractional values (#1836: the integer part is rendered LSB-first then
+ * reversed; the fractional part is appended MSB-first afterwards, up to
+ * MAX_FRAC_DIGITS or until the remainder is exhausted). Shortest-representation
+ * rounding for the unsafe-integer magnitude range remains #1335 Phase 2.
  */
 function emitToStringRadix(
   ctx: CodegenContext,
@@ -681,6 +1085,9 @@ function emitToStringRadix(
   const L_CODE = 11;
   const L_I = 12;
   const L_J = 13;
+  const L_INTPART = 14; // floor(abs) — integer part for the LSB-first digit loop
+  const L_FRAC = 15; // abs - intPart — fractional remainder
+  const L_K = 16; // fractional-digit counter (bounded by MAX_FRAC_DIGITS)
 
   const writeFinalizeReturn = (): Instr[] => [
     { op: "local.get", index: L_BUF },
@@ -708,18 +1115,21 @@ function emitToStringRadix(
       then: [...putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO), ...writeFinalizeReturn()],
     },
 
-    // Phase 1 guard: finite integers only, and stay within exactly represented
-    // integer space so the f64 div/mod digit loop is stable.
-    { op: "local.get", index: L_ABS },
+    // Split into integer and fractional parts (§6.1.6.1.20 / §21.1.3.6): the
+    // integer part is rendered LSB-first then reversed; the fractional part is
+    // appended MSB-first afterwards. intPart = floor(abs); frac = abs - intPart.
     { op: "local.get", index: L_ABS },
     { op: "f64.floor" },
-    { op: "f64.ne" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "unreachable" }],
-    },
+    { op: "local.set", index: L_INTPART },
     { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_INTPART },
+    { op: "f64.sub" },
+    { op: "local.set", index: L_FRAC },
+
+    // Stay within exactly represented integer space so the f64 div/mod digit
+    // loop on the INTEGER part is stable. (Fractional shortest-representation
+    // edge cases beyond ~maxFractionDigits remain approximate, like V8's.)
+    { op: "local.get", index: L_INTPART },
     { op: "f64.const", value: MAX_SAFE_INTEGER },
     { op: "f64.gt" },
     {
@@ -728,8 +1138,8 @@ function emitToStringRadix(
       then: [{ op: "unreachable" }],
     },
 
-    // n = abs; write least-significant digits into buf[0..pos).
-    { op: "local.get", index: L_ABS },
+    // n = intPart; write least-significant integer digits into buf[0..pos).
+    { op: "local.get", index: L_INTPART },
     { op: "local.set", index: L_N },
     {
       op: "block",
@@ -796,8 +1206,19 @@ function emitToStringRadix(
       ],
     },
 
+    // If intPart == 0 the digit loop emitted nothing (e.g. 0 < abs < 1 like
+    // 0.5 -> "0.1"); emit a single '0' so the integer part is present.
+    { op: "local.get", index: L_POS },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO),
+    },
+
     // Negative finite non-zero values prepend '-' after the digit loop, then the
-    // full buffer is reversed below.
+    // full buffer is reversed below. (The '-' lands at the front after reversal;
+    // any fractional digits are appended after the reverse, so they keep order.)
     { op: "local.get", index: L_NEG },
     {
       op: "if",
@@ -805,7 +1226,7 @@ function emitToStringRadix(
       then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
     },
 
-    // Reverse buf[0..pos) in place.
+    // Reverse buf[0..pos) in place (integer digits + optional leading '-').
     { op: "i32.const", value: 0 },
     { op: "local.set", index: L_I },
     { op: "local.get", index: L_POS },
@@ -856,6 +1277,96 @@ function emitToStringRadix(
       ],
     },
 
+    // Fractional part (§6.1.6.1.20): if frac > 0, append '.' then up to
+    // MAX_FRAC_DIGITS digits, each = floor(frac * radix), stopping early when
+    // frac reaches 0. Emitted MSB-first directly at the tail (after the reverse),
+    // so no further reversal. The buffer is pre-sized generously (BUF_CAP) and
+    // the integer part is bounded by MAX_SAFE_INTEGER (<= 53 bits), so
+    // MAX_FRAC_DIGITS more digits stay within capacity.
+    { op: "local.get", index: L_FRAC },
+    { op: "f64.const", value: 0 },
+    { op: "f64.gt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...putConst(strDataTypeIdx, L_BUF, L_POS, C_DOT),
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_K },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // if frac == 0 || k >= MAX_FRAC_DIGITS: stop.
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.const", value: 0 },
+                { op: "f64.eq" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: MAX_FRAC_DIGITS },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+
+                // frac *= radix; digit = floor(frac); frac -= digit.
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_R },
+                { op: "f64.mul" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.floor" },
+                { op: "local.set", index: L_DIGIT },
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.sub" },
+                { op: "local.set", index: L_FRAC },
+
+                // digitCode = digit < 10 ? '0'+digit : 'a'-10+digit.
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.const", value: 10 },
+                { op: "f64.lt" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: i32 },
+                  then: [
+                    { op: "i32.const", value: C_ZERO },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                  else: [
+                    { op: "i32.const", value: C_LC_A_MINUS_10 },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                },
+                { op: "local.set", index: L_CODE },
+
+                { op: "local.get", index: L_BUF },
+                { op: "local.get", index: L_POS },
+                { op: "local.get", index: L_CODE },
+                { op: "array.set", typeIdx: strDataTypeIdx },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_POS },
+
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_K },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+
     ...writeFinalizeReturn(),
   ];
 
@@ -878,6 +1389,9 @@ function emitToStringRadix(
       { name: "digitCode", type: i32 },
       { name: "i", type: i32 },
       { name: "j", type: i32 },
+      { name: "intPart", type: f64 },
+      { name: "frac", type: f64 },
+      { name: "k", type: i32 },
     ],
     body,
     exported: false,
@@ -919,8 +1433,29 @@ function emitToFixed(
   const L_FDIG = 13; // fractional digit count (i32)
   const L_K = 14;
 
+  // §21.1.3.3 Number.prototype.toFixed step 5: if x >= 10^21, return ToString(x).
+  // Without this, the scaled fixed-point path below overflows the integer-digit
+  // emitter and prints a bogus 22-digit integer. number_toString is guaranteed
+  // emitted alongside toFixed (see emitNumberFormatHelpers).
+  const numToStrIdx = ctx.funcMap.get("number_toString");
+  const toStringFallback: Instr[] =
+    numToStrIdx !== undefined
+      ? [
+          { op: "local.get", index: L_ABS },
+          { op: "f64.const", value: 1e21 },
+          { op: "f64.ge" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "local.get", index: L_VALUE }, { op: "call", funcIdx: numToStrIdx }, { op: "return" }],
+          } as Instr,
+        ]
+      : [];
+
   const body: Instr[] = [
     ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+    // §21.1.3.3 step 5: |x| >= 1e21 → ToString(x) (defers to number_toString).
+    ...toStringFallback,
     // fdig = (i32)digits (truncated)
     { op: "local.get", index: L_DIGITS },
     { op: "i32.trunc_f64_s" },

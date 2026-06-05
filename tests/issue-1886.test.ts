@@ -19,7 +19,11 @@ import { analyzeLinearUint8 } from "../src/codegen/linear-uint8-analysis.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** Compile `src` to a Program in-memory and run the analysis on it. */
-function analyze(src: string): { safeNames: Set<string>; linearParamFns: Map<string, number[]> } {
+function analyze(src: string): {
+  safeNames: Set<string>;
+  linearParamFns: Map<string, number[]>;
+  localOnlyNames: Set<string>;
+} {
   const fileName = "test.ts";
   const sourceFileObj = ts.createSourceFile(fileName, src, ts.ScriptTarget.ES2022, true);
   const host: ts.CompilerHost = {
@@ -43,12 +47,14 @@ function analyze(src: string): { safeNames: Set<string>; linearParamFns: Map<str
   for (const sym of result.safeBindings) safeNames.add(sym.name);
   const linearParamFns = new Map<string, number[]>();
   for (const [fnSym, idxs] of result.linearParams) linearParamFns.set(fnSym.name, [...idxs].sort());
-  return { safeNames, linearParamFns };
+  const localOnlyNames = new Set<string>();
+  for (const sym of result.localOnlyBindings) localOnlyNames.add(sym.name);
+  return { safeNames, linearParamFns, localOnlyNames };
 }
 
 describe("#1886 linear-safe Uint8Array analysis", () => {
   it("marks a plain indexed I/O buffer linear-safe", () => {
-    const { safeNames } = analyze(`
+    const { safeNames, localOnlyNames } = analyze(`
       declare const process: {
         stdin: { read(b: Uint8Array, off?: number): number };
         stdout: { write(b: Uint8Array): void };
@@ -63,6 +69,9 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
       }
     `);
     expect(safeNames.has("buf")).toBe(true);
+    // Slice B: a `new Uint8Array` local whose only call-arg uses are the I/O
+    // intrinsics is intraprocedurally linear-backable.
+    expect(localOnlyNames.has("buf")).toBe(true);
   });
 
   it("rejects a buffer stored into an object (escapes to GC)", () => {
@@ -114,7 +123,7 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
   });
 
   it("threads linear-safety through a helper parameter (interprocedural)", () => {
-    const { safeNames, linearParamFns } = analyze(`
+    const { safeNames, linearParamFns, localOnlyNames } = analyze(`
       declare const process: {
         stdin: { read(b: Uint8Array, off?: number): number };
       };
@@ -135,6 +144,11 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
     expect(safeNames.has("header")).toBe(true);
     expect(safeNames.has("buf")).toBe(true); // the helper param
     expect(linearParamFns.get("readExact")).toEqual([0]);
+    // Slice B excludes param-threaded buffers: `header` flows into a user
+    // function, so it stays GC until the Slice-C signature rewrite. `buf` is a
+    // parameter and is never local-only.
+    expect(localOnlyNames.has("header")).toBe(false);
+    expect(localOnlyNames.has("buf")).toBe(false);
   });
 
   it("demotes the caller buffer when the helper param escapes", () => {
@@ -176,5 +190,57 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
     expect(linearParamFns.get("readAt")).toContain(0);
     expect(linearParamFns.get("decodeLength")).toContain(0);
     expect(linearParamFns.get("emitRun")).toContain(0);
+  });
+});
+
+describe("#1886 Slice B intraprocedural eligibility (localOnlyBindings)", () => {
+  it("includes a local buffer built + written entirely in one function", () => {
+    // `frame` is allocated, filled with an element loop, and written via the
+    // I/O intrinsic — never threaded into a user function. Slice-B-eligible.
+    const { safeNames, localOnlyNames } = analyze(`
+      declare const process: { stdout: { write(b: Uint8Array): void } };
+      function emit(runLen: number): void {
+        const frame = new Uint8Array(runLen + 2);
+        frame[0] = 91;
+        let k = 0;
+        while (k < runLen) { frame[k + 1] = 0; k = k + 1; }
+        frame[runLen + 1] = 93;
+        process.stdout.write(frame);
+      }
+      export function main(): void { emit(4); }
+    `);
+    expect(safeNames.has("frame")).toBe(true);
+    expect(localOnlyNames.has("frame")).toBe(true);
+  });
+
+  it("excludes a local buffer passed to a user function (Slice-C territory)", () => {
+    // `payload` is itself only indexed + I/O, BUT it is also handed to the
+    // user helper `fill`. Without the Slice-C signature rewrite, backing it
+    // linearly would pass a (ptr,len) to a GC-array param — so Slice B must
+    // leave it on the GC path even though Slice A proves it safe.
+    const { safeNames, localOnlyNames } = analyze(`
+      declare const process: { stdout: { write(b: Uint8Array): void } };
+      function fill(b: Uint8Array): void { b[0] = 1; }
+      export function main(): void {
+        const payload = new Uint8Array(8);
+        fill(payload);
+        process.stdout.write(payload);
+      }
+    `);
+    expect(safeNames.has("payload")).toBe(true); // Slice A still proves it safe
+    expect(localOnlyNames.has("payload")).toBe(false); // Slice B defers it
+  });
+
+  it("the native-messaging host: per-frame temporaries are Slice-B-eligible, the threaded read window is not", () => {
+    const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
+    const src = readFileSync(nmPath, "utf-8");
+    const { localOnlyNames } = analyze(src);
+    // `frame` (emitRun) and the `writeLength` 4-byte literal are local-only.
+    expect(localOnlyNames.has("frame")).toBe(true);
+    // `buf`/`header`/`one`/`small`/`tmp` flow through readExact/readAt user
+    // params → param-threaded → deferred to Slice C, not linear-backed now.
+    for (const name of ["buf", "header", "one", "small", "tmp", "src"]) {
+      expect(localOnlyNames.has(name), `expected '${name}' deferred (param-threaded)`).toBe(false);
+    }
   });
 });

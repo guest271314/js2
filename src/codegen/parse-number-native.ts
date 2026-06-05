@@ -27,6 +27,18 @@ const C_FF = 12;
 const C_CR = 13;
 const C_SPACE = 32;
 const C_NBSP = 0xa0;
+// §11.2 WhiteSpace (Zs category beyond NBSP) + §11.3 LineTerminator extras and
+// the BOM/ZWNBSP. StrWhiteSpace for ToNumber/parseInt/parseFloat (§19.2.4/.5,
+// §7.1.4.1) is WhiteSpace ∪ LineTerminator.
+const C_OGHAM_SP = 0x1680; // Zs OGHAM SPACE MARK
+const C_ENQUAD = 0x2000; // Zs range start (EN QUAD … HAIR SPACE)
+const C_HAIR_SP = 0x200a; // Zs range end
+const C_LS = 0x2028; // LINE SEPARATOR (LineTerminator)
+const C_PS = 0x2029; // PARAGRAPH SEPARATOR (LineTerminator)
+const C_NNBSP = 0x202f; // Zs NARROW NO-BREAK SPACE
+const C_MMSP = 0x205f; // Zs MEDIUM MATHEMATICAL SPACE
+const C_IDEO_SP = 0x3000; // Zs IDEOGRAPHIC SPACE
+const C_BOM = 0xfeff; // ZERO WIDTH NO-BREAK SPACE (BOM)
 const C_PLUS = 43;
 const C_MINUS = 45;
 const C_DOT = 46;
@@ -59,16 +71,26 @@ function externToFlat(ctx: CodegenContext, flattenIdx: number): Instr[] {
 }
 
 /**
- * `isWhiteSpace(c)` inline test: c==space|tab|LF|VT|FF|CR|NBSP. Leaves i32 bool.
- * Operand: the code unit on the stack is consumed via a local.
+ * `isWhiteSpace(c)` inline test — the StrWhiteSpace set consumed by ToNumber /
+ * parseInt / parseFloat (ECMA-262 §19.2.4/.5, §7.1.4.1) = WhiteSpace (§11.2) ∪
+ * LineTerminator (§11.3): TAB, LF, VT, FF, CR, SP, NBSP, the BOM/ZWNBSP, the
+ * LS/PS line terminators, and the Zs (space-separator) category — OGHAM SPACE,
+ * the EN-QUAD..HAIR-SPACE range (U+2000–U+200A), NARROW/MEDIUM/IDEOGRAPHIC space.
+ * Leaves i32 bool. Operand: the code unit is consumed via a local.
  */
 function isWsBody(cLocal: number): Instr[] {
-  const eq = (code: number): Instr[] => [
-    { op: "local.get", index: cLocal } as Instr,
-    { op: "i32.const", value: code } as Instr,
-    { op: "i32.eq" } as Instr,
+  const get = (): Instr => ({ op: "local.get", index: cLocal }) as Instr;
+  const eq = (code: number): Instr[] => [get(), { op: "i32.const", value: code } as Instr, { op: "i32.eq" } as Instr];
+  // c >= lo && c <= hi  (the contiguous Zs run U+2000..U+200A).
+  const inRange = (lo: number, hi: number): Instr[] => [
+    get(),
+    { op: "i32.const", value: lo } as Instr,
+    { op: "i32.ge_u" } as Instr,
+    get(),
+    { op: "i32.const", value: hi } as Instr,
+    { op: "i32.le_u" } as Instr,
+    { op: "i32.and" } as Instr,
   ];
-  // c==space || c==tab || c==LF || c==VT || c==FF || c==CR || c==NBSP
   return [
     ...eq(C_SPACE),
     ...eq(C_TAB),
@@ -82,6 +104,22 @@ function isWsBody(cLocal: number): Instr[] {
     ...eq(C_CR),
     { op: "i32.or" } as Instr,
     ...eq(C_NBSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_BOM),
+    { op: "i32.or" } as Instr,
+    ...eq(C_LS),
+    { op: "i32.or" } as Instr,
+    ...eq(C_PS),
+    { op: "i32.or" } as Instr,
+    ...eq(C_OGHAM_SP),
+    { op: "i32.or" } as Instr,
+    ...inRange(C_ENQUAD, C_HAIR_SP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_NNBSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_MMSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_IDEO_SP),
     { op: "i32.or" } as Instr,
   ];
 }

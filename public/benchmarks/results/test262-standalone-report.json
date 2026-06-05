@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T00:02:10.411Z",
-  "baseline_generated_at": "2026-06-05T00:02:09Z",
-  "baseline_sha": "037635d7226d99e5a3fe5d9558e1d244ce388da2",
+  "timestamp": "2026-06-05T03:06:49.414Z",
+  "baseline_generated_at": "2026-06-05T03:06:49Z",
+  "baseline_sha": "89ca014028d8aa5a494cf55778b2c7a42bb8641f",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43125,
-    "pass": 12472,
-    "fail": 8767,
-    "compile_error": 21855,
+    "pass": 12481,
+    "fail": 8759,
+    "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21239,
+    "compilable": 21240,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42039,
-        "pass": 12077,
-        "fail": 8343,
-        "compile_error": 21588,
+        "pass": 12086,
+        "fail": 8335,
+        "compile_error": 21587,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 20420,
+        "compilable": 20421,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43125,
-        "pass": 12472,
-        "fail": 8767,
-        "compile_error": 21855,
+        "pass": 12481,
+        "fail": 8759,
+        "compile_error": 21854,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 21239,
+        "compilable": 21240,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48107,
-        "pass": 12692,
-        "fail": 9032,
-        "compile_error": 26256,
+        "pass": 12701,
+        "fail": 9024,
+        "compile_error": 26255,
         "compile_timeout": 13,
         "skip": 114,
-        "compilable": 21724,
+        "compilable": 21725,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43125,
-    "pass": 12472,
-    "fail": 8767,
-    "compile_error": 21855,
+    "pass": 12481,
+    "fail": 8759,
+    "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21239,
+    "compilable": 21240,
     "stale": 0
   },
   "full_summary": {
     "total": 48107,
-    "pass": 12692,
-    "fail": 9032,
-    "compile_error": 26256,
+    "pass": 12701,
+    "fail": 9024,
+    "compile_error": 26255,
     "compile_timeout": 13,
     "skip": 114,
-    "compilable": 21724,
+    "compilable": 21725,
     "stale": 0
   },
   "strict_summary": {
     "total": 40616,
-    "pass": 11672,
-    "fail": 8038,
-    "compile_error": 20875,
+    "pass": 11681,
+    "fail": 8030,
+    "compile_error": 20874,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 19710,
+    "compilable": 19711,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42039,
-      "pass": 12077,
-      "fail": 8343,
-      "compile_error": 21588,
+      "pass": 12086,
+      "fail": 8335,
+      "compile_error": 21587,
       "compile_timeout": 13,
       "skip": 18,
-      "compilable": 20420,
+      "compilable": 20421,
       "stale": 0
     }
   },
@@ -540,8 +540,8 @@
     {
       "name": "built-ins/Number",
       "path": "built-ins/Number",
-      "pass": 87,
-      "fail": 87,
+      "pass": 89,
+      "fail": 85,
       "compile_error": 164,
       "compile_timeout": 0,
       "skip": 0,
@@ -560,8 +560,8 @@
     {
       "name": "built-ins/parseFloat",
       "path": "built-ins/parseFloat",
-      "pass": 34,
-      "fail": 12,
+      "pass": 37,
+      "fail": 9,
       "compile_error": 8,
       "compile_timeout": 0,
       "skip": 0,
@@ -570,8 +570,8 @@
     {
       "name": "built-ins/parseInt",
       "path": "built-ins/parseInt",
-      "pass": 34,
-      "fail": 11,
+      "pass": 37,
+      "fail": 8,
       "compile_error": 10,
       "compile_timeout": 0,
       "skip": 0,
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 3263,
+      "pass": 3264,
       "fail": 1963,
-      "compile_error": 4109,
+      "compile_error": 4108,
       "compile_timeout": 2,
       "skip": 0,
       "total": 9337
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7005,
+    "assertion_fail": 7000,
     "illegal_cast": 203,
     "negative_test_fail": 73,
     "null_deref": 220,
-    "oob": 96,
-    "other": 20111,
+    "oob": 98,
+    "other": 20110,
     "promise_error": 32,
     "range_error": 27,
-    "runtime_error": 2100,
+    "runtime_error": 2097,
     "type_error": 1,
     "unreachable": 36,
-    "wasm_compile": 5384
+    "wasm_compile": 5382
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 35301,
-    "classified": 35301,
+    "total_non_pass_non_skip": 35292,
+    "classified": 35292,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1216,9 +1216,9 @@
           "other": 3571,
           "runtime_error": 623,
           "assertion_fail": 250,
-          "wasm_compile": 40,
+          "wasm_compile": 38,
           "range_error": 9,
-          "oob": 4,
+          "oob": 6,
           "null_deref": 1
         },
         "sample_files": [
@@ -1253,22 +1253,22 @@
           "total": 94
         },
         "error_categories": {
-          "runtime_error": 1,
           "other": 61,
+          "runtime_error": 1,
           "wasm_compile": 7,
           "assertion_fail": 24,
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/DisposableStack/prototype-from-newtarget.js",
+          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/AsyncDisposableStack/prototype/use/this-not-object-throws.js",
           "test/built-ins/DisposableStack/prototype/adopt/this-does-not-have-internal-disposablestate-throws.js",
           "test/built-ins/AsyncDisposableStack/prototype/Symbol.asyncDispose.js"
         ],
         "sample_signatures": [
-          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__getPrototypeOf' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
+          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## Codegen error: '__getOwnPropertyDescriptor' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to stru"
@@ -1343,7 +1343,7 @@
           "test/language/statements/with/S12.10_A3.10_T2.js",
           "test/language/statements/with/S12.10_A4_T6.js",
           "test/language/statements/with/S12.10_A1.11_T5.js",
-          "test/language/statements/with/cptn-nrml.js"
+          "test/language/statements/with/S12.10_A3.12_T3.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
@@ -1369,22 +1369,22 @@
           "total": 157
         },
         "error_categories": {
-          "other": 99,
           "unreachable": 33,
+          "other": 99,
           "assertion_fail": 22,
           "wasm_compile": 2,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
+          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
+          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1418,15 +1418,15 @@
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
           "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
-          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
-          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
+          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js",
+          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
       {
@@ -1435,17 +1435,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 4071,
+        "count": 4066,
         "statuses": {
           "pass": 0,
-          "fail": 4070,
+          "fail": 4065,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4071
+          "total": 4066
         },
         "error_categories": {
-          "assertion_fail": 4064,
+          "assertion_fail": 4059,
           "unreachable": 3,
           "runtime_error": 1,
           "promise_error": 3
@@ -1550,20 +1550,20 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 4316,
+        "count": 4315,
         "statuses": {
           "pass": 0,
           "fail": 514,
-          "compile_error": 3802,
+          "compile_error": 3801,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4316
+          "total": 4315
         },
         "error_categories": {
           "assertion_fail": 338,
           "wasm_compile": 3146,
           "null_deref": 28,
-          "other": 661,
+          "other": 660,
           "illegal_cast": 65,
           "runtime_error": 67,
           "oob": 1,
@@ -1674,17 +1674,17 @@
           "#1759"
         ],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 1003,
+        "count": 1000,
         "statuses": {
           "pass": 0,
-          "fail": 796,
+          "fail": 793,
           "compile_error": 207,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1003
+          "total": 1000
         },
         "error_categories": {
-          "runtime_error": 942,
+          "runtime_error": 939,
           "other": 37,
           "wasm_compile": 8,
           "assertion_fail": 16
