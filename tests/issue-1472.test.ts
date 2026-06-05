@@ -990,30 +990,64 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });
 
-  // ── S5c follow-ups (closure capture/`this`-mutation + object-literal emit) ──
-  // The runtime arms + drivers + define-site routing land here; two cases remain
-  // for S5c because they hit SHARED closure-dispatch infrastructure, not the
-  // localized accessor wiring:
+  // ── S5c — struct-accessor capturing-closure rework (#1888 S5c) ─────────────
+  // ROOT CAUSE (sd-1888): `Object.defineProperty(o,k,{get(){…}})` / `{get x(){}}`
+  // on `const o:any={}` route to the static-struct accessor path (object-ops.ts
+  // ~958-1171, #1629 S3), which compiles `${structName}_get_${prop}` as a BARE
+  // `(this) -> result` Wasm function with NO closure-capture environment. So a
+  // getter/setter body that closes over OUTER scope reads those captures as 0.
+  // The READ (property-access.ts:870) `call`s the getter and the WRITE
+  // (assignment.ts) the setter — but the compiled fn has no env to thread. S5c
+  // re-represents the accessor as a host-free CLOSURE (capturing env, call_ref-
+  // invoked with `this`), per arch-s5c's representation spec.
   //
-  //  1. A getter/setter closure that reads an OUTER capture (or mutates `this`)
-  //     returns/observes 0 under standalone: `__call_fn_method_N` installs the
-  //     receiver via `__current_this` but the closure's captured environment
-  //     ($self struct) is not threaded through the reserve/fill driver for the
-  //     accessor path the way it is for a direct closure call. A NON-capturing
-  //     getter works end-to-end (asserted above), proving the arm + driver +
-  //     dispatch are correct — the gap is capture/`this`-mutation threading in
-  //     the shared `__call_fn_method_N` dispatcher (the #1636-S1 / #1896 line).
-  //  2. Object-literal `{ get x() {} }` under standalone fails to SERIALIZE
-  //     ("u32 out of range: -1"): the literals.ts accessor-define path emits an
-  //     unresolved index when the getter is lifted as a host-free closure. The
-  //     `Object.defineProperty` define-site path (object-ops.ts) does NOT hit
-  //     this; only the object-literal lift does. Tracked for S5c.
-  it.skip("S5c: setter observes the write; getter reads it back (capture/this threading)", async () => {
+  // These tests are RED until S5c lands (they assert the post-fix behavior):
+  // capturing getter, this-mutating setter round-trip, object-literal accessor.
+  // The non-capturing-getter / getter-only / data-unaffected cases above already
+  // pass and must STAY green (regression guard for the closure rework).
+  it("S5c: capturing getter returns the captured value", async () => {
+    // get(){return k} where k is an outer const — must observe k=42, not 0.
+    const source = `
+        export function run(): number {
+          const k = 42;
+          const o: any = {};
+          Object.defineProperty(o, "x", { get() { return k; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5c: capturing getter mixes captured + literal", async () => {
+    // get(){return n+37} with outer n=5 — must observe n=5 (→42), not 0 (→37).
+    const source = `
+        export function run(): number {
+          let n = 5;
+          const o: any = {};
+          Object.defineProperty(o, "x", { get() { return n + 37; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5c: setter observes the write via a captured cell; getter reads it back", async () => {
+    // set mutates outer `backing`; get reads it — round-trips through the same
+    // captured cell. o.v=21 → backing=42; o.v → 42.
     const source = `
         export function run(): number {
           let backing = 0;
           const o: any = {};
-          o["seed"] = 0;
           Object.defineProperty(o, "v", {
             get() { return backing; },
             set(nv: number) { backing = nv * 2; },
@@ -1025,20 +1059,30 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
       `;
     const r = await compile(source, { target: "standalone" });
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });
 
-  it.skip("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
+  it("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
+    // The dominant accessor shape. Routes through compileObjectLiteralWithAccessors
+    // → emitObjectLiteralAccessorFn (S5b host-free closure) → __defineProperty_accessor.
+    // The remaining standalone failure was the accessor KEY emission using the `-1`
+    // string-constant sentinel via `global.get` ("u32 out of range: -1"); C5
+    // materializes the key via stringConstantExternrefInstrs (native-string inline
+    // under standalone). The capture-bearing closure was already correct from S5b.
     const source = `
         export function run(): number {
-          const o: any = { get x() { return 42; } };
-          o["seed"] = 0;
+          const k = 42;
+          const o: any = { get x() { return k; } };
           return o.x as number;
         }
       `;
     const r = await compile(source, { target: "standalone" });
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });

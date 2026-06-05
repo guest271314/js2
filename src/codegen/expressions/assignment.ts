@@ -32,6 +32,8 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { reserveAccessorSetDriver } from "../accessor-driver.js";
+import { S5C_STRUCT_ACCESSOR_CLOSURE } from "../struct-accessor-closure.js";
 import {
   arrayIteratorOverrideGlobalIdx,
   emitArrayProtoIteratorDrive,
@@ -2332,6 +2334,48 @@ function compilePropertyAssignment(
   // Check for setter accessor on user-defined classes
   const fieldName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
   const accessorKey = `${typeName}_${fieldName}`;
+  // (#1888 S5c / C4) Migrated struct accessor → route the write through the
+  // host-free setter closure (per-(struct,prop) global + shared S5b
+  // __call_accessor_set driver) so a setter that mutates an outer-scope capture
+  // observes it. __call_accessor_set(recv, setter, value): recv = the struct
+  // instance boxed to externref (threaded as `this` via __current_this); the
+  // setter's return is DISCARDED by the driver (§10.1.5.3 [[Set]]); the
+  // assignment expression evaluates to the RHS, not the setter result. The
+  // closure globals only exist for Object.defineProperty(o,…)/objlit receivers
+  // (always a struct instance), so the proto/class-object dummy path is not a
+  // concern here.
+  const closureAccSet =
+    S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone ? ctx.structAccessorClosure.get(accessorKey)?.setGlobal : undefined;
+  if (closureAccSet !== undefined) {
+    // recv: struct instance → externref
+    const recvResult = compileExpression(ctx, fctx, target.expression);
+    if (!recvResult) {
+      reportError(ctx, target, "Failed to compile setter receiver");
+      return null;
+    }
+    if (recvResult.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    // setter closure (externref)
+    fctx.body.push({ op: "global.get", index: closureAccSet });
+    // value: compile in its natural type, save for the assignment result, then
+    // box a copy to externref for the driver's `value` arg.
+    const valResult = compileExpression(ctx, fctx, value);
+    if (!valResult) {
+      reportError(ctx, target, "Failed to compile setter value");
+      return null;
+    }
+    const valTmp = allocLocal(fctx, `__acc_set_val_${fctx.locals.length}`, valResult);
+    fctx.body.push({ op: "local.tee", index: valTmp });
+    if (valResult.kind !== "externref") {
+      coerceType(ctx, fctx, valResult, { kind: "externref" });
+    }
+    const setDriverIdx = reserveAccessorSetDriver(ctx);
+    fctx.body.push({ op: "call", funcIdx: setDriverIdx }); // () result — setter return discarded
+    // Assignment expression evaluates to the RHS (natural type).
+    fctx.body.push({ op: "local.get", index: valTmp });
+    return valResult;
+  }
   if (ctx.classAccessorSet.has(accessorKey)) {
     const setterName = `${typeName}_set_${fieldName}`;
     const funcIdx = ctx.funcMap.get(setterName);
