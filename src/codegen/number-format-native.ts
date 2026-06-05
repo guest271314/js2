@@ -46,6 +46,10 @@ import { addFuncType } from "./registry/types.js";
 
 const BUF_CAP = 256;
 const MAX_SAFE_INTEGER = 9007199254740991;
+// Cap on fractional digits emitted by number_toString_radix (§6.1.6.1.20). f64
+// has ~52 bits of mantissa; 100 digits is well beyond what any radix 2..36 needs
+// to exhaust the representable fraction and keeps the buffer within BUF_CAP.
+const MAX_FRAC_DIGITS = 100;
 const C_ZERO = 48; // '0'
 const C_MINUS = 45; // '-'
 const C_PLUS = 43; // '+'
@@ -655,8 +659,11 @@ function emitToString(
  *
  * The call site has already applied `ToIntegerOrInfinity(radix)`'s truncating
  * shape for ordinary positive radices and rejected values outside 2..36. This
- * standalone slice handles non-finite values, ±0, and finite safe integers.
- * Fractional and unsafe-integer shortest formatting remains #1335 Phase 2.
+ * standalone slice handles non-finite values, ±0, finite safe integers, AND
+ * finite fractional values (#1836: the integer part is rendered LSB-first then
+ * reversed; the fractional part is appended MSB-first afterwards, up to
+ * MAX_FRAC_DIGITS or until the remainder is exhausted). Shortest-representation
+ * rounding for the unsafe-integer magnitude range remains #1335 Phase 2.
  */
 function emitToStringRadix(
   ctx: CodegenContext,
@@ -684,6 +691,9 @@ function emitToStringRadix(
   const L_CODE = 11;
   const L_I = 12;
   const L_J = 13;
+  const L_INTPART = 14; // floor(abs) — integer part for the LSB-first digit loop
+  const L_FRAC = 15; // abs - intPart — fractional remainder
+  const L_K = 16; // fractional-digit counter (bounded by MAX_FRAC_DIGITS)
 
   const writeFinalizeReturn = (): Instr[] => [
     { op: "local.get", index: L_BUF },
@@ -711,18 +721,21 @@ function emitToStringRadix(
       then: [...putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO), ...writeFinalizeReturn()],
     },
 
-    // Phase 1 guard: finite integers only, and stay within exactly represented
-    // integer space so the f64 div/mod digit loop is stable.
-    { op: "local.get", index: L_ABS },
+    // Split into integer and fractional parts (§6.1.6.1.20 / §21.1.3.6): the
+    // integer part is rendered LSB-first then reversed; the fractional part is
+    // appended MSB-first afterwards. intPart = floor(abs); frac = abs - intPart.
     { op: "local.get", index: L_ABS },
     { op: "f64.floor" },
-    { op: "f64.ne" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "unreachable" }],
-    },
+    { op: "local.set", index: L_INTPART },
     { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_INTPART },
+    { op: "f64.sub" },
+    { op: "local.set", index: L_FRAC },
+
+    // Stay within exactly represented integer space so the f64 div/mod digit
+    // loop on the INTEGER part is stable. (Fractional shortest-representation
+    // edge cases beyond ~maxFractionDigits remain approximate, like V8's.)
+    { op: "local.get", index: L_INTPART },
     { op: "f64.const", value: MAX_SAFE_INTEGER },
     { op: "f64.gt" },
     {
@@ -731,8 +744,8 @@ function emitToStringRadix(
       then: [{ op: "unreachable" }],
     },
 
-    // n = abs; write least-significant digits into buf[0..pos).
-    { op: "local.get", index: L_ABS },
+    // n = intPart; write least-significant integer digits into buf[0..pos).
+    { op: "local.get", index: L_INTPART },
     { op: "local.set", index: L_N },
     {
       op: "block",
@@ -799,8 +812,19 @@ function emitToStringRadix(
       ],
     },
 
+    // If intPart == 0 the digit loop emitted nothing (e.g. 0 < abs < 1 like
+    // 0.5 -> "0.1"); emit a single '0' so the integer part is present.
+    { op: "local.get", index: L_POS },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO),
+    },
+
     // Negative finite non-zero values prepend '-' after the digit loop, then the
-    // full buffer is reversed below.
+    // full buffer is reversed below. (The '-' lands at the front after reversal;
+    // any fractional digits are appended after the reverse, so they keep order.)
     { op: "local.get", index: L_NEG },
     {
       op: "if",
@@ -808,7 +832,7 @@ function emitToStringRadix(
       then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
     },
 
-    // Reverse buf[0..pos) in place.
+    // Reverse buf[0..pos) in place (integer digits + optional leading '-').
     { op: "i32.const", value: 0 },
     { op: "local.set", index: L_I },
     { op: "local.get", index: L_POS },
@@ -859,6 +883,96 @@ function emitToStringRadix(
       ],
     },
 
+    // Fractional part (§6.1.6.1.20): if frac > 0, append '.' then up to
+    // MAX_FRAC_DIGITS digits, each = floor(frac * radix), stopping early when
+    // frac reaches 0. Emitted MSB-first directly at the tail (after the reverse),
+    // so no further reversal. The buffer is pre-sized generously (BUF_CAP) and
+    // the integer part is bounded by MAX_SAFE_INTEGER (<= 53 bits), so
+    // MAX_FRAC_DIGITS more digits stay within capacity.
+    { op: "local.get", index: L_FRAC },
+    { op: "f64.const", value: 0 },
+    { op: "f64.gt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...putConst(strDataTypeIdx, L_BUF, L_POS, C_DOT),
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_K },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // if frac == 0 || k >= MAX_FRAC_DIGITS: stop.
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.const", value: 0 },
+                { op: "f64.eq" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: MAX_FRAC_DIGITS },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+
+                // frac *= radix; digit = floor(frac); frac -= digit.
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_R },
+                { op: "f64.mul" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.floor" },
+                { op: "local.set", index: L_DIGIT },
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.sub" },
+                { op: "local.set", index: L_FRAC },
+
+                // digitCode = digit < 10 ? '0'+digit : 'a'-10+digit.
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.const", value: 10 },
+                { op: "f64.lt" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: i32 },
+                  then: [
+                    { op: "i32.const", value: C_ZERO },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                  else: [
+                    { op: "i32.const", value: C_LC_A_MINUS_10 },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                },
+                { op: "local.set", index: L_CODE },
+
+                { op: "local.get", index: L_BUF },
+                { op: "local.get", index: L_POS },
+                { op: "local.get", index: L_CODE },
+                { op: "array.set", typeIdx: strDataTypeIdx },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_POS },
+
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_K },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+
     ...writeFinalizeReturn(),
   ];
 
@@ -881,6 +995,9 @@ function emitToStringRadix(
       { name: "digitCode", type: i32 },
       { name: "i", type: i32 },
       { name: "j", type: i32 },
+      { name: "intPart", type: f64 },
+      { name: "frac", type: f64 },
+      { name: "k", type: i32 },
     ],
     body,
     exported: false,

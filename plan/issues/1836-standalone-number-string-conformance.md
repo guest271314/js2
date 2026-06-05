@@ -68,15 +68,23 @@ MEDIUM (U+205F), IDEOGRAPHIC (U+3000) spaces. Shared by parseInt/parseFloat (and
 Number routes through them). `Number("﻿12")` → 12; non-ws (e.g. U+200B Cf)
 still rejected.
 
+### Slice 4 — DONE: fractional radix in toString(radix) (§6.1.6.1.20)
+`emitToStringRadix` (`number_toString_radix`) no longer traps (`unreachable`) on
+non-integer values. The value is split into `intPart = floor(abs)` and
+`frac = abs - intPart`: the integer part is rendered LSB-first then reversed (as
+before); the fractional part is appended MSB-first afterwards (repeated
+`frac *= radix; digit = floor(frac); frac -= digit`), up to `MAX_FRAC_DIGITS`
+(100) or until the remainder is exhausted, so it survives the integer-segment
+reverse with no further reversal. A leading `0` is emitted when `intPart == 0`
+(e.g. `(0.5).toString(2)` → `"0.1"`). `(3.5).toString(2)` → `"11.1"`,
+`(10.5).toString(16)` → `"a.8"`, negatives handled; integer radix output
+unchanged. The `MAX_SAFE_INTEGER` guard now bounds only the integer part.
+
 ### Residual defects (not in this PR — track as follow-up slices)
 - `(1e-7).toString()`→`"0"`, `(1e21).toString()` lacks `e` — exponential
   Number→String formatting, `number-format-native.ts:470`. §6.1.6.1.20. Larger;
   separate slice. (`(1e21).toString()` now renders the full 22-digit integer via
   the integer path — still not the spec `"1e+21"`, but no longer `"0"`.)
-- `(3.5).toString(2)` traps (`unreachable`) — fractional radix in
-  `number_toString_radix` (`:713`). Needs integration with the LSB-first reverse-
-  buffer layout (integer digits are emitted reversed; fractional digits are
-  MSB-first and must survive the reverse). Separate slice.
 - `+"12abc"` ToNumber(String) — still returns 12 not NaN on current main (the
   earlier "appears fixed" note is stale). `type-coercion.ts:1748` falls back to
   parseFloat instead of a strict StringToNumber (which rejects trailing

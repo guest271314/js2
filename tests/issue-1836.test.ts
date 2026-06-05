@@ -134,3 +134,54 @@ describe("#1836 standalone toFixed |x| >= 1e21 (§21.1.3.3)", () => {
     ).toBe(1);
   });
 });
+
+// Slice: Number.prototype.toString(radix) for FRACTIONAL values (§6.1.6.1.20,
+// §21.1.3.6). Previously the radix formatter only handled integers and TRAPPED
+// (`unreachable`) on any non-integer, e.g. (3.5).toString(2). Now the integer
+// part is rendered LSB-first then reversed and the fractional part is appended
+// MSB-first (multiply-by-radix), up to MAX_FRAC_DIGITS or until exhausted.
+describe("#1836 standalone toString(radix) fractional values (§6.1.6.1.20)", () => {
+  it("renders fractional binary values (no more unreachable trap)", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (3.5).toString(2) === "11.1" ? 1 : 0; }`),
+    ).toBe(1);
+    expect(await evalStandalone(`export function test(): number { return (0.5).toString(2) === "0.1" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(
+      await evalStandalone(`export function test(): number { return (0.25).toString(2) === "0.01" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("renders a leading 0 for values in (0,1)", async () => {
+    // intPart == 0 must still emit "0" before the point.
+    expect(await evalStandalone(`export function test(): number { return (0.5).toString(2) === "0.1" ? 1 : 0; }`)).toBe(
+      1,
+    );
+  });
+
+  it("handles negative fractional values", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (-3.5).toString(2) === "-11.1" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("renders fractional hex (radix 16)", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (10.5).toString(16) === "a.8" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("does not change integer radix output (no regression)", async () => {
+    expect(await evalStandalone(`export function test(): number { return (255).toString(16) === "ff" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(await evalStandalone(`export function test(): number { return (10).toString(2) === "1010" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(
+      await evalStandalone(`export function test(): number { return (-255).toString(16) === "-ff" ? 1 : 0; }`),
+    ).toBe(1);
+    expect(await evalStandalone(`export function test(): number { return (0).toString(2) === "0" ? 1 : 0; }`)).toBe(1);
+  });
+});
