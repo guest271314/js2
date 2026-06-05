@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: class
 goal: spec-completeness
-sprint: 59
+sprint: 60
 parent: 1328
 ---
 # #1348 — Class: static block order, private field exotics, super-class field shadow
