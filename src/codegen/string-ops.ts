@@ -21,6 +21,7 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -2447,6 +2448,24 @@ export function compileNativeStringMethodCall(
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
+  // static RegExp routes to the pure-WasmGC matcher (returns the match index or
+  // -1) instead of the host regex engine. The string-coercion form (string
+  // argument) is not a RegExp value and falls through to the refusal below.
+  if (ctx.standalone && method === "search") {
+    const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess);
+    if (searchResult !== undefined) return searchResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.replace(/re/, "str")` / `replaceAll`
+  // against a backend-created static RegExp with a literal replacement routes
+  // to the pure-WasmGC matcher (returns the rebuilt NativeString). `$`-pattern /
+  // function replacers and the string-coercion form fall through to the refusal.
+  if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
+    const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
+    if (replaceResult !== undefined) return replaceResult;
+  }
+
   if (ctx.standalone) {
     const alwaysRegExp = method === "match" || method === "matchAll" || method === "search";
     const symbolProtocolArgForm =

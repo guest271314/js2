@@ -88,6 +88,51 @@ describe("#1539 standalone RegExp.test — no JS host, matches native", () => {
   }
 });
 
+// #1539 Phase 2b — `String.prototype.search(/re/)`: returns the match index or
+// -1, routed through the same pure-WasmGC matcher. The subject is embedded as a
+// string literal and the RegExp is the call argument; we read back the f64
+// index as a number and compare to native `String.prototype.search`.
+async function standaloneSearch(pattern: string, flags: string, input: string): Promise<number> {
+  const inLit = JSON.stringify(input);
+  const src = `export function run(): number { return ${inLit}.search(/${pattern}/${flags}); }`;
+  const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  const mod = await WebAssembly.compile(r.binary);
+  const hostRegex = WebAssembly.Module.imports(mod).filter((i) => /RegExp/.test(i.name));
+  expect(hostRegex, "no RegExp_new host import in standalone").toEqual([]);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  const run = (instance.exports as { run(): number }).run;
+  return run();
+}
+
+describe("#1539 standalone String.prototype.search — no JS host, matches native", () => {
+  // Reuse the .test corpus: search returns the index of the first match, or -1.
+  for (const { p, f, inputs } of CASES) {
+    for (const input of inputs) {
+      it(`"${input}".search(/${p}/${f})`, async () => {
+        const expected = input.search(new RegExp(p, f));
+        expect(await standaloneSearch(p, f, input)).toBe(expected);
+      });
+    }
+  }
+
+  it("var-bound RegExp argument (const re = /…/)", async () => {
+    const src = `export function run(): number { const re = /\\d+/; return "ab12cd".search(re); }`;
+    const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { run(): number }).run()).toBe(2);
+  });
+
+  it("new RegExp(...) argument", async () => {
+    const src = `export function run(): number { return "xxbx".search(new RegExp("b")); }`;
+    const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { run(): number }).run()).toBe(2);
+  });
+});
+
 describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   async function expectRefused(src: string): Promise<void> {
     const r = await compile(src, { target: "standalone" });
