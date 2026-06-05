@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T03:59:52.180Z",
-  "baseline_generated_at": "2026-06-05T03:59:51Z",
-  "baseline_sha": "acd0417d3bdd786b5f85ae8c85d540c01385680d",
+  "timestamp": "2026-06-05T04:17:14.589Z",
+  "baseline_generated_at": "2026-06-05T04:17:14Z",
+  "baseline_sha": "6c015fc6d3cc87d24f964f038ae6c6dba39bed1c",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -10,21 +10,21 @@
   "summary": {
     "total": 43125,
     "pass": 12512,
-    "fail": 8730,
-    "compile_error": 21852,
+    "fail": 8727,
+    "compile_error": 21855,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21242,
+    "compilable": 21239,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42039,
         "pass": 12117,
-        "fail": 8306,
-        "compile_error": 21585,
+        "fail": 8303,
+        "compile_error": 21588,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 20423,
+        "compilable": 20420,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,22 +53,22 @@
       "official": {
         "total": 43125,
         "pass": 12512,
-        "fail": 8730,
-        "compile_error": 21852,
+        "fail": 8727,
+        "compile_error": 21855,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 21242,
+        "compilable": 21239,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48107,
         "pass": 12732,
-        "fail": 8995,
-        "compile_error": 26253,
+        "fail": 8992,
+        "compile_error": 26256,
         "compile_timeout": 13,
         "skip": 114,
-        "compilable": 21727,
+        "compilable": 21724,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,31 +77,31 @@
   "official_summary": {
     "total": 43125,
     "pass": 12512,
-    "fail": 8730,
-    "compile_error": 21852,
+    "fail": 8727,
+    "compile_error": 21855,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21242,
+    "compilable": 21239,
     "stale": 0
   },
   "full_summary": {
     "total": 48107,
     "pass": 12732,
-    "fail": 8995,
-    "compile_error": 26253,
+    "fail": 8992,
+    "compile_error": 26256,
     "compile_timeout": 13,
     "skip": 114,
-    "compilable": 21727,
+    "compilable": 21724,
     "stale": 0
   },
   "strict_summary": {
     "total": 40616,
     "pass": 11712,
-    "fail": 8001,
-    "compile_error": 20872,
+    "fail": 7998,
+    "compile_error": 20875,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 19713,
+    "compilable": 19710,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,11 +128,11 @@
     "standard": {
       "total": 42039,
       "pass": 12117,
-      "fail": 8306,
-      "compile_error": 21585,
+      "fail": 8303,
+      "compile_error": 21588,
       "compile_timeout": 13,
       "skip": 18,
-      "compilable": 20423,
+      "compilable": 20420,
       "stale": 0
     }
   },
@@ -891,8 +891,8 @@
       "name": "language/expressions",
       "path": "language/expressions",
       "pass": 4101,
-      "fail": 2238,
-      "compile_error": 4679,
+      "fail": 2235,
+      "compile_error": 4682,
       "compile_timeout": 0,
       "skip": 18,
       "total": 11036
@@ -1079,7 +1079,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 6973,
+    "assertion_fail": 6970,
     "illegal_cast": 203,
     "negative_test_fail": 74,
     "null_deref": 220,
@@ -1090,7 +1090,7 @@
     "runtime_error": 2094,
     "type_error": 1,
     "unreachable": 36,
-    "wasm_compile": 5380
+    "wasm_compile": 5383
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1222,15 +1222,15 @@
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: '__proto_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/",
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
+          "other:L#:## Codegen error: '__proto_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/",
           "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result1, \"#-#-09T01:#:#.123987Z\", \"roundingMode is halfTrunc (with # digits from smallestUnit)\");",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result, \"#-#-#\", `default calendarName option is auto with built-in ISO calendar`);"
@@ -1253,22 +1253,22 @@
           "total": 94
         },
         "error_categories": {
-          "runtime_error": 1,
           "other": 61,
+          "runtime_error": 1,
           "wasm_compile": 7,
           "assertion_fail": 24,
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/DisposableStack/prototype-from-newtarget.js",
+          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/AsyncDisposableStack/prototype/use/this-not-object-throws.js",
           "test/built-ins/DisposableStack/prototype/adopt/this-does-not-have-internal-disposablestate-throws.js",
           "test/built-ins/AsyncDisposableStack/prototype/Symbol.asyncDispose.js"
         ],
         "sample_signatures": [
-          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__getPrototypeOf' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
+          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## Codegen error: '__getOwnPropertyDescriptor' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to stru"
@@ -1343,7 +1343,7 @@
           "test/language/statements/with/S12.10_A3.10_T2.js",
           "test/language/statements/with/S12.10_A4_T6.js",
           "test/language/statements/with/S12.10_A1.11_T5.js",
-          "test/language/statements/with/S12.10_A3.12_T3.js"
+          "test/language/statements/with/cptn-nrml.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
@@ -1409,23 +1409,23 @@
         "error_categories": {
           "assertion_fail": 113,
           "other": 1692,
-          "null_deref": 9,
           "wasm_compile": 163,
+          "null_deref": 9,
           "runtime_error": 17,
           "illegal_cast": 5
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
@@ -2399,15 +2399,15 @@
         "count": 13,
         "statuses": {
           "pass": 0,
-          "fail": 11,
-          "compile_error": 2,
+          "fail": 8,
+          "compile_error": 5,
           "compile_timeout": 0,
           "skip": 0,
           "total": 13
         },
         "error_categories": {
-          "assertion_fail": 11,
-          "wasm_compile": 2
+          "wasm_compile": 5,
+          "assertion_fail": 8
         },
         "sample_files": [
           "test/language/expressions/template-literal/middle-list-many-expr-tostr-error.js",
@@ -2417,7 +2417,7 @@
           "test/language/expressions/tagged-template/cache-identical-source-new-function.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__closure_3\" failed: not enough arguments on the stack for call (need #, got #) @+#) [in __closure_3()] [@+#] [wat: (func $__closure_3 (type #) (local $__self_cast",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"f\" failed: array.new_fixed[#] expected type externref, found struct.new of type (ref #) @+#) [in f()] [@+#] [wat: (func $f (param externref externref) (result exte",
           "assertion_fail:returned # — assert ## at L#: assert(firstObject !== null);",
           "assertion_fail:returned # — assert ## at L#: assert(previousObject !== null);"
