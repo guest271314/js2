@@ -33,7 +33,6 @@ import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-i
 import { resolveStructName } from "./expressions/misc.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "./expressions/proto-override.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { collectInstrs } from "./statements/shared.js";
