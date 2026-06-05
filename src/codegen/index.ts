@@ -37,6 +37,7 @@ import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { ensureNativeIteratorRuntime } from "./iterator-native.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
+import { fillApplyClosure } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1460,11 +1461,23 @@ export function generateModule(
     emitClosureMethodCallExportN(ctx, 0);
     emitClosureMethodCallExportN(ctx, 1);
     emitClosureMethodCallExportN(ctx, 2);
+    // (#1888 Slice 1) Arities 3 and 4 for the standalone open-any method
+    // dispatch bridge `__apply_closure` (spec D7: `o.m(a,b,c[,d])`). Each call
+    // is a no-op when no closure of that arity exists, so GC/host modules without
+    // arity-3/4 closures stay byte-identical. Dynamic method calls above arity 4
+    // are refused-loud in `__apply_closure`.
+    emitClosureMethodCallExportN(ctx, 3);
+    emitClosureMethodCallExportN(ctx, 4);
 
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive
     // site reserved a driver (brand clear / no Array.prototype @@iterator override).
     fillProtoIteratorDriver(ctx);
+
+    // (#1888 Slice 1) Fill the reserved `__apply_closure` bridge body now that
+    // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
+    // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
+    fillApplyClosure(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
