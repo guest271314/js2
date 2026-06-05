@@ -24,6 +24,7 @@ import {
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -480,13 +481,19 @@ function compileObjectLiteralWithAccessors(
       if (pair.firstIdx !== i) continue; // wait for the actual first slot
       emittedAccessors.add(propName);
 
-      addStringConstantGlobal(ctx, propName);
-      const keyGlobal = ctx.stringGlobalMap.get(propName);
-      if (keyGlobal === undefined) continue;
-
       // Stack: [obj, key, getterCb | null, setterCb | null, flags]
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      // (#1888 S5c / C5) Materialize the accessor key via the dual-mode helper.
+      // Under standalone/nativeStrings, `addStringConstantGlobal` records the
+      // `-1` sentinel (no host string-constant global), so the old
+      // `global.get <stringGlobalMap.get(prop)>` emitted `global.get -1` →
+      // "u32 out of range: -1" at serialize time (the objlit-accessor standalone
+      // defect). `stringConstantExternrefInstrs` emits the native-string inline
+      // path under standalone and the host `global.get` under GC.
+      addStringConstantGlobal(ctx, propName);
+      for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+        fctx.body.push(instr);
+      }
 
       // Getter (or ref.null.extern when only setter is defined).
       // (#1888 S5b) Under standalone, compile as a HOST-FREE closure so the

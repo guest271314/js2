@@ -1065,19 +1065,13 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });
 
-  // SKIPPED (#1888 S5c): the object-literal `{ get x() {} }` accessor STORE arm +
-  // C3 read dispatch are wired (literals.ts C5), but this shape is blocked on a
-  // SEPARATE pre-existing serialization defect in the objlit bare-fn accessor path
-  // ("u32 out of range: -1" — the legacy `promoteAccessorCapturesToGlobals` /
-  // objlit-struct-shape getter funcIdx wiring leaves an unbound `-1` global under
-  // standalone, independent of the S5c closure rework). The closure capture-threading
-  // itself works — the Object.defineProperty capturing-getter / mixed / this-setter
-  // cases above all pass end-to-end. Re-enable once the objlit-standalone `-1` defect
-  // is fixed (carved as a follow-up; the bare-fn path can't be skipped without
-  // breaking the objlit struct shape, so it needs a focused objlit-shape fix).
-  it.skip("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
-    // The dominant accessor shape. Blocked on the pre-existing objlit-standalone
-    // serialization defect ("u32 out of range: -1") — see the skip note above.
+  it("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
+    // The dominant accessor shape. Routes through compileObjectLiteralWithAccessors
+    // → emitObjectLiteralAccessorFn (S5b host-free closure) → __defineProperty_accessor.
+    // The remaining standalone failure was the accessor KEY emission using the `-1`
+    // string-constant sentinel via `global.get` ("u32 out of range: -1"); C5
+    // materializes the key via stringConstantExternrefInstrs (native-string inline
+    // under standalone). The capture-bearing closure was already correct from S5b.
     const source = `
         export function run(): number {
           const k = 42;
