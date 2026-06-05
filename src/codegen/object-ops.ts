@@ -8,7 +8,12 @@
 import { ts } from "../ts-api.js";
 import { isVoidType } from "../checker/type-mapper.js";
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
-import { collectReferencedIdentifiers, collectWrittenIdentifiers, compileArrowAsCallback } from "./closures.js";
+import {
+  collectReferencedIdentifiers,
+  collectWrittenIdentifiers,
+  compileArrowAsCallback,
+  compileArrowAsClosure,
+} from "./closures.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -19,6 +24,11 @@ import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
+import {
+  S5C_STRUCT_ACCESSOR_CLOSURE,
+  buildAccessorClosure,
+  ensureStructAccessorGlobal,
+} from "./struct-accessor-closure.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { compileNativeStringLiteral, compileStringLiteral } from "./string-ops.js";
 import { getVecInfo } from "./type-coercion.js";
@@ -968,6 +978,44 @@ export function compileObjectDefineProperty(
     const accessorKey = `${structName}_${propName}`;
     ctx.classAccessorSet.add(accessorKey);
 
+    // (#1888 S5c / C2) STORE arm — land dark behind `S5C_STRUCT_ACCESSOR_CLOSURE`.
+    // The #1629-S3 bare `${struct}_get/set_${prop}` fns below have NO capture
+    // environment, so a getter/setter that closes over outer scope reads those
+    // captures as 0 (sd-1888 root cause). Under standalone, additionally lift
+    // each accessor as a host-free CLOSURE (captures baked into `$self` by
+    // `compileArrowAsClosure`, `this` via `__current_this`) and store it in the
+    // per-(struct,prop) `(mut externref)` module global. C3 (read) / C4 (write)
+    // gate dispatch on `ctx.structAccessorClosure.has(key)` to route through the
+    // S5b `__call_accessor_get/set` drivers; until those land the bare-fn path
+    // below still serves reads, so this arm is additive + side-effect-free when
+    // the flag is off. The `as unknown as ts.FunctionExpression` cast mirrors the
+    // proven S5b `emitAccessorFn` call sites (object-ops.ts ~1945) — accessor
+    // nodes (MethodDeclaration / Get/SetAccessorDeclaration) structurally satisfy
+    // the `.body` / `.parameters` / `.modifiers` reads `compileArrowAsClosure`
+    // performs.
+    if (S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone) {
+      if (getNode) {
+        const getGlobalIdx = ensureStructAccessorGlobal(ctx, structName, propName, "get");
+        if (buildAccessorClosure(ctx, fctx, getNode as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+        } else {
+          // Lift failed — leave the global null; the bare-fn read path below
+          // still serves this accessor, so no behavior regression.
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+        }
+      }
+      if (setNode) {
+        const setGlobalIdx = ensureStructAccessorGlobal(ctx, structName, propName, "set");
+        if (buildAccessorClosure(ctx, fctx, setNode as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+        }
+      }
+    }
+
     // Helper to get body statements from a getter/setter node
     const getBodyStatements = (
       node:
@@ -1756,6 +1804,43 @@ function resolveExprToFuncNode(
 }
 
 /**
+ * (#1888 S5b) Compile an accessor getter/setter function and leave an externref
+ * on the stack to pass into `__defineProperty_accessor`. Returns `true` when a
+ * value was pushed, `false` when the caller should push `ref.null.extern`.
+ *
+ * Dual-mode:
+ *  - **standalone** (`ctx.standalone`): compile the function as a HOST-FREE
+ *    closure (`compileArrowAsClosure`) and convert the closure-struct ref →
+ *    externref. This is what makes the stored `$PropEntry.$get/$set` slot hold a
+ *    real callable closure that the native accessor arms in `__extern_get`/
+ *    `__extern_set` can dispatch through `__call_accessor_get/set` →
+ *    `__call_fn_method_0/1` (which threads the receiver as `this` via
+ *    `__current_this`, #1636-S1). The lifted closure body sets
+ *    `readsCurrentThis: true`, so `this` inside the getter/setter resolves to the
+ *    installed receiver per §6.2.5.5 / §10.1.5.3.
+ *  - **JS-host / GC** (default): unchanged — `compileArrowAsCallback` with
+ *    `needsThis: true` routes through the `__make_getter_callback` JS bridge.
+ *    Gating strictly on `ctx.standalone` keeps the host/GC binary byte-identical.
+ */
+function emitAccessorFn(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  fn: ts.FunctionExpression | ts.ArrowFunction,
+): boolean {
+  if (ctx.standalone) {
+    const closureType = compileArrowAsClosure(ctx, fctx, fn);
+    if (!closureType) return false;
+    // compileArrowAsClosure leaves a closure-struct ref; __defineProperty_accessor
+    // expects externref. Convert unless it is already externref.
+    if (closureType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    return true;
+  }
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
+}
+
+/**
  * Emit __defineProperty_value(obj, prop, null, flags) for descriptors without a value property.
  * For externref objects, this delegates to the JS host which can handle flag-only descriptors.
  * For struct-typed objects, this is a no-op (struct fields are always writable).
@@ -1896,22 +1981,17 @@ function emitExternDefinePropertyNoValue(
       }
       fctx.body.push({ op: "local.get", index: propLocal });
 
-      // Compile getter as JS-callable callback (or null)
-      // needsThis=true: getter receives 'this' as the object the property is accessed on
+      // Compile getter (host-free closure under standalone, else JS callback;
+      // #1888 S5b emitAccessorFn). `this` is the object the property is accessed on.
       if (getNode) {
-        if (ts.isFunctionExpression(getNode) || ts.isArrowFunction(getNode)) {
-          if (!compileArrowAsCallback(ctx, fctx, getNode, { needsThis: true }))
-            fctx.body.push({ op: "ref.null.extern" });
-        } else {
-          // MethodDeclaration / GetAccessorDeclaration — cast for TS; runtime props are compatible
-          if (!compileArrowAsCallback(ctx, fctx, getNode as unknown as ts.FunctionExpression, { needsThis: true }))
-            fctx.body.push({ op: "ref.null.extern" });
-        }
+        // MethodDeclaration / GetAccessorDeclaration — cast for TS; runtime props are compatible
+        if (!emitAccessorFn(ctx, fctx, getNode as unknown as ts.FunctionExpression))
+          fctx.body.push({ op: "ref.null.extern" });
       } else if (getExpr) {
-        // get: identifierRef — resolve to function declaration and compile as callback
+        // get: identifierRef — resolve to function declaration and compile
         const getFuncNode = resolveExprToFuncNode(ctx, getExpr);
         if (getFuncNode) {
-          if (!compileArrowAsCallback(ctx, fctx, getFuncNode as unknown as ts.FunctionExpression, { needsThis: true }))
+          if (!emitAccessorFn(ctx, fctx, getFuncNode as unknown as ts.FunctionExpression))
             fctx.body.push({ op: "ref.null.extern" });
         } else {
           fctx.body.push({ op: "ref.null.extern" });
@@ -1920,21 +2000,16 @@ function emitExternDefinePropertyNoValue(
         fctx.body.push({ op: "ref.null.extern" });
       }
 
-      // Compile setter as JS-callable callback (or null)
-      // needsThis=true: setter receives 'this' as the object the property is assigned on
+      // Compile setter (host-free closure under standalone, else JS callback;
+      // #1888 S5b). `this` is the object the property is assigned on.
       if (setNode) {
-        if (ts.isFunctionExpression(setNode) || ts.isArrowFunction(setNode)) {
-          if (!compileArrowAsCallback(ctx, fctx, setNode, { needsThis: true }))
-            fctx.body.push({ op: "ref.null.extern" });
-        } else {
-          if (!compileArrowAsCallback(ctx, fctx, setNode as unknown as ts.FunctionExpression, { needsThis: true }))
-            fctx.body.push({ op: "ref.null.extern" });
-        }
+        if (!emitAccessorFn(ctx, fctx, setNode as unknown as ts.FunctionExpression))
+          fctx.body.push({ op: "ref.null.extern" });
       } else if (setExpr) {
-        // set: identifierRef — resolve to function declaration and compile as callback
+        // set: identifierRef — resolve to function declaration and compile
         const setFuncNode = resolveExprToFuncNode(ctx, setExpr);
         if (setFuncNode) {
-          if (!compileArrowAsCallback(ctx, fctx, setFuncNode as unknown as ts.FunctionExpression, { needsThis: true }))
+          if (!emitAccessorFn(ctx, fctx, setFuncNode as unknown as ts.FunctionExpression))
             fctx.body.push({ op: "ref.null.extern" });
         } else {
           fctx.body.push({ op: "ref.null.extern" });
@@ -2536,16 +2611,14 @@ export function compileObjectDefineProperties(
           fctx.body.push({ op: "local.get", index: objExtLocal });
           compileExpression(ctx, fctx, ts.factory.createStringLiteral(propName), { kind: "externref" });
 
-          // Compile getter callback
+          // Compile getter (host-free closure under standalone, else JS callback; #1888 S5b)
           if (dpGetNode) {
-            if (!compileArrowAsCallback(ctx, fctx, dpGetNode as unknown as ts.FunctionExpression, { needsThis: true }))
+            if (!emitAccessorFn(ctx, fctx, dpGetNode as unknown as ts.FunctionExpression))
               fctx.body.push({ op: "ref.null.extern" });
           } else if (dpGetExpr) {
             const gFuncNode = resolveExprToFuncNode(ctx, dpGetExpr);
             if (gFuncNode) {
-              if (
-                !compileArrowAsCallback(ctx, fctx, gFuncNode as unknown as ts.FunctionExpression, { needsThis: true })
-              )
+              if (!emitAccessorFn(ctx, fctx, gFuncNode as unknown as ts.FunctionExpression))
                 fctx.body.push({ op: "ref.null.extern" });
             } else {
               fctx.body.push({ op: "ref.null.extern" });
@@ -2554,16 +2627,14 @@ export function compileObjectDefineProperties(
             fctx.body.push({ op: "ref.null.extern" });
           }
 
-          // Compile setter callback
+          // Compile setter (host-free closure under standalone, else JS callback; #1888 S5b)
           if (dpSetNode) {
-            if (!compileArrowAsCallback(ctx, fctx, dpSetNode as unknown as ts.FunctionExpression, { needsThis: true }))
+            if (!emitAccessorFn(ctx, fctx, dpSetNode as unknown as ts.FunctionExpression))
               fctx.body.push({ op: "ref.null.extern" });
           } else if (dpSetExpr) {
             const sFuncNode = resolveExprToFuncNode(ctx, dpSetExpr);
             if (sFuncNode) {
-              if (
-                !compileArrowAsCallback(ctx, fctx, sFuncNode as unknown as ts.FunctionExpression, { needsThis: true })
-              )
+              if (!emitAccessorFn(ctx, fctx, sFuncNode as unknown as ts.FunctionExpression))
                 fctx.body.push({ op: "ref.null.extern" });
             } else {
               fctx.body.push({ op: "ref.null.extern" });

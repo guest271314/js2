@@ -593,6 +593,86 @@ jobs:
             exit 1
           fi
 
+      # #1897 — HARD standalone-regression guard. Mirrors the host
+      # catastrophic guard above, but for the STANDALONE lane and at a much
+      # TIGHTER floor. Lives INSIDE the REQUIRED "merge shard reports" check so
+      # it blocks the merge queue with no branch-protection change (the
+      # standalone shards already run in the same 57×2 matrix and the merged
+      # standalone JSONL is already built two steps up; this step is just a
+      # diff + fail).
+      #
+      # Why a separate, tighter guard instead of folding into the host one:
+      # the standalone lane was silently regressed ~1,800 passes (+5,582
+      # compile_error) by a #1196 merge because the only hard guard looked at
+      # the host JSONL alone (cf. the gap this issue closes). The host guard's
+      # 200-test catastrophic threshold is far too loose to catch the more
+      # common case of a few-hundred-pass standalone slide.
+      #
+      # Floor-holding semantics: we diff against the standalone baseline that
+      # `promote-baseline` refreshes on every push to main, so the gate pins
+      # whatever floor standalone is CURRENTLY at — it never blocks a PR that
+      # leaves standalone unchanged (net 0) or improves it (net > 0). It only
+      # fails a PR that drops the standalone net below the tolerance. As the
+      # standalone fixes land, the baseline rises and the gate holds the new,
+      # higher floor automatically.
+      #
+      # Flake handling: `diff-test262.ts` already EXCLUDES `compile_timeout`
+      # transitions (the known standalone CI-load flake) from its
+      # "Regressions with wasm-hash change" count. So the net we gate on is
+      # already flake-free; STANDALONE_REGRESSION_TOLERANCE only absorbs
+      # residual baseline drift (corpus-version skew, env::-import
+      # nondeterminism). Measured real run-to-run standalone drift was 0
+      # regressions / +3 improvements, so 15 sits well above the noise floor.
+      #
+      # net = improvements − regressions_with_wasm_hash_change
+      # fail when net < −STANDALONE_REGRESSION_TOLERANCE.
+      - name: Standalone regression guard (#1897)
+        if: env.SHARDS_RAN == 'true'
+        env:
+          STANDALONE_REGRESSION_TOLERANCE: "15"
+        run: |
+          # Reuse the baselines clone from the catastrophic guard above (same
+          # job, same runner). Re-clone defensively if that step was skipped
+          # or the clone failed.
+          if [ ! -d /tmp/cat-baselines ]; then
+            git clone --depth=1 https://github.com/loopdive/js2wasm-baselines.git /tmp/cat-baselines 2>/dev/null || true
+          fi
+          if [ ! -f /tmp/cat-baselines/test262-standalone-current.jsonl ]; then
+            echo "::warning::No standalone baseline JSONL available — skipping standalone guard (first seed)."
+            exit 0
+          fi
+          if [ ! -s merged-reports/test262-standalone-results-merged.jsonl ]; then
+            echo "::error::standalone merged JSONL missing/empty — cannot evaluate standalone guard."
+            exit 1
+          fi
+          set +e
+          npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-standalone-current.jsonl \
+            merged-reports/test262-standalone-results-merged.jsonl --quiet > /tmp/standalone-diff.txt 2>&1
+          diff_exit=$?
+          set -e
+          if [ "$diff_exit" -gt 1 ]; then
+            echo "::error::diff-test262 (standalone) failed (exit $diff_exit) — cannot evaluate standalone guard."
+            cat /tmp/standalone-diff.txt
+            exit "$diff_exit"
+          fi
+          # Pull the flake-filtered regression count and the improvement count
+          # straight out of the diff report, then compute net ourselves so the
+          # threshold logic is explicit (the script's own exit code uses a
+          # net<0 gate with no drift tolerance, which is too strict for a
+          # gating check on the standalone lane).
+          REG=$(grep -oE 'Regressions with wasm-hash change: [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
+          IMP=$(grep -oE 'Improvements \(other → pass\): [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
+          CT=$(grep -oE 'Compile timeouts \(pass → compile_timeout\): [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
+          REG="${REG:-0}"; IMP="${IMP:-0}"; CT="${CT:-0}"
+          NET=$((IMP - REG))
+          echo "Standalone guard: improvements=${IMP}, wasm-change regressions=${REG} (compile_timeout flake=${CT}, excluded), net=${NET} (tolerance −${STANDALONE_REGRESSION_TOLERANCE})."
+          if [ "$NET" -lt "$((0 - STANDALONE_REGRESSION_TOLERANCE))" ]; then
+            echo "::error::STANDALONE test262 regression: net ${NET} (improvements ${IMP} − regressions ${REG}) is below the −${STANDALONE_REGRESSION_TOLERANCE} tolerance. The standalone lane regressed against the current baseline floor and this blocks the merge queue. compile_timeout flake is already excluded; this is a real standalone conformance drop. See #1897."
+            echo "----- standalone regression report (first 60 lines) -----"
+            head -60 /tmp/standalone-diff.txt
+            exit 1
+          fi
+
       # #1668 — HARD stale-baseline guard. The catastrophic guard above (and the
       # advisory regression-gate) are only as trustworthy as the baseline they
       # diff against. The baseline is refreshed per-merge by the promote-baseline

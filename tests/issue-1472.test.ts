@@ -913,6 +913,180 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__getOwnPropertyDescriptor\b/);
   });
 
+  // ── #1888 S5b — accessor LIVE get/set (the ~2.7k lever) ────────────────────
+  //
+  // Builds on the Slice-5 runtime layer: the call-site now compiles getter/setter
+  // as HOST-FREE closures into `__defineProperty_accessor` (under standalone,
+  // replacing the `__make_getter_callback` JS bridge), and the accessor arms in
+  // `__extern_get` / `__extern_set` invoke the stored `$get`/`$set` through the
+  // reserve/fill drivers `__call_accessor_get` / `__call_accessor_set` →
+  // `__call_fn_method_0/1` (receiver bound as `this` via `__current_this`,
+  // #1636-S1). §6.2.5.5 Get / §10.1.5.3 Set, own-accessor scope.
+
+  it("S5b: non-capturing getter returns its computed value (host-free, runs end-to-end)", async () => {
+    // The `o["seed"]=0` write forces the open-`$Object` runtime path (TS narrows
+    // a bare `{}` to a closed struct that bypasses the runtime — #1472 R2). The
+    // getter closure captures nothing, so the accessor dispatch (`__extern_get`
+    // FLAG_ACCESSOR arm → `__call_accessor_get` → `__call_fn_method_0`) runs the
+    // getter and returns its value with zero host imports.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "x", { get() { return 41 + 1; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    // Both the define and the get run native — no JS-host bridge.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__make_getter_callback")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5b: getter-only accessor — assignment is a sloppy no-op, does not create a data prop", async () => {
+    // §10.1.5.3: writing to an own accessor with no setter is a sloppy no-op;
+    // the subsequent get still routes through the getter (returns its constant),
+    // NOT a freshly-written data value.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "ro", { get() { return 42; }, configurable: true });
+          o.ro = 99;            // no setter → sloppy no-op (NOT a data write)
+          return o.ro as number; // getter still returns 42
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5b: data properties on the same object are unaffected by accessor arms", async () => {
+    // The FLAG_ACCESSOR branch must only fire for accessor entries; plain data
+    // reads/writes on sibling keys keep the fast data path.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "acc", { get() { return 100; }, configurable: true });
+          o.d = 7;
+          o.d = (o.d as number) + 35; // data update through __extern_set data path
+          return o.d as number;       // 42, not the accessor
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  // ── S5c — struct-accessor capturing-closure rework (#1888 S5c) ─────────────
+  // ROOT CAUSE (sd-1888): `Object.defineProperty(o,k,{get(){…}})` / `{get x(){}}`
+  // on `const o:any={}` route to the static-struct accessor path (object-ops.ts
+  // ~958-1171, #1629 S3), which compiles `${structName}_get_${prop}` as a BARE
+  // `(this) -> result` Wasm function with NO closure-capture environment. So a
+  // getter/setter body that closes over OUTER scope reads those captures as 0.
+  // The READ (property-access.ts:870) `call`s the getter and the WRITE
+  // (assignment.ts) the setter — but the compiled fn has no env to thread. S5c
+  // re-represents the accessor as a host-free CLOSURE (capturing env, call_ref-
+  // invoked with `this`), per arch-s5c's representation spec.
+  //
+  // These tests are RED until S5c lands (they assert the post-fix behavior):
+  // capturing getter, this-mutating setter round-trip, object-literal accessor.
+  // The non-capturing-getter / getter-only / data-unaffected cases above already
+  // pass and must STAY green (regression guard for the closure rework).
+  it("S5c: capturing getter returns the captured value", async () => {
+    // get(){return k} where k is an outer const — must observe k=42, not 0.
+    const source = `
+        export function run(): number {
+          const k = 42;
+          const o: any = {};
+          Object.defineProperty(o, "x", { get() { return k; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5c: capturing getter mixes captured + literal", async () => {
+    // get(){return n+37} with outer n=5 — must observe n=5 (→42), not 0 (→37).
+    const source = `
+        export function run(): number {
+          let n = 5;
+          const o: any = {};
+          Object.defineProperty(o, "x", { get() { return n + 37; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5c: setter observes the write via a captured cell; getter reads it back", async () => {
+    // set mutates outer `backing`; get reads it — round-trips through the same
+    // captured cell. o.v=21 → backing=42; o.v → 42.
+    const source = `
+        export function run(): number {
+          let backing = 0;
+          const o: any = {};
+          Object.defineProperty(o, "v", {
+            get() { return backing; },
+            set(nv: number) { backing = nv * 2; },
+            configurable: true,
+          });
+          o.v = 21;
+          return o.v as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
+    // The dominant accessor shape. Routes through compileObjectLiteralWithAccessors
+    // → emitObjectLiteralAccessorFn (S5b host-free closure) → __defineProperty_accessor.
+    // The remaining standalone failure was the accessor KEY emission using the `-1`
+    // string-constant sentinel via `global.get` ("u32 out of range: -1"); C5
+    // materializes the key via stringConstantExternrefInstrs (native-string inline
+    // under standalone). The capture-bearing closure was already correct from S5b.
+    const source = `
+        export function run(): number {
+          const k = 42;
+          const o: any = { get x() { return k; } };
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
   it("default target (gc) still routes accessor defineProperty through the host import", async () => {
     // Regression guard: standalone is opt-in. Default (gc) mode keeps the
     // JS-host descriptor sidecar for accessor descriptors.
@@ -1048,5 +1222,121 @@ describe("#1888 Slice 2 — standalone open-any method dispatch", () => {
       {},
     );
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  });
+});
+
+/**
+ * #1888 Slice 3 — standalone borrowed-method dispatch
+ * `Type.prototype.<m>.call(recv, …args)` (ES §7.3.14 Call).
+ *
+ * The host `__proto_method_call` is refused under --target standalone (no JS
+ * runtime). Per "compile away, don't emulate", the dispatch is done STATICALLY
+ * at the call site (calls.ts) because typeName + methodName are compile-time
+ * constants: the borrowed call is synthesised as `recv.<m>(…args)` and routed
+ * through the native member-call path — no new runtime helper, no funcIdx shift.
+ *
+ * Covered now: the String brand arm (synthesised → compileNativeStringMethodCall
+ * → native __str_* over a $NativeString-branded receiver) and the
+ * Object.prototype.hasOwnProperty arm (→ native __hasOwnProperty). Everything
+ * else (Array — rides on #6407; Object isPrototypeOf/propertyIsEnumerable/valueOf
+ * — a separate follow-on) refuses-loud with a #1888 cite, never silent-wrong.
+ *
+ * String-returning methods are asserted via a numeric projection (`.length` /
+ * `charCodeAt`) since a $NativeString export return is opaque to the bare
+ * `WebAssembly.instantiate` harness (same pattern as the Blocker-B Slice-2 tests).
+ */
+describe("#1888 Slice 3 — standalone Type.prototype.<m>.call borrowed dispatch", () => {
+  const STD = { target: "standalone" as const, nativeStrings: true };
+  type NumExports = Record<string, () => number>;
+
+  it("String.prototype.indexOf.call routes native (i32 result), zero host imports", async () => {
+    const r = await compile(`export function run(): number { return String.prototype.indexOf.call("abc", "b"); }`, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("String.prototype.includes.call routes native (bool result)", async () => {
+    const r = await compile(
+      `export function run(): number { return String.prototype.includes.call("hello", "ell") ? 1 : 0; }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("String.prototype.toUpperCase.call result is correct (charCodeAt projection)", async () => {
+    const r = await compile(
+      `export function run(): number { const s = String.prototype.toUpperCase.call("hi"); return s.charCodeAt(0); }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(72); // 'H'
+  });
+
+  it("String.prototype.slice.call result is correct (length + charCodeAt projection)", async () => {
+    const r = await compile(
+      `export function run(): number { const s = String.prototype.slice.call("hello", 1, 3); return s.length * 1000 + s.charCodeAt(0); }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(2101); // "el": len 2, 'e'=101
+  });
+
+  it("Object.prototype.hasOwnProperty.call routes to native __hasOwnProperty (own-only)", async () => {
+    const r = await compile(
+      `export function run(): number {
+        const o: any = {};
+        const k = "key";
+        o[k] = 1;
+        return (Object.prototype.hasOwnProperty.call(o, k) ? 1 : 0) +
+               (Object.prototype.hasOwnProperty.call(o, "absent") ? 10 : 0);
+      }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("Array.prototype.push.call refuses-loud (rides on #6407, no silent-wrong)", async () => {
+    const r = await compile(
+      `export function run(): number { const a: any = []; Array.prototype.push.call(a, 5); return 1; }`,
+      STD,
+    );
+    expect(r.success).toBe(false);
+    const joined = r.errors.map((e) => e.message).join("\n");
+    expect(joined).toMatch(/#1888 Slice 3\/4/);
+    expect(joined).toMatch(/#6407/);
+  });
+
+  it("Object.prototype.isPrototypeOf.call refuses-loud (deferred follow-on, not silent-wrong)", async () => {
+    const r = await compile(
+      `export function run(): number { const p: any = {}; const o: any = {}; return Object.prototype.isPrototypeOf.call(p, o) ? 1 : 0; }`,
+      STD,
+    );
+    expect(r.success).toBe(false);
+    expect(r.errors.map((e) => e.message).join("\n")).toMatch(/#1888 Slice 3\/4/);
+  });
+
+  it("default target (gc) still uses the host __proto_method_call bridge (dual-mode unchanged)", async () => {
+    const r = await compile(`export function run(): number { return String.prototype.indexOf.call("abc", "b"); }`, {});
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(true);
   });
 });

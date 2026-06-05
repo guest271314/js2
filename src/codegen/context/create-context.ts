@@ -71,6 +71,7 @@ export function createCodegenContext(
     classMethodSet: new Set(),
     deferredClassBodies: new Set(),
     classAccessorSet: new Set(),
+    structAccessorClosure: new Map(), // (#1888 S5c) struct accessors compiled as host-free closures
     staticAccessorSet: new Set(),
     staticMethodSet: new Set(),
     staticProps: new Map(),

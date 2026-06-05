@@ -508,6 +508,17 @@ export interface CodegenContext {
   deferredClassBodies: Set<string>;
   /** Set of "ClassName_propName" for getter/setter accessor properties */
   classAccessorSet: Set<string>;
+  /**
+   * (#1888 S5c) Set of "structName_propName" whose getter/setter is compiled as
+   * a host-free CLOSURE (capturing env, call_ref-invoked) rather than the bare
+   * `${struct}_get_${prop}(this)` fn. Populated by the C2 define-site when
+   * `S5C_STRUCT_ACCESSOR_CLOSURE` is on; the C3 read / C4 write sites dispatch
+   * through the per-(struct,prop) `$__acc_get/set_<struct>_<prop>` globals +
+   * the S5b `__call_accessor_get/set` drivers ONLY when this set has the key, so
+   * class-accessor emission (#459/#1680/#1681/#1605) stays on the proven bare-fn
+   * path. Maps the key → the get/set global indices.
+   */
+  structAccessorClosure: Map<string, { getGlobal?: number; setGlobal?: number }>;
   /** Set of "ClassName_propName" for static getter/setter accessor properties */
   staticAccessorSet: Set<string>;
   /** Set of "ClassName_methodName" for static methods (no self param) */
@@ -554,6 +565,18 @@ export interface CodegenContext {
    * a late-import index shift never desyncs the reservation.
    */
   protoIteratorDriverReserved?: boolean;
+  /**
+   * (#1888 S5b accessor live get/set) Set when `ensureObjectRuntime` reserves the
+   * `__call_accessor_get` / `__call_accessor_set` driver placeholders so the
+   * `__extern_get` / `__extern_set` accessor arms can `call` them. The bodies are
+   * filled in post-processing by `fillAccessorDrivers` AFTER
+   * `emitClosureMethodCallExportN(0/1)` registers `__call_fn_method_0/1` — same
+   * reserve/fill funcIdx-authority pattern as `protoIteratorDriverReserved`
+   * (proto-override.ts). Never reserved when the object runtime is not emitted
+   * (non-standalone), so host/GC modules stay byte-identical.
+   */
+  accessorGetDriverReserved?: boolean;
+  accessorSetDriverReserved?: boolean;
   /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via

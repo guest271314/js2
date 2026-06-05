@@ -830,3 +830,51 @@ so it can land dark and flip on after the regression gate is green.
       the closure *builder* is shared.
 - [ ] Per-instance distinct-capture accessor on one `(struct,prop)` refuses-loud
       with a `#1888 S5c` cite.
+
+## S5c — IMPLEMENTED (sd-1888, 2026-06-05, branch issue-1888-s5c-struct-closure)
+
+All 7 acceptance tests green (`tests/issue-1472.test.ts`), tsc clean, GC-mode
+byte-identical, `#1629` accessor suite 21 pass. Slices as-built:
+
+- **C1** `src/codegen/struct-accessor-closure.ts` (new): `buildAccessorClosure`
+  (lifts a getter/setter via `compileArrowAsClosure` → externref; shared with the
+  S5b open-`$Object` arm), `ensureStructAccessorGlobal` (idempotent per-(struct,prop)
+  nullable `(mut externref)` module global; returns the **absolute** Wasm global
+  index `numImportGlobals + mod.globals.length` — relative-index would mis-address
+  if any host global were imported). `ctx.structAccessorClosure: Map<string,
+  {getGlobal?; setGlobal?}>` added to context/types.ts + create-context.ts. Master
+  gate `S5C_STRUCT_ACCESSOR_CLOSURE` (now `true`).
+- **C2** define-site (object-ops.ts struct-accessor arm): under
+  `S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone`, lift each getter/setter +
+  `global.set` into its slot (the proven S5b `as unknown as ts.FunctionExpression`
+  cast for MethodDeclaration/Get-SetAccessorDeclaration node shapes).
+- **C3** read (property-access.ts primary instance read ~2426 + optional-chain ~870):
+  gate on `structAccessorClosure.get(key)?.getGlobal`; box recv→externref,
+  `global.get` the get-slot, `call __call_accessor_get(recv, getter)` (reserve via
+  `reserveAccessorGetDriver`), result externref. Class accessors (no
+  structAccessorClosure entry) keep the bare-fn path.
+- **C4** write (expressions/assignment.ts ~2334): box recv→externref, `global.get`
+  set-slot, tee the RHS (natural type) for the assignment result, box→externref,
+  `call __call_accessor_set(recv, setter, value)` (driver discards setter return
+  per §10.1.5.3); `=` evaluates to the RHS.
+- **C5** objlit: the objlit accessor path already routed standalone through
+  `emitObjectLiteralAccessorFn` → `compileArrowAsClosure` →
+  `__defineProperty_accessor` (S5b — correct). The remaining standalone `-1`
+  serializer failure was the accessor-KEY emission using the `-1` string-constant
+  sentinel via `global.get`; fixed by materializing the key with
+  `stringConstantExternrefInstrs` (native-string inline under standalone;
+  `global.get` under GC). The objlit getter/setter store arms in
+  `compileObjectLiteralForStruct`'s accessor loop are additive (typed-objlit
+  struct path).
+
+**Divergence from spec Q5 (signed off by tech-lead):** kept the struct arm
+**standalone-only** (`ctx.standalone`-gated), NOT "both modes". GC already handles
+captures via `__make_getter_callback`; migrating it buys zero standalone-goal value
+while taking on the full class-accessor regression surface (#459/#1680/#1681/#1605).
+GC-struct-arm migration is explicitly NOT a follow-up unless a real GC-mode
+capturing-accessor bug surfaces.
+
+**Sibling sites (carved as #129, NOT in this PR):** the same `-1`-sentinel
+`global.get` pattern exists at the objlit string-data-prop key (literals.ts ~399)
+and the Symbol-keyed-method fallback key (literals.ts ~461) — confirmed buggy under
+standalone, same `stringConstantExternrefInstrs` fix; separate small PR after S5c.

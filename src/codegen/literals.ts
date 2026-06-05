@@ -18,11 +18,13 @@ import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
   compileArrowAsCallback,
+  compileArrowAsClosure,
   emitMethodParamDefaults,
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -57,6 +59,11 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
+import {
+  S5C_STRUCT_ACCESSOR_CLOSURE,
+  buildAccessorClosure,
+  ensureStructAccessorGlobal,
+} from "./struct-accessor-closure.js";
 
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
@@ -474,29 +481,35 @@ function compileObjectLiteralWithAccessors(
       if (pair.firstIdx !== i) continue; // wait for the actual first slot
       emittedAccessors.add(propName);
 
-      addStringConstantGlobal(ctx, propName);
-      const keyGlobal = ctx.stringGlobalMap.get(propName);
-      if (keyGlobal === undefined) continue;
-
       // Stack: [obj, key, getterCb | null, setterCb | null, flags]
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      // (#1888 S5c / C5) Materialize the accessor key via the dual-mode helper.
+      // Under standalone/nativeStrings, `addStringConstantGlobal` records the
+      // `-1` sentinel (no host string-constant global), so the old
+      // `global.get <stringGlobalMap.get(prop)>` emitted `global.get -1` →
+      // "u32 out of range: -1" at serialize time (the objlit-accessor standalone
+      // defect). `stringConstantExternrefInstrs` emits the native-string inline
+      // path under standalone and the host `global.get` under GC.
+      addStringConstantGlobal(ctx, propName);
+      for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+        fctx.body.push(instr);
+      }
 
-      // Getter callback (or ref.null.extern when only setter is defined)
+      // Getter (or ref.null.extern when only setter is defined).
+      // (#1888 S5b) Under standalone, compile as a HOST-FREE closure so the
+      // stored $PropEntry.$get holds a real callable closure that __extern_get's
+      // accessor arm dispatches via __call_accessor_get → __call_fn_method_0
+      // (receiver bound as `this` through __current_this). Else JS-host callback.
       if (pair.getter) {
-        const ok = compileArrowAsCallback(ctx, fctx, pair.getter as unknown as ts.FunctionExpression, {
-          needsThis: true,
-        });
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression);
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }
 
-      // Setter callback
+      // Setter
       if (pair.setter) {
-        const ok = compileArrowAsCallback(ctx, fctx, pair.setter as unknown as ts.FunctionExpression, {
-          needsThis: true,
-        });
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression);
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -517,6 +530,30 @@ function compileObjectLiteralWithAccessors(
 
   fctx.body.push({ op: "local.get", index: objLocal });
   return { kind: "externref" };
+}
+
+/**
+ * (#1888 S5b) Compile an object-literal accessor getter/setter and leave an
+ * externref on the stack for `__defineProperty_accessor`. Standalone →
+ * host-free closure (`compileArrowAsClosure`, converted to externref); JS-host /
+ * GC → `compileArrowAsCallback` with `needsThis: true` (unchanged
+ * `__make_getter_callback` bridge). Returns `false` when the caller should push
+ * `ref.null.extern`. Mirrors `emitAccessorFn` in object-ops.ts.
+ */
+function emitObjectLiteralAccessorFn(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  fn: ts.FunctionExpression | ts.ArrowFunction,
+): boolean {
+  if (ctx.standalone) {
+    const closureType = compileArrowAsClosure(ctx, fctx, fn);
+    if (!closureType) return false;
+    if (closureType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    return true;
+  }
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
 }
 
 /**
@@ -1383,6 +1420,39 @@ export function compileObjectLiteralForStruct(
       const accessorKey = `${typeName}_${propName}`;
       ctx.classAccessorSet.add(accessorKey);
 
+      // (#1888 S5c / C5) Object-literal `{ get x() {} }` STORE arm — land dark
+      // behind `S5C_STRUCT_ACCESSOR_CLOSURE`. Mirror the C2 define-site: lift the
+      // getter as a host-free closure (captures baked into `$self`) and store it
+      // in the per-(struct,prop) global so the C3 read site routes through the
+      // shared __call_accessor_get driver. `fctx` here is the ENCLOSING function
+      // (the object literal is built inline), so `compileArrowAsClosure`
+      // correctly captures the outer scope. The bare-fn getter below still
+      // compiles (harmless); the read site prefers the closure when the global
+      // exists. Additive + side-effect-free when the flag is off.
+      // (#1888 S5c / C5) Object-literal `{ get x() {} }` STORE arm. Lift the
+      // getter as a host-free closure (captures baked into `$self`) and store it
+      // in the per-(struct,prop) global so the C3 read site routes through the
+      // shared __call_accessor_get driver. `fctx` here is the ENCLOSING function
+      // (the object literal is built inline), so `compileArrowAsClosure` captures
+      // the outer scope correctly. ADDITIVE: the bare `${struct}_get_${prop}` fn
+      // below still compiles so the objlit struct shape stays valid (downstream
+      // struct construction references its funcIdx); the read site just prefers
+      // the closure when the global exists. Side-effect-free when the flag is off.
+      // (NOTE: the objlit-standalone bare-fn path has a SEPARATE pre-existing
+      // "u32 out of range: -1" serialization defect via
+      // `promoteAccessorCapturesToGlobals` — out of scope for the S5c closure
+      // rework; tracked by the still-RED objlit test.)
+      if (S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone) {
+        const getGlobalIdx = ensureStructAccessorGlobal(ctx, typeName, propName, "get");
+        if (buildAccessorClosure(ctx, fctx, prop as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+          ctx.structAccessorClosure.get(`${typeName}_${propName}`)!.getGlobal = undefined;
+        }
+      }
+
       const getterName = `${typeName}_get_${propName}`;
       const getterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
       const sig = ctx.checker.getSignatureFromDeclaration(prop);
@@ -1470,6 +1540,22 @@ export function compileObjectLiteralForStruct(
       if (propName === undefined) continue;
       const accessorKey = `${typeName}_${propName}`;
       ctx.classAccessorSet.add(accessorKey);
+
+      // (#1888 S5c / C5) Object-literal setter STORE arm — see the getter arm
+      // above. Lift the setter closure and store it in the per-(struct,prop)
+      // set-slot so the C4 write site routes through __call_accessor_set.
+      // ADDITIVE: the bare `${struct}_set_${prop}` fn below still compiles to keep
+      // the objlit struct shape valid.
+      if (S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone) {
+        const setGlobalIdx = ensureStructAccessorGlobal(ctx, typeName, propName, "set");
+        if (buildAccessorClosure(ctx, fctx, prop as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+          ctx.structAccessorClosure.get(`${typeName}_${propName}`)!.setGlobal = undefined;
+        }
+      }
 
       const setterName = `${typeName}_set_${propName}`;
       const setterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];

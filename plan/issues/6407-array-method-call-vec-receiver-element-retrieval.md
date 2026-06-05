@@ -1,19 +1,69 @@
 ---
 id: 6407
 title: "Array.prototype.<m>.call(receiver, cb) never reads elements of a compiled $Vec / open-object receiver"
-status: ready
+status: done
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-06-05
+completed: 2026-06-05
 priority: high
 feasibility: medium
 task_type: bugfix
 area: codegen+runtime
 language_feature: array-methods
 goal: correctness
-sprint: 59
+sprint: 61
 blocks: [1828, 1830, 1831, 1832]
 ---
 # #6407 — `Array.prototype.<m>.call(receiver, …)` can't read elements of a compiled receiver
+
+## RESOLUTION (sd-s2, 2026-06-05) — ALREADY FIXED ON MAIN + regression-pinned
+
+The JS-host element-retrieval defect this issue describes is **already
+resolved on current `main`** (HEAD `7a14a48a2`). The dispatch routes a
+compiled-`$Vec` `.call` receiver to the element-aware typed
+`compileArrayMethodCall` path — verified by inspecting emitted imports:
+`Array.prototype.findIndex.call([10,20,30], …)`, `indexOf.call`, and
+`map.call` emit **neither** `__proto_method_call` **nor** `__extern_get_idx`,
+i.e. they no longer reach the opaque-externref host bridge. The headline
+symptom (`findIndex.call([10,20,30], x=>x===20)` → -1) and every other case
+the spec lists now agree with native JS. This was fixed by the array-method
+work that landed since the spec was written 2026-06-04 (the
+`#1828`/`#1830`/`#1831`/`#1832` family + dispatch routing).
+
+Verified working (all run through `assertEquivalent` = compile-to-Wasm vs
+native-JS equality) in **`tests/equivalence/issue-6407.test.ts`** (17 cases,
+added by this issue as a regression pin):
+
+- `findIndex` / `find` / `indexOf` / `includes` / `forEach` / `every` / `some`
+  / `map` / `filter` `.call` on a dense `$Vec` array literal `[10,20,30]`;
+- `findIndex` / `indexOf` `.call` on a **typed `number[]` variable** (the
+  `__vec_`/`__arr_` bailout path the spec's §(A) targeted — no longer broken);
+- `findIndex` `.call` on an **`any`-typed array** (the generic loop path);
+- `indexOf` `.call` on an **open-object numeric-key array-like**
+  `{0:10,1:20,2:30,length:3}` (the #6407b candidate — also working).
+
+**Slices 1 & 2 (JS-host dispatch + host backstop) are therefore moot** — no
+code change is needed for the JS-host path, only the regression test.
+
+### Standalone (`--target wasi` / `nativeStrings`) — NOT a #6407 gap
+
+The spec's §(C)/Slice 3 native `$Vec` arm: in `nativeStrings` mode the
+array-callback element boxing still routes through host `__box_number` /
+`__unbox_number` imports — **but this is true for a plain `arr.findIndex(...)`
+direct method call too**, not just the `.call` borrowed form. So it is a
+general standalone-array-callback boxing gap, NOT a `$Vec`-element-read gap
+specific to `Array.prototype.<m>.call`. It does not belong to #6407's thesis
+and is left to the broader standalone-array-callback boxing work. Noted in the
+test file header.
+
+### Impact on dependents
+
+`#1828` / `#1830` / `#1831` / `#1832` are now **verifiable** through this path
+(their fixes already merged; `#1830` is `done`, the other three have merged
+fix commits but stale `ready` status — a TaskList/issue-status reconcile, not
+new work). The combined String+Array borrowed-method brand table (#1888 follow-on)
+can ride on the existing element read for the Array arm — no #6407 impl gate
+remains for it in JS-host mode.
 
 ## Symptom (dev-w1, 2026-06-04)
 
