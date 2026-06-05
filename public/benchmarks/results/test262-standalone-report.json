@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T03:23:05.641Z",
-  "baseline_generated_at": "2026-06-05T03:23:05Z",
-  "baseline_sha": "e21493350a86457819be1f929173adb0b32eeac8",
+  "timestamp": "2026-06-05T03:46:06.067Z",
+  "baseline_generated_at": "2026-06-05T03:46:05Z",
+  "baseline_sha": "c791d7434d53a1226f19524c6e80a494aef63f62",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1226,7 +1226,7 @@
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/compare/builtin.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
@@ -1253,22 +1253,22 @@
           "total": 94
         },
         "error_categories": {
-          "other": 61,
           "runtime_error": 1,
+          "other": 61,
           "wasm_compile": 7,
           "assertion_fail": 24,
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype-from-newtarget.js",
           "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
+          "test/built-ins/DisposableStack/prototype-from-newtarget.js",
           "test/built-ins/AsyncDisposableStack/prototype/use/this-not-object-throws.js",
           "test/built-ins/DisposableStack/prototype/adopt/this-does-not-have-internal-disposablestate-throws.js",
           "test/built-ins/AsyncDisposableStack/prototype/Symbol.asyncDispose.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: '__getPrototypeOf' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
+          "other:L#:## Codegen error: '__getPrototypeOf' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## Codegen error: '__getOwnPropertyDescriptor' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to stru"
@@ -1409,23 +1409,23 @@
         "error_categories": {
           "assertion_fail": 113,
           "other": 1692,
-          "null_deref": 9,
           "wasm_compile": 163,
+          "null_deref": 9,
           "runtime_error": 17,
           "illegal_cast": 5
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
@@ -1775,15 +1775,15 @@
         "sample_files": [
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-94.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-94.js",
           "test/built-ins/Object/defineProperty/15.2.3.6-4-432.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');",
           "other:L#:## Codegen error: '__defineProperties' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/s",
-          "other:L#:## Codegen error: '__hasOwnProperty' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
+          "other:L#:## Codegen error: '__hasOwnProperty' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "assertion_fail:returned # — assert ## at L#: verifySetFunc = value;"
         ]
       },
@@ -1962,15 +1962,15 @@
           "test/language/function-code/10.4.3-1-48-s.js",
           "test/built-ins/Function/S15.3.5_A3_T1.js",
           "test/language/function-code/10.4.3-1-83-s.js",
-          "test/built-ins/Function/StrictFunction_reservedwords_with.js",
-          "test/built-ins/Function/15.3.5.4_2-9gs.js"
+          "test/built-ins/Function/15.3.5.4_2-9gs.js",
+          "test/built-ins/Function/StrictFunction_reservedwords_with.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
           "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\"",
           "assertion_fail:returned # — assert ## at L#: assert((function () {return Function(\"\\\"use strict\\\";return f();\")();})());",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');"
         ]
       },
       {
