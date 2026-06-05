@@ -198,6 +198,85 @@ acceptance):**
   equivalence failures are **pre-existing on main** (confirmed by swapping
   main's `literals.ts`), unrelated to this change.
 
+## #124 co-land plan (sd-s2, 2026-06-05) — REQUIRED before #1901 re-push
+
+**Why co-land:** the standalone diff of #1901-alone is NET **-205** (+61, **-266**;
+gate #1897 correctly blocked PR #1241). All 266 regressions are ToPrimitive on a
+user `$Object` with own coercion methods: on main these object literals compile
+to a **closed struct whose valueOf/Symbol.toPrimitive ARE callable** (pass
+today); #1901 routes them to `$Object` which has **no ToPrimitive dispatch**, so
+it forfeits the working coercion. Routing is all-or-nothing → #1901 + #124 are
+inseparable (= the original ~2,300 plateau-breaker). Regression breakdown
+(`plan/agent-context/1241-regression-analysis.md`): 174 "dereferencing a null
+pointer" (abrupt-completion: `{valueOf(){throw}}` — needs **dispatch only**, the
+user throw propagates via `__apply_closure`), 42 "Cannot convert object to
+primitive" (needs the **TypeError-throw** path), 5 "returned 2", 1 not-iterable.
+
+**No S6b dependency (confirmed):** `object-runtime.ts:3346 __extern_method_call`
+already does `ref.test $Object → __apply_closure(__extern_get(recv,name), recv,
+args)` (S1+S2). S6b is only builtin static-method *value-reads* via
+`__get_builtin` — orthogonal.
+
+**SHARPER ROOT CAUSE (empirically isolated 2026-06-05):** method **storage is
+NOT the gap** — the regressing literals are `{valueOf: function(){…}}` /
+`{valueOf: () => …}` (PropertyAssignment, not MethodDeclaration), which #1901
+ALREADY stores as a callable closure on the `$Object`. Proof under standalone:
+`{foo: ()=>7}` → `o.foo()` returns **7** (generic `__extern_method_call` finds +
+calls the stored closure). The bug is **name-specific call-site interception**:
+`o.valueOf()` → NaN, `o.toString()` → REFUSED `__extern_toString`, `(o as
+number)+0` / `o*1` → NaN. The names `valueOf`/`toString` are routed by
+wrapper/string/struct-specific handlers in `calls.ts` (the `method ===
+"valueOf"|"toString"` arms ~L6043/7025/7270 + the `__extern_toString` path) and
+by the ToPrimitive coercion sites, ALL of which bypass the generic
+`__extern_method_call` that already works for arbitrary names. So the user's own
+`valueOf`/`toString` stored on the `$Object` is never reached.
+
+**The fix (surgical, no new runtime helper, no method-storage change):** when the
+receiver/operand is a `$Object` externref under `ctx.standalone`, route
+`valueOf`/`toString` member-CALLS and the ToPrimitive coercion through the
+generic `__extern_method_call(obj, name, [])` (proven working) instead of the
+name-specific builtin paths. Member-call sites: the `valueOf`/`toString` arms in
+calls.ts must, before taking the wrapper/`__extern_toString` path, check
+`receiver is $Object externref (standalone)` → emit `__extern_method_call`.
+ToPrimitive coercion (type-coercion.ts `toPrimitiveHostCallInstrs` standalone
+branch / the #1806 walkers): for a `$Object` operand, dispatch `valueOf` then
+`toString` (string hint: reverse) via `__extern_method_call`, validate primitive
+(`!ref.test $Object`), else `emitThrowTypeError(... "Cannot convert object to
+primitive value")` (native standalone throw, no host import).
+
+(Original "method storage" note retained for the MethodDeclaration-shorthand
+`{valueOf(){…}}` form — that does NOT route to `$Object` today (#1901's `.every`
+guard excludes MethodDeclaration), so it stays a closed struct and is NOT in the
+266 regressions. A separate closed-struct `{f(){return 7}}`→0 bug exists but is
+pre-existing + out of scope.)
+
+2. **ToPrimitive dispatch over `$Object`** — analog of the closed-struct walkers
+   (`tryToStringFallback` numeric / `tryStructToString` string) but for an
+   externref `$Object` operand, at the CALL SITE (where `emitThrowTypeError` is
+   available — native standalone TypeError, no host import; see
+   destructuring-params.ts:246). Per §7.1.1/§7.1.1.1, for the `$Object` operand:
+   try (number hint or default) `valueOf` then `toString`; (string hint)
+   `toString` then `valueOf`; each via `__extern_method_call(obj, name, emptyArgs)`.
+   If the method is absent it returns the undefined sentinel → skip to next. If a
+   result is a primitive (not `ref.test $Object`) → use it. If neither yields a
+   primitive → `emitThrowTypeError(ctx, fctx, "Cannot convert object to primitive
+   value")`. (Symbol.toPrimitive own-key arm: dispatch `@@toPrimitive` first when
+   present — covers the well-known-symbol method literals; keep behind the same
+   primitive-validate path.)
+
+   **Wiring:** simplest blast-radius is to make `__to_primitive` resolve natively
+   under `ctx.standalone` (add to `OBJECT_RUNTIME_HELPER_NAMES`, drop
+   `refuseStandaloneToPrimitive` for it) with a `registerNative` body that calls
+   `__extern_method_call` per the order above — so the many existing
+   `toPrimitiveHostCallInstrs` call sites are unchanged. The TypeError path inside
+   a runtime helper needs the #1104 native-Error throw (verify reachable from a
+   helper body; if not, do the walk at the call site instead where
+   `emitThrowTypeError` is in scope).
+
+**Validation gate:** re-run the standalone diff (baseline vs new head) BEFORE any
+re-push; require NET POSITIVE past the -15 tolerance. Expect the 266 to flip +
+the +61 #1901 already gains. Hold #1241 BLOCKED (no enqueue) until positive.
+
 ### Follow-ons carved out of #1901
 
 1. **wasi object-runtime extension** — route `OBJECT_RUNTIME_HELPER_NAMES`
