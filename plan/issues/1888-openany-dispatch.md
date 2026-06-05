@@ -481,3 +481,53 @@ matters only where noted**; (b)-path slices are the high-value core.
   `src/codegen/property-access.ts` L1452 (`Builtin.prop` read).
 - `setPrototypeOf` stub: `src/codegen/expressions/calls.ts` ~L3857.
 - Brand-arm element read shared with #6407 receiver-element-retrieval spec.
+
+## Slice 0 — fast-path audit (sd-1472c-recover, 2026-06-05)
+
+Read-only audit of every dispatch-helper call site + the standalone refusal
+gate, before any runtime is added. No code change in this audit; it scopes
+Slices 1–7 to the true open-receiver residual.
+
+### Current standalone gate
+`STANDALONE_REFUSED_IMPORT` (`src/codegen/expressions/late-imports.ts:52`)
+refuses-loud, under `ctx.standalone`, any name matching
+`__extern_*` / `__object_*` / `__defineProperty*` / `__getOwn*` /
+`__getPrototypeOf` / `__proto_method_call` / `__get_builtin` / `__proxy_*`
+(plus the explicit `__new_plain_object` / `__delete_property` /
+`__hasOwnProperty` / `__propertyIsEnumerable` / `__isPrototypeOf` /
+`__object_hasOwn`). The check at L308 runs **before** the refusal at L317, so
+adding a name to `OBJECT_RUNTIME_HELPER_NAMES` flips it from refuse → native
+route. So all three dispatch helpers (`__extern_method_call`,
+`__get_builtin`, `__proto_method_call`) currently **refuse-loud** standalone —
+no leaked imports today; the gap is "compiles to a #1472-Phase-B refusal",
+not "invalid Wasm".
+
+### Dispatch-helper call sites (the host shim is requested here)
+| Site | Helper | Case (D1) | Notes |
+| --- | --- | --- | --- |
+| `calls.ts:7327-7392` (generic `obj.m(args)`) | `__extern_method_call` (+`__js_array_new`/`__js_array_push` for args, +`__get_builtin` when receiver is a `BUILTIN_CLASS_NAMES` identifier) | (b) open user object + (c) named builtin receiver | **The big lever.** Args list built with the JS-host array builders — Slice 2 branches this on `ctx.standalone` to `ensureObjVecBuilders` (native `$ObjVec`, exactly the Object.assign Slice-3 pattern), then calls native `__extern_method_call`. `__apply_closure` (Slice 1) reads the `$ObjVec` via `__extern_length`/`__extern_get_idx` (both already native). |
+| `calls.ts:1072` | `__extern_method_call` | (b) | wrapper-reassignment dispatch (`o.toString = fn; o.toString()`). Naturally handled once the open `$Object` user-method path lives (the reassigned fn is an own prop). |
+| `calls.ts:4460-4466` | `__get_builtin` | (c) | builtin-as-value inside a call arg. Slice 6. |
+| `calls.ts:2820-2944` | `__proto_method_call` | borrowed-method | `Array.prototype.m.call(recv, …)`. Slice 3. |
+| `property-access.ts:1407-1468` | `__get_builtin` (+`__extern_get`) | (c) | `Builtin.prop` read as a value. Slice 6. |
+| `new-super.ts:129-192` | `__extern_method_call` | (b)/super | `super.method(args)`. Routes through the same native path once Slice 2 lands; super-receiver threading already correct. |
+
+### Statically-classifiable fast paths (case (a)) — NOT gated against standalone
+Audited the array/string/Map/Set method handlers and `tryExternClassMethodOnAny`
+in `calls.ts` / `array-methods.ts` / `property-access.ts`: the case-(a) static
+fast paths emit their native helpers directly and are **not** blanket-gated on
+`!ctx.standalone` — they already work standalone for a statically-typed
+receiver (`[].map`, `"s".slice`, `Math.max`). No Slice-0 re-route needed; the
+residual is genuinely the open-`any` receiver (case b) + named-builtin-as-value
+(case c). This confirms the spec's R2: Slice 2 tests MUST use computed-key
+writes + `any` function params to force the open path (TS narrows a literal
+`{}` to a closed struct that bypasses the runtime), exactly as S3 did.
+
+### Conclusion / sequencing confirmed
+- Slice 1 (`__apply_closure`) + Slice 2 (`__extern_method_call` open-`$Object`
+  path) are the high-value core and unblock the bare-method presence forms
+  (`o.hasOwnProperty(k)` etc.) the earlier Phase C slices punted.
+- Per **R1**, land Slices 1+ only **after** #1194/#1195/#1196 merge (they share
+  the `OBJECT_RUNTIME_HELPER_NAMES` tail + `tests/issue-1472.test.ts`). As of
+  this audit #1195/#1196 are CI-green + enqueued in the merge queue (behind
+  #1205); start Slice 1 once they land to avoid a shared-file re-conflict.
