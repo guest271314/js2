@@ -15,6 +15,7 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,
@@ -3088,14 +3089,21 @@ function compileArrayIteratorMethod(
   methodName: string,
 ): ValType | null {
   if (ctx.standalone || ctx.wasi) {
-    reportError(
-      ctx,
-      propAccess,
-      `Codegen error: #681 standalone/WASI Array.prototype.${methodName}() still requires JS-host iterator helpers; ` +
-        "use direct array for-of/destructuring for the current pure-Wasm slice " +
-        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose).",
-    );
-    return null;
+    // #1320 Slice 1: native iterator bridge. Build a canonical externref `$Vec`
+    // (box each element here, where we have an fctx), wrap it in an `$IterRec`
+    // via the native `__iterator`. `.entries()` (whose elements are `[i, value]`
+    // pair vecs) is deferred to a later slice — keep the explicit refusal so it
+    // falls through to the iterator path rather than silently misbehaving.
+    if (methodName === "entries") {
+      reportError(
+        ctx,
+        propAccess,
+        `Codegen error: #1320 standalone/WASI Array.prototype.entries() (pair-shaped iterator) ` +
+          "is deferred to a later iterator-bridge slice; .values()/.keys() and direct for-of are native.",
+      );
+      return null;
+    }
+    return compileNativeArrayIterator(ctx, fctx, propAccess, methodName);
   }
 
   addArrayIteratorImports(ctx);
@@ -3110,6 +3118,132 @@ function compileArrayIteratorMethod(
   // Call the host import: (externref) → externref
   fctx.body.push({ op: "call", funcIdx });
   return { kind: "externref" };
+}
+
+/**
+ * #1320 Slice 1 — native standalone/WASI `arr.values()` / `arr.keys()`.
+ *
+ * Builds a canonical externref `$Vec` from the receiver array (boxing each
+ * element here, where we have an `fctx`), then constructs an `$IterRec` over it
+ * and returns it as externref — the same value shape the consumer expects from
+ * the JS-host `__array_values`/`__array_keys` import. `.values()` boxes each
+ * element; `.keys()` emits the index as a boxed number. `.entries()` is handled
+ * by the caller (deferred refusal).
+ */
+function compileNativeArrayIterator(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  methodName: string,
+): ValType | null {
+  ensureNativeIteratorRuntime(ctx);
+  const iterRecTypeIdx = getOrRegisterIterRecType(ctx);
+  const canonVecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+  const canonArrTypeIdx = getArrTypeIdxFromVec(ctx, canonVecTypeIdx);
+
+  // Compile the receiver to discover its vec type.
+  const recvType = compileExpression(ctx, fctx, propAccess.expression);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    reportError(ctx, propAccess, `Codegen error: #1320 ${methodName}() receiver is not an array`);
+    return null;
+  }
+  const srcVecTypeIdx = recvType.typeIdx;
+  const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
+  if (srcArrTypeIdx < 0) {
+    reportError(ctx, propAccess, `Codegen error: #1320 ${methodName}() receiver is not a vec`);
+    return null;
+  }
+  const srcArrDef = ctx.mod.types[srcArrTypeIdx];
+  const srcElemType: ValType = srcArrDef && srcArrDef.kind === "array" ? srcArrDef.element : { kind: "externref" };
+
+  // locals: srcVec, len, i, out (canonical externref data array)
+  const srcVecLocal = allocLocal(fctx, `__iter_src_${fctx.locals.length}`, recvType);
+  const lenLocal = allocLocal(fctx, `__iter_len_${fctx.locals.length}`, { kind: "i32" });
+  const iLocal = allocLocal(fctx, `__iter_i_${fctx.locals.length}`, { kind: "i32" });
+  const outLocal = allocLocal(fctx, `__iter_out_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: canonArrTypeIdx,
+  });
+
+  fctx.body.push({ op: "local.set", index: srcVecLocal });
+  // len = srcVec.length
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: lenLocal });
+  // out = new externref[len]
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: canonArrTypeIdx });
+  fctx.body.push({ op: "local.set", index: outLocal });
+  // i = 0
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
+
+  // while (i < len) { out[i] = box(methodName === "keys" ? i : srcVec.data[i]); i++; }
+  const loopBody: Instr[] = [];
+  // i >= len -> break
+  loopBody.push({ op: "local.get", index: iLocal });
+  loopBody.push({ op: "local.get", index: lenLocal });
+  loopBody.push({ op: "i32.ge_s" });
+  loopBody.push({ op: "br_if", depth: 1 });
+  // out[i] = ...
+  loopBody.push({ op: "local.get", index: outLocal });
+  loopBody.push({ op: "ref.as_non_null" } as Instr);
+  loopBody.push({ op: "local.get", index: iLocal });
+  // Build the element value to box into the canonical externref slot.
+  const elemInstrs = collectElemInstrs(ctx, fctx, () => {
+    if (methodName === "keys") {
+      // value = box(f64(i))   — keys yields the numeric index
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
+    } else {
+      // value = box(srcVec.data[i])  — values yields the element
+      fctx.body.push({ op: "local.get", index: srcVecLocal });
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "array.get", typeIdx: srcArrTypeIdx });
+      if (srcElemType.kind !== "externref") {
+        coerceType(ctx, fctx, srcElemType, { kind: "externref" });
+      }
+    }
+  });
+  loopBody.push(...elemInstrs);
+  loopBody.push({ op: "array.set", typeIdx: canonArrTypeIdx } as Instr);
+  // i++
+  loopBody.push({ op: "local.get", index: iLocal });
+  loopBody.push({ op: "i32.const", value: 1 });
+  loopBody.push({ op: "i32.add" });
+  loopBody.push({ op: "local.set", index: iLocal });
+  loopBody.push({ op: "br", depth: 0 });
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
+
+  // Result = the canonical externref `$Vec`, wrapped to externref. Per the
+  // #1320 Slice-1 producer/consumer contract (Option 1): the producer hands
+  // back the canonical vec and the *consumer* (`__iterator`, called from the
+  // for-of driver) wraps it into the `$IterRec`. So `arr.values()`/`.keys()`
+  // as a value is a canonical externref vec; the for-of consumer does
+  // `__iterator(vec)` → IterRec → `__iterator_next`. Single wrap point.
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: outLocal });
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: canonVecTypeIdx });
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  void iterRecTypeIdx; // type registered eagerly via ensureNativeIteratorRuntime
+  return { kind: "externref" };
+}
+
+/** Capture instrs emitted by `emit` into a fresh array (mirrors collectInstrs). */
+function collectElemInstrs(_ctx: CodegenContext, fctx: FunctionContext, emit: () => void): Instr[] {
+  const before = fctx.body.length;
+  emit();
+  return fctx.body.splice(before);
 }
 
 /** Helper: emit array.copy instruction.

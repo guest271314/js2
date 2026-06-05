@@ -36,6 +36,7 @@ import {
   valTypesMatch,
 } from "../shared.js";
 import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
+import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import {
   compileArrayDestructuring,
   arrayDstrNeedsIdentity,
@@ -3785,21 +3786,21 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     }
   }
 
-  // Fallback: host-delegated iterator protocol
+  // #1320 Slice 1: standalone/WASI binds the iterator protocol to emitted Wasm
+  // fns (no JS host). `ensureNativeIteratorRuntime` registers `__iterator` /
+  // `__iterator_next` / `__iterator_return` / `__iterator_rest`; the same
+  // consumer code below then drives the loop byte-identically to the host path.
+  // The native `__iterator` expects a canonical externref `$Vec` (the producer,
+  // e.g. `arr.values()`, builds one); for other shapes (generic class iterables,
+  // Map/Set) this is a later slice — `__iterator`'s `ref.cast` traps loudly
+  // rather than silently misbehaving, which is acceptable for Slice 1.
   if (ctx.standalone || ctx.wasi) {
-    fctx.body.length = bodyLenBefore;
-    restoreLocals(fctx, localsSnap); // #1847
-    reportError(
-      ctx,
-      stmt,
-      "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
-        "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
-        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
-    );
-    return;
+    ensureNativeIteratorRuntime(ctx);
+    // fall through to the shared __iterator/__iterator_next consumer path below
   }
 
-  // Ensure iterator host imports are registered before using them
+  // Ensure iterator host imports are registered before using them (no-op in
+  // standalone — ensureNativeIteratorRuntime already populated funcMap).
   addIteratorImports(ctx);
 
   // Coerce to externref if the iterable is a struct ref (GC type).
