@@ -1,0 +1,312 @@
+# #1241 (#1901) standalone regression analysis — baseline sha 9a1292e6f vs PR head f6be0610c
+
+- NET REAL DELTA: **-205** (+61 new passes, -266 regressions; 0 compile_timeout-excluded)
+- Gate that blocked: **Standalone regression guard (#1897)**, tolerance -15, in `merge shard reports` job (run 27020114809)
+- Root cause: #1901 any-context→$Object routing replaces working closed-struct valueOf/Symbol.toPrimitive coercion with $Object path that has NO ToPrimitive dispatch wired (#124).
+
+## Regressed tests (all 266), grouped by directory:
+-  98  test/language/expressions/object/
+-  38  test/language/statements/for-await-of/
+-  31  test/language/statements/for-of/
+-  21  test/built-ins/Date/prototype/
+-  19  test/language/expressions/assignment/
+-  10  test/built-ins/Array/prototype/
+-   8  test/built-ins/DataView/prototype/
+-   4  test/built-ins/TypedArrayConstructors/from/
+-   4  test/language/expressions/class/
+-   4  test/language/statements/class/
+-   2  test/language/types/object/
+-   2  test/built-ins/Promise/any/
+-   1  test/language/expressions/optional-chaining/
+-   1  test/built-ins/TypedArrayConstructors/ctors/
+-   1  test/built-ins/Math/max/
+-   1  test/built-ins/ArrayBuffer/return-abrupt-from-length.js/
+-   1  test/language/expressions/arrow-function/
+-   1  test/built-ins/DataView/return-abrupt-tonumber-byteoffset.js/
+-   1  test/built-ins/Reflect/ownKeys/
+-   1  test/language/statements/function/
+-   1  test/language/statements/for/
+-   1  test/language/statements/try/
+-   1  test/language/expressions/logical-not/
+-   1  test/language/statements/async-generator/
+-   1  test/built-ins/Array/from/
+-   1  test/built-ins/Object/keys/
+-   1  test/built-ins/Object/defineProperties/
+-   1  test/language/expressions/dynamic-import/
+-   1  test/built-ins/String/prototype/
+-   1  test/language/expressions/member-expression/
+-   1  test/built-ins/Object/freeze/
+-   1  test/language/expressions/property-accessors/
+-   1  test/language/expressions/array/
+-   1  test/built-ins/Math/min/
+-   1  test/built-ins/Object/defineProperty/
+-   1  test/built-ins/DataView/return-abrupt-tonumber-byteoffset-sab.js/
+-   1  test/built-ins/TypedArrayConstructors/ctors-bigint/
+
+## Full list (file — new_status — error):
+- [fail] test/built-ins/Array/from/source-object-without.js :: L41:3 object null is not iterable (cannot read property Symbol(Symbol.iterator))
+- [compile_error] test/built-ins/Array/prototype/copyWithin/return-abrupt-from-end.js :: L23:23 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/copyWithin/return-abrupt-from-start.js :: L22:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/fill/return-abrupt-from-end.js :: L24:17 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/fill/return-abrupt-from-start.js :: L23:14 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/includes/return-abrupt-tointeger-fromindex.js :: L26:22 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/indexOf/15.4.4.14-5-21.js :: L22:42 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Array/prototype/indexOf/15.4.4.14-5-22.js :: L18:42 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [fail] test/built-ins/Array/prototype/indexOf/15.4.4.14-9-5.js :: returned 2 — assert #1 at L26: assert.sameValue(a.indexOf(obj3), 8, 'a[8] = obj1
+- [compile_error] test/built-ins/Array/prototype/lastIndexOf/15.4.4.15-5-22.js :: L19:72 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [fail] test/built-ins/Array/prototype/lastIndexOf/15.4.4.15-8-5.js :: returned 2 — assert #1 at L26: assert.sameValue(a.lastIndexOf(obj3), 2, 'a.lastI
+- [compile_error] test/built-ins/ArrayBuffer/return-abrupt-from-length.js :: L23:19 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setFloat32/detached-buffer-after-number-value.js :: L37:24 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setFloat64/detached-buffer-after-number-value.js :: L37:24 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setInt16/detached-buffer-after-number-value.js :: L37:22 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setInt32/detached-buffer-after-number-value.js :: L37:22 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setInt8/detached-buffer-after-number-value.js :: L36:21 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setUint16/detached-buffer-after-number-value.js :: L37:23 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setUint32/detached-buffer-after-number-value.js :: L37:23 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/prototype/setUint8/detached-buffer-after-number-value.js :: L36:22 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/return-abrupt-tonumber-byteoffset-sab.js :: L27:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/DataView/return-abrupt-tonumber-byteoffset.js :: L25:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setDate/arg-coercion-order.js :: L26:32 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setDate/arg-to-number-err.js :: L20:16 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setFullYear/arg-date-to-number-err.js :: L25:26 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setFullYear/arg-month-to-number-err.js :: L29:23 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setFullYear/arg-year-to-number-err.js :: L27:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setHours/arg-hour-to-number-err.js :: L26:17 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setHours/arg-min-to-number-err.js :: L28:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setHours/arg-ms-to-number-err.js :: L26:26 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setHours/arg-sec-to-number-err.js :: L30:23 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMilliseconds/arg-coercion-order.js :: L26:40 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMilliseconds/arg-to-number-err.js :: L20:24 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMinutes/arg-min-to-number-err.js :: L26:19 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMinutes/arg-ms-to-number-err.js :: L24:25 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMinutes/arg-sec-to-number-err.js :: L28:25 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMonth/arg-date-to-number-err.js :: L22:20 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setMonth/arg-month-to-number-err.js :: L29:17 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setSeconds/arg-ms-to-number-err.js :: L22:22 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setSeconds/arg-sec-to-number-err.js :: L26:19 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setTime/arg-to-number-err.js :: L20:16 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setUTCDate/arg-coercion-order.js :: L25:35 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Date/prototype/setUTCMilliseconds/arg-coercion-order.js :: L26:43 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Math/max/Math.max_each-element-coerced.js :: L20:15 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Math/min/Math.min_each-element-coerced.js :: L20:15 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/Object/defineProperties/15.2.3.7-5-b-143.js :: Cannot convert object to primitive value
+- [compile_error] test/built-ins/Object/defineProperty/15.2.3.6-4-51.js :: Cannot convert object to primitive value
+- [fail] test/built-ins/Object/freeze/15.2.3.9-2-a-13.js :: L54:3 dereferencing a null pointer [in test()]
+- [compile_error] test/built-ins/Object/keys/15.2.3.14-5-3.js :: Cannot convert object to primitive value
+- [compile_error] test/built-ins/Promise/any/iter-next-val-err-no-close.js :: Cannot convert object to primitive value
+- [compile_error] test/built-ins/Promise/any/iter-next-val-err-reject.js :: Cannot convert object to primitive value
+- [fail] test/built-ins/Reflect/ownKeys/return-empty-array.js :: L49:3 dereferencing a null pointer [in test()]
+- [compile_error] test/built-ins/String/prototype/repeat/return-abrupt-from-count.js :: L21:13 Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is n
+- [compile_error] test/built-ins/TypedArrayConstructors/ctors-bigint/object-arg/throws-from-property.js :: Cannot convert object to primitive value
+- [compile_error] test/built-ins/TypedArrayConstructors/ctors/object-arg/throws-from-property.js :: Cannot convert object to primitive value
+- [fail] test/built-ins/TypedArrayConstructors/from/BigInt/arylk-to-length-error.js :: L51:3 dereferencing a null pointer [in test()]
+- [compile_error] test/built-ins/TypedArrayConstructors/from/BigInt/property-abrupt-completion.js :: Cannot convert object to primitive value
+- [fail] test/built-ins/TypedArrayConstructors/from/arylk-to-length-error.js :: L58:3 dereferencing a null pointer [in test()]
+- [compile_error] test/built-ins/TypedArrayConstructors/from/property-abrupt-completion.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/array/spread-obj-override-immutable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/arrow-function/object-literal-return-requires-body-parens.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/assignment/dstr/array-elem-nested-obj.js :: Cannot convert object to primitive value
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-resolution-first.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-resolution-last.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-resolution-lone.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-resolution-middle.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-resolution-trlng.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-identifier-yield-ident-valid.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-init-assignment-truthy.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-id-init-assignment-undef.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-elem-init-assignment-truthy.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-elem-init-assignment-undef.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-identifier-resolution-first.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-identifier-resolution-last.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-identifier-resolution-lone.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-identifier-resolution-middle.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-identifier-resolution-trlng.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-name-evaluation.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-nested-obj.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/assignment/dstr/obj-prop-put-order.js :: L41:3 dereferencing a null pointer [in test()]
+- [compile_error] test/language/expressions/class/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/class/dstr/async-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/class/dstr/async-private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/expressions/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [fail] test/language/expressions/dynamic-import/assignment-expression/unary-expr.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/logical-not/S11.4.9_A2.2_T1.js :: L41:3 Cannot convert object to primitive value
+- [fail] test/language/expressions/member-expression/computed-reference-null-or-undefined.js :: returned 2 — assert #1 at L24: assert.throws(TypeError, function() { var base = 
+- [fail] test/language/expressions/object/S11.1.5_A3.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-break-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-case-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-catch-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-class-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-const-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-continue-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-debugger-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-default-escaped-ext.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-default-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-default.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-delete-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-do-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-else-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-enum-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-export-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-extends-escaped-ext.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-extends-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-extends.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-finally-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-for-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-function-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-if-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-implements-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-import-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-in-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-instanceof-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-interface-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-let-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-new-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-package-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-private-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-protected-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-public-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-return-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-static-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-super-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-switch-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-this-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-throw-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-try-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-typeof-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-var-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-void-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-while-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/covered-ident-name-prop-name-literal-with-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-decimal-e-notational-literal.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-decimal-literal.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-integer-e-notational-literal.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-integer-separators.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-null.js :: L65:3 illegal cast [in __obj_find() ← __extern_get ← test]
+- [fail] test/language/expressions/object/cpn-obj-lit-computed-property-name-from-numeric-literal.js :: L41:3 dereferencing a null pointer [in test()]
+- [compile_error] test/language/expressions/object/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-break-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-case-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-catch-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-class-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-const-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-continue-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-debugger-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-default-escaped-ext.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-default-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-default.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-delete-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-do-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-else-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-enum-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-export-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-extends-escaped-ext.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-extends-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-extends.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-finally-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-for-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-function-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-if-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-implements-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-import-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-in-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-instanceof-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-interface-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-let-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-new-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-package-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-private-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-protected-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-public-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-return-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-static-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-super-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-switch-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-this-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-throw-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-try-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-typeof-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-var-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-void-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-while-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/object/ident-name-prop-name-literal-with-escaped.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/expressions/optional-chaining/iteration-statement-while.js :: returned 2 — assert #1 at L18: assert.sameValue(1, count);
+- [compile_error] test/language/expressions/property-accessors/S8.12.3_A3.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/async-generator/dstr/obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/class/dstr/async-gen-meth-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/class/dstr/async-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/class/dstr/async-private-gen-meth-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/class/dstr/async-private-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-first.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-last.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-lone.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-middle.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-trlng.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-null.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-truthy.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-id-simple-no-strict.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-first.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-last.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-lone.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-middle.js :: L56:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-trlng.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-name-evaluation.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-put-order.js :: L55:3 dereferencing a null pointer [in fn() ← test]
+- [compile_error] test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [fail] test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-valid-object.js :: L69:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj.js :: L74:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-first.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-last.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-lone.js :: L71:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-middle.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-trlng.js :: L71:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-null.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-truthy.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-simple-no-strict.js :: L74:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-target-yield-expr.js :: L93:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-first.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-last.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-lone.js :: L71:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-middle.js :: L72:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-trlng.js :: L71:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-name-evaluation.js :: L73:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-obj-yield-expr.js :: L94:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-order.js :: L71:3 dereferencing a null pointer [in fn() ← test]
+- [compile_error] test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-skip-non-enumerable.js :: Cannot convert object to primitive value
+- [fail] test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-valid-object.js :: L91:3 dereferencing a null pointer [in fn() ← test]
+- [fail] test/language/statements/for-of/dstr/array-elem-nested-obj.js :: L41:3 dereferencing a null pointer [in test()]
+- [compile_error] test/language/statements/for-of/dstr/const-ary-ptrn-elem-obj-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/const-ary-ptrn-elem-obj-prop-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/const-obj-ptrn-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/const-obj-ptrn-prop-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/const-obj-ptrn-prop-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/let-ary-ptrn-elem-obj-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/let-ary-ptrn-elem-obj-prop-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/let-obj-ptrn-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/let-obj-ptrn-prop-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/let-obj-ptrn-prop-id.js :: Cannot convert object to primitive value
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-resolution-first.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-resolution-last.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-resolution-lone.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-resolution-middle.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-resolution-trlng.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-identifier-yield-ident-valid.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-init-assignment-null.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-id-init-assignment-truthy.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-identifier-resolution-first.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-identifier-resolution-last.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-identifier-resolution-lone.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-identifier-resolution-middle.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-identifier-resolution-trlng.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-name-evaluation.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/statements/for-of/dstr/obj-prop-put-order.js :: L41:3 dereferencing a null pointer [in test()]
+- [compile_error] test/language/statements/for-of/dstr/var-ary-ptrn-elem-obj-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/var-ary-ptrn-elem-obj-prop-id.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/var-obj-ptrn-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/var-obj-ptrn-prop-id-trailing-comma.js :: Cannot convert object to primitive value
+- [compile_error] test/language/statements/for-of/dstr/var-obj-ptrn-prop-id.js :: Cannot convert object to primitive value
+- [fail] test/language/statements/for/12.6.3_2-3-a-ii-1.js :: returned 2 — assert #1 at L23: assert(accessed, 'accessed !== true');
+- [fail] test/language/statements/function/S13.2.2_A7_T1.js :: L53:5 dereferencing a null pointer [in __fnctor___func_new() ← test]
+- [compile_error] test/language/statements/try/12.14-8.js :: Cannot convert object to primitive value
+- [fail] test/language/types/object/S8.6_A2_T1.js :: L41:3 dereferencing a null pointer [in test()]
+- [fail] test/language/types/object/S8.6_A3_T1.js :: L41:3 dereferencing a null pointer [in test()]
