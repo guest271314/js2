@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T03:06:49.414Z",
-  "baseline_generated_at": "2026-06-05T03:06:49Z",
-  "baseline_sha": "89ca014028d8aa5a494cf55778b2c7a42bb8641f",
+  "timestamp": "2026-06-05T03:23:05.641Z",
+  "baseline_generated_at": "2026-06-05T03:23:05Z",
+  "baseline_sha": "e21493350a86457819be1f929173adb0b32eeac8",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,8 +9,8 @@
   },
   "summary": {
     "total": 43125,
-    "pass": 12481,
-    "fail": 8759,
+    "pass": 12484,
+    "fail": 8756,
     "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
@@ -19,8 +19,8 @@
     "by_category": {
       "standard": {
         "total": 42039,
-        "pass": 12086,
-        "fail": 8335,
+        "pass": 12089,
+        "fail": 8332,
         "compile_error": 21587,
         "compile_timeout": 13,
         "skip": 18,
@@ -52,8 +52,8 @@
       },
       "official": {
         "total": 43125,
-        "pass": 12481,
-        "fail": 8759,
+        "pass": 12484,
+        "fail": 8756,
         "compile_error": 21854,
         "compile_timeout": 13,
         "skip": 18,
@@ -63,8 +63,8 @@
       },
       "full": {
         "total": 48107,
-        "pass": 12701,
-        "fail": 9024,
+        "pass": 12704,
+        "fail": 9021,
         "compile_error": 26255,
         "compile_timeout": 13,
         "skip": 114,
@@ -76,8 +76,8 @@
   },
   "official_summary": {
     "total": 43125,
-    "pass": 12481,
-    "fail": 8759,
+    "pass": 12484,
+    "fail": 8756,
     "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
@@ -86,8 +86,8 @@
   },
   "full_summary": {
     "total": 48107,
-    "pass": 12701,
-    "fail": 9024,
+    "pass": 12704,
+    "fail": 9021,
     "compile_error": 26255,
     "compile_timeout": 13,
     "skip": 114,
@@ -96,8 +96,8 @@
   },
   "strict_summary": {
     "total": 40616,
-    "pass": 11681,
-    "fail": 8030,
+    "pass": 11684,
+    "fail": 8027,
     "compile_error": 20874,
     "compile_timeout": 13,
     "skip": 18,
@@ -127,8 +127,8 @@
     },
     "standard": {
       "total": 42039,
-      "pass": 12086,
-      "fail": 8335,
+      "pass": 12089,
+      "fail": 8332,
       "compile_error": 21587,
       "compile_timeout": 13,
       "skip": 18,
@@ -670,8 +670,8 @@
     {
       "name": "built-ins/String",
       "path": "built-ins/String",
-      "pass": 133,
-      "fail": 345,
+      "pass": 136,
+      "fail": 342,
       "compile_error": 745,
       "compile_timeout": 0,
       "skip": 0,
@@ -1087,7 +1087,7 @@
     "other": 20110,
     "promise_error": 32,
     "range_error": 27,
-    "runtime_error": 2097,
+    "runtime_error": 2094,
     "type_error": 1,
     "unreachable": 36,
     "wasm_compile": 5382
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 35292,
-    "classified": 35292,
+    "total_non_pass_non_skip": 35289,
+    "classified": 35289,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1225,8 +1225,8 @@
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
@@ -1369,22 +1369,22 @@
           "total": 157
         },
         "error_categories": {
-          "unreachable": 33,
           "other": 99,
+          "unreachable": 33,
           "assertion_fail": 22,
           "wasm_compile": 2,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
+          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1418,15 +1418,15 @@
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
           "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
-          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js",
-          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js"
+          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
+          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
       {
@@ -1674,17 +1674,17 @@
           "#1759"
         ],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 1000,
+        "count": 997,
         "statuses": {
           "pass": 0,
-          "fail": 793,
+          "fail": 790,
           "compile_error": 207,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1000
+          "total": 997
         },
         "error_categories": {
-          "runtime_error": 939,
+          "runtime_error": 936,
           "other": 37,
           "wasm_compile": 8,
           "assertion_fail": 16
@@ -1775,15 +1775,15 @@
         "sample_files": [
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-94.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
           "test/built-ins/Object/defineProperty/15.2.3.6-4-432.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');",
           "other:L#:## Codegen error: '__defineProperties' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/s",
-          "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
           "other:L#:## Codegen error: '__hasOwnProperty' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
+          "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
           "assertion_fail:returned # — assert ## at L#: verifySetFunc = value;"
         ]
       },
@@ -1962,15 +1962,15 @@
           "test/language/function-code/10.4.3-1-48-s.js",
           "test/built-ins/Function/S15.3.5_A3_T1.js",
           "test/language/function-code/10.4.3-1-83-s.js",
-          "test/built-ins/Function/15.3.5.4_2-9gs.js",
-          "test/built-ins/Function/StrictFunction_reservedwords_with.js"
+          "test/built-ins/Function/StrictFunction_reservedwords_with.js",
+          "test/built-ins/Function/15.3.5.4_2-9gs.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
           "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\"",
           "assertion_fail:returned # — assert ## at L#: assert((function () {return Function(\"\\\"use strict\\\";return f();\")();})());",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });"
         ]
       },
       {
