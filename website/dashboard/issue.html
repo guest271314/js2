@@ -180,6 +180,31 @@
     </article>
 
     <script>
+      // Fetch an issue's markdown. `slug` may be a full filename stem
+      // (681-pure-wasm-…) or a bare issue id (681 / 1525b). Resolution works in
+      // both modes:
+      //   dev  — the dashboard Vite plugin serves /plan/issues/*.md from the
+      //          repo root and prefix-resolves bare ids to <id>-*.md
+      //   prod — scripts/build-pages.js copies plan/issues into the site and
+      //          writes index.json (id → filename) for the bare-id fallback
+      async function fetchIssueMarkdown(slug) {
+        // 1) Try the slug directly (full filename, or a bare id the dev plugin
+        //    prefix-resolves).
+        let response = await fetch(`/plan/issues/${slug}.md`);
+        if (response.ok) return await response.text();
+
+        // 2) Fall back: treat the slug as a bare id and resolve via index.json.
+        const index = await fetch("/plan/issues/index.json")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (index && index[slug]) {
+          response = await fetch(`/plan/issues/${index[slug]}.md`);
+          if (response.ok) return await response.text();
+        }
+
+        throw new Error(`Issue not found: ${slug}`);
+      }
+
       async function loadIssue() {
         // Extract slug from URL query parameter
         const params = new URLSearchParams(window.location.search);
@@ -194,12 +219,7 @@
         document.getElementById("issue-num").textContent = `#${slug.split("-")[0]}`;
 
         try {
-          // Fetch the markdown file
-          const response = await fetch(`/plan/issues/${slug}.md`);
-          if (!response.ok) {
-            throw new Error(`Issue not found (${response.status})`);
-          }
-          const markdown = await response.text();
+          const markdown = await fetchIssueMarkdown(slug);
 
           // Remove frontmatter
           const contentStart = markdown.indexOf("---", 3) + 3;

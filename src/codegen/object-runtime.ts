@@ -58,16 +58,26 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { ensureNativeStringHelpers } from "./native-strings.js";
+import { ensureNativeStringHelpers, nativeStringLiteralInstrs } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
+import { addUnionImportsViaRegistry } from "./shared.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
+
+/** WasmGC `none` bottom heap type (signed-LEB 0x6e = -18). `ref.null none` is a
+ *  subtype of `anyref`, used to push a null into the `$PropEntry.$get/$set`
+ *  anyref slots on the data path (#1888 Slice 5). */
+const NONE_HEAP = -18;
 
 /** `$PropEntry.$flags` bit layout. */
 const FLAG_WRITABLE = 0x01;
 const FLAG_ENUMERABLE = 0x02;
 const FLAG_CONFIGURABLE = 0x04;
+// #1888 Slice 5 — accessor descriptor: when set, the entry's value is replaced
+// by the `$get`/`$set` funcref-bearing slots (fields 4/5). 0x08 is the first
+// free bit (0x10/0x20/0x40 remain free; 0x80 = TOMBSTONE).
+const FLAG_ACCESSOR = 0x08;
 const FLAG_TOMBSTONE = 0x80;
 /** Default for a data property created by `o.x = v` — w/e/c all true. */
 const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
@@ -137,6 +147,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // only so the field can be filled by struct.new at any callsite; it is
       // never rewritten after creation.
       { name: "seq", type: { kind: "i32" }, mutable: true },
+      // #1888 Slice 5 — accessor get/set slots. Non-null only when
+      // (flags & FLAG_ACCESSOR); the boxed getter/setter closure is held as an
+      // anyref (closures are per-signature structs dispatched dynamically, so
+      // there is no single typed closure ref to use here). On the data path
+      // both are null — zero behavioural change for non-accessor properties.
+      // Appended LAST so existing field indices 0-3 (key/value/flags/seq) are
+      // unchanged (R3 migration note); the single `struct.new $PropEntry` site
+      // (__obj_insert) pushes two `ref.null any` for these.
+      { name: "get", type: { kind: "anyref" }, mutable: true },
+      { name: "set", type: { kind: "anyref" }, mutable: true },
     ],
   });
 
@@ -603,13 +623,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
                   { op: "i32.and" },
                   { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
-                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq }
+                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq,
+                  //                                   get=null, set=null }
                   { op: "local.get", index: 5 },
                   { op: "local.get", index: 8 },
                   { op: "local.get", index: 11 },
                   { op: "local.get", index: 2 },
                   { op: "local.get", index: 3 },
                   { op: "local.get", index: 4 }, // seq (#1837)
+                  { op: "ref.null", typeIdx: NONE_HEAP }, // get (#1888 S5) — data path: null
+                  { op: "ref.null", typeIdx: NONE_HEAP }, // set (#1888 S5) — data path: null
                   { op: "struct.new", typeIdx: propEntryTypeIdx },
                   { op: "array.set", typeIdx: propMapTypeIdx },
                   // o.count++
@@ -1134,6 +1157,123 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   }
   const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
 
+  // ── __hasOwnProperty / __object_hasOwn (externref obj, externref key) -> i32 ─
+  //
+  // ES §20.1.3.2 Object.prototype.hasOwnProperty / §20.1.2.13 Object.hasOwn:
+  // OWN-property presence only (NO prototype walk). Cast obj to $Object (return
+  // 0 on a non-$Object / null receiver — never throws into Wasm), then
+  // __obj_find on the own props table; present iff the returned entry is
+  // non-null (find already skips tombstones). Object.hasOwn shares the exact
+  // own-only predicate, so both names register the same body.
+  const emitHasOwn = (name: string): void => {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // e = __obj_find(cast<$Object>(any), key) ; return e != null
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+    ];
+    registerNative(
+      name,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  };
+  emitHasOwn("__hasOwnProperty");
+  emitHasOwn("__object_hasOwn");
+
+  // ── __extern_has(externref obj, externref key) -> i32 (#1472 Phase C) ──────
+  //
+  // ES §7.3.12 HasProperty(O, P): keyed `key in obj` — own properties AND the
+  // prototype chain. Mirrors __extern_get's proto-walk but returns a boolean
+  // instead of the value (so a present-but-undefined property still reports 1).
+  // Non-$Object / null receiver → 0 (the `in` dispatch site has already
+  // confirmed an object-shaped externref; this never throws into Wasm).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=o(ref null $Object) 3=any(anyref)
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 3 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 2 },
+      // proto-walk loop (mirror of __extern_get)
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if o == null break
+              { op: "local.get", index: 2 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if __obj_find(o, key) != null → return 1
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: objFindIdx },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
+              // o = o.proto ; loop
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // not found anywhere → 0
+      { op: "i32.const", value: 0 },
+    ];
+    registerNative(
+      "__extern_has",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
+
   // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
   //
   // The $Object struct already carries the [[Prototype]] in field 0 ($proto,
@@ -1196,11 +1336,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         ],
         else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
       },
-      // struct.new $Object {proto, props, count=0, tombstones=0, flags=0}
+      // struct.new $Object {proto, props, count=0, tombstones=0, flags=0, nextSeq=0}
       { op: "local.get", index: 2 },
       { op: "i32.const", value: 0 },
       { op: "i32.const", value: 0 },
       { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 }, // nextSeq (#1837)
       { op: "struct.new", typeIdx: objectTypeIdx },
       { op: "extern.convert_any" },
     ];
@@ -1216,11 +1357,154 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
-  // NOTE: `Object.setPrototypeOf(o, p)` is NOT wired to a native helper here —
-  // the call site (calls.ts ~L3857) currently *stubs* it in ALL modes (drops the
-  // proto arg, returns obj), so a native `__object_setPrototypeOf` would be dead
-  // code. Wiring the mutation (write `$proto`) requires changing that stubbed
-  // call site under a dual-mode gate, which is a separate follow-up slice.
+  // __object_setPrototypeOf(externref obj, externref proto) -> externref
+  //   (ES §20.1.2.21 Object.setPrototypeOf → §10.1.2 [[SetPrototypeOf]] →
+  //   §10.1.2.1 OrdinarySetPrototypeOf). #1888 Slice 7. Writes $Object.$proto
+  //   (field 0) after the OrdinarySetPrototypeOf checks, then returns obj.
+  //
+  //   Per §20.1.2.21 the return value is always the first argument `obj`, even
+  //   when the [[SetPrototypeOf]] would have been observably a no-op or refused.
+  //   (Object.setPrototypeOf returns O regardless of the boolean result, except
+  //   that a *false* result throws a TypeError in the spec — see the dual-mode
+  //   note below.)
+  //
+  //   OrdinarySetPrototypeOf(O, V), with V restricted to Object|null here
+  //   (a non-$Object externref V coerces to null, matching __object_create):
+  //     1. current = O.[[Prototype]].
+  //     2. If SameValue(V, current) → true (no write; ref.eq, both nullable).
+  //     3. If O is non-extensible (OBJ_FLAG_NONEXTENSIBLE) → false (NO write).
+  //     4. Cycle check: walk p = V; while p ≠ null: if p === O → false (refuse,
+  //        never build a cyclic chain that a later proto-walk would loop on);
+  //        p = p.$proto. (We do not model the exotic [[GetPrototypeOf]] short-
+  //        circuit — all our objects are ordinary.)
+  //     5. O.[[Prototype]] = V → true.
+  //
+  //   Dual-mode posture (#1472 / #1888): a *refused* set (steps 3/4 → false)
+  //   is a SILENT no-op in standalone, NOT a thrown TypeError. This mirrors the
+  //   freeze-write refusal posture (the #1473 error machinery is a separate
+  //   layer) and keeps this slice from pulling __new_TypeError / the exn tag
+  //   late into the runtime. The proto is simply left unchanged; obj is still
+  //   returned. A non-$Object obj receiver is also a silent no-op (the ToObject
+  //   / RequireObjectCoercible receiver guard lives at the #820k call site).
+  //
+  // params: 0=obj(externref) 1=proto(externref)
+  // locals: 2=o(ref null $Object) 3=v(ref null $Object) 4=p(ref null $Object)
+  //         5=any(anyref)
+  {
+    const body: Instr[] = [
+      // o = (obj is $Object ? cast : null); if not an $Object → return obj as-is
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.set", index: 2 },
+        ],
+        else: [
+          // non-$Object receiver → no write, return obj unchanged
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      },
+      // v = (proto is $Object ? cast : null) — non-$Object/null proto ⇒ null
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: objRefNull },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+        ],
+        else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
+      },
+      { op: "local.set", index: 3 },
+      // step 2: if SameValue(v, o.$proto) → no-op (return obj)
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      { op: "ref.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 3: if o.flags & OBJ_FLAG_NONEXTENSIBLE → refuse (return obj, no write)
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 4: cycle check — p = v ; while p != null { if p === o → refuse ; p = p.$proto }
+      { op: "local.get", index: 3 },
+      { op: "local.set", index: 4 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if p == null break (end of candidate chain, no cycle)
+              { op: "local.get", index: 4 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if ref.eq(p, o) → cycle → refuse (return obj, no write)
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "ref.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "local.get", index: 0 }, { op: "return" }],
+              },
+              // p = p.$proto ; loop
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 4 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // step 5: o.$proto = v
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 3 },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      // return obj
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__object_setPrototypeOf",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "v", type: objRefNull },
+        { name: "p", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
 
   // __isPrototypeOf(externref obj, externref candidate) -> i32 (ES §20.1.3.3):
   //   1 iff obj appears in candidate's prototype chain. Walk candidate.$proto
@@ -2515,6 +2799,326 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __defineProperty_accessor (#1888 Slice 5 — native accessor-descriptor STORE) ─
+  //
+  // `Object.defineProperty(obj, key, { get?, set?, enumerable?, configurable? })`
+  // and `Reflect.defineProperty` for an ACCESSOR descriptor under standalone /
+  // WASI. The JS-host path is the `env::__defineProperty_accessor` import backed
+  // by the JS descriptor sidecar; standalone has no host, so we store the boxed
+  // getter/setter closures + attribute flags directly into the `$PropEntry`
+  // accessor slots ($get field 4 / $set field 5).
+  //
+  // RUNTIME-LAYER GROUNDWORK (#1888 Slice 5). This + the native
+  // `__getOwnPropertyDescriptor` below + the R3 `$PropEntry.$get/$set` layout are
+  // the foundation for accessor descriptors under standalone. They are NOT yet
+  // reached end-to-end (see the call-site note below), so they bank ~0 test262 on
+  // their own — the value is de-risking the R3 layout change in isolation +
+  // providing the runtime target the wiring follow-up calls.
+  //
+  // FOLLOW-UPS (both #329-gated — the late-shift / host-free-closure funcIdx
+  // stability fix being driven now):
+  //   - Call-site wiring: `Object.defineProperty(o,k,{get,set})` (object-ops.ts)
+  //     compiles getter/setter via `compileArrowAsCallback` → `__make_getter_callback`
+  //     (a JS-host import). Routing those to HOST-FREE closures so they reach this
+  //     helper (and the GOPD readback can see real getter/setter) needs the #329
+  //     funcIdx-stability fix.
+  //   - LIVE get/set invocation on member read/write — the accessor arms in
+  //     `__extern_get` / `__extern_set` invoke `$get`/`$set` with the original
+  //     receiver bound as `this` via `__call_fn_method_0/1` (#1636-S1); also rides
+  //     sd-1472c's #1224 `__call_fn_N` externref-arg coercion fix (now landed).
+  //
+  // Flag translation matches __defineProperty_value (host value bits 0/1/2 →
+  // native FLAG_WRITABLE/_ENUMERABLE/_CONFIGURABLE) — but an accessor has no
+  // writable attribute (ES §6.2.6.1), so we additionally OR in FLAG_ACCESSOR and
+  // leave WRITABLE masked off via the same NATIVE_ATTR_MASK (the host accessor
+  // encoding never sets bit 0). The data $value slot is cleared to null.
+  //
+  // params: 0=obj 1=key 2=getter(externref) 3=setter(externref) 4=flagsF64
+  // locals: 5=o(ref null $Object) 6=any(anyref) 7=cap 8=load 9=nflags(i32) 10=hf(i32) 11=seq 12=e(ref null $PropEntry)
+  {
+    const NATIVE_ATTR_MASK = FLAG_ENUMERABLE | FLAG_CONFIGURABLE; // 0x06 — accessors carry no WRITABLE
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return obj (lenient no-op)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 6 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 6 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 5 },
+      // hf = trunc_s(flagsF64)
+      { op: "local.get", index: 4 },
+      { op: "i32.trunc_f64_s" },
+      { op: "local.set", index: 10 },
+      // nflags = (hf & (ENUMERABLE|CONFIGURABLE)) | FLAG_ACCESSOR
+      { op: "local.get", index: 10 },
+      { op: "i32.const", value: NATIVE_ATTR_MASK },
+      { op: "i32.and" },
+      { op: "i32.const", value: FLAG_ACCESSOR },
+      { op: "i32.or" },
+      { op: "local.set", index: 9 },
+      // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      { op: "i32.add" },
+      { op: "local.set", index: 8 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 7 },
+      // if (load + 1) * 10 >= cap * 7 → grow
+      { op: "local.get", index: 8 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "i32.const", value: 10 },
+      { op: "i32.mul" },
+      { op: "local.get", index: 7 },
+      { op: "i32.const", value: 7 },
+      { op: "i32.mul" },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 5 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
+      },
+      // seq = o.nextSeq ; o.nextSeq = seq + 1  (#1837)
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      { op: "local.set", index: 11 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 11 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      // __obj_insert(o, key, ref.null any, nflags, seq) — value slot stays null
+      // for an accessor; this creates the entry (or updates flags in place) and
+      // handles growth/tombstone reuse in one place.
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.null", typeIdx: NONE_HEAP },
+      { op: "local.get", index: 9 },
+      { op: "local.get", index: 11 },
+      { op: "call", funcIdx: objInsertIdx },
+      // e = __obj_find(o, key) — re-locate the just-inserted/updated entry to
+      // write the accessor slots. (__obj_insert does not take get/set params.)
+      // It is always non-null here: either we just created it, or the update-in-
+      // place branch matched an existing live entry. The only way to get null is
+      // a non-extensible object refusing a NEW key — in which case there are no
+      // accessor slots to write, so the null-guarded if is a correct no-op.
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 12 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // e.get = any.convert_extern(getter) ; e.set = any.convert_extern(setter)
+          // A null externref (absent get/set) converts to a null anyref, which
+          // GOPD reads back as `undefined` for that half of the descriptor.
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 2 },
+          { op: "any.convert_extern" },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 3 },
+          { op: "any.convert_extern" },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+          // e.value = null (clear any prior data value — accessors hold no value)
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "ref.null", typeIdx: NONE_HEAP },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+        ],
+      },
+      // return obj (host import returns O)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__defineProperty_accessor",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "load", type: { kind: "i32" } },
+        { name: "nflags", type: { kind: "i32" } },
+        { name: "hf", type: { kind: "i32" } },
+        { name: "seq", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+      ],
+      body,
+    );
+  }
+
+  // ── __getOwnPropertyDescriptor (#1888 Slice 5 — native descriptor read-back) ─
+  //
+  // `Object.getOwnPropertyDescriptor(obj, key)` / `Reflect.getOwnPropertyDescriptor`
+  // under standalone. Reads the own `$PropEntry` for `key` and materialises a
+  // descriptor `$Object`:
+  //   accessor (flags & FLAG_ACCESSOR) → { get, set, enumerable, configurable }
+  //   data                            → { value, writable, enumerable, configurable }
+  // A missing own property, or a non-`$Object` receiver, returns `undefined`
+  // (the null externref). This is the read side of the Slice-5 store/round-trip:
+  // a getter/setter installed via `__defineProperty_accessor` reads back here as
+  // `{ get, set, … }`. The boxed getter/setter come straight out of the
+  // `$PropEntry.$get/$set` anyref slots via `extern.convert_any` (a null anyref —
+  // an absent half — reads back as `undefined`).
+  //
+  // Descriptor keys ("get"/"set"/"value"/"writable"/"enumerable"/"configurable")
+  // are materialised as native `$NativeString`s (standalone forces nativeStrings)
+  // and handed to `__extern_set` as externref — `$NativeString <: $AnyString`, so
+  // the insert's `ref.cast $AnyString` succeeds. Attribute booleans are boxed via
+  // `__box_boolean` (registered through addUnionImportsViaRegistry, same defined-
+  // func, no-index-shift invariant as the rest of this runtime).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=any(anyref) 3=o(ref null $Object) 4=e(ref null $PropEntry)
+  //         5=fl(i32) 6=desc(externref)
+  {
+    // __box_boolean is needed for the attribute flags — register the union
+    // helpers (idempotent; defined funcs, no index shift) and resolve it.
+    addUnionImportsViaRegistry(ctx);
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean")!;
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+
+    // `__extern_set(desc, "<key>", <value externref>)` — desc is in local 6.
+    // `valueInstrs` must leave one externref on the stack.
+    const setKey = (key: string, valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: 6 }, // desc (externref)
+      // key: native string → externref
+      ...nativeStringLiteralInstrs(ctx, key),
+      { op: "extern.convert_any" } as Instr,
+      ...valueInstrs,
+      { op: "call", funcIdx: externSetIdx },
+    ];
+
+    // Box `(e.flags & MASK) != 0` as a JS boolean externref.
+    const boolAttr = (mask: number): Instr[] => [
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: mask },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+      { op: "call", funcIdx: boxBoolIdx },
+    ];
+
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return undefined (null)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; e = __obj_find(o, key)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 4 },
+      // if e == null → return undefined (own property does not exist)
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // fl = e.flags
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: 5 },
+      // desc = __new_plain_object()
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 6 },
+      // accessor vs data branch
+      { op: "local.get", index: 5 },
+      { op: "i32.const", value: FLAG_ACCESSOR },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        // accessor: { get, set, enumerable, configurable }
+        then: [
+          // desc.get = extern.convert_any(e.get)  (null anyref → undefined)
+          ...setKey("get", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+          // desc.set = extern.convert_any(e.set)
+          ...setKey("set", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+        ],
+        // data: { value, writable }
+        else: [
+          // desc.value = extern.convert_any(e.value)
+          ...setKey("value", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+          // desc.writable = box(fl & FLAG_WRITABLE)
+          ...setKey("writable", boolAttr(FLAG_WRITABLE)),
+        ],
+      },
+      // common: enumerable, configurable
+      ...setKey("enumerable", boolAttr(FLAG_ENUMERABLE)),
+      ...setKey("configurable", boolAttr(FLAG_CONFIGURABLE)),
+      // return desc
+      { op: "local.get", index: 6 },
+    ];
+    registerNative(
+      "__getOwnPropertyDescriptor",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "e", type: entryRefNull },
+        { name: "fl", type: { kind: "i32" } },
+        { name: "desc", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -2636,6 +3240,65 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
   );
 
+  // ── __extern_method_call(externref recv, externref name, externref args)
+  //    -> externref (#1888 Slice 2) ─────────────────────────────────────────
+  //
+  // Generic `recv.name(args)` dispatch on an open `any`/externref receiver
+  // (ES §7.3.14 Call). Open-`$Object` user-method path: resolve `name` via
+  // `__extern_get` (own + prototype walk) and invoke through the
+  // `__apply_closure` arity bridge → `__call_fn_method_0..4` (D6/D7). Non-
+  // `$Object` brands ($Vec/string/Map/Set instance methods on a genuinely-`any`
+  // receiver) are the Slice-4 brand arms — they return undefined here for now
+  // (trackable, never invalid Wasm). The closure-round-trip prerequisite landed
+  // (#1226 typeof-closure recognition + every compiled fn-expr self-registers in
+  // `closureInfoByTypeIdx` so `__call_fn_method_N` emits a matching `ref.test`
+  // arm), so a closure stored into an open `$Object` reads back callable.
+  const S2_OPENANY_DISPATCH_WIRED = true;
+  if (S2_OPENANY_DISPATCH_WIRED) {
+    const applyClosureIdx = reserveApplyClosure(ctx);
+    const externGetIdx = ctx.funcMap.get("__extern_get")!;
+
+    const body: Instr[] = [
+      // any = any.convert_extern(recv); if null → return undefined
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // if ref.test $Object(any) → __apply_closure(__extern_get(recv,name), recv, args)
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          // m = __extern_get(recv, name)
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          // __apply_closure(m, recv, args)
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: applyClosureIdx },
+        ],
+        // Non-$Object receiver: brand arms ($Vec/string/Map/Set) are Slice 4;
+        // return undefined for now (never invalid Wasm).
+        else: [{ op: "ref.null.extern" }],
+      },
+    ];
+    registerNative(
+      "__extern_method_call",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  }
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -2664,6 +3327,149 @@ export function ensureObjVecBuilders(ctx: CodegenContext): { newIdx: number; pus
     newIdx: ctx.funcMap.get("__objvec_new")!,
     pushIdx: ctx.funcMap.get("__objvec_push")!,
   };
+}
+
+/**
+ * (#1888 Slice 1) Reserve the `__apply_closure(externref fn, externref recv,
+ * externref args) -> externref` arity-bridge funcIdx with a placeholder
+ * `unreachable` body, registered in `funcMap`. The real body (an arity switch
+ * on `__extern_length(args)` dispatching to `__call_fn_method_0..4`) is filled
+ * by `fillApplyClosure` at FINALIZE, because the `__call_fn_method_N` exports
+ * it calls are only emitted there (after `closureInfoByTypeIdx` is complete).
+ * Mirrors the `reserveProtoIteratorDriver`/`fillProtoIteratorDriver` pattern
+ * (#1719). Idempotent. Sets `ctx.applyClosureReserved`.
+ */
+export function reserveApplyClosure(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__apply_closure");
+  if (existing !== undefined) return existing;
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$apply_closure_type",
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.mod.functions.push({
+    name: "__apply_closure",
+    typeIdx,
+    locals: [],
+    // Placeholder; filled by fillApplyClosure. A bare `unreachable` keeps the
+    // stub valid (externref result) if the fill is ever skipped.
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  });
+  ctx.funcMap.set("__apply_closure", funcIdx);
+  ctx.applyClosureReserved = true;
+  return funcIdx;
+}
+
+/**
+ * (#1888 Slice 1) Fill the reserved `__apply_closure` bridge body at FINALIZE,
+ * AFTER `emitClosureMethodCallExportN(0..4)` have registered
+ * `__call_fn_method_0..4` in `funcMap`. The bridge reads the dynamic arg count
+ * from `__extern_length(args)` and dispatches to the matching this-threaded
+ * closure dispatcher:
+ *
+ *   n = i32(__extern_length(args))
+ *   if n==0: __call_fn_method_0(recv, fn)
+ *   if n==1: __call_fn_method_1(recv, fn, idx0)
+ *   ... up to 4 ...
+ *   else (n>4): return undefined (sentinel)
+ *
+ * S1 SCOPE — NO THROWS. This bridge returns the undefined sentinel
+ * (`ref.null.extern`) for the not-a-function and arity-overflow cases rather
+ * than raising a `TypeError`. Reason: emitting a spec-correct throw here would
+ * pull `__new_TypeError` + the exn tag + a string constant into the object
+ * runtime, and those late registrations land AFTER the string helpers have
+ * already baked `call` targets at finalize — shifting func indices and
+ * corrupting the module ("__str_flatten expected (ref null 5) found i32"). That
+ * is the #1839/#117/#1886 late-registration-index-shift class. Carving S1
+ * without throws keeps the bridge dependency-free of late error machinery, so
+ * the module verifies cleanly. The spec-correct `TypeError` throws (ES §7.3.14
+ * step 2 "is not a function", and arity-overflow) plus the index-shift fix are
+ * the S2 fast-follow. Each `__call_fn_method_N` arm is only emitted when that
+ * export was registered (no closure of arity ≤ N ⇒ no dispatcher ⇒ that arm
+ * returns the undefined sentinel). No-op when `__apply_closure` was never
+ * reserved.
+ */
+export function fillApplyClosure(ctx: CodegenContext): void {
+  if (!ctx.applyClosureReserved) return;
+  const bridgeIdx = ctx.funcMap.get("__apply_closure");
+  if (bridgeIdx === undefined) return;
+  const fnArrayIdx = bridgeIdx - ctx.numImportFuncs;
+  const bridgeFn = ctx.mod.functions[fnArrayIdx];
+  if (!bridgeFn) return;
+
+  // Dependencies, all registered by now: __extern_length + __extern_get_idx
+  // (object runtime). S1 intentionally pulls NO error machinery (see header).
+  const externLengthIdx = ctx.funcMap.get("__extern_length");
+  const externGetIdxArr = ctx.funcMap.get("__extern_get_idx");
+  if (externLengthIdx === undefined || externGetIdxArr === undefined) {
+    // Dependencies absent (object runtime not emitted after all) — keep a valid
+    // body that returns undefined so the module verifies.
+    bridgeFn.body = [{ op: "ref.null.extern" } as Instr];
+    return;
+  }
+
+  // S1 undefined sentinel: every non-dispatchable case (arity > 4, or a missing
+  // arity-N dispatcher) returns undefined rather than throwing. S2 replaces
+  // these with spec-correct TypeError throws once the late-shift is fixed.
+  const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" } as Instr];
+
+  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32)
+  const ARG_OF = (k: number): Instr[] => [
+    { op: "local.get", index: 2 } as Instr,
+    { op: "f64.const", value: k } as Instr,
+    { op: "call", funcIdx: externGetIdxArr } as Instr,
+  ];
+
+  // Build the arity dispatch from the bottom up (n>4 → undefined), each arm
+  // guarded on the matching __call_fn_method_N being registered.
+  const callMethod = (n: number): number | undefined => ctx.funcMap.get(`__call_fn_method_${n}`);
+  const armUnsupported = undefinedSentinel();
+
+  const buildArm = (n: number): Instr[] => {
+    const idx = callMethod(n);
+    if (idx === undefined) {
+      // No closure of this arity was emitted ⇒ no dispatcher. A live call of
+      // this arity is impossible (the program has no arity-n closure), but keep
+      // a valid body: return the undefined sentinel.
+      return undefinedSentinel();
+    }
+    // __call_fn_method_N(recv, fn, arg0..arg{N-1})
+    const ops: Instr[] = [{ op: "local.get", index: 1 } as Instr, { op: "local.get", index: 0 } as Instr];
+    for (let k = 0; k < n; k++) ops.push(...ARG_OF(k));
+    ops.push({ op: "call", funcIdx: idx } as Instr);
+    return ops;
+  };
+
+  // if n==0 .. n==4 else undefined. Nest as if/else chain.
+  let dispatch: Instr[] = armUnsupported;
+  for (let n = 4; n >= 0; n--) {
+    dispatch = [
+      { op: "local.get", index: 3 } as Instr,
+      { op: "i32.const", value: n } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: buildArm(n),
+        else: dispatch,
+      } as Instr,
+    ];
+  }
+
+  // n = i32(__extern_length(args)); dispatch.
+  const body: Instr[] = [
+    { op: "local.get", index: 2 } as Instr,
+    { op: "call", funcIdx: externLengthIdx } as Instr,
+    { op: "i32.trunc_f64_s" } as Instr,
+    { op: "local.set", index: 3 } as Instr,
+    ...dispatch,
+  ];
+
+  bridgeFn.body = body;
+  bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
 }
 
 /**
@@ -2699,18 +3505,49 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_freeze",
   // #1629 S6 — native data-descriptor define (Object.defineProperty /
   // Reflect.defineProperty with a { value, writable?, enumerable?, configurable? }
-  // descriptor). Accessor descriptors stay refused (see the __defineProperty_value
-  // note in ensureObjectRuntime).
+  // descriptor).
   "__defineProperty_value",
+  // #1888 Slice 5 — native accessor-descriptor STORE ({ get?, set? }): stores
+  // the boxed getter/setter into $PropEntry.$get/$set + FLAG_ACCESSOR.
+  "__defineProperty_accessor",
+  // #1888 Slice 5 — native getOwnPropertyDescriptor: reads the $PropEntry back
+  // and builds a descriptor `$Object` (accessor → { get, set, enumerable,
+  // configurable }, data → { value, writable, enumerable, configurable };
+  // missing own prop / non-$Object receiver → undefined). RUNTIME-LAYER
+  // GROUNDWORK: both this and __defineProperty_accessor are not yet reached
+  // end-to-end under standalone — the accessor define call-site compiles
+  // getter/setter via the __make_getter_callback JS bridge, and that call-site
+  // routing (host-free closures → __defineProperty_accessor) plus live get/set
+  // invocation are #329-gated follow-ups. Landing the helpers + the R3
+  // $PropEntry $get/$set layout now de-risks the layout change in isolation.
+  "__getOwnPropertyDescriptor",
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
   // remaining standalone-refusal helper (~6.6k tests).
   "__extern_is_undefined",
+  // #1472 Phase C — own-property presence (Object.prototype.hasOwnProperty /
+  // Object.hasOwn) over the $Object hash-map via __obj_find; keyed HasProperty
+  // (`key in obj`) over own + prototype chain via a proto-walk mirroring
+  // __extern_get.
+  "__hasOwnProperty",
+  "__object_hasOwn",
+  "__extern_has",
   // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0):
-  // getPrototypeOf / Object.create / isPrototypeOf. (setPrototypeOf is stubbed at
-  // its call site in all modes, so it is intentionally NOT routed here.)
+  // getPrototypeOf / Object.create / isPrototypeOf.
   "__getPrototypeOf",
   "__object_create",
   "__isPrototypeOf",
+  // #1888 Slice 7 — Object.setPrototypeOf writes $Object.$proto (field 0) after
+  // the §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle checks. Routed
+  // here so the standalone call site reaches the native helper instead of the
+  // proto-dropping stub. (GC/host keeps the stub — see the calls.ts dual-mode
+  // gate.)
+  "__object_setPrototypeOf",
+  // #1888 Slice 2 — open-`any` method dispatch `recv.m(args)`. Native arm
+  // (__extern_method_call → __extern_get + __apply_closure arity bridge). The
+  // closure round-trips through __extern_set/__extern_get as a ref.test-able
+  // wrapper (#1226 typeof recognition + closureInfoByTypeIdx self-reg), so
+  // routing native is a correct answer, not a silent undefined.
+  "__extern_method_call",
 ]);

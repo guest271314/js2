@@ -465,8 +465,19 @@ export function flushLateImportShifts(ctx: CodegenContext, fctx: FunctionContext
  * Ensure the __get_undefined host import exists, returning its funcIdx.
  * This import returns the actual JS `undefined` value as externref,
  * allowing Wasm to distinguish null from undefined at runtime.
+ *
+ * Under native-strings mode (auto-on for `--target standalone`/`wasi`) there is
+ * no JS host to satisfy this import, and undefined is conflated with null (same
+ * convention as `__extern_is_undefined` → bare `ref.is_null`). Returning
+ * `undefined` here makes callers fall back to the native `ref.null.extern`
+ * sentinel via `emitUndefined`, which (a) keeps standalone host-import-free and
+ * (b) avoids adding a late import *after* the native-string helpers were emitted
+ * — that post-helper import otherwise drives `reconcileNativeStrFinalizeShift`
+ * an extra time and off-by-ones the baked `__str_flatten`→`__str_copy_tree`
+ * call (#329: `let g: any; g = function(){…}; g()` invalid wasm).
  */
 export function ensureGetUndefined(ctx: CodegenContext): number | undefined {
+  if (ctx.nativeStrings) return undefined;
   return ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
 }
 

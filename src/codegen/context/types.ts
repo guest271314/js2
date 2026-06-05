@@ -555,6 +555,18 @@ export interface CodegenContext {
    */
   protoIteratorDriverReserved?: boolean;
   /**
+   * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
+   * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
+   * a placeholder function pushed during `ensureObjectRuntime` (registered in
+   * `funcMap` under `"__apply_closure"`). The bridge calls the
+   * `__call_fn_method_0..4` exports, which are only emitted at FINALIZE (after
+   * the full `closureInfoByTypeIdx` is known), so the placeholder body is filled
+   * by `fillApplyClosure` in post-processing — mirroring the
+   * `protoIteratorDriverReserved` reserve-then-fill pattern (#1719). Only set
+   * under `--target standalone`, so the GC/host path stays byte-identical.
+   */
+  applyClosureReserved?: boolean;
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`

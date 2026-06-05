@@ -459,6 +459,50 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__extern_has_idx\b/);
   });
 
+  it("Phase C: `key in obj` routes to native __extern_has (own + proto) and runs", async () => {
+    // #1472 Phase C — keyed HasProperty (`key in obj`, §7.3.12) over the $Object
+    // hash-map: own props AND the prototype chain. Native via a proto-walk
+    // mirroring __extern_get (boolean instead of value). Present-but-undefined
+    // still reports 1 — but standalone conflates undefined/null, so we use a
+    // present non-null value to keep the test crisp. The receiver is an open
+    // `any` object (computed-key writes defeat closed-struct inference).
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 5;
+          return (ka in o ? 1 : 0) + ("missing" in o ? 10 : 0); // present:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_has")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
+  it("Phase C: Object.hasOwn(o, k) routes to native __object_hasOwn (own-only) and runs", async () => {
+    // #1472 Phase C — Object.hasOwn (§20.1.2.13): own-property presence only
+    // (no proto walk), native via __obj_find over the $Object props table.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 1;
+          return (Object.hasOwn(o, ka) ? 1 : 0) + (Object.hasOwn(o, "b") ? 10 : 0); // own:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_hasOwn")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
   it("Phase C: Object.create + getPrototypeOf round-trip native over $Object.$proto", async () => {
     // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0).
     // Object.create(proto) builds a fresh $Object whose $proto is `proto`;
@@ -504,6 +548,96 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(WebAssembly.validate(r.binary)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Slice 7: Object.setPrototypeOf writes $proto native; getPrototypeOf reads it + inherited read", async () => {
+    // #1888 Slice 7 — Object.setPrototypeOf(o, proto) writes $Object.$proto
+    // (field 0) under standalone (was a proto-dropping stub in all modes).
+    // After the write, Object.getPrototypeOf round-trips proto by identity and
+    // the inherited property resolves through __extern_get's existing proto
+    // walk. Both helpers native; zero object host imports leak.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const kt = "tag";
+          proto[kt] = 9;
+          const o: any = {};
+          o["own"] = 1;
+          Object.setPrototypeOf(o, proto);
+          const p: any = Object.getPrototypeOf(o);
+          // identity (1) + inherited read through the chain (9) → 10
+          return (p === proto ? 1 : 0) + (o[kt] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_setPrototypeOf")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("Slice 7: Object.setPrototypeOf returns its first argument (obj)", async () => {
+    // §20.1.2.21: the return value is always O (the first arg), regardless of
+    // the [[SetPrototypeOf]] result. Verify the call expression yields obj.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          proto["v"] = 4;
+          const o: any = {};
+          const ret: any = Object.setPrototypeOf(o, proto);
+          // ret === o identity (1) + inherited read via ret (4) → 5
+          return (ret === o ? 1 : 0) + (ret["v"] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Slice 7: Object.setPrototypeOf refuses a self-cycle (no infinite proto walk)", async () => {
+    // §10.1.2.1 step: a [[SetPrototypeOf]] that would create a cycle returns
+    // false and performs NO write. Standalone refuses silently (no throw). After
+    // `Object.setPrototypeOf(o, o)` the chain must stay acyclic: getPrototypeOf(o)
+    // is still null (the write was refused), so a subsequent walk terminates.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 1;
+          Object.setPrototypeOf(o, o); // self-cycle → refused, $proto stays null
+          const p: any = Object.getPrototypeOf(o);
+          return p === null ? 7 : 0; // refused write ⇒ null proto ⇒ 7
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(7);
+  });
+
+  it("Slice 7: default target (gc) Object.setPrototypeOf keeps the host stub (returns obj)", async () => {
+    // Dual-mode guard: in gc mode the call site keeps the existing stub
+    // (compile both args, drop proto, return obj). The result is still obj, so
+    // the program runs; the native __object_setPrototypeOf is NOT emitted.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const o: any = { a: 2 };
+          const ret: any = Object.setPrototypeOf(o, proto);
+          return (ret === o ? 1 : 0) + ((o as { a: number }).a); // 1 + 2 = 3
+        }
+      `;
+    const r = await compile(source); // default gc target
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // No native __object_setPrototypeOf runtime fn in gc mode (host stub path).
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).not.toMatch(/\(func \$__object_setPrototypeOf\b/);
   });
 
   it("Phase C: __extern_is_undefined routes native (ref.is_null) — destructuring default compiles + runs", async () => {
@@ -682,6 +816,233 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
           const o: any = { x: 1 };
           o.y = 2;
           return o.y;
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  });
+
+  // ── #1888 Slice 5 — native accessor-descriptor RUNTIME LAYER (groundwork) ──
+  //
+  // Slice 5 adds the runtime groundwork for accessor descriptors under
+  // --target standalone: the `$PropEntry.$get/$set` anyref slots + FLAG_ACCESSOR
+  // (R3 layout), the native `__defineProperty_accessor` store helper, and the
+  // native `__getOwnPropertyDescriptor` read-back (builds a descriptor $Object).
+  //
+  // These tests pin the runtime layer: accessor `defineProperty` compiles
+  // host-free + validates + instantiates, and the GOPD helper routes native
+  // (no `env::__getOwnPropertyDescriptor` import). The helpers are not yet
+  // reached end-to-end — the call-site routing (compiling getter/setter as
+  // host-free closures so they reach `__defineProperty_accessor` instead of the
+  // `__make_getter_callback` JS bridge) plus live get/set invocation are
+  // #329-gated follow-ups. Landing the helpers + R3 layout now de-risks the
+  // layout change in isolation. (~0 test262 on its own; pure foundation.)
+
+  it("Phase 5: accessor defineProperty compiles + validates host-free under standalone", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          // Accessor descriptor — getter + setter, both enumerable/configurable.
+          Object.defineProperty(o, "x", {
+            get() { return 1; },
+            set(_v: any) {},
+            enumerable: true,
+            configurable: true,
+          });
+          // The store must not disturb a sibling DATA property written before
+          // and after the accessor define (entry-slot reuse / table integrity).
+          o.before = 11;
+          Object.defineProperty(o, "y", { get() { return 2; } });
+          o.after = 31;
+          return (o.before as number) + (o.after as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    // The accessor stores don't clobber the data path: 11 + 31 = 42.
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("Phase 5: getter-only and setter-only accessor descriptors both store + instantiate", async () => {
+    // A descriptor with only `get` (no `set`) and one with only `set` (no `get`)
+    // both store: the absent half is a null externref → null anyref in the
+    // $PropEntry slot. Must compile + validate + instantiate host-free.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          Object.defineProperty(o, "getterOnly", { get() { return 7; }, configurable: true });
+          Object.defineProperty(o, "setterOnly", { set(_v: any) {}, configurable: true });
+          o.sentinel = 5;
+          return o.sentinel as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Phase 5: getOwnPropertyDescriptor on an externref receiver routes to the native helper (no host import)", async () => {
+    // The dynamic getOwnPropertyDescriptor path (non-struct/non-literal receiver)
+    // routes to the native `__getOwnPropertyDescriptor` runtime helper under
+    // standalone instead of leaking the `env::__getOwnPropertyDescriptor` host
+    // import — it reads the $PropEntry back and builds a descriptor $Object. This
+    // pins the runtime layer (helper emits as a DEFINED function, host-free); it
+    // is not yet reached for accessor *stores* (the call-site routing that
+    // compiles getter/setter as host-free closures is a #329-gated follow-up).
+    const r = await compile(
+      `
+        export function f(o: any, k: string): any {
+          return Object.getOwnPropertyDescriptor(o, k);
+        }
+      `,
+      { target: "standalone" },
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getOwnPropertyDescriptor")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__getOwnPropertyDescriptor\b/);
+  });
+
+  it("default target (gc) still routes accessor defineProperty through the host import", async () => {
+    // Regression guard: standalone is opt-in. Default (gc) mode keeps the
+    // JS-host descriptor sidecar for accessor descriptors.
+    const r = await compile(
+      `
+        export function f(o: any): any {
+          Object.defineProperty(o, "x", { get() { return 1; } });
+          return o;
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(true);
+  });
+});
+
+/**
+ * #1888 Slice 2 — standalone open-`any` method dispatch (`recv.m(args)`).
+ *
+ * The native `__extern_method_call` (object-runtime.ts, gated
+ * `S2_OPENANY_DISPATCH_WIRED`) resolves a user method stored on an open
+ * `$Object` via `__extern_get` (own + proto walk) and invokes it through the
+ * `__apply_closure` arity bridge → `__call_fn_method_0..4` (ES §7.3.14 Call,
+ * D6/D7). The receiver's args list is built with the native `$ObjVec` builders
+ * under standalone (not the host `__js_array_*`). Zero host imports; the
+ * `this`-threaded method path carries the receiver as `this`.
+ *
+ * Tests force the OPEN path with computed-key writes + `any` function params
+ * (TS narrows a literal `{}` to a closed struct that bypasses the runtime —
+ * see #1472 R2 / the Slice-0 audit). Method names avoid lib-prototype
+ * collisions (e.g. not `add`, which narrows to Set.prototype.add).
+ */
+describe("#1888 Slice 2 — standalone open-any method dispatch", () => {
+  const STD = { target: "standalone" as const };
+
+  it("o['m']=function(){return 42}; o.m() runs native, zero host imports", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["m"] = function () { return 42; };
+          return o.m();
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // Native dispatch: __extern_method_call is a DEFINED func, not an import.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("o['combine']=(a,b)=>a+b; o.combine(2,3) → 5 (2-arg arrow, native args via $ObjVec)", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["combine"] = (a: any, b: any) => a + b;
+          return o.combine(2, 3);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_new")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_push")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("3-arg method dispatch (arity-3 __call_fn_method_3 arm) runs", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["sum3"] = (a: any, b: any, c: any) => a + b + c;
+          return o.sum3(1, 2, 4);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(7);
+  });
+
+  it("4-arg method dispatch (arity-4 __call_fn_method_4 arm) runs", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["q"] = (a: any, b: any, c: any, d: any) => a + b + c + d;
+          return o.q(1, 2, 3, 4);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("method reads this.x through the open object (this-threaded dispatch)", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 10;
+          o["getX"] = function () { return (this as any).x; };
+          return o.getX();
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("regression: the same open-method program in default (gc) mode still compiles", async () => {
+    // Conservative dual-mode invariant: GC/host path is unchanged. The gc
+    // target keeps the host __extern_method_call bridge.
+    const r = await compile(
+      `
+        export function run(): number {
+          const o: any = {};
+          o["m"] = function () { return 42; };
+          return o.m();
         }
       `,
       {},

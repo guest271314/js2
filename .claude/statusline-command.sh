@@ -17,10 +17,19 @@ vim_mode=$(echo "$input" | jq -r '.vim.mode // empty')
 agent_name=$(echo "$input" | jq -r '.agent.name // empty')
 repo=$(echo "$input" | jq -r '.workspace.repo | if . then .owner + "/" + .name else empty end')
 case "$model_id" in
-  claude-opus-4-7*)   model='Opus';   price_in=15 ;;
-  claude-sonnet-4-6*) model='Sonnet'; price_in=3  ;;
-  claude-haiku-4-5*)  model='Haiku';  price_in=0  ;;
-  *)                  model='';       price_in=0  ;;
+  claude-opus-4-8*)   model='Opus 4.8';   price_in=15 ;;
+  claude-opus-4-7*)   model='Opus 4.7';   price_in=15 ;;
+  claude-opus-4-6*)   model='Opus 4.6';   price_in=15 ;;
+  claude-sonnet-4-6*) model='Sonnet 4.6'; price_in=3  ;;
+  claude-haiku-4-5*)  model='Haiku 4.5';  price_in=0  ;;
+  claude-opus*)       model='Opus';       price_in=15 ;;
+  claude-sonnet*)     model='Sonnet';     price_in=3  ;;
+  claude-haiku*)      model='Haiku';      price_in=0  ;;
+  *)                  model='';           price_in=0  ;;
+esac
+# 1M-context variant suffix (model id carries "1m", e.g. claude-opus-4-8[1m])
+case "$model_id" in
+  *1m*|*1M*) [ -n "$model" ] && model="$model 1M" ;;
 esac
 if [ "$price_in" -ge 5 ] 2>/dev/null; then   model_color='00;31'
 elif [ "$price_in" -ge 1 ] 2>/dev/null; then  model_color='00;33'
