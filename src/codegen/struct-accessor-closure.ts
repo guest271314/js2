@@ -126,3 +126,38 @@ export function ensureStructAccessorGlobal(
   else entry.setGlobal = globalIdx;
   return globalIdx;
 }
+
+/*
+ * ── C3/C4/C5 dispatch-site map (sd-1888 scope, await arch-s5c line-level spec) ──
+ *
+ * C2 (DONE) populates `ctx.structAccessorClosure[key]` + the per-(struct,prop)
+ * globals at the `Object.defineProperty` struct define-site. The remaining
+ * slices flip a closure-routing branch at each dispatch site, gated on
+ * `ctx.structAccessorClosure.has(`${structName}_${propName}`)` (so ONLY the
+ * migrated open-`any`/struct accessors route through the closure; class
+ * accessors stay on the bare-fn path — arch-s5c "do NOT migrate class-accessor").
+ * All routes call the SAME S5b drivers (`__call_accessor_get/set` →
+ * `__call_fn_method_0/1`), boxing the receiver struct ref to externref first.
+ *
+ * C3 — READ. The struct-getter bare-fn call lives at
+ *   property-access.ts:870-882 (`accessorKey=${structName}_${propName}`,
+ *   `getterName=${structName}_get_${propName}`, `classAccessorSet.has && call
+ *   getterIdx`). Parallel read arms that resolve the same accessorKey and would
+ *   also need the gate when the receiver is a migrated struct: property-access.ts
+ *   1689, 2410, 3369, 3426 (class-only, skip), 3642. Closure route: box recv→
+ *   externref, `global.get` the get-slot, `call __call_accessor_get(recv,getter)`.
+ *
+ * C4 — WRITE. The struct-setter bare-fn call lives at
+ *   expressions/assignment.ts:2334-2375 (`accessorKey=${typeName}_${fieldName}`,
+ *   `setterName=${typeName}_set_${fieldName}`, `emitSetterCallWithDummy`).
+ *   Parallel write arms: assignment.ts 2592, 2630 (class-only, skip), 2696, 2966.
+ *   Closure route: box recv→externref, `global.get` the set-slot,
+ *   `call __call_accessor_set(recv,setter,value)`.
+ *
+ * C5 — OBJLIT. The object-literal `{ get x() {} }` accessor compile-site is
+ *   literals.ts:~1409/1497 (`${typeName}_get/set_${propName}` + classAccessorSet.add).
+ *   Mirror C2 there (lift via buildAccessorClosure → global.set under the flag +
+ *   ctx.standalone). NOTE: the objlit-standalone S5c test currently surfaces a
+ *   separate `u32 out of range: -1` emit error in this path — diagnose as part of
+ *   C5, it is pre-existing and unrelated to the closure rework.
+ */
