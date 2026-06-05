@@ -53,6 +53,22 @@ export interface LinearUint8Result {
    * to rewrite the callee's wasm param list.
    */
   linearParams: Map<ts.Symbol, Set<number>>;
+  /**
+   * The **Slice-B-eligible** subset of {@link safeBindings}: a `new
+   * Uint8Array(...)` *local* whose every use stays inside its declaring
+   * function — element load/store, `.length`, and `process.std*.{read,write}`
+   * I/O only — and which is **never** passed as an argument to a user function
+   * (nor is itself a parameter). These can be backed by linear memory
+   * intraprocedurally with no call-site or signature changes.
+   *
+   * A buffer that flows through a user-function parameter is in `safeBindings`
+   * + `linearParams` (the Slice-C interprocedural signature-rewrite targets)
+   * but is deliberately **excluded** here: backing it linearly without the
+   * C-phase signature rewrite would hand a `(ptr,len)` local to a callee that
+   * still expects a GC array, an invalid-Wasm type mismatch. Slice B consumes
+   * this set; Slice C will widen consumption to all of `safeBindings`.
+   */
+  localOnlyBindings: Set<ts.Symbol>;
 }
 
 /** A function-like declaration we model in the interprocedural fixpoint. */
@@ -148,6 +164,10 @@ function resolveDirectCallee(
 export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.SourceFile): LinearUint8Result {
   // candidate bindings (locals + params), seeded safe; demote on disqualifying use.
   const safe = new Set<ts.Symbol>();
+  // Symbols introduced by a `new Uint8Array(...)` LOCAL init (not parameters).
+  // Only these can be backed linearly intraprocedurally (Slice B); a parameter
+  // needs the Slice-C signature rewrite before its (ptr,len) form is valid.
+  const newLocalSyms = new Set<ts.Symbol>();
   // function symbol → its FnDecl (for param-index lookup) + whether exported.
   const fnDecls = new Map<ts.Symbol, FnDecl>();
   // function symbol → param symbols (index-aligned) that are Uint8Array candidates.
@@ -165,7 +185,10 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
         // only `new Uint8Array(...)` inits are linear-candidates; an init from
         // another expression (a returned/aliased array) is left to the escape
         // checks (it will not be a `new` site we can back linearly).
-        if (sym && isNewUint8Array(node.initializer)) safe.add(sym);
+        if (sym && isNewUint8Array(node.initializer)) {
+          safe.add(sym);
+          newLocalSyms.add(sym);
+        }
       }
     }
     if (isFnDecl(node)) {
@@ -225,7 +248,35 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
     if (idxs.size > 0) linearParams.set(fnSym, idxs);
   }
 
-  return { safeBindings: safe, linearParams };
+  // ---- Freeze: derive the Slice-B (intraprocedural-only) eligible subset ----
+  // A surviving `new Uint8Array` local is Slice-B-eligible only if it never
+  // flows into a USER function as an argument — i.e. its sole call-argument
+  // uses are the `process.std*.{read,write}` I/O intrinsics (which Slice B
+  // lowers in place). A buffer passed to a user function needs the Slice-C
+  // signature rewrite first; backing it linearly now would hand a `(ptr,len)`
+  // local to a callee still typed for a GC array (invalid Wasm). Parameters
+  // are excluded by construction (only `newLocalSyms` are seeded here).
+  const localOnly = new Set<ts.Symbol>(newLocalSyms);
+  const dropParamThreaded = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const ioIdx = ioBufferArgIndex(node);
+      node.arguments.forEach((arg, argIdx) => {
+        if (!ts.isIdentifier(arg)) return;
+        const sym = checker.getSymbolAtLocation(arg);
+        if (!sym || !localOnly.has(sym)) return;
+        // I/O-intrinsic argument is fine; any other call-arg position means the
+        // buffer is threaded into a user function → not Slice-B-eligible.
+        if (argIdx !== ioIdx) localOnly.delete(sym);
+      });
+    }
+    ts.forEachChild(node, dropParamThreaded);
+  };
+  dropParamThreaded(sourceFile);
+  // Intersect with survivors (a `new`-local could have been demoted in Pass 2).
+  const localOnlyBindings = new Set<ts.Symbol>();
+  for (const sym of localOnly) if (safe.has(sym)) localOnlyBindings.add(sym);
+
+  return { safeBindings: safe, linearParams, localOnlyBindings };
 }
 
 /** The function's own symbol (for declarations and `const f = …` forms). */
