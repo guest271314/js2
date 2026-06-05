@@ -562,17 +562,17 @@ function compileDestructuringAssignment(
     // property, because the no-struct-fields path returned early without
     // touching any of the target identifiers.
     if (resultType.kind === "externref") {
-      let getIdx = ctx.funcMap.get("__extern_get");
-      if (getIdx === undefined) {
-        const importsBefore = ctx.numImportFuncs;
-        const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-        addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-        shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-        getIdx = ctx.funcMap.get("__extern_get");
-      }
+      // (#1866) Route `__extern_get` through `ensureLateImport` rather than a raw
+      // `addImport("env", …)`: under `--target standalone` that re-routes to the
+      // Wasm-native object-runtime impl (no `env::__extern_get` host import), so
+      // the module instantiates under wasmtime; in JS-host mode it adds the host
+      // import as before. A raw addImport leaks an undefined `env::__extern_get`
+      // that breaks the zero-JS-host guarantee.
+      ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
       const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
-      getIdx = ctx.funcMap.get("__extern_get");
+      const getIdx = ctx.funcMap.get("__extern_get");
 
       if (getIdx !== undefined && undefIdx !== undefined) {
         for (const prop of target.properties) {
@@ -1581,15 +1581,12 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return null;
 
   // Ensure __box_number is available (needed to convert index to externref)
