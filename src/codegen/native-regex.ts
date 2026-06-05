@@ -889,8 +889,15 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     // i = max(0, start)
-    { op: "local.get", index: START },
+    // `select` returns its 1st operand when the condition is non-zero, so to
+    // compute `start < 0 ? 0 : start` the operands must be (0, start, start<0):
+    // [val_if_true=0, val_if_false=start, cond=(start<0)]. (The earlier order
+    // [start, 0, start<0] yielded the inverse — `start<0 ? start : 0` — which
+    // returned 0 for every non-negative start, so any `__regex_search` with a
+    // positive `startIdx` rescanned from 0 and global replace/match looped
+    // forever re-matching the first hit. #1539 Phase 2c.)
     { op: "i32.const", value: 0 },
+    { op: "local.get", index: START },
     { op: "local.get", index: START },
     { op: "i32.const", value: 0 },
     { op: "i32.lt_s" },
