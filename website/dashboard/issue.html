@@ -194,12 +194,29 @@
         document.getElementById("issue-num").textContent = `#${slug.split("-")[0]}`;
 
         try {
-          // Fetch the markdown file
-          const response = await fetch(`/plan/issues/${slug}.md`);
-          if (!response.ok) {
-            throw new Error(`Issue not found (${response.status})`);
+          // Try fetching the markdown file from multiple possible locations
+          // Production: /plan/issues/<slug>.md
+          // Development: ../../plan/issues/<slug>.md (relative from dashboard/issue.html)
+          const paths = [`/plan/issues/${slug}.md`, `../../plan/issues/${slug}.md`];
+
+          let markdown = null;
+          let lastError = null;
+
+          for (const path of paths) {
+            try {
+              const response = await fetch(path);
+              if (response.ok) {
+                markdown = await response.text();
+                break;
+              }
+            } catch (err) {
+              lastError = err;
+            }
           }
-          const markdown = await response.text();
+
+          if (!markdown) {
+            throw new Error(`Issue not found. Tried: ${paths.join(", ")}`);
+          }
 
           // Remove frontmatter
           const contentStart = markdown.indexOf("---", 3) + 3;
