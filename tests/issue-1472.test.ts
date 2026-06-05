@@ -929,3 +929,124 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(true);
   });
 });
+
+/**
+ * #1888 Slice 2 — standalone open-`any` method dispatch (`recv.m(args)`).
+ *
+ * The native `__extern_method_call` (object-runtime.ts, gated
+ * `S2_OPENANY_DISPATCH_WIRED`) resolves a user method stored on an open
+ * `$Object` via `__extern_get` (own + proto walk) and invokes it through the
+ * `__apply_closure` arity bridge → `__call_fn_method_0..4` (ES §7.3.14 Call,
+ * D6/D7). The receiver's args list is built with the native `$ObjVec` builders
+ * under standalone (not the host `__js_array_*`). Zero host imports; the
+ * `this`-threaded method path carries the receiver as `this`.
+ *
+ * Tests force the OPEN path with computed-key writes + `any` function params
+ * (TS narrows a literal `{}` to a closed struct that bypasses the runtime —
+ * see #1472 R2 / the Slice-0 audit). Method names avoid lib-prototype
+ * collisions (e.g. not `add`, which narrows to Set.prototype.add).
+ */
+describe("#1888 Slice 2 — standalone open-any method dispatch", () => {
+  const STD = { target: "standalone" as const };
+
+  it("o['m']=function(){return 42}; o.m() runs native, zero host imports", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["m"] = function () { return 42; };
+          return o.m();
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // Native dispatch: __extern_method_call is a DEFINED func, not an import.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("o['combine']=(a,b)=>a+b; o.combine(2,3) → 5 (2-arg arrow, native args via $ObjVec)", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["combine"] = (a: any, b: any) => a + b;
+          return o.combine(2, 3);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_new")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__js_array_push")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("3-arg method dispatch (arity-3 __call_fn_method_3 arm) runs", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["sum3"] = (a: any, b: any, c: any) => a + b + c;
+          return o.sum3(1, 2, 4);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(7);
+  });
+
+  it("4-arg method dispatch (arity-4 __call_fn_method_4 arm) runs", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["q"] = (a: any, b: any, c: any, d: any) => a + b + c + d;
+          return o.q(1, 2, 3, 4);
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("method reads this.x through the open object (this-threaded dispatch)", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 10;
+          o["getX"] = function () { return (this as any).x; };
+          return o.getX();
+        }
+      `;
+    const r = await compile(source, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("regression: the same open-method program in default (gc) mode still compiles", async () => {
+    // Conservative dual-mode invariant: GC/host path is unchanged. The gc
+    // target keeps the host __extern_method_call bridge.
+    const r = await compile(
+      `
+        export function run(): number {
+          const o: any = {};
+          o["m"] = function () { return 42; };
+          return o.m();
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  });
+});

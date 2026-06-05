@@ -37,6 +37,7 @@ import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
+import { fillApplyClosure } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1460,6 +1461,13 @@ export function generateModule(
     emitClosureMethodCallExportN(ctx, 0);
     emitClosureMethodCallExportN(ctx, 1);
     emitClosureMethodCallExportN(ctx, 2);
+    // (#1888 Slice 1) Arities 3 and 4 for the standalone open-any method
+    // dispatch bridge `__apply_closure` (spec D7: `o.m(a,b,c[,d])`). Each call
+    // is a no-op when no closure of that arity exists, so GC/host modules without
+    // arity-3/4 closures stay byte-identical. Dynamic method calls above arity 4
+    // are refused-loud in `__apply_closure`.
+    emitClosureMethodCallExportN(ctx, 3);
+    emitClosureMethodCallExportN(ctx, 4);
 
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive
@@ -1477,11 +1485,21 @@ export function generateModule(
     // No-op when no accessor arm reserved a driver (no standalone object runtime).
     fillAccessorDrivers(ctx);
 
+    // (#1888 Slice 1) Fill the reserved `__apply_closure` bridge body now that
+    // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
+    // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
+    fillApplyClosure(ctx);
+
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
     // (necessary because __vec_len returns 0 for both empty arrays and
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
+
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (closures registered after the typeof helpers were
+    // synthesised mid-compile). Edits the helper bodies in place — no funcIdx churn.
+    fillStandaloneTypeofClosureArms(ctx);
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
@@ -3369,12 +3387,17 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
  * (#1504). No-op when the module has no closures.
  */
-function emitIsClosureExport(ctx: CodegenContext): void {
+/**
+ * Collect the deduped set of closure base-wrapper struct type indices from
+ * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
+ * their funcref signature with the base wrapper post-V8 canonicalisation, so a
+ * `ref.test` against the base catches all of them. Walks each registered
+ * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
+ * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
+ * closure-recognition arms.)
+ */
+function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
   const mod = ctx.mod;
-
-  // Collect base wrapper struct types (deduped). Concrete closure subtypes
-  // share their funcref signature with the base wrapper post-V8 canonicalisation,
-  // so ref.test against the base catches all of them.
   const baseTypeIdxs: number[] = [];
   const seenBase = new Set<number>();
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
@@ -3396,6 +3419,16 @@ function emitIsClosureExport(ctx: CodegenContext): void {
       baseTypeIdxs.push(root);
     }
   }
+  return baseTypeIdxs;
+}
+
+function emitIsClosureExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect base wrapper struct types (deduped). Concrete closure subtypes
+  // share their funcref signature with the base wrapper post-V8 canonicalisation,
+  // so ref.test against the base catches all of them.
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
   if (baseTypeIdxs.length === 0) return;
 
   const isClosureTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_closure_type");
@@ -3430,6 +3463,93 @@ function emitIsClosureExport(ctx: CodegenContext): void {
     name: "__is_closure",
     desc: { kind: "func", index: funcIdx },
   });
+}
+
+/**
+ * #1896 — teach the standalone/WASI native `__typeof_function` and
+ * `__typeof_object` helpers to recognise closure wrapper structs.
+ *
+ * Those helpers are synthesised by `addUnionImportsAsNativeFuncs`, which runs
+ * once on the first `addUnionImports` call — frequently *mid-compile*, before
+ * every closure type has been registered in `ctx.closureInfoByTypeIdx`. Baking
+ * the base-wrapper set at registration time would therefore miss later-registered
+ * closures. Instead we rewrite the two helper bodies HERE, at finalize, after all
+ * closures are registered (same late timing as `emitIsClosureExport`). We locate
+ * the functions by name in `ctx.mod.functions` and splice in `ref.test` arms over
+ * the closure base wrappers — no funcIdx churn (we edit existing bodies in place).
+ *
+ * - `__typeof_function`: was `i32.const 0` (wrong — a stored standalone closure
+ *   is callable). Now: `any.convert_extern` then chained `ref.test` over each
+ *   closure base wrapper; return 1 on first match, else 0.
+ * - `__typeof_object`: add a closure-base-wrapper `ref.test` guard that returns 0
+ *   (a callable is `"function"`, never `"object"`) BEFORE the final non-null
+ *   `i32.const 1`, so a wrapper read back from an open-object slot is not
+ *   mis-classified as `"object"`.
+ *
+ * No-op unless native-strings (the helpers only exist then) and at least one
+ * closure base wrapper was registered.
+ */
+function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
+  if (!ctx.nativeStrings) return;
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
+  if (baseTypeIdxs.length === 0) return;
+
+  const fnByName = (name: string): WasmFunction | undefined =>
+    ctx.mod.functions.find((f) => (f as { name?: string }).name === name) as WasmFunction | undefined;
+
+  // Chained `ref.test` arms over the anyref-converted param in local 0/1. Each
+  // arm returns `matchValue` on hit. Caller supplies the param→anyref local.
+  const closureTestArms = (anyLocalIdx: number, matchValue: number): Instr[] => {
+    const arms: Instr[] = [];
+    for (const t of baseTypeIdxs) {
+      arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
+      arms.push({ op: "ref.test", typeIdx: t } as Instr);
+      arms.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: matchValue } as Instr, { op: "return" } as Instr],
+      } as Instr);
+    }
+    return arms;
+  };
+
+  // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
+  const tf = fnByName("__typeof_function");
+  if (tf) {
+    // Ensure an anyref local exists for the converted param (local index 1).
+    if (tf.locals.length === 0) {
+      tf.locals.push({ name: "$any_temp", type: { kind: "anyref" } });
+    }
+    tf.body = [
+      { op: "local.get", index: 0 } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
+      } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+      ...closureTestArms(1, 1),
+      { op: "i32.const", value: 0 } as Instr,
+    ];
+  }
+
+  // --- __typeof_object: insert closure-exclusion (return 0) before the trailing
+  // non-null `i32.const 1`. The existing body already converts the param to
+  // anyref into local 1 (`$any_temp`) for its boxed-primitive guards, so reuse it.
+  const to = fnByName("__typeof_object");
+  if (to) {
+    const b = to.body;
+    // The body ends with `{ i32.const 1 }` (the "non-null → object" fallthrough).
+    // Splice the closure-exclusion arms immediately before that terminal const.
+    const lastIdx = b.length - 1;
+    const last = b[lastIdx] as { op?: string; value?: number } | undefined;
+    if (last && last.op === "i32.const" && last.value === 1) {
+      b.splice(lastIdx, 0, ...closureTestArms(1, 0));
+    }
+  }
 }
 
 /**
@@ -4534,6 +4654,10 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (edits helper bodies in place — no funcIdx churn).
+    fillStandaloneTypeofClosureArms(ctx);
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);

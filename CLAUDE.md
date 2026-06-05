@@ -337,7 +337,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,614 / 43,135 (71.0 %) — baseline fd9e40d7, 2026-06-05T07:47:40Z
+**test262 conformance**: 30,590 / 43,135 (70.9 %) — baseline 99996205, 2026-06-05T08:48:08Z
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

@@ -531,3 +531,45 @@ writes + `any` function params to force the open path (TS narrows a literal
   the `OBJECT_RUNTIME_HELPER_NAMES` tail + `tests/issue-1472.test.ts`). As of
   this audit #1195/#1196 are CI-green + enqueued in the merge queue (behind
   #1205); start Slice 1 once they land to avoid a shared-file re-conflict.
+
+## Slices 1+2 — WIRED (sd-s2, 2026-06-05, branch issue-1888-s2-wire)
+
+The high-value `~7.5k` open-`any` method-dispatch lever is implemented and
+gated **on** (`S2_OPENANY_DISPATCH_WIRED = true`). Combines Slice 1
+(`__apply_closure` arity bridge) + Slice 2 (`__extern_method_call` open-`$Object`
+user-method path), built on the parked machinery from `issue-1888-s1-apply-closure`.
+
+**What landed:**
+- `object-runtime.ts`: `reserveApplyClosure`/`fillApplyClosure` (reserve-then-fill
+  at finalize, mirroring `__drive_proto_iterator`); the `__extern_method_call`
+  native arm (`any.convert_extern` → null-guard → `ref.test $Object` →
+  `__extern_get` own+proto walk → `__apply_closure`); `"__extern_method_call"`
+  added to `OBJECT_RUNTIME_HELPER_NAMES`.
+- `index.ts`: `emitClosureMethodCallExportN(3,4)` (arity extension to 4) +
+  `fillApplyClosure(ctx)` at finalize after `__call_fn_method_0..4` register.
+- `context/types.ts`: `applyClosureReserved` flag.
+- `calls.ts`: generic `obj.m()` dispatch site (#965 path) + the
+  wrapper-reassign `emitWrapperDynamicMethodCall` both route the args list
+  through native `$ObjVec` builders (`ensureObjVecBuilders`) under
+  `ctx.standalone`, so `__extern_method_call` reads args via
+  `__extern_length`/`__extern_get_idx` instead of host `__js_array_*`.
+- `tests/issue-1472.test.ts`: `#1888 Slice 2` describe block (arity 0–4,
+  this-threading, gc-mode regression guard) — instantiate-and-run, zero env imports.
+
+**Closure round-trip prereq:** satisfied by #1226 (typeof-closure recognition)
++ the existing `closureInfoByTypeIdx` self-registration of every compiled
+fn-expr (`closures.ts:2322`), so `__call_fn_method_N` emits a matching
+`ref.test` arm for an open-stored method. No extra registration needed.
+
+**#1899 decider:** did NOT trip — un-parking `__apply_closure`'s baked
+`call __call_fn_method_N` validated clean; no reconcile off-by-one. The
+finalize funcIdx-authority refactor is not on S2's critical path.
+
+**Merge-defect caught + fixed (downstream effect):** the parked S1 branch
+predates Slice 7, so its `calls.ts` carried the pre-Slice-7 `Object.setPrototypeOf`
+**stub** (drop proto). A naive `git apply --3way` of the parked branch silently
+clobbered main's newer Slice-7 standalone `__object_setPrototypeOf` branch,
+regressing proto-chain inherited reads (2 Slice-7 tests failed). Fixed by
+re-applying only the S2 hunks onto main's current `calls.ts` (which keeps
+Slice 7). Lesson for the remaining slices: re-base parked machinery onto
+**current main per-hunk**, never bulk-apply a stale full-file diff.
