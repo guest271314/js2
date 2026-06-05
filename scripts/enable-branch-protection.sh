@@ -55,10 +55,19 @@ done
 # Each entry is a GitHub check name (the value of the `name:` field on the job
 # in the workflow YAML, OR the workflow `name:` if the job doesn't override).
 # Names are case-sensitive and whitespace-sensitive.
+#
+# NOTE (#1897): the STANDALONE test262 lane is gated by an inline guard step
+# *inside* the already-required `merge shard reports` job, NOT by a separate
+# required check. The standalone shards already run in the same 57×2 matrix and
+# the merged standalone JSONL is built in that job; the guard step diffs it
+# against the standalone baseline and fails the (required) check on a
+# net-negative standalone regression beyond tolerance. So gating standalone
+# needed NO new entry here and NO branch-protection re-apply — it rides the
+# `merge shard reports` context. See docs/ci-policy.md §3.
 # -----------------------------------------------------------------------------
 REQUIRED_CHECKS=(
   "cheap gate (main-ancestor + lint)"    # test262-sharded.yml — fast pre-flight reject
-  "merge shard reports"                  # test262-sharded.yml — authoritative test262 gate
+  "merge shard reports"                  # test262-sharded.yml — authoritative test262 gate (host + standalone, #1897)
   "quality"                              # ci.yml — lint, format, typecheck, IR budget
 )
 

@@ -32,7 +32,7 @@ case-sensitive and whitespace-sensitive.
 | Check name | Workflow file | What it gates |
 |---|---|---|
 | `cheap gate (main-ancestor + lint)` | `.github/workflows/test262-sharded.yml` | fast pre-flight: lint + typecheck on the PR branch (cheap reject before running the test262 matrix) |
-| `merge shard reports` | `.github/workflows/test262-sharded.yml` | aggregates the 16 test262 shards into a single pass/fail signal — the authoritative conformance gate (replaces the legacy `regression-gate` / rolling-baseline approach) |
+| `merge shard reports` | `.github/workflows/test262-sharded.yml` | aggregates the 57 test262 shards into a single pass/fail signal — the authoritative conformance gate (replaces the legacy `regression-gate` / rolling-baseline approach). Hosts the HARD inline guards: the host catastrophic-regression guard (#1668), the **standalone net-regression guard (#1897)**, and the stale-baseline guard (#1668) — see §3 |
 | `quality` | `.github/workflows/ci.yml` | lint, format check, typecheck, IR fallback budget (#1376), planning-artifact regen |
 
 ### Optional / informational checks (NOT required to merge)
@@ -116,6 +116,53 @@ Two test262 workflows currently run on PRs:
 
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
+
+### Both lanes are gated — host AND standalone (#1897)
+
+The 57-shard matrix runs **two** test262 targets per chunk: `js-host` (the
+default WasmGC/gc lane) and `standalone` (`--target standalone
+--no-host-imports nativeStrings`, the pure-Wasm lane). `merge shard reports`
+merges **both** sets of shard artifacts and builds both reports, then runs
+three HARD inline guards. Because a failing step inside `merge shard reports`
+fails the required check, all three guards gate the merge queue **without
+any additional required-check name** — no branch-protection change is needed
+to enforce them.
+
+| Inline guard | Lane | Fails when | Tolerance |
+|---|---|---|---|
+| Catastrophic regression guard (#1668) | host | `Regressions with wasm-hash change` > 200 vs `test262-current.jsonl` | high (200) — only a codegen/harness catastrophe trips it |
+| **Standalone regression guard (#1897)** | **standalone** | net (`improvements − wasm-change regressions`) < −15 vs `test262-standalone-current.jsonl` | tight (15) — holds the current standalone floor |
+| Stale-baseline guard (#1668) | both | baselines JSONL > 50 commits behind main HEAD (promotion pipeline broken) | n/a |
+
+**Why the standalone guard is separate and tighter.** Before #1897 the merge
+queue gated only the host lane. The standalone lane runs in the same matrix
+and its merged report is built, but nothing failed the merge when standalone
+regressed — it was only measured *post-merge* by the non-gating
+`promote-baseline` job. A #1196 merge regressed standalone ~1,800 passes
+(+5,582 `compile_error`) and slipped straight through, because the host
+catastrophic guard's 200-test threshold never sees the standalone JSONL.
+#1897 closes that gap with a standalone-specific net-regression guard at a
+much tighter floor.
+
+**Floor-holding, not absolute-target.** The standalone guard diffs against
+`test262-standalone-current.jsonl` — the moving standalone baseline that
+`promote-baseline` refreshes on every push to main. So it pins **whatever
+floor standalone is currently at**: a PR that leaves standalone unchanged
+(net 0) or improves it (net > 0) always passes; only a PR that drops the
+standalone net below tolerance fails. As standalone fixes land and the
+baseline rises, the gate automatically holds the new, higher floor. This is
+why the gate can be enforced even while standalone is below its long-term
+target — it never blocks an improving or neutral PR.
+
+**Flake tolerance.** The known standalone CI flake is `compile_timeout` under
+load (tests near the 30s compile boundary flapping with runner pressure).
+`scripts/diff-test262.ts` already **excludes** `compile_timeout` transitions
+from its `Regressions with wasm-hash change` count, so the net the guard
+gates on is structurally flake-free. The −15 tolerance only absorbs residual
+baseline drift (corpus-version skew, `env::`-import nondeterminism); measured
+real run-to-run standalone drift was 0 regressions / +3 improvements, so 15
+sits well above the noise floor. The threshold is tunable via the
+`STANDALONE_REGRESSION_TOLERANCE` env on the guard step.
 
 ---
 
@@ -233,7 +280,7 @@ behaviour can be flipped without touching the JS script.
 | Required check | Workflow | What it protects against |
 |---|---|---|
 | `cheap gate (main-ancestor + lint)` | `test262-sharded.yml` | fast pre-flight reject: lint + typecheck on the PR branch before any test262 shard runs. Catches obvious failures cheaply and stops the queue from spending compute on a doomed PR. |
-| `merge shard reports` | `test262-sharded.yml` | semantic conformance: aggregates the 16 sharded test262 runs into a single pass/fail. Authoritative gate via the `batch=1` serial merge queue — each PR validated on its own merge_group ref with no ALLGREEN hiding. |
+| `merge shard reports` | `test262-sharded.yml` | semantic conformance, **both lanes**: aggregates the 57 sharded test262 runs (host + standalone) into a single pass/fail. Authoritative gate via the `batch=1` serial merge queue — each PR validated on its own merge_group ref with no ALLGREEN hiding. Hosts the host catastrophic guard (#1668), the standalone net-regression guard (#1897), and the stale-baseline guard (#1668) — see §3. |
 | `quality` | `ci.yml` | source quality regressions: lint, formatting, typecheck failures, IR fallback budget exceeded (#1376), planning-artifact regeneration. Also runs the "origin/main is merged into branch" pre-check that catches stale PR branches. |
 
 The CODEOWNERS file gates **who** can approve. The required checks gate
