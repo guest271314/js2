@@ -148,3 +148,69 @@ Compile-time-resolvable `valueOf`/`toString` (typed class methods) never reach
 
 `typecheck` clean (exit 0), `prettier --check` + `biome lint` clean,
 `host-import-allowlist-{budget,gate}` tests pass (13).
+
+## Implementation (Phase 1, string-hint slice — done)
+
+Phase 0 only re-bucketed the failures; it did not make any pass. Phase 1 is the
+feature work. It splits cleanly by how the object's type is known:
+
+- **Compile-time-resolvable** (typed object literals incl. `var o = {…}`, and
+  class instances): the struct type and its `valueOf`/`toString` methods are
+  known at compile time. The **numeric-hint** path here already worked
+  (`obj + 1` → correct via the ref→f64 `valueOf`/`toString` dispatch). The
+  **string-hint** path was broken: `string + obj`, `` `${obj}` ``, `String(obj)`
+  all routed any struct ref through the `$__any_to_string` dispatcher, which
+  (by design, deferred to #1472) cannot introspect a user struct and returns
+  `"[object Object]"` — observed as a dropped `undefined` concat result.
+- **Dynamic / open-object** (`any`-typed, sidecar-backed): genuinely blocked on
+  open-object method dispatch (#1472 Phase C, in progress). Out of scope here.
+
+This slice fixes the **compile-time-resolvable string-hint** family. New
+exported helper `tryStructToString(ctx, fctx, from)` in
+`src/codegen/type-coercion.ts` performs OrdinaryToPrimitive(§7.1.1.1, hint
+"string") over a known struct, mirroring the numeric-hint walker
+(`tryToStringFallback`) but producing a `ref $AnyString` instead of f64:
+
+1. the `toString` closure field via `call_ref` — handles both the concrete
+   `ref`/`ref_null` closure case and the **eqref**-stored case (object literals
+   store methods as `eqref`), recovering the closure type from
+   `ctx.valueOfClosureTypes`. When both `valueOf` and `toString` exist, the
+   candidate list is filtered to **string-returning** closures first so the
+   f64-returning `valueOf` is never invoked with the wrong signature (a
+   null-deref / illegal cast — the bug behind the `concat-both` case).
+2. a named `${name}_toString` in `funcMap` (class methods).
+
+Results normalise to a native string; non-string returns route through
+`$__any_to_string`. When neither form resolves, the helper returns false and the
+caller falls back to `$__any_to_string` (so plain objects still yield
+`"[object Object]"`).
+
+Wired into the two standalone string-coercion sites in
+`src/codegen/string-ops.ts`: `compileNativeConcatOperand` (string `+`) and the
+template-literal span path — both try `tryStructToString` before the
+`$__any_to_string` fallback.
+
+**Deliberately deferred**: a user `[Symbol.toPrimitive]` (which would take
+precedence per §7.1.1.1) is NOT dispatched here — its hint argument needs native
+string marshalling in native-strings mode, which the externref-global
+`pushStringHint` does not satisfy; handling it caused a `u32 out of range`
+binary-emit error, so it's left to a follow-up. (The computed-`@@toPrimitive`
+case already emits invalid Wasm on `main`, unrelated to this slice.)
+
+## Test Results (Phase 1)
+
+`tests/issue-1806-string-hint.test.ts` — all 6 pass (in-Wasm `=== expected`
+assertions, since standalone returns a `$AnyString` GC struct, not a JS string):
+- `string + obj` and `` `${obj}` `` dispatch a user `toString` (closure field).
+- string hint prefers `toString` over `valueOf` when both exist (no null-deref).
+- numeric `obj + 1` still uses `valueOf` (no regression).
+- plain object without `toString` still yields `"[object Object]"`.
+- class-instance `toString` dispatched for a string coercion.
+
+No regressions: `tests/issue-1806.test.ts` (Phase 0, 5), `tests/issue-1525.test.ts`
+(10), `tests/issue-1470-standalone-string-imports.test.ts` (14),
+`tests/issue-1470-string-coercion-standalone.test.ts` (4),
+`tests/call-arg-type-coercion.test.ts` (6) all pass. `typecheck` clean,
+`prettier --check` clean. The default GC/JS-host lane is untouched (the new
+dispatch is reached only via the `noJsHost` string-coercion sites). Full test262
+conformance validated by CI.
