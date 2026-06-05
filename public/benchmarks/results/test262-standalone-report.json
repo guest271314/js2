@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T00:02:10.411Z",
-  "baseline_generated_at": "2026-06-05T00:02:09Z",
-  "baseline_sha": "037635d7226d99e5a3fe5d9558e1d244ce388da2",
+  "timestamp": "2026-06-05T00:32:01.924Z",
+  "baseline_generated_at": "2026-06-05T00:32:01Z",
+  "baseline_sha": "68e9fd62551acb87f1c60c137c9e1eda0289abed",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1083,14 +1083,14 @@
     "illegal_cast": 203,
     "negative_test_fail": 73,
     "null_deref": 220,
-    "oob": 96,
+    "oob": 98,
     "other": 20111,
     "promise_error": 32,
     "range_error": 27,
     "runtime_error": 2100,
     "type_error": 1,
     "unreachable": 36,
-    "wasm_compile": 5384
+    "wasm_compile": 5382
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1216,17 +1216,17 @@
           "other": 3571,
           "runtime_error": 623,
           "assertion_fail": 250,
-          "wasm_compile": 40,
+          "wasm_compile": 38,
           "range_error": 9,
-          "oob": 4,
+          "oob": 6,
           "null_deref": 1
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
-          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
+          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
@@ -1343,7 +1343,7 @@
           "test/language/statements/with/S12.10_A3.10_T2.js",
           "test/language/statements/with/S12.10_A4_T6.js",
           "test/language/statements/with/S12.10_A1.11_T5.js",
-          "test/language/statements/with/cptn-nrml.js"
+          "test/language/statements/with/S12.10_A3.12_T3.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
