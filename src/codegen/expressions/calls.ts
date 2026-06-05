@@ -3854,13 +3854,55 @@ function compileCallExpression(
       return { kind: "i32" };
     }
 
-    // Handle Object.setPrototypeOf(obj, proto) — stub: compile both args, drop proto, return obj
+    // Handle Object.setPrototypeOf(obj, proto).
+    //   - Standalone (#1888 Slice 7): route to the native __object_setPrototypeOf
+    //     runtime helper, which writes $Object.$proto (field 0) after the
+    //     §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle checks and
+    //     returns obj. No host import leaks (the name is in
+    //     OBJECT_RUNTIME_HELPER_NAMES, so ensureLateImport lands the native fn).
+    //   - GC/host: keep the existing stub (compile both args, drop proto,
+    //     return obj) — byte-for-byte unchanged, the host runtime owns proto.
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "Object" &&
       propAccess.name.text === "setPrototypeOf" &&
       expr.arguments.length >= 2
     ) {
+      if (ctx.standalone) {
+        // obj (externref)
+        const objType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (!objType) {
+          // obj produced no value — nothing to set on; push null result.
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        if (objType.kind !== "externref") {
+          coerceType(ctx, fctx, objType, { kind: "externref" });
+        }
+        // proto (externref)
+        const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+        if (!protoType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (protoType.kind !== "externref") {
+          coerceType(ctx, fctx, protoType, { kind: "externref" });
+        }
+        const spoIdx = ensureLateImport(
+          ctx,
+          "__object_setPrototypeOf",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (spoIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: spoIdx });
+        } else {
+          // Helper unavailable (should not happen in standalone) — fall back to
+          // the stub: drop proto, leave obj on the stack.
+          fctx.body.push({ op: "drop" });
+        }
+        return { kind: "externref" };
+      }
+      // GC/host stub: compile both args, drop proto, return obj.
       const objType = compileExpression(ctx, fctx, expr.arguments[0]!);
       const protoType = compileExpression(ctx, fctx, expr.arguments[1]!);
       if (protoType) {

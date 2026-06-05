@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T05:18:25.336Z",
-  "baseline_generated_at": "2026-06-05T05:18:24Z",
-  "baseline_sha": "23b664ab16edc5704efafe0bd0a5684222eb60be",
+  "timestamp": "2026-06-05T05:37:38.481Z",
+  "baseline_generated_at": "2026-06-05T05:37:38Z",
+  "baseline_sha": "e3694270cd004c6426da187d340d6091bde56cc6",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1223,9 +1223,9 @@
         "sample_files": [
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
-          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
@@ -1338,8 +1338,8 @@
           "test/language/statements/generators/unscopables-with-in-nested-fn.js",
           "test/language/statements/with/S12.10_A3.10_T2.js",
           "test/language/statements/with/S12.10_A4_T6.js",
-          "test/language/statements/with/S12.10_A1.11_T5.js",
-          "test/language/statements/with/S12.10_A3.12_T3.js"
+          "test/language/statements/with/S12.10_A3.12_T3.js",
+          "test/language/statements/with/S12.10_A1.11_T5.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
@@ -1365,22 +1365,22 @@
           "total": 157
         },
         "error_categories": {
-          "unreachable": 31,
           "other": 99,
+          "unreachable": 31,
           "assertion_fail": 22,
           "wasm_compile": 4,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
+          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1466,17 +1466,17 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 18464,
+        "count": 19166,
         "statuses": {
           "pass": 0,
           "fail": 584,
-          "compile_error": 17880,
+          "compile_error": 18582,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 18464
+          "total": 19166
         },
         "error_categories": {
-          "wasm_compile": 6638,
+          "wasm_compile": 7340,
           "other": 11172,
           "assertion_fail": 510,
           "runtime_error": 117,
@@ -1541,17 +1541,17 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 3485,
+        "count": 2783,
         "statuses": {
           "pass": 0,
           "fail": 122,
-          "compile_error": 3363,
+          "compile_error": 2661,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3485
+          "total": 2783
         },
         "error_categories": {
-          "wasm_compile": 2755,
+          "wasm_compile": 2053,
           "other": 627,
           "assertion_fail": 73,
           "null_deref": 15,
