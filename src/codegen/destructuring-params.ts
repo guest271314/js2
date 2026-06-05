@@ -1006,14 +1006,16 @@ export function destructureParamArray(
       // Pre-register fallback host imports BEFORE building convertInstrs, so that
       // any function index shifts from late imports are visible to boxToExternref
       // calls inside the vec-type conversion loop below. (#825)
-      const fbLenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+      //
+      // (#1890 / late-shift class) We deliberately do NOT capture the returned
+      // funcIdx here: the `convertInstrs` loop below runs `boxToExternref` →
+      // `addUnionImports`, which shifts every defined-function index, so any index
+      // captured now would go stale. We re-resolve all three by name from funcMap
+      // *after* that loop, just before baking them into call instructions. Only
+      // the *presence* of these imports matters at this point.
+      ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
       flushLateImportShifts(ctx, fctx);
-      const fbGetIdxFn = ensureLateImport(
-        ctx,
-        "__extern_get_idx",
-        [{ kind: "externref" }, { kind: "f64" }],
-        [{ kind: "externref" }],
-      );
+      ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       // __array_from_iter_n materializes iterables (generators, sets, custom
       // @@iterator) so __extern_length / __extern_get_idx operate on a real
@@ -1023,12 +1025,7 @@ export function destructureParamArray(
       // pass -1 → unbounded drain, byte-identical to legacy __array_from_iter
       // and preserving its IteratorClose tuning (#1219, #1592).
       const fbIterStepCount = patternIteratorStepCount(pattern.elements);
-      const fbIterFn = ensureLateImport(
-        ctx,
-        "__array_from_iter_n",
-        [{ kind: "externref" }, { kind: "f64" }],
-        [{ kind: "externref" }],
-      );
+      ensureLateImport(ctx, "__array_from_iter_n", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
 
       // Else: try each other known vec type and convert element-by-element
@@ -1115,7 +1112,20 @@ export function destructureParamArray(
       // Fallback: if no Wasm vec type matched, the externref is a plain JS array/iterable.
       // Materialize via Array.from first so iterator protocol runs (generators, custom
       // @@iterator); then walk with __extern_length + __extern_get_idx. (#825, #1150)
-      if (fbLenFn !== undefined && fbGetIdxFn !== undefined && fbIterFn !== undefined) {
+      //
+      // (#1890 / late-shift class) RE-RESOLVE the three fallback funcIdx by name
+      // before baking them into call instructions below. They were captured above
+      // (lines ~1012/1014/1029), but the `convertInstrs` loop just ran
+      // `boxToExternref` → `addUnionImports`, which adds func imports and shifts
+      // EVERY defined-function index. Under standalone/WASI these names resolve to
+      // DEFINED helpers (via addUnionImportsViaRegistry / ensureObjectRuntime), so
+      // their captured indices are now stale-low → the `call`s would target the
+      // freshly-inserted import (invalid Wasm). funcMap holds the post-shift truth;
+      // re-reading by name is the fix (idempotent — no new import is added here).
+      const fbLenFnFinal = ctx.funcMap.get("__extern_length");
+      const fbGetIdxFnFinal = ctx.funcMap.get("__extern_get_idx");
+      const fbIterFnFinal = ctx.funcMap.get("__array_from_iter_n");
+      if (fbLenFnFinal !== undefined && fbGetIdxFnFinal !== undefined && fbIterFnFinal !== undefined) {
         const fbMatTmp = allocLocal(fctx, `__dparam_fb_mat_${fctx.locals.length}`, { kind: "externref" });
         const fbLenTmp = allocLocal(fctx, `__dparam_fb_len_${fctx.locals.length}`, { kind: "i32" });
         const fbArrTmp = allocLocal(fctx, `__dparam_fb_arr_${fctx.locals.length}`, {
@@ -1129,11 +1139,11 @@ export function destructureParamArray(
           // iterator .next() propagate; stepCount bounds the drain (#1592).
           { op: "local.get", index: paramIdx } as Instr,
           { op: "f64.const", value: fbIterStepCount } as Instr,
-          { op: "call", funcIdx: fbIterFn } as Instr,
+          { op: "call", funcIdx: fbIterFnFinal } as Instr,
           { op: "local.set", index: fbMatTmp } as Instr,
           // len = i32(__extern_length(materialized))
           { op: "local.get", index: fbMatTmp } as Instr,
-          { op: "call", funcIdx: fbLenFn } as Instr,
+          { op: "call", funcIdx: fbLenFnFinal } as Instr,
           { op: "i32.trunc_sat_f64_s" },
           { op: "local.set", index: fbLenTmp } as Instr,
           // arr = array.new_default(len)
@@ -1163,7 +1173,7 @@ export function destructureParamArray(
                   { op: "local.get", index: fbMatTmp } as Instr,
                   { op: "local.get", index: fbIdxTmp } as Instr,
                   { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: fbGetIdxFn } as Instr,
+                  { op: "call", funcIdx: fbGetIdxFnFinal } as Instr,
                   { op: "array.set", typeIdx: extArrTypeIdx } as Instr,
                   // idx++
                   { op: "local.get", index: fbIdxTmp } as Instr,
