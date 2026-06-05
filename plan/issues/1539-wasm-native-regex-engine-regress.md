@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: regular expressions
 goal: standalone-wasm
-sprint: 59
+sprint: 60
 depends_on: [1474]
 related: [1474, 682, 1535]
 ---
