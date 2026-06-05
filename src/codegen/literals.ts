@@ -18,6 +18,7 @@ import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
   compileArrowAsCallback,
+  compileArrowAsClosure,
   emitMethodParamDefaults,
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
@@ -482,21 +483,21 @@ function compileObjectLiteralWithAccessors(
       fctx.body.push({ op: "local.get", index: objLocal });
       fctx.body.push({ op: "global.get", index: keyGlobal });
 
-      // Getter callback (or ref.null.extern when only setter is defined)
+      // Getter (or ref.null.extern when only setter is defined).
+      // (#1888 S5b) Under standalone, compile as a HOST-FREE closure so the
+      // stored $PropEntry.$get holds a real callable closure that __extern_get's
+      // accessor arm dispatches via __call_accessor_get → __call_fn_method_0
+      // (receiver bound as `this` through __current_this). Else JS-host callback.
       if (pair.getter) {
-        const ok = compileArrowAsCallback(ctx, fctx, pair.getter as unknown as ts.FunctionExpression, {
-          needsThis: true,
-        });
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression);
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }
 
-      // Setter callback
+      // Setter
       if (pair.setter) {
-        const ok = compileArrowAsCallback(ctx, fctx, pair.setter as unknown as ts.FunctionExpression, {
-          needsThis: true,
-        });
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression);
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -517,6 +518,30 @@ function compileObjectLiteralWithAccessors(
 
   fctx.body.push({ op: "local.get", index: objLocal });
   return { kind: "externref" };
+}
+
+/**
+ * (#1888 S5b) Compile an object-literal accessor getter/setter and leave an
+ * externref on the stack for `__defineProperty_accessor`. Standalone →
+ * host-free closure (`compileArrowAsClosure`, converted to externref); JS-host /
+ * GC → `compileArrowAsCallback` with `needsThis: true` (unchanged
+ * `__make_getter_callback` bridge). Returns `false` when the caller should push
+ * `ref.null.extern`. Mirrors `emitAccessorFn` in object-ops.ts.
+ */
+function emitObjectLiteralAccessorFn(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  fn: ts.FunctionExpression | ts.ArrowFunction,
+): boolean {
+  if (ctx.standalone) {
+    const closureType = compileArrowAsClosure(ctx, fctx, fn);
+    if (!closureType) return false;
+    if (closureType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    return true;
+  }
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
 }
 
 /**

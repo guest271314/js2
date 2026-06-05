@@ -61,6 +61,7 @@ import type { CodegenContext } from "./context/types.js";
 import { ensureNativeStringHelpers, nativeStringLiteralInstrs } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
+import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
@@ -471,7 +472,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=obj(externref) 1=key(externref)
   // locals: 2=o(ref null $Object) 3=e(ref null $PropEntry) 4=any(anyref)
+  //         5=getter(externref) — (#1888 S5b) stored accessor $get closure
   {
+    // (#1888 S5b) Reserve the `__call_accessor_get` driver funcIdx BEFORE the
+    // body bakes its `call`. The driver body is filled in finalize once
+    // `__call_fn_method_0` exists (fillAccessorDrivers). Routing through funcMap
+    // keeps the late-import shifter in sync (#329/#1899).
+    const callAccessorGetIdx = reserveAccessorGetDriver(ctx);
     const body: Instr[] = [
       // any = any.convert_extern(obj)
       { op: "local.get", index: 0 },
@@ -508,13 +515,46 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 1 },
               { op: "call", funcIdx: objFindIdx },
               { op: "local.tee", index: 3 },
-              // if e != null → return extern.convert_any(e.value)
+              // if e != null → resolve the property
               { op: "ref.is_null" },
               { op: "i32.eqz" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
+                  // (#1888 S5b) Accessor branch: if (e.flags & FLAG_ACCESSOR),
+                  // invoke the stored getter with the ORIGINAL receiver (param 0,
+                  // §6.2.5.5 Get — NOT the proto-walk cursor) bound as `this`.
+                  { op: "local.get", index: 3 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_ACCESSOR },
+                  { op: "i32.and" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      // getter = extern.convert_any(e.$get)
+                      { op: "local.get", index: 3 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+                      { op: "extern.convert_any" },
+                      { op: "local.tee", index: 5 },
+                      // if getter == null → return undefined (null externref)
+                      { op: "ref.is_null" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [{ op: "ref.null.extern" }, { op: "return" }],
+                      },
+                      // return __call_accessor_get(obj /*param 0*/, getter)
+                      { op: "local.get", index: 0 },
+                      { op: "local.get", index: 5 },
+                      { op: "call", funcIdx: callAccessorGetIdx },
+                      { op: "return" },
+                    ],
+                  },
+                  // Data property → return extern.convert_any(e.value)
                   { op: "local.get", index: 3 },
                   { op: "ref.as_non_null" },
                   { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
@@ -543,6 +583,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "o", type: objRefNull },
         { name: "e", type: entryRefNull },
         { name: "any", type: { kind: "anyref" } },
+        { name: "getter", type: { kind: "externref" } }, // (#1888 S5b) accessor $get
       ],
       body,
     );
@@ -832,8 +873,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // flags. Value is stored as anyref via any.convert_extern.
   //
   // params: 0=obj 1=key 2=value
-  // locals: 3=o(ref null $Object) 4=cap 5=load 6=any(anyref)
+  // locals: 3=o(ref null $Object) 4=cap 5=load 6=any(anyref) 7=seq
+  //         8=accEntry(ref null $PropEntry) 9=setter(externref) — (#1888 S5b)
   {
+    // (#1888 S5b) Reserve the `__call_accessor_set` driver funcIdx BEFORE the
+    // body bakes its `call`; body filled in finalize (fillAccessorDrivers) once
+    // `__call_fn_method_1` exists.
+    const callAccessorSetIdx = reserveAccessorSetDriver(ctx);
     const body: Instr[] = [
       // any = any.convert_extern(obj)
       { op: "local.get", index: 0 },
@@ -851,6 +897,61 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 6 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.set", index: 3 },
+      // (#1888 S5b) Accessor write gate — runs BEFORE the FROZEN gate because a
+      // setter is invoked regardless of [[Extensible]]/frozen state (§10.1.5.3
+      // OrdinarySetWithOwnDescriptor calls Set even on a frozen object; only data
+      // writes are blocked by frozen). Find the OWN entry; if it has
+      // FLAG_ACCESSOR, invoke the stored setter with the ORIGINAL receiver
+      // (param 0) bound as `this` and `value` (param 2) as the argument, then
+      // return — bypassing the data-write path entirely. A null setter is a
+      // sloppy no-op (strict TypeError deferred, matches the frozen-refuse).
+      // Inherited-accessor set (proto-chain) is out of scope for this slice;
+      // __obj_find walks only the own table.
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 8 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 8 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+          { op: "i32.const", value: FLAG_ACCESSOR },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // setter = extern.convert_any(e.$set)
+              { op: "local.get", index: 8 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+              { op: "extern.convert_any" },
+              { op: "local.tee", index: 9 },
+              // if setter != null → __call_accessor_set(obj /*param 0*/, setter, value /*param 2*/)
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 0 },
+                  { op: "local.get", index: 9 },
+                  { op: "local.get", index: 2 },
+                  { op: "call", funcIdx: callAccessorSetIdx },
+                ],
+              },
+              // accessor write handled (setter ran, or sloppy no-op) → return
+              { op: "return" },
+            ],
+          },
+        ],
+      },
       // #1472 Phase B Blocker A Half 2 — FROZEN write gate. A frozen object
       // refuses ALL data writes (update AND new key) per ES §10.4.7 / the
       // [[Set]] invariant on non-writable own data properties. Sloppy-mode
@@ -923,6 +1024,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "load", type: { kind: "i32" } },
         { name: "any", type: { kind: "anyref" } },
         { name: "seq", type: { kind: "i32" } },
+        { name: "accEntry", type: entryRefNull }, // (#1888 S5b) own entry for accessor probe
+        { name: "setter", type: { kind: "externref" } }, // (#1888 S5b) accessor $set
       ],
       body,
     );
