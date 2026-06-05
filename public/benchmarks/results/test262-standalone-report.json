@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T08:07:02.533Z",
-  "baseline_generated_at": "2026-06-05T08:07:02Z",
-  "baseline_sha": "1c872667c46835d89e6c5a2189b507519c718715",
+  "timestamp": "2026-06-05T08:29:28.088Z",
+  "baseline_generated_at": "2026-06-05T08:29:27Z",
+  "baseline_sha": "61a4db3c26d1605f2da94fe7683ca9d2059da979",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1369,25 +1369,25 @@
           "total": 157
         },
         "error_categories": {
-          "other": 97,
           "unreachable": 35,
+          "other": 97,
           "assertion_fail": 22,
           "wasm_compile": 2,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
+          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
-          "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/parse/text-object-abrupt.js"
+          "test/built-ins/JSON/parse/text-object-abrupt.js",
+          "test/built-ins/JSON/parse/15.12.1.1-g4-2.js"
         ],
         "sample_signatures": [
-          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
+          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
+          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # ",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]"
         ]
       },
       {
@@ -1622,7 +1622,7 @@
           "runtime_error:Cannot convert object to primitive value",
           "other:L#:## Codegen error: __toPrimitive (Symbol.toPrimitive / valueOf coercion) is not yet supported in standalone mode (##). A Wasm-native numeric/string-hint ToPrimitive over the $Object struct is Phase # of ##.",
           "other:L#:## ',' expected.",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"fn\" failed: not enough arguments on the stack for throw (need #, got #) @+#) [in fn()] [@+#] [wat: (func $fn (param externref externref (ref null #) externref (ref"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"fn\" failed: call[#] expected type i32, found extern.convert_any of type (ref extern) @+#) [in fn()] [@+#] [wat: (func $fn (type #) (local $__arr_data_0 (ref null #"
         ]
       },
       {
@@ -1693,8 +1693,8 @@
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/bitwise-xor/S11.10.2_A2.4_T2.js",
           "test/language/expressions/bitwise-and/bigint-toprimitive.js"
         ],

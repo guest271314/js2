@@ -1,0 +1,3 @@
+# Build artifact — assembled from gc-array-copy.wat by the harnesses (binaryen).
+# Not committed (the repo routes *.wasm to Git LFS; this is a throwaway).
+gc-array-copy.wasm
