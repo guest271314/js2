@@ -21,7 +21,7 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
-import { tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
+import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -2422,6 +2422,15 @@ export function compileNativeStringMethodCall(
   if (ctx.standalone && method === "search") {
     const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess);
     if (searchResult !== undefined) return searchResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.replace(/re/, "str")` / `replaceAll`
+  // against a backend-created static RegExp with a literal replacement routes
+  // to the pure-WasmGC matcher (returns the rebuilt NativeString). `$`-pattern /
+  // function replacers and the string-coercion form fall through to the refusal.
+  if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
+    const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
+    if (replaceResult !== undefined) return replaceResult;
   }
 
   if (ctx.standalone) {
