@@ -156,9 +156,11 @@ function loadIssues() {
       const sprintsIdx = dirSegments.lastIndexOf("sprints");
       const sprintFromDir =
         sprintsIdx >= 0 && sprintsIdx + 1 < dirSegments.length - 1 ? dirSegments[sprintsIdx + 1] : "";
+      const slug = f.replace(".md", "");
       return {
         id,
         title,
+        slug,
         priority: fm.priority || "medium",
         feasibility: fm.feasibility || "",
         depends_on: fm.depends_on || [],
