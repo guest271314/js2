@@ -86,6 +86,53 @@ function getWellKnownSymbolId(name: string): number | undefined {
 }
 
 /**
+ * (#1888 S6-c) Math/Number constant property names that have a Wasm-native
+ * fall-through emitter further down in `compileMemberRead` (the `f64.const`
+ * handlers for `Math.PI` / `Number.MAX_SAFE_INTEGER` & co.). These MUST be
+ * reachable: under `--target standalone` the generic `Builtin.prop` →
+ * `__get_builtin` branch above them refuses-loud (the open-object runtime does
+ * not expose `__get_builtin`), so without an exclusion `Math.PI` etc. fail to
+ * compile even though a pure-Wasm `f64.const` lowering exists. Keep this set in
+ * sync with the `mathConstants` / `numberConstants` tables below (the single
+ * source of truth is those tables; this mirror only decides whether the
+ * `__get_builtin` shortcut must yield to them). Symbol well-knowns
+ * (`Symbol.iterator` etc.) are covered separately via `getWellKnownSymbolId`.
+ */
+const MATH_CONSTANT_PROPS = new Set(["PI", "E", "LN2", "LN10", "SQRT2", "SQRT1_2", "LOG2E", "LOG10E"]);
+const NUMBER_CONSTANT_PROPS = new Set([
+  "EPSILON",
+  "MAX_SAFE_INTEGER",
+  "MIN_SAFE_INTEGER",
+  "MAX_VALUE",
+  "MIN_VALUE",
+  "POSITIVE_INFINITY",
+  "NEGATIVE_INFINITY",
+  "NaN",
+]);
+
+/**
+ * True when `<builtinName>.<propName>` has a Wasm-native **f64 constant**
+ * emitter downstream in `compileMemberRead` that the `__get_builtin` shortcut
+ * must not pre-empt. Keeps the standalone path host-import-free for the
+ * numeric-constant reads we can already lower natively (Math.PI →
+ * `f64.const`, Number.MAX_SAFE_INTEGER → `f64.const`).
+ *
+ * Scoped to Math/Number f64 constants ONLY. `Symbol.<wellKnown>` also has a
+ * downstream emitter (an `i32.const` symbol id), but that i32 result does not
+ * yet compose safely with every consumer under standalone — e.g.
+ * `Symbol.iterator !== undefined` would compare an i32 against an externref
+ * `undefined`, producing **invalid Wasm**. Leaving the `__get_builtin` shortcut
+ * to keep refusing-loud for Symbol is strictly safer than emitting an invalid
+ * module (refuse-loud > silent-wrong); native Symbol value-reads are deferred
+ * to the S6-b builtins-as-globals lever.
+ */
+function hasNativeBuiltinConstantHandler(builtinName: string, propName: string): boolean {
+  if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
+  if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
+  return false;
+}
+
+/**
  * (#1337) True when `expr` is the syntactic shape `<receiver>.bind(...)`.
  */
 function isDirectBindCall(expr: ts.Expression): boolean {
@@ -1474,7 +1521,17 @@ export function compilePropertyAccess(
       "BigUint64Array",
     ]);
     const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
-    if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed) {
+    // (#1888 S6-c) Under --target standalone, `__get_builtin` refuses-loud (the
+    // open-object runtime does not expose it). For builtin constant reads that
+    // already have a pure-Wasm fall-through emitter below (Math.PI →
+    // `f64.const`, Number.MAX_SAFE_INTEGER → `f64.const`, Symbol.iterator →
+    // `i32.const`), this shortcut would pre-empt that native lowering and turn a
+    // compilable program into a hard refusal. Skip it for those (builtin, prop)
+    // pairs so control reaches the constant emitter. gc/host is unaffected
+    // (`__get_builtin` is a real host import there and the early shortcut +
+    // the later constant handler are observationally identical for these reads).
+    const deferToNativeConstant = ctx.standalone && hasNativeBuiltinConstantHandler(builtinName, propName);
+    if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
       const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
       const getIdx = ensureLateImport(
         ctx,
