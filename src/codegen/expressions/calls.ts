@@ -1067,7 +1067,12 @@ function emitWrapperDynamicMethodCall(
   recvExpr: ts.Expression,
   methodName: string,
 ): ValType | null {
-  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  // (#1888 Slice 2) Standalone routes __extern_method_call native, which reads
+  // its args over a $ObjVec — build the (empty) args list with the native
+  // $ObjVec builder, not the host __js_array_new. JS-host keeps the host import.
+  const arrNewIdx = ctx.standalone
+    ? ensureObjVecBuilders(ctx).newIdx
+    : ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
   const methodCallIdx = ensureLateImport(
     ctx,
     "__extern_method_call",
@@ -7382,13 +7387,24 @@ function compileCallExpression(
         // (#965) For known built-in class identifiers (Object, Array, Proxy, etc.) that would
         // otherwise compile to ref.null.extern, use __get_builtin to get the real JS object.
         {
-          const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-          const arrPushIdx = ensureLateImport(
-            ctx,
-            "__js_array_push",
-            [{ kind: "externref" }, { kind: "externref" }],
-            [],
-          );
+          // (#1888 Slice 2) Under --target standalone the native
+          // __extern_method_call reads its args via __extern_length /
+          // __extern_get_idx over a $ObjVec (no JS array exists). Build the args
+          // list with the native $ObjVec builders instead of the host
+          // __js_array_new / __js_array_push. JS-host / WASI keep the host
+          // imports unchanged (byte-for-byte). Per the #1472 S3 note, the
+          // __js_array_* builders are NOT globally safe to alias (real JS arrays
+          // elsewhere depend on them) — so this is a per-call-site swap.
+          let arrNewIdx: number | undefined;
+          let arrPushIdx: number | undefined;
+          if (ctx.standalone) {
+            const b = ensureObjVecBuilders(ctx);
+            arrNewIdx = b.newIdx;
+            arrPushIdx = b.pushIdx;
+          } else {
+            arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+            arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+          }
           const methodCallIdx = ensureLateImport(
             ctx,
             "__extern_method_call",
