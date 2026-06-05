@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T05:03:36.264Z",
-  "baseline_generated_at": "2026-06-05T05:03:35Z",
-  "baseline_sha": "80f8a500b7c1938bce5aa9d0d6533f33e58f3b47",
+  "timestamp": "2026-06-05T05:18:25.336Z",
+  "baseline_generated_at": "2026-06-05T05:18:24Z",
+  "baseline_sha": "23b664ab16edc5704efafe0bd0a5684222eb60be",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43125,
-    "pass": 10673,
-    "fail": 4978,
-    "compile_error": 27446,
+    "pass": 10676,
+    "fail": 4985,
+    "compile_error": 27436,
     "compile_timeout": 10,
     "skip": 18,
-    "compilable": 15651,
+    "compilable": 15661,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42039,
-        "pass": 10278,
-        "fail": 4583,
-        "compile_error": 27150,
+        "pass": 10281,
+        "fail": 4590,
+        "compile_error": 27140,
         "compile_timeout": 10,
         "skip": 18,
-        "compilable": 14861,
+        "compilable": 14871,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43125,
-        "pass": 10673,
-        "fail": 4978,
-        "compile_error": 27446,
+        "pass": 10676,
+        "fail": 4985,
+        "compile_error": 27436,
         "compile_timeout": 10,
         "skip": 18,
-        "compilable": 15651,
+        "compilable": 15661,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48107,
-        "pass": 10868,
-        "fail": 5192,
-        "compile_error": 31923,
+        "pass": 10871,
+        "fail": 5199,
+        "compile_error": 31913,
         "compile_timeout": 10,
         "skip": 114,
-        "compilable": 16060,
+        "compilable": 16070,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43125,
-    "pass": 10673,
-    "fail": 4978,
-    "compile_error": 27446,
+    "pass": 10676,
+    "fail": 4985,
+    "compile_error": 27436,
     "compile_timeout": 10,
     "skip": 18,
-    "compilable": 15651,
+    "compilable": 15661,
     "stale": 0
   },
   "full_summary": {
     "total": 48107,
-    "pass": 10868,
-    "fail": 5192,
-    "compile_error": 31923,
+    "pass": 10871,
+    "fail": 5199,
+    "compile_error": 31913,
     "compile_timeout": 10,
     "skip": 114,
-    "compilable": 16060,
+    "compilable": 16070,
     "stale": 0
   },
   "strict_summary": {
     "total": 40616,
-    "pass": 9996,
-    "fail": 4468,
-    "compile_error": 26124,
+    "pass": 9999,
+    "fail": 4475,
+    "compile_error": 26114,
     "compile_timeout": 10,
     "skip": 18,
-    "compilable": 14464,
+    "compilable": 14474,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42039,
-      "pass": 10278,
-      "fail": 4583,
-      "compile_error": 27150,
+      "pass": 10281,
+      "fail": 4590,
+      "compile_error": 27140,
       "compile_timeout": 10,
       "skip": 18,
-      "compilable": 14861,
+      "compilable": 14871,
       "stale": 0
     }
   },
@@ -611,8 +611,8 @@
       "name": "built-ins/RegExp",
       "path": "built-ins/RegExp",
       "pass": 225,
-      "fail": 81,
-      "compile_error": 1565,
+      "fail": 83,
+      "compile_error": 1563,
       "compile_timeout": 8,
       "skip": 0,
       "total": 1879
@@ -670,9 +670,9 @@
     {
       "name": "built-ins/String",
       "path": "built-ins/String",
-      "pass": 136,
-      "fail": 277,
-      "compile_error": 810,
+      "pass": 139,
+      "fail": 282,
+      "compile_error": 802,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1223
@@ -1079,12 +1079,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 3777,
+    "assertion_fail": 3779,
     "illegal_cast": 85,
     "negative_test_fail": 66,
-    "null_deref": 145,
+    "null_deref": 150,
     "oob": 71,
-    "other": 19884,
+    "other": 19874,
     "promise_error": 25,
     "range_error": 17,
     "runtime_error": 1326,
@@ -1097,8 +1097,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 37125,
-    "classified": 37125,
+    "total_non_pass_non_skip": 37122,
+    "classified": 37122,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1223,9 +1223,9 @@
         "sample_files": [
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
@@ -1393,20 +1393,20 @@
           "#1474"
         ],
         "label": "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
-        "count": 2005,
+        "count": 1997,
         "statuses": {
           "pass": 0,
-          "fail": 117,
-          "compile_error": 1880,
+          "fail": 119,
+          "compile_error": 1870,
           "compile_timeout": 8,
           "skip": 0,
-          "total": 2005
+          "total": 1997
         },
         "error_categories": {
           "wasm_compile": 185,
-          "other": 1692,
+          "other": 1682,
           "null_deref": 9,
-          "assertion_fail": 90,
+          "assertion_fail": 92,
           "runtime_error": 17,
           "illegal_cast": 4
         },
@@ -1622,14 +1622,14 @@
           "#1364"
         ],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 2021,
+        "count": 2026,
         "statuses": {
           "pass": 0,
-          "fail": 497,
+          "fail": 502,
           "compile_error": 1524,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 2021
+          "total": 2026
         },
         "error_categories": {
           "wasm_compile": 910,
@@ -1638,7 +1638,7 @@
           "assertion_fail": 201,
           "oob": 40,
           "runtime_error": 119,
-          "null_deref": 64,
+          "null_deref": 69,
           "illegal_cast": 28
         },
         "sample_files": [
