@@ -302,15 +302,12 @@ export function destructureParamObjectExternref(
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
   }
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   const excludedKeys: string[] = [];
