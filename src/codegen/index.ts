@@ -38,7 +38,7 @@ import { ensureNativeIteratorRuntime } from "./iterator-native.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure } from "./object-runtime.js";
+import { fillApplyClosure, fillToPrimitive } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1490,6 +1490,13 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#124) Fill the reserved `__to_primitive` body now that every late import
+    // has settled — re-resolves the `__extern_method_call` funcIdx by name to
+    // avoid the late-shift `u32 out of range:-1` class. No-op unless a standalone
+    // ToPrimitive coercion site reserved it (`ctx.toPrimitiveReserved`). Must run
+    // AFTER fillApplyClosure (the dispatch it calls into) and after all imports.
+    fillToPrimitive(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return

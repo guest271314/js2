@@ -1354,7 +1354,43 @@ export function coerceType(
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx });
+      // (#124 co-land with #1901) Under --target standalone the externref may be
+      // an open `$Object` carrying its own `valueOf`/`toString` (§7.1.1
+      // ToPrimitive). `__unbox_number` alone returns NaN for a `$Object` — it
+      // doesn't run OrdinaryToPrimitive. Route through the native
+      // `__to_primitive(recv, "number")` first: it dispatches the own method via
+      // `__extern_method_call` and returns the boxed primitive, OR returns recv
+      // UNCHANGED for any non-`$Object` externref (boxed numbers, strings, host
+      // values) so the existing `__unbox_number` behaviour is byte-identical for
+      // every non-object operand. (JS-host mode already wires `__to_primitive` as
+      // an import where appropriate; this branch only adds the call under
+      // standalone, where it resolves natively from OBJECT_RUNTIME_HELPER_NAMES.)
+      if (ctx.standalone) {
+        const toPrimIdx = ensureLateImport(
+          ctx,
+          "__to_primitive",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (toPrimIdx !== undefined) {
+          // hint: the native helper ignores its value (number/default order is
+          // its only mode today), so push a null externref rather than a string
+          // constant. Avoids `addStringConstantGlobal`, whose late global/import
+          // registration could shift the freshly-resolved funcIdxs here.
+          // `__to_primitive` always returns a PRIMITIVE externref — a boxed
+          // number/string from the dispatched own valueOf/toString, or the
+          // default "[object Object]" string for a plain `$Object` — and never a
+          // `$Object`. So `__unbox_number` below is always applied to a primitive
+          // (NaN for "[object Object]", per spec for `{a:1} - 0`), needing no
+          // `$Object`-guard or TypeError throw here. The genuine §7.1.1.1 step-6
+          // TypeError (own valueOf AND toString both returning objects) is a
+          // tracked #124 follow-on; today it degrades to the pre-#124 NaN.
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__to_primitive") ?? toPrimIdx });
+        }
+      }
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__unbox_number") ?? funcIdx });
       return;
     }
     // Fallback: drop and push default

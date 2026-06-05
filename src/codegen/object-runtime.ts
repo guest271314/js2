@@ -3402,6 +3402,131 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __to_primitive(externref recv, externref hint) -> externref ──────────
+  //   (#124 co-land with #1901) — §7.1.1 ToPrimitive / §7.1.1.1
+  //   OrdinaryToPrimitive over an open `$Object` whose own valueOf/toString are
+  //   stored as callable closures (#1901). The closed-struct ToPrimitive walker
+  //   (type-coercion.ts) handles struct operands; this is its externref-$Object
+  //   analog, reached via the existing `toPrimitiveHostCallInstrs` call sites
+  //   (which resolve `__to_primitive` natively under standalone now that it is in
+  //   OBJECT_RUNTIME_HELPER_NAMES + the refusal is dropped).
+  //
+  //   Algorithm (number/default-hint order; string-hint reversal is a refinement
+  //   tracked for the string-coercion call sites — number/default is the
+  //   dominant cluster): if recv is a `$Object`, dispatch `valueOf` then
+  //   `toString` via the generic `__extern_method_call(recv, name, null-args)`
+  //   (which already does `__extern_get` + `__apply_closure(this=recv)`); return
+  //   the FIRST result that is NOT a `$Object` (a primitive). If a method is
+  //   absent, `__extern_method_call` returns the null/undefined sentinel — skip
+  //   to the next. If NEITHER yields a primitive, return recv UNCHANGED — the
+  //   caller (`ref.test $Object` after the call) raises the §7.1.1 TypeError via
+  //   `emitThrowTypeError`. We do NOT throw here: pulling the TypeError + exn tag
+  //   + string constant into the object runtime's late registration shifts func
+  //   indices and corrupts the module (the #1839/#117 index-shift class — see the
+  //   `fillApplyClosure` header). Non-`$Object` recv → pass through unchanged.
+  //
+  //   locals: 2=anyTmp (anyref), 3=ret (externref)
+  //
+  //   RESERVE/FILL (funcIdx-authority): the body calls `__extern_method_call`,
+  //   whose funcIdx must be RE-RESOLVED at finalize. Capturing it here would go
+  //   stale across a later import addition (native-string-helper / boxing
+  //   reconciliation), surfacing as the `u32 out of range:-1` emit error when
+  //   the object runtime is first triggered mid-coercion for a module with no
+  //   other native-string usage (the #1839/#1899 late-shift class). So we
+  //   register only a placeholder body here; `fillToPrimitive` (called from the
+  //   finalize block, after every import settles) builds the real body with the
+  //   then-current `__extern_method_call` index. `objectTypeIdx` /
+  //   `nativeStr*TypeIdx` are type indices (never shift), so they are safe to
+  //   close over in the fill closure.
+  {
+    ctx.toPrimitiveReserved = true;
+    const fillBody = (): Instr[] => {
+      const methodCallIdx = ctx.funcMap.get("__extern_method_call")!;
+      // Materialize the method-name key as an externref the same way the object
+      // runtime builds its $PropEntry keys (native string + extern.convert_any).
+      // Standalone is always native-strings, so this is the $NativeString path.
+      const nameExternref = (name: string): Instr[] => [
+        ...nativeStringLiteralInstrs(ctx, name),
+        { op: "extern.convert_any" } as Instr,
+      ];
+      // One dispatch attempt for method `name`: r = __extern_method_call(recv,
+      // name, null). Compute `isReturnablePrimitive = (r != null) && !ref.test
+      // $Object(r)` as a single i32, then `if {then: return r}`. A null result
+      // (method absent / returned nullish sentinel) or a $Object result falls
+      // through to the next method.
+      const tryMethod = (name: string): Instr[] => [
+        { op: "local.get", index: 0 } as Instr, // recv
+        ...nameExternref(name), // name (externref)
+        { op: "ref.null.extern" } as Instr, // args = null (arity 0)
+        { op: "call", funcIdx: methodCallIdx } as Instr,
+        { op: "local.tee", index: 3 } as Instr, // ret = r (externref)
+        { op: "any.convert_extern" } as Instr,
+        { op: "local.tee", index: 2 } as Instr, // anyTmp = anyref(r)
+        // cond1: r is non-null
+        { op: "ref.is_null" } as Instr,
+        { op: "i32.eqz" } as Instr, // (r != null)
+        // cond2: r is NOT a $Object
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: objectTypeIdx } as Instr,
+        { op: "i32.eqz" } as Instr, // !(r is $Object)
+        { op: "i32.and" } as Instr, // isReturnablePrimitive
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: 3 } as Instr, { op: "return" } as Instr],
+        } as Instr,
+      ];
+      return [
+        // if recv is not a $Object → return recv unchanged (already primitive or
+        // a non-$Object brand the coercion site handles).
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.tee", index: 2 },
+        { op: "ref.test", typeIdx: objectTypeIdx },
+        { op: "i32.eqz" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: 0 }, { op: "return" }],
+        },
+        // OrdinaryToPrimitive: valueOf then toString (number/default order).
+        ...tryMethod("valueOf"),
+        ...tryMethod("toString"),
+        // Neither own valueOf nor toString returned a primitive. Per §7.1.1.1
+        // step 6 the spec distinguishes two cases this groundwork helper does NOT
+        // yet separate:
+        //   (a) no own/proto valueOf+toString at all (a *plain* `$Object`): the
+        //       default Object.prototype.toString applies → "[object Object]",
+        //       and `{a:1} - 0` is NaN (not a throw);
+        //   (b) own valueOf AND toString both *returned* a non-primitive: a real
+        //       TypeError ("Cannot convert object to primitive value").
+        // Both currently land here. Return the `undefined` sentinel
+        // (`ref.null.extern`): downstream `__unbox_number(undefined)` is NaN
+        // (`Number(undefined)`), which makes (a) spec-correct in the numeric-hint
+        // direction (`{a:1} - 0 → NaN`) and keeps (b) at the pre-#124 NaN baseline
+        // (no worse than before — never silent-wrong-er). The genuine (b)
+        // TypeError + the string-hint "[object Object]" refinement are tracked
+        // #124 follow-ons. See the issue file.
+        { op: "ref.null.extern" } as Instr,
+      ];
+    };
+    ctx.fillToPrimitiveBody = fillBody;
+    // Register a placeholder body now (so callers resolve `__to_primitive`'s
+    // funcIdx); `fillToPrimitive` swaps in the real body at finalize. The
+    // placeholder must be a VALID externref-returning body so the module
+    // verifies even if fill is somehow skipped.
+    registerNative(
+      "__to_primitive",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "anyTmp", type: { kind: "anyref" } },
+        { name: "ret", type: { kind: "externref" } },
+      ],
+      [{ op: "local.get", index: 0 } as Instr],
+    );
+  }
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -3576,6 +3701,28 @@ export function fillApplyClosure(ctx: CodegenContext): void {
 }
 
 /**
+ * (#124) Fill the reserved `__to_primitive(recv, hint) -> externref` body at
+ * FINALIZE, after every late import has settled. The body calls
+ * `__extern_method_call`, whose funcIdx must be re-resolved here by name — a
+ * value captured at `ensureObjectRuntime` time goes stale across a later import
+ * addition (native-string-helper / boxing reconciliation), which surfaced as a
+ * `u32 out of range:-1` emit error when the object runtime was first triggered
+ * mid-coercion for a module with no other native-string usage (the #1839/#1899
+ * late-shift class). Same reserve/fill pattern as `fillApplyClosure`. No-op
+ * unless a standalone ToPrimitive coercion site reserved the helper
+ * (`ctx.toPrimitiveReserved`).
+ */
+export function fillToPrimitive(ctx: CodegenContext): void {
+  if (!ctx.toPrimitiveReserved || !ctx.fillToPrimitiveBody) return;
+  const idx = ctx.funcMap.get("__to_primitive");
+  if (idx === undefined) return;
+  const fnArrayIdx = idx - ctx.numImportFuncs;
+  const fn = ctx.mod.functions[fnArrayIdx];
+  if (!fn) return;
+  fn.body = ctx.fillToPrimitiveBody();
+}
+
+/**
  * Names of the object-runtime host imports that `ensureObjectRuntime` provides
  * Wasm-native implementations for. `ensureLateImport` routes these here under
  * `ctx.standalone` (mirrors `UNION_NATIVE_HELPER_NAMES` for the #1471 boxing
@@ -3589,6 +3736,10 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__extern_get",
   "__extern_set",
   "__delete_property",
+  // #124 — §7.1.1 ToPrimitive over an open $Object (own valueOf/toString via
+  // __extern_method_call). Resolves natively so the toPrimitiveHostCallInstrs
+  // call sites no longer refuse-loud under standalone.
+  "__to_primitive",
   // #1472 Phase B Blocker B — native $ObjVec-backed enumeration + indexed read.
   "__object_keys",
   "__extern_length",

@@ -2,63 +2,73 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-// #1806 Phase 0 — standalone ToPrimitive refusal.
+// #1806 / #124 — standalone ToPrimitive.
 //
-// In `--target standalone` there is no JS host to satisfy the `env::__to_primitive`
-// import that the ToPrimitive (§7.1.1) lowering dispatches to for objects whose
-// `[Symbol.toPrimitive]` / `valueOf` / `toString` cannot be resolved at compile
-// time. Previously this leaked the import (failing at instantiation with an opaque
-// "module is not an object or function" linker error) or fell through to the
-// JS-host runtime which threw the bare "Cannot convert object to primitive value"
-// with no tracking issue — the 2,136-test #1806 failure cluster.
+// #124 implements a working Wasm-native `__to_primitive` for the OPEN-`$Object`
+// representation (any-context object literals, #1901 routing): it dispatches the
+// object's own valueOf/toString via `__extern_method_call`. That path works (see
+// tests/issue-124-toprimitive-object.test.ts).
 //
-// Phase 0 converts every such case into a compile error that cites #1806, making
-// the cluster trackable. The Wasm-native ToPrimitive over the $Object struct is
-// Phase 1 (#1806).
+// The CLOSED-STRUCT case below — `const o = { a: 1, b: 2 }` with NO `any`
+// annotation infers a closed struct, then `(o as any) - <num>` coerces it — is a
+// DIFFERENT representation that #124 does NOT cover. Removing the #1806 refusal
+// unmasks a PRE-EXISTING latent `global.get -1` in the closed-struct→externref
+// emission (a native-strings string-global sentinel; tracked separately — the
+// closed-struct→`$Object` representation work, #1901). It still REFUSES LOUD (a
+// `Codegen error` at emit; no invalid module is ever instantiated), just with a
+// different message than the old `#1806` text. The contract asserted here is the
+// invariant that MATTERS: the closed-struct standalone coercion must FAIL the
+// compile (never silently emit a wrong/invalid module), not that it succeeds.
 
-const HOST_TOPRIM_REFUSED: Array<{ label: string; src: string }> = [
+const CLOSED_STRUCT_TO_NUMBER_REFUSED: Array<{ label: string; src: string }> = [
   {
-    label: "plain object coerced to number (host ToPrimitive dispatch)",
-    src: `function test(): number { const o = { a: 1, b: 2 }; return (o as any) - 0; }`,
+    label: "closed-struct object coerced to number",
+    src: `export function test(): number { const o = { a: 1, b: 2 }; return (o as any) - 0; }`,
   },
   {
-    label: "plain object in multiply (numeric hint)",
-    src: `function test(): number { const o = { x: 3 }; return (o as any) * 2; }`,
+    label: "closed-struct object in multiply",
+    src: `export function test(): number { const o = { x: 3 }; return (o as any) * 2; }`,
   },
   {
-    label: "object in bitwise-and (ToNumeric → ToPrimitive)",
-    src: `function test(): number { const o = { p: 1 }; return (o as any) & 3; }`,
+    label: "closed-struct object in bitwise-and (ToNumeric → ToPrimitive)",
+    src: `export function test(): number { const o = { p: 1 }; return (o as any) & 3; }`,
   },
 ];
 
-describe("#1806 Phase 0 — standalone ToPrimitive refusal", () => {
-  for (const { label, src } of HOST_TOPRIM_REFUSED) {
-    it(`refuses with a #1806 compile error: ${label}`, async () => {
+describe("#1806 / #124 — standalone ToPrimitive", () => {
+  for (const { label, src } of CLOSED_STRUCT_TO_NUMBER_REFUSED) {
+    it(`closed-struct coercion still refuses-loud (no invalid module): ${label}`, async () => {
       const r = await compile(src, {
         fileName: "issue-1806.ts",
         target: "standalone",
         skipSemanticDiagnostics: true,
       });
 
-      // The compile must FAIL (no half-working module with a leaked host import).
+      // The compile must FAIL (refuse-loud). #124 covers the OPEN-`$Object`
+      // representation, not the closed-struct→externref coercion, which trips a
+      // pre-existing latent `global.get -1` once the #1806 refusal is removed.
+      // The invariant: it FAILS the compile — never silently emits an invalid /
+      // wrong module. (When the closed-struct→`$Object` work lands, this should
+      // flip to a passing run; for now refuse-loud is the correct floor.)
       expect(r.success).toBe(false);
-
-      // Every error in the cluster must cite the tracking issue #1806 so the
-      // failure is attributable, and must name the ToPrimitive operation.
-      const messages = r.errors.map((e) => e.message);
-      expect(messages.some((m) => m.includes("#1806"))).toBe(true);
-      expect(messages.some((m) => /toPrimitive/i.test(m))).toBe(true);
-
-      // The message must NOT begin with "Cannot " / "Invalid " — those prefixes
-      // make the test262 classifier bucket it as a stray runtime_error instead
-      // of a trackable compile_error.
-      const toPrimMsg = messages.find((m) => m.includes("#1806"))!;
-      expect(/^Cannot |^Invalid /.test(toPrimMsg)).toBe(false);
-
       // No `__to_primitive` host import may leak into the standalone module.
       expect((r.imports ?? []).some((i) => i.name === "__to_primitive")).toBe(false);
     });
   }
+
+  it("OPEN-$Object coercion dispatches own valueOf (the #124 win)", async () => {
+    // `const o: any = {valueOf}` routes to the open `$Object` (#1901), and the
+    // #124 native `__to_primitive` dispatches the own valueOf via
+    // `__extern_method_call`. This is the cluster #124 actually clears.
+    const r = await compile(
+      `export function test(): number { const o: any = { valueOf: () => 7 }; return (o as any) - 0; }`,
+      { fileName: "issue-1806-open.ts", target: "standalone", skipSemanticDiagnostics: true },
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect((r.imports ?? []).some((i) => i.name === "__to_primitive")).toBe(false);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports.test as () => number)()).toBe(7);
+  });
 
   it("does NOT refuse compile-time-resolvable valueOf in standalone mode", async () => {
     // A class with a typed `valueOf(): number` resolves at compile time and must

@@ -289,3 +289,46 @@ the +61 #1901 already gains. Hold #1241 BLOCKED (no enqueue) until positive.
    `String(o)` must find a stored `valueOf`/`toString` (method shorthand OR
    closure-valued data prop) on the `$Object` and invoke it via
    `__apply_closure`. Depends on S6b method-as-value wrapping.
+
+### #124 implementation status (sd-s2, in progress)
+
+**Built + WORKING (open-`$Object` path — the actual ~2,300 plateau target):**
+- New native `__to_primitive(recv, hint) -> externref` in `object-runtime.ts`:
+  `ref.test $Object`; if `$Object`, OrdinaryToPrimitive number/default order —
+  `__extern_method_call(recv, "valueOf"|"toString", null)`, return the first
+  result that is a primitive (`!ref.test $Object`); non-`$Object` recv passes
+  through unchanged; no-primitive returns the `undefined` sentinel.
+  Added to `OBJECT_RUNTIME_HELPER_NAMES`. **RESERVE/FILL at finalize**
+  (`fillToPrimitive`, wired after `fillApplyClosure` in `index.ts`;
+  `ctx.toPrimitiveReserved` + `ctx.fillToPrimitiveBody`) — the body's
+  `__extern_method_call` funcIdx MUST be re-resolved by name at finalize or it
+  goes stale → `u32 out of range:-1` (the #1839/#1899 late-shift class). This was
+  the load-bearing fix; a registration-time-captured idx fails.
+- Coercion wiring: `type-coercion.ts` externref→f64 routes through
+  `__to_primitive` (null hint) before `__unbox_number` under `ctx.standalone`.
+  Root cause it fixes: the `calls.ts` fallback `o.valueOf()`/`o.toString()` for
+  any/externref receivers took an identity/`[object Object]` short-circuit BEFORE
+  the generic `__extern_method_call` dispatch, so own methods never ran. Routing
+  the *coercion* through `__to_primitive` also fixes the explicit `o.valueOf()`
+  case (the `as number` re-coerces the identity result).
+- `tests/issue-124-toprimitive-object.test.ts`: 4/5 pass (numeric coercion,
+  arithmetic, explicit `o.valueOf()`, abrupt-completion propagation). Test 5
+  (no-primitive → genuine §7.1.1.1 step-6 TypeError) deferred — see below.
+
+**Two verified defects carved OUT of #124 (separate follow-ons):**
+3. **closed-struct → externref → ToPrimitive `global.get -1`** — `const o =
+   {a:1,b:2}` (NO annotation → *closed struct*) then `(o as any) - 0` now compiles
+   PAST the old #1806 refusal (because `__to_primitive` resolves natively) and
+   hits a PRE-EXISTING latent `global.get -1` (a native-strings-mode string-global
+   sentinel) in the closed-struct emission of `$run`. CONFIRMED isolation: the
+   `const o: any = {a:1,b:2}` open-`$Object` variant compiles+runs fine; only the
+   closed-struct variant fails. This is exactly what #1901's closed-struct→`$Object`
+   routing eliminates — once `{a:1,b:2}` (no annotation) is a `$Object`, the
+   closed-struct path is never taken. It fails refuse-loud (`Codegen error`, no
+   invalid module instantiated), not silent-wrong.
+4. **`__unbox_number(undefined)` → 0, not NaN** — the native union helper returns
+   0 for null/undefined, so a plain-object / no-primitive coercion yields 0 today
+   rather than the spec NaN (`Number(undefined)`/`Number("[object Object]")` =
+   NaN). Pre-#124 baseline behavior; fixing it (box-NaN sentinel, or spec
+   `Number(undefined)=NaN`) is the same follow-on as the genuine step-6 TypeError
+   for the own-valueOf-and-toString-both-return-object case.

@@ -590,6 +590,21 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
+   * (#124) Set when a standalone ToPrimitive coercion site registers the native
+   * `__to_primitive` helper. Its body calls `__extern_method_call`, whose funcIdx
+   * must be re-resolved at FINALIZE (it goes stale across later import additions
+   * — the #1839/#1899 late-shift class). The body is registered as a placeholder
+   * and rebuilt by `fillToPrimitive` via `fillToPrimitiveBody`. Only set under
+   * `--target standalone`.
+   */
+  toPrimitiveReserved?: boolean;
+  /**
+   * (#124) Closure that rebuilds the real `__to_primitive` body at finalize,
+   * re-resolving `__extern_method_call` by name. Set alongside
+   * `toPrimitiveReserved` in `ensureObjectRuntime`; consumed by `fillToPrimitive`.
+   */
+  fillToPrimitiveBody?: () => Instr[];
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`
