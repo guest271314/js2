@@ -36,6 +36,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
+import { fillAccessorDrivers } from "./accessor-driver.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1464,6 +1465,17 @@ export function generateModule(
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive
     // site reserved a driver (brand clear / no Array.prototype @@iterator override).
     fillProtoIteratorDriver(ctx);
+
+    // (#1888 S5b accessor live get/set) Fill the reserved
+    // `__call_accessor_get` / `__call_accessor_set` driver bodies now that
+    // `__call_fn_method_0` / `__call_fn_method_1` are registered. Same
+    // reserve/fill funcIdx-authority pattern as the proto-iterator driver:
+    // the `__extern_get` / `__extern_set` accessor arms baked a `call
+    // <reserved funcIdx>` at object-runtime-emit time; here we give those
+    // placeholders a real body (wrapping the closure-method dispatcher) so a
+    // stored getter/setter closure runs with the original receiver as `this`.
+    // No-op when no accessor arm reserved a driver (no standalone object runtime).
+    fillAccessorDrivers(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return

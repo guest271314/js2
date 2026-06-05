@@ -555,6 +555,18 @@ export interface CodegenContext {
    */
   protoIteratorDriverReserved?: boolean;
   /**
+   * (#1888 S5b accessor live get/set) Set when `ensureObjectRuntime` reserves the
+   * `__call_accessor_get` / `__call_accessor_set` driver placeholders so the
+   * `__extern_get` / `__extern_set` accessor arms can `call` them. The bodies are
+   * filled in post-processing by `fillAccessorDrivers` AFTER
+   * `emitClosureMethodCallExportN(0/1)` registers `__call_fn_method_0/1` — same
+   * reserve/fill funcIdx-authority pattern as `protoIteratorDriverReserved`
+   * (proto-override.ts). Never reserved when the object runtime is not emitted
+   * (non-standalone), so host/GC modules stay byte-identical.
+   */
+  accessorGetDriverReserved?: boolean;
+  accessorSetDriverReserved?: boolean;
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`
