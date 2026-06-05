@@ -2859,6 +2859,93 @@ function compileCallExpression(
             );
             return null;
           }
+          // (#1888 Slice 3) Standalone borrowed-method dispatch
+          // `Type.prototype.<m>.call(recv, …args)` (ES §7.3.14 Call). The host
+          // `__proto_method_call` is refused under --target standalone (no JS
+          // runtime). Per the "compile away" principle, typeName + methodName
+          // are compile-time constants here, so we dispatch STATICALLY by
+          // synthesising `recv.<m>(…args)` and routing it through the native
+          // member-call path — no new runtime helper, no funcIdx shift.
+          //   - String: route to compileNativeStringMethodCall, which coerces
+          //     the borrowed receiver to a native string ($NativeString brand)
+          //     and emits the __str_* fast path. The covered method set is the
+          //     ones whose native helper round-trips correctly (see below).
+          //   - Object.hasOwnProperty: synthesise the bare call, which already
+          //     has a clean native standalone path (compilePropertyIntrospection
+          //     → __hasOwnProperty). Other Object methods (isPrototypeOf /
+          //     propertyIsEnumerable / valueOf) and Array/Number/Boolean/Function
+          //     have no clean native borrowed path yet → refuse-loud below
+          //     (Array brand arm rides on #6407; isPrototypeOf bare-path leak is
+          //     a separate follow-on). Never a silent-wrong answer.
+          if (ctx.standalone && expr.arguments.length >= 1 && !isBuiltinRegExpPrototype) {
+            // Native String methods whose __str_* helper + return marshaling
+            // round-trip correctly standalone (verified end-to-end). Methods
+            // outside this set refuse-loud rather than risk a wrong result.
+            const STANDALONE_STR_PROTO_METHODS = new Set<string>([
+              "charAt",
+              "charCodeAt",
+              "codePointAt",
+              "indexOf",
+              "lastIndexOf",
+              "includes",
+              "startsWith",
+              "endsWith",
+              "toUpperCase",
+              "toLowerCase",
+              "trim",
+              "trimStart",
+              "trimEnd",
+              "concat",
+              "repeat",
+              "padStart",
+              "padEnd",
+              "substring",
+              "slice",
+              "at",
+            ]);
+            const synthesizeBorrowedCall = (): { prop: ts.PropertyAccessExpression; call: ts.CallExpression } => {
+              const receiverArg = expr.arguments[0]!;
+              const restArgs = Array.from(expr.arguments).slice(1);
+              const sProp = ts.factory.createPropertyAccessExpression(receiverArg, methodName);
+              ts.setTextRange(sProp, innerExpr);
+              (sProp as unknown as { parent: ts.Node }).parent = expr;
+              const sCall = ts.factory.createCallExpression(sProp, undefined, restArgs);
+              ts.setTextRange(sCall, expr);
+              (sCall as unknown as { parent: ts.Node }).parent = expr.parent;
+              return { prop: sProp, call: sCall };
+            };
+
+            if (typeName === "String" && STANDALONE_STR_PROTO_METHODS.has(methodName)) {
+              const { prop, call } = synthesizeBorrowedCall();
+              const strResult = compileNativeStringMethodCall(ctx, fctx, call, prop, methodName);
+              if (strResult !== null) return strResult;
+              // Native string path declined (unexpected shape) — fall through
+              // to the refuse-loud below rather than the host import.
+            } else if (typeName === "Object" && methodName === "hasOwnProperty") {
+              // Object.prototype.hasOwnProperty.call(o, k) → o.hasOwnProperty(k),
+              // which routes to the native __hasOwnProperty (own-only presence).
+              const { prop, call } = synthesizeBorrowedCall();
+              const hasOwnResult = compilePropertyIntrospection(ctx, fctx, prop, call);
+              if (hasOwnResult !== null) return hasOwnResult;
+            }
+
+            // Unsupported (typeName, methodName) under standalone: refuse-loud,
+            // never leak the host import or return a silent-wrong value.
+            const cite =
+              typeName === "Array"
+                ? "the Array brand arm rides on #6407 ($Vec element retrieval)"
+                : typeName === "Object"
+                  ? "only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on)"
+                  : "this prototype's borrowed-method brand arm is not yet native";
+            reportError(
+              ctx,
+              expr,
+              `Codegen error: ${typeName}.prototype.${methodName}.call(...) is not yet ` +
+                `supported in --target standalone (#1888 Slice 3/4) — ${cite}. ` +
+                `Recompile without --target standalone, or call the method directly on a typed receiver.`,
+            );
+            return null;
+          }
           if (
             (typeName === "String" ||
               typeName === "Number" ||
