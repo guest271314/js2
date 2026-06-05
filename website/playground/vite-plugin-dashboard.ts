@@ -489,6 +489,23 @@ export function dashboardPlugin(): Plugin {
         }
       }
 
+      // fs.watch({recursive:true}) silently no-ops on Linux/containers (Node's
+      // recursive mode isn't supported there), which is why dashboard live
+      // updates stopped firing — change events never reach onFileChange, so the
+      // SSE "refresh" is never broadcast. Vite's own chokidar watcher is
+      // reliable cross-platform, so register the repo-root source dirs (they
+      // live outside Vite's website/ root, so add() is required) and route their
+      // changes through the same debounced handler. Watch SOURCES only
+      // (plan/ + benchmarks/results) — never dashboard/data, which is the
+      // regenerated OUTPUT and would otherwise loop.
+      const chokidarRoots = [join(projectRoot, "plan"), join(projectRoot, "benchmarks/results")].filter(existsSync);
+      for (const dir of chokidarRoots) server.watcher.add(dir);
+      server.watcher.on("all", (_event, changedPath) => {
+        if (typeof changedPath === "string" && chokidarRoots.some((d) => changedPath.startsWith(d))) {
+          onFileChange("change", changedPath);
+        }
+      });
+
       // SSE endpoint for live updates — no upgrade dance, works through Vite middleware
       server.middlewares.use("/dashboard-sse", (req, res) => {
         res.writeHead(200, {
@@ -597,6 +614,50 @@ _es.onmessage = (e) => {
         if (url.pathname === "/api/dashboard/burndown") {
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify(loadBurndown()));
+          return;
+        }
+
+        // Lightweight id → slug index so the issue detail page can resolve a
+        // bare id (?slug=681) to its full filename. Generated on the fly in
+        // dev; scripts/build-pages.js writes the static equivalent for prod.
+        if (url.pathname === "/plan/issues/index.json") {
+          const map: Record<string, string> = {};
+          for (const f of readdirSync(join(projectRoot, "plan", "issues"))) {
+            const m = f.match(/^(\d+[a-z]?)(?:-.*)?\.md$/i);
+            if (m) map[m[1]] = f.replace(/\.md$/, "");
+          }
+          res.setHeader("Content-Type", "application/json");
+          res.setHeader("Cache-Control", "no-cache");
+          res.end(JSON.stringify(map));
+          return;
+        }
+
+        // Raw issue markdown for the dashboard issue detail page (issue.html).
+        // plan/issues/ lives at the repo root, OUTSIDE Vite's website/ root, so
+        // a plain fetch('/plan/issues/<slug>.md') would 404 in dev. In
+        // production scripts/build-pages.js copies plan/issues into the
+        // published site, so the same URL resolves statically there.
+        if (url.pathname.startsWith("/plan/issues/") && url.pathname.endsWith(".md")) {
+          const slug = decodeURIComponent(url.pathname.slice("/plan/issues/".length, -".md".length));
+          // Flat issue filenames only — reject path traversal (no "/", no "..").
+          if (/^[\w.-]+$/.test(slug) && !slug.includes("..")) {
+            const dir = join(projectRoot, "plan", "issues");
+            let filePath = join(dir, `${slug}.md`);
+            // Bare id (e.g. "681" or "1525b") → first matching "<id>-*.md".
+            if (!existsSync(filePath) && /^\d+[a-z]?$/i.test(slug)) {
+              const match = readdirSync(dir).find((f) => new RegExp(`^${slug}(?:-.*)?\\.md$`, "i").test(f));
+              if (match) filePath = join(dir, match);
+            }
+            if (existsSync(filePath)) {
+              res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+              res.setHeader("Cache-Control", "no-cache");
+              res.end(readFileSync(filePath, "utf-8"));
+              return;
+            }
+          }
+          res.statusCode = 404;
+          res.setHeader("Content-Type", "text/plain; charset=utf-8");
+          res.end(`Issue not found: ${slug}`);
           return;
         }
 
