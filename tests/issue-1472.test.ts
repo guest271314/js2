@@ -913,6 +913,136 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__getOwnPropertyDescriptor\b/);
   });
 
+  // ── #1888 S5b — accessor LIVE get/set (the ~2.7k lever) ────────────────────
+  //
+  // Builds on the Slice-5 runtime layer: the call-site now compiles getter/setter
+  // as HOST-FREE closures into `__defineProperty_accessor` (under standalone,
+  // replacing the `__make_getter_callback` JS bridge), and the accessor arms in
+  // `__extern_get` / `__extern_set` invoke the stored `$get`/`$set` through the
+  // reserve/fill drivers `__call_accessor_get` / `__call_accessor_set` →
+  // `__call_fn_method_0/1` (receiver bound as `this` via `__current_this`,
+  // #1636-S1). §6.2.5.5 Get / §10.1.5.3 Set, own-accessor scope.
+
+  it("S5b: non-capturing getter returns its computed value (host-free, runs end-to-end)", async () => {
+    // The `o["seed"]=0` write forces the open-`$Object` runtime path (TS narrows
+    // a bare `{}` to a closed struct that bypasses the runtime — #1472 R2). The
+    // getter closure captures nothing, so the accessor dispatch (`__extern_get`
+    // FLAG_ACCESSOR arm → `__call_accessor_get` → `__call_fn_method_0`) runs the
+    // getter and returns its value with zero host imports.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "x", { get() { return 41 + 1; }, configurable: true });
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    // Both the define and the get run native — no JS-host bridge.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__make_getter_callback")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5b: getter-only accessor — assignment is a sloppy no-op, does not create a data prop", async () => {
+    // §10.1.5.3: writing to an own accessor with no setter is a sloppy no-op;
+    // the subsequent get still routes through the getter (returns its constant),
+    // NOT a freshly-written data value.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "ro", { get() { return 42; }, configurable: true });
+          o.ro = 99;            // no setter → sloppy no-op (NOT a data write)
+          return o.ro as number; // getter still returns 42
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("S5b: data properties on the same object are unaffected by accessor arms", async () => {
+    // The FLAG_ACCESSOR branch must only fire for accessor entries; plain data
+    // reads/writes on sibling keys keep the fast data path.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "acc", { get() { return 100; }, configurable: true });
+          o.d = 7;
+          o.d = (o.d as number) + 35; // data update through __extern_set data path
+          return o.d as number;       // 42, not the accessor
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  // ── S5c follow-ups (closure capture/`this`-mutation + object-literal emit) ──
+  // The runtime arms + drivers + define-site routing land here; two cases remain
+  // for S5c because they hit SHARED closure-dispatch infrastructure, not the
+  // localized accessor wiring:
+  //
+  //  1. A getter/setter closure that reads an OUTER capture (or mutates `this`)
+  //     returns/observes 0 under standalone: `__call_fn_method_N` installs the
+  //     receiver via `__current_this` but the closure's captured environment
+  //     ($self struct) is not threaded through the reserve/fill driver for the
+  //     accessor path the way it is for a direct closure call. A NON-capturing
+  //     getter works end-to-end (asserted above), proving the arm + driver +
+  //     dispatch are correct — the gap is capture/`this`-mutation threading in
+  //     the shared `__call_fn_method_N` dispatcher (the #1636-S1 / #1896 line).
+  //  2. Object-literal `{ get x() {} }` under standalone fails to SERIALIZE
+  //     ("u32 out of range: -1"): the literals.ts accessor-define path emits an
+  //     unresolved index when the getter is lifted as a host-free closure. The
+  //     `Object.defineProperty` define-site path (object-ops.ts) does NOT hit
+  //     this; only the object-literal lift does. Tracked for S5c.
+  it.skip("S5c: setter observes the write; getter reads it back (capture/this threading)", async () => {
+    const source = `
+        export function run(): number {
+          let backing = 0;
+          const o: any = {};
+          o["seed"] = 0;
+          Object.defineProperty(o, "v", {
+            get() { return backing; },
+            set(nv: number) { backing = nv * 2; },
+            configurable: true,
+          });
+          o.v = 21;
+          return o.v as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it.skip("S5c: object-literal accessor { get x() {} } runs native end-to-end", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = { get x() { return 42; } };
+          o["seed"] = 0;
+          return o.x as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
   it("default target (gc) still routes accessor defineProperty through the host import", async () => {
     // Regression guard: standalone is opt-in. Default (gc) mode keeps the
     // JS-host descriptor sidecar for accessor descriptors.
