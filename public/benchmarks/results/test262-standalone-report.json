@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T00:48:08.095Z",
-  "baseline_generated_at": "2026-06-05T00:48:07Z",
-  "baseline_sha": "3303876705f117f3a26b09e6881930b8a156fb3d",
+  "timestamp": "2026-06-05T03:06:49.414Z",
+  "baseline_generated_at": "2026-06-05T03:06:49Z",
+  "baseline_sha": "89ca014028d8aa5a494cf55778b2c7a42bb8641f",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43125,
-    "pass": 12480,
+    "pass": 12481,
     "fail": 8759,
-    "compile_error": 21855,
+    "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21239,
+    "compilable": 21240,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42039,
-        "pass": 12085,
+        "pass": 12086,
         "fail": 8335,
-        "compile_error": 21588,
+        "compile_error": 21587,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 20420,
+        "compilable": 20421,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43125,
-        "pass": 12480,
+        "pass": 12481,
         "fail": 8759,
-        "compile_error": 21855,
+        "compile_error": 21854,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 21239,
+        "compilable": 21240,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48107,
-        "pass": 12700,
+        "pass": 12701,
         "fail": 9024,
-        "compile_error": 26256,
+        "compile_error": 26255,
         "compile_timeout": 13,
         "skip": 114,
-        "compilable": 21724,
+        "compilable": 21725,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43125,
-    "pass": 12480,
+    "pass": 12481,
     "fail": 8759,
-    "compile_error": 21855,
+    "compile_error": 21854,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21239,
+    "compilable": 21240,
     "stale": 0
   },
   "full_summary": {
     "total": 48107,
-    "pass": 12700,
+    "pass": 12701,
     "fail": 9024,
-    "compile_error": 26256,
+    "compile_error": 26255,
     "compile_timeout": 13,
     "skip": 114,
-    "compilable": 21724,
+    "compilable": 21725,
     "stale": 0
   },
   "strict_summary": {
     "total": 40616,
-    "pass": 11680,
+    "pass": 11681,
     "fail": 8030,
-    "compile_error": 20875,
+    "compile_error": 20874,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 19710,
+    "compilable": 19711,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42039,
-      "pass": 12085,
+      "pass": 12086,
       "fail": 8335,
-      "compile_error": 21588,
+      "compile_error": 21587,
       "compile_timeout": 13,
       "skip": 18,
-      "compilable": 20420,
+      "compilable": 20421,
       "stale": 0
     }
   },
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 3263,
+      "pass": 3264,
       "fail": 1963,
-      "compile_error": 4109,
+      "compile_error": 4108,
       "compile_timeout": 2,
       "skip": 0,
       "total": 9337
@@ -1084,7 +1084,7 @@
     "negative_test_fail": 73,
     "null_deref": 220,
     "oob": 98,
-    "other": 20111,
+    "other": 20110,
     "promise_error": 32,
     "range_error": 27,
     "runtime_error": 2097,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 35293,
-    "classified": 35293,
+    "total_non_pass_non_skip": 35292,
+    "classified": 35292,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1224,8 +1224,8 @@
         "sample_files": [
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
-          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
@@ -1253,22 +1253,22 @@
           "total": 94
         },
         "error_categories": {
-          "runtime_error": 1,
           "other": 61,
+          "runtime_error": 1,
           "wasm_compile": 7,
           "assertion_fail": 24,
           "null_deref": 1
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/DisposableStack/prototype-from-newtarget.js",
+          "test/built-ins/DisposableStack/prototype/move/throws-if-disposed.js",
           "test/built-ins/AsyncDisposableStack/prototype/use/this-not-object-throws.js",
           "test/built-ins/DisposableStack/prototype/adopt/this-does-not-have-internal-disposablestate-throws.js",
           "test/built-ins/AsyncDisposableStack/prototype/Symbol.asyncDispose.js"
         ],
         "sample_signatures": [
-          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__getPrototypeOf' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
+          "runtime_error:L#:## Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack",
           "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## Codegen error: '__getOwnPropertyDescriptor' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to stru"
@@ -1369,22 +1369,22 @@
           "total": 157
         },
         "error_categories": {
-          "other": 99,
           "unreachable": 33,
+          "other": 99,
           "assertion_fail": 22,
           "wasm_compile": 2,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
+          "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
+          "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1417,16 +1417,16 @@
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
-          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
           "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
-          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
+          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js",
+          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
-          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
       {
@@ -1550,20 +1550,20 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 4316,
+        "count": 4315,
         "statuses": {
           "pass": 0,
           "fail": 514,
-          "compile_error": 3802,
+          "compile_error": 3801,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4316
+          "total": 4315
         },
         "error_categories": {
           "assertion_fail": 338,
           "wasm_compile": 3146,
           "null_deref": 28,
-          "other": 661,
+          "other": 660,
           "illegal_cast": 65,
           "runtime_error": 67,
           "oob": 1,
@@ -1962,15 +1962,15 @@
           "test/language/function-code/10.4.3-1-48-s.js",
           "test/built-ins/Function/S15.3.5_A3_T1.js",
           "test/language/function-code/10.4.3-1-83-s.js",
-          "test/built-ins/Function/StrictFunction_reservedwords_with.js",
-          "test/built-ins/Function/15.3.5.4_2-9gs.js"
+          "test/built-ins/Function/15.3.5.4_2-9gs.js",
+          "test/built-ins/Function/StrictFunction_reservedwords_with.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
           "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\"",
           "assertion_fail:returned # — assert ## at L#: assert((function () {return Function(\"\\\"use strict\\\";return f();\")();})());",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');"
         ]
       },
       {
