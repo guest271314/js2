@@ -332,3 +332,65 @@ the +61 #1901 already gains. Hold #1241 BLOCKED (no enqueue) until positive.
    NaN). Pre-#124 baseline behavior; fixing it (box-NaN sentinel, or spec
    `Number(undefined)=NaN`) is the same follow-on as the genuine step-6 TypeError
    for the own-valueOf-and-toString-both-return-object case.
+
+## Suspended Work (sd-s2, 2026-06-05 — sprint wind-down)
+
+**Status: pushed, on CI, NOT enqueued. PR #1241 stays BLOCKED.** Resume here.
+
+- **Worktree:** `/workspace/.claude/worktrees/issue-130-closed-struct-extern-get/`
+- **Branch:** `issue-130-closed-struct-extern-get` · **head `d1ea2aedf`** (local == origin, 0/0).
+- **PR #1241** updated to `d1ea2aedf`, mergeState BLOCKED (#1897 standalone gate). A
+  background CI watcher (`b1795c94y`) was polling `gh pr checks 1241`; on resume
+  read `.claude/ci-status/pr-1241.json` and **verify `head_sha == d1ea2aedf`**
+  before trusting net/regression numbers (a stale-SHA file is misleading).
+- **Gate (verbatim from tech lead):** the re-run standalone diff must be
+  **NET POSITIVE past the −15 tolerance** before re-push/enqueue. Expected
+  ~+254 (the ~260/266 coercion cluster flips; 6 residuals stay — see below).
+  If net-positive: enqueue via GraphQL `enqueuePullRequest` (NOT `gh pr merge
+  --auto`). If not: escalate to tech lead, do not enqueue.
+
+### What's REWIRED (committed `493dbb266`, in `d1ea2aedf`)
+1. **`src/codegen/object-runtime.ts`** — new native `__to_primitive(recv, hint)
+   -> externref`: `ref.test $Object`; if $Object, OrdinaryToPrimitive
+   number/default order via `__extern_method_call(recv,"valueOf"|"toString",null)`,
+   return first PRIMITIVE result; non-$Object passes through unchanged; no-primitive
+   returns the `undefined` sentinel (`ref.null.extern`). Added `"__to_primitive"`
+   to `OBJECT_RUNTIME_HELPER_NAMES`. **RESERVE/FILL at finalize** — registered as a
+   placeholder body, real body built by new exported **`fillToPrimitive(ctx)`**
+   (wired in `src/codegen/index.ts` right AFTER `fillApplyClosure`) which
+   re-resolves the `__extern_method_call` funcIdx BY NAME (a registration-time
+   capture goes stale → `u32 out of range:-1`, the #1839/#1899 late-shift class;
+   this was the load-bearing fix). Ctx fields `toPrimitiveReserved` +
+   `fillToPrimitiveBody` added in `src/codegen/context/types.ts`.
+2. **`src/codegen/type-coercion.ts`** — the externref→f64 coercion (the
+   `from.kind==="externref" && to.kind==="f64"` arm, ~L1352) now, under
+   `ctx.standalone`, calls `__to_primitive(recv, null-hint)` BEFORE
+   `__unbox_number`. Byte-identical for every non-$Object operand (passthrough).
+   This is the site that was the root cause: it (plus the calls.ts name-arms)
+   bypassed the working generic dispatch. **NOTE: I rewired the externref→f64
+   coercion site; I did NOT separately edit the calls.ts valueOf/toString
+   name-arms** — routing the *coercion* through `__to_primitive` turned out to
+   cover the explicit `o.valueOf()` case too (the `as number` re-coerces the
+   identity-short-circuit result), so the 4/5 + #1806 tests pass without touching
+   calls.ts. If the diff shows residual explicit-call misses, the calls.ts
+   `valueOf`/`toString` fallback arms (calls.ts ~L7311 toString, ~L7388 valueOf —
+   the "Fallback .valueOf()/.toString() for any type" identity short-circuits)
+   are the next place to route through `__to_primitive`/`__extern_method_call`.
+
+### Tests (all green): `tests/issue-124-toprimitive-object.test.ts` (5/5),
+   `tests/issue-1806.test.ts` (6/6, closed-struct cases assert REFUSE-LOUD).
+
+### Still-TODO / carved out (do NOT block this co-land)
+- **Closed-struct `(o as any) - 0` (no annotation)** kept REFUSING-LOUD
+  (decision A): removing the #1806 refusal unmasked a pre-existing latent
+  `global.get -1` in the closed-struct→externref emission. Tracked as the
+  closed-struct→$Object representation follow-on (fixed when #1901 routing
+  itself co-lands). + `__unbox_number(undefined)→0` (should be NaN).
+- **6 non-coercion residuals** expected to remain (file as follow-up): Array
+  indexOf/lastIndexOf on $Object ×2, Symbol.iterator-null ×1, illegal-cast in
+  `__obj_find`←`__extern_get` ×1 (likely same root as the $Object enumeration
+  finding), valueOf-side-effect-count ×2 (these likely clear once valueOf fires).
+- **for-of 69 cluster** — tech lead RETRACTED this; they're
+  `async-func-decl-dstr-obj-id-*` destructuring (coercion, covered by gap-2), NOT
+  Symbol.iterator iteration. Exactly 1 genuine iterator case in all 266. No
+  separate iterator-bridge work needed for this PR.
