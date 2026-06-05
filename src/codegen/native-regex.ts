@@ -18,6 +18,9 @@ import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 import { ReOp } from "./regex/bytecode.js";
+// NOTE: `__regex_replace` (below) reuses the native string helpers
+// `__str_substring` + `__str_concat` (registered by ensureNativeStringHelpers)
+// and returns a `$NativeString` — no array boundary, so no host import.
 
 /** The frame struct holds one backtrack alternative, exactly like vm.ts. */
 const RE_FRAME_STRUCT = "__ReFrame";
@@ -886,8 +889,15 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     // i = max(0, start)
-    { op: "local.get", index: START },
+    // `select` returns its 1st operand when the condition is non-zero, so to
+    // compute `start < 0 ? 0 : start` the operands must be (0, start, start<0):
+    // [val_if_true=0, val_if_false=start, cond=(start<0)]. (The earlier order
+    // [start, 0, start<0] yielded the inverse — `start<0 ? start : 0` — which
+    // returned 0 for every non-negative start, so any `__regex_search` with a
+    // positive `startIdx` rescanned from 0 and global replace/match looped
+    // forever re-matching the first hit. #1539 Phase 2c.)
     { op: "i32.const", value: 0 },
+    { op: "local.get", index: START },
     { op: "local.get", index: START },
     { op: "i32.const", value: 0 },
     { op: "i32.lt_s" },
@@ -946,6 +956,202 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     body,
     exported: false,
   });
+  return funcIdx;
+}
+
+/**
+ * Emit `__regex_replace(prog, classTable, nGroups, strData, strOff, strLen,
+ * subject, replacement, global) -> ref $NativeString` (#1539 Phase 2c).
+ *
+ * Implements `String.prototype.replace` / `replaceAll` for a backend-created
+ * RegExp with a **literal** (non-`$`-pattern, non-function) replacement string
+ * (ECMA-262 §22.1.3.19 / §22.2.6.11 with the `$`-substitution and function
+ * replacer paths refused at the call site). Walks the subject with
+ * `__regex_search`, accumulating `result = … + slice[lastEnd, matchStart) +
+ * replacement` for each match and appending `slice[lastEnd, len)` at the end.
+ * `global != 0` replaces every match (advancing past empty matches by 1 per
+ * §22.2.6.11 AdvanceStringIndex); otherwise only the first.
+ *
+ * Returns a `$NativeString` — no array boundary, so no `__make_iterable` /
+ * host import is pulled in standalone.
+ */
+export function ensureRegexReplace(ctx: CodegenContext): number {
+  const existing = ctx.nativeRegexHelpers.get("__regex_replace");
+  if (existing !== undefined) return existing;
+
+  const searchIdx = ensureRegexSearch(ctx);
+  const i32Arr = regexI32ArrayType(ctx);
+  const strDataIdx = ctx.nativeStrDataTypeIdx; // array i16
+  const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString (for the empty-string struct.new)
+  const anyStrTypeIdx = ctx.anyStrTypeIdx; // $AnyString — the helper signature type
+
+  const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
+  const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+  if (substringIdx === undefined || concatIdx === undefined) {
+    throw new Error("__regex_replace requires __str_substring + __str_concat (#682 native string helpers)");
+  }
+
+  const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
+  const strDataRef: ValType = { kind: "ref", typeIdx: strDataIdx };
+  // `__str_substring` / `__str_concat` take and return `$AnyString` (the base
+  // type), so subject/replacement params, the result accumulator, and the
+  // return type are all `$AnyString`. An empty `$NativeString` is a valid
+  // subtype to seed `result` with. `strDataRef` (the i16 backing array) is the
+  // concrete native-string data the call site passes split out for the matcher.
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      i32ArrRef, // prog
+      i32ArrRef, // classTable
+      { kind: "i32" }, // nGroups
+      strDataRef, // strData
+      { kind: "i32" }, // strOff
+      { kind: "i32" }, // strLen
+      strRef, // subject (flattened)
+      strRef, // replacement (flattened)
+      { kind: "i32" }, // global flag
+    ],
+    [strRef],
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeRegexHelpers.set("__regex_replace", funcIdx);
+
+  // params
+  const PROG = 0,
+    CTAB = 1,
+    NGROUPS = 2,
+    SDATA = 3,
+    SOFF = 4,
+    SLEN = 5,
+    SUBJ = 6,
+    REPL = 7,
+    GLOBAL = 8;
+  // locals
+  const NSLOTS = 9; // 2 * nGroups
+  const CAPS = 10; // ref array<i32> capture slots
+  const POS = 11; // current search start
+  const LASTEND = 12; // end of last replaced match (start of next kept slice)
+  const RESULT = 13; // ref $NativeString accumulator
+  const MSTART = 14;
+  const MEND = 15;
+
+  const body: Instr[] = [
+    // nSlots = 2 * nGroups
+    { op: "local.get", index: NGROUPS },
+    { op: "i32.const", value: 2 },
+    { op: "i32.mul" },
+    { op: "local.set", index: NSLOTS },
+    { op: "local.get", index: NSLOTS },
+    { op: "array.new_default", typeIdx: i32Arr },
+    { op: "local.set", index: CAPS },
+    // result = "" (empty NativeString {len:0, off:0, data:[]}), pos = 0, lastEnd = 0
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "array.new_default", typeIdx: strDataIdx },
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "local.set", index: RESULT },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: POS },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: LASTEND },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if pos > slen: break
+            { op: "local.get", index: POS },
+            { op: "local.get", index: SLEN },
+            { op: "i32.gt_s" },
+            { op: "br_if", depth: 1 },
+            // if !__regex_search(... pos, sticky=0 ...): break
+            { op: "local.get", index: PROG },
+            { op: "local.get", index: CTAB },
+            { op: "local.get", index: NSLOTS },
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: SLEN },
+            { op: "local.get", index: POS },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: CAPS },
+            { op: "call", funcIdx: searchIdx },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            // mstart = caps[0]; mend = caps[1]
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 0 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MSTART },
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 1 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MEND },
+            // result = concat(concat(result, substring(subj, lastEnd, mstart)), replacement)
+            { op: "local.get", index: RESULT },
+            { op: "local.get", index: SUBJ },
+            { op: "local.get", index: LASTEND },
+            { op: "local.get", index: MSTART },
+            { op: "call", funcIdx: substringIdx },
+            { op: "call", funcIdx: concatIdx },
+            { op: "local.get", index: REPL },
+            { op: "call", funcIdx: concatIdx },
+            { op: "local.set", index: RESULT },
+            // lastEnd = mend
+            { op: "local.get", index: MEND },
+            { op: "local.set", index: LASTEND },
+            // if !global: break after the first match
+            { op: "local.get", index: GLOBAL },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            // advance pos: pos = mend + (mend > mstart ? 0 : 1)  (empty-match guard)
+            { op: "local.get", index: MEND },
+            { op: "local.get", index: MEND },
+            { op: "local.get", index: MSTART },
+            { op: "i32.gt_s" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 0 }],
+              else: [{ op: "i32.const", value: 1 }],
+            },
+            { op: "i32.add" },
+            { op: "local.set", index: POS },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // result = concat(result, substring(subj, lastEnd, slen))  — the tail
+    { op: "local.get", index: RESULT },
+    { op: "local.get", index: SUBJ },
+    { op: "local.get", index: LASTEND },
+    { op: "local.get", index: SLEN },
+    { op: "call", funcIdx: substringIdx },
+    { op: "call", funcIdx: concatIdx },
+  ];
+
+  const fn: WasmFunction = {
+    name: "__regex_replace",
+    typeIdx,
+    locals: [
+      { name: "nslots", type: { kind: "i32" } },
+      { name: "caps", type: i32ArrRef },
+      { name: "pos", type: { kind: "i32" } },
+      { name: "lastEnd", type: { kind: "i32" } },
+      { name: "result", type: strRef },
+      { name: "mstart", type: { kind: "i32" } },
+      { name: "mend", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  };
+  ctx.mod.functions.push(fn);
   return funcIdx;
 }
 
