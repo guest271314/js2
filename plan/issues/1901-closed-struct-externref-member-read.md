@@ -1,9 +1,10 @@
 ---
 id: 1901
 title: "Standalone __extern_get string-key read on a closed-struct/$Vec-backed externref returns 0 (untyped-param object reads)"
-status: in-progress
+status: done
 created: 2026-06-05
 updated: 2026-06-05
+completed: 2026-06-05
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -142,3 +143,70 @@ any-context non-empty-literal case (which was the broken one).
 
 sd-s2 — object-runtime.ts core lane. Serializes with sd-1888 S5c on
 object-runtime.ts at the merge queue; build in parallel, rebase at merge.
+
+## Implementation notes (sd-s2, delivered 2026-06-05)
+
+Shipped option **(iii)** construction-time `$Object` routing in
+`src/codegen/literals.ts`:
+
+1. **`compileObjectLiteral`** — new branch (after the empty-`{}` any-context
+   branch) routes a **non-empty** object literal whose every property is a
+   data prop / shorthand / spread (no accessors, methods, or computed/symbol
+   keys) and whose contextual type is any/unknown/`object`/absent through
+   `compileObjectLiteralAsExternref`. The any-context test **mirrors the
+   existing empty-`{}` check verbatim** (R2 guard: a concrete struct type keeps
+   the closed-struct fast path, byte-identical).
+2. **`compileObjectLiteralAsExternref`** — extended its per-prop loop to build
+   named data props onto the `$Object` via native `__extern_set(obj, "<key>",
+   value)` (was previously spread-only; named props were silently dropped).
+
+**Scope correction during impl (important — differs from the original
+acceptance):**
+
+- **Gated to `ctx.standalone` only.** Recon proved the open-object runtime
+  (`ensureObjectRuntime` / `__new_plain_object` / `__extern_get`) is emitted as
+  native defined functions **exclusively** under `ctx.standalone` —
+  `late-imports.ts:308` deliberately excludes `ctx.wasi` (#1472 Phase B note:
+  "WASI is intentionally NOT routed here yet"). Under wasi the `$Object`
+  builder declines (`ensureLateImport` → undefined), so the branch must not
+  fire there. **Verified wasi is byte-identical to main** with the gate. The
+  `target:wasi` half of the original acceptance is therefore a **tracked
+  follow-on** (extend the object runtime to wasi — needs the wasi `__str_flatten`
+  type-mismatch in `__extern_get`'s body fixed first; that defect is
+  **pre-existing on main**, present whenever a closed-struct-only wasi program
+  emits `__extern_get`, and is NOT caused by this change).
+- **#124 ToPrimitive sibling does NOT "fall out for free"** (contra the design
+  note). Recon proved that even a closure-valued `{valueOf: () => 7}` data prop
+  — which **does** route to `$Object` here — still returns `NaN`: ToPrimitive's
+  `(o as number)` coercion does not LOCATE + `__apply_closure` the stored
+  valueOf/toString off the `$Object`. That dispatch is a separate lever
+  (depends on S6b method-as-value wrapping) and is a **tracked follow-on**. The
+  construction half is pinned (`{valueOf(){…}}` literal compiles valid +
+  leak-free).
+
+**Delivered & validated under `--target standalone`:**
+
+- `g({x:9}).x` → **9** (was 0 + invalid Wasm on main), `valid=true`, zero
+  `env::` object-import leaks. Nested `g({x:{y:5}}).x.y` → 5, multi-prop,
+  `const o:any={x:9};o.x`, absent-prop → 0 (no trap) all correct.
+- R2 regression guard green: typed `interface Point` literal still builds a
+  closed struct (`p.x*p.x+p.y*p.y` → 25).
+- gc/host + wasi codegen **byte-identical to main** (gate off in both).
+- Suites green: `tests/issue-1901.test.ts` (7), `issue-1472` (object runtime),
+  `issue-1239`/`issue-1433` (accessor/disposal routing), `issue-1806`
+  (ToPrimitive). The 4 `object-mutability`/`object-literal-getters-setters`
+  equivalence failures are **pre-existing on main** (confirmed by swapping
+  main's `literals.ts`), unrelated to this change.
+
+### Follow-ons carved out of #1901
+
+1. **wasi object-runtime extension** — route `OBJECT_RUNTIME_HELPER_NAMES`
+   through `ensureObjectRuntime` under `ctx.wasi` too (lift the
+   `late-imports.ts:308` `ctx.standalone`-only gate), after fixing the
+   pre-existing `__str_flatten` type-5 mismatch inside `__extern_get`'s emitted
+   body under native-strings. Unblocks the `target:wasi` half here + the wider
+   wasi object corner.
+2. **#124 ToPrimitive-off-`$Object` dispatch** — `(o as number)` /
+   `String(o)` must find a stored `valueOf`/`toString` (method shorthand OR
+   closure-valued data prop) on the `$Object` and invoke it via
+   `__apply_closure`. Depends on S6b method-as-value wrapping.
