@@ -131,6 +131,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "key", type: { kind: "ref", typeIdx: anyStrTypeIdx }, mutable: false },
       { name: "value", type: { kind: "anyref" }, mutable: true },
       { name: "flags", type: { kind: "i32" }, mutable: true },
+      // #1837 — monotonically-increasing insertion sequence, assigned at
+      // create time from $Object.nextSeq and PRESERVED across rehash so
+      // OrdinaryOwnPropertyKeys can emit string keys in insertion order. Mutable
+      // only so the field can be filled by struct.new at any callsite; it is
+      // never rewritten after creation.
+      { name: "seq", type: { kind: "i32" }, mutable: true },
     ],
   });
 
@@ -152,6 +158,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "count", type: { kind: "i32" }, mutable: true },
       { name: "tombstones", type: { kind: "i32" }, mutable: true },
       { name: "flags", type: { kind: "i32" }, mutable: true },
+      // #1837 — next insertion sequence number. Incremented (never reset, not
+      // even on rehash) on every NEW key so $PropEntry.seq records the order
+      // string keys were first added. Powers OrdinaryOwnPropertyKeys insertion
+      // ordering for Object.keys/values/entries/for-in/spread/JSON.stringify.
+      { name: "nextSeq", type: { kind: "i32" }, mutable: true },
     ],
   });
 
@@ -308,7 +319,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // ── __new_plain_object() -> externref ────────────────────────────────────
   //
   // struct.new $Object { proto: null, props: new $PropMap[INITIAL_CAP], count:
-  // 0, tombstones: 0, flags: 0 }, then extern.convert_any.
+  // 0, tombstones: 0, flags: 0, nextSeq: 0 }, then extern.convert_any.
   {
     const body: Instr[] = [
       { op: "ref.null", typeIdx: objectTypeIdx }, // proto
@@ -317,6 +328,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "i32.const", value: 0 }, // count
       { op: "i32.const", value: 0 }, // tombstones
       { op: "i32.const", value: 0 }, // flags
+      { op: "i32.const", value: 0 }, // nextSeq (#1837)
       { op: "struct.new", typeIdx: objectTypeIdx },
       { op: "extern.convert_any" },
     ];
@@ -516,38 +528,43 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
-  // ── $__obj_insert(ref $Object, externref key, anyref value, i32 flags) ────
+  // ── $__obj_insert(ref $Object, externref key, anyref value, i32 flags, i32 seq) ──
   //
   // Insert-or-update on the OWN table. Caller is responsible for growing the
   // table BEFORE calling when the load factor is exceeded (see __extern_set).
-  // On update of a LIVE entry with the same key, overwrites value + flags.
+  // On update of a LIVE entry with the same key, overwrites value + flags (the
+  // existing entry's seq is NOT touched — first-insertion order is preserved
+  // per OrdinaryOwnPropertyKeys; updating an existing key does not reorder it).
+  // `seq` (#1837) is stamped onto a freshly-created entry. Callers that add a
+  // NEW key pass `o.nextSeq` (and bump it); the __obj_grow rehash passes the
+  // entry's PRESERVED seq so order survives a resize.
   //
-  // params: 0=o(ref $Object) 1=key(externref) 2=value(anyref) 3=flags
-  // locals: 4=arr(ref $PropMap) 5=cap 6=mask 7=i 8=e(ref null $PropEntry) 9=fkey(ref $NativeString) 10=keyStr(ref $AnyString)
+  // params: 0=o(ref $Object) 1=key(externref) 2=value(anyref) 3=flags 4=seq
+  // locals: 5=arr(ref $PropMap) 6=cap 7=mask 8=i 9=e(ref null $PropEntry) 10=fkey(ref $NativeString) 11=keyStr(ref $AnyString)
   {
     const body: Instr[] = [
       // keyStr = cast<$AnyString>(any.convert_extern(key)) ; fkey = flatten(keyStr)
       { op: "local.get", index: 1 },
       { op: "any.convert_extern" },
       { op: "ref.cast", typeIdx: anyStrTypeIdx },
-      { op: "local.tee", index: 10 },
+      { op: "local.tee", index: 11 },
       { op: "call", funcIdx: strFlattenIdx },
-      { op: "local.set", index: 9 },
+      { op: "local.set", index: 10 },
       // arr = o.props ; cap = arr.len ; mask = cap - 1
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
-      { op: "local.tee", index: 4 },
-      { op: "array.len" },
       { op: "local.tee", index: 5 },
+      { op: "array.len" },
+      { op: "local.tee", index: 6 },
       { op: "i32.const", value: 1 },
       { op: "i32.sub" },
-      { op: "local.set", index: 6 },
+      { op: "local.set", index: 7 },
       // i = hash(key) & mask
       { op: "local.get", index: 1 },
       { op: "call", funcIdx: objHashIdx },
-      { op: "local.get", index: 6 },
+      { op: "local.get", index: 7 },
       { op: "i32.and" },
-      { op: "local.set", index: 7 },
+      { op: "local.set", index: 8 },
       {
         op: "block",
         blockType: { kind: "empty" },
@@ -557,10 +574,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             blockType: { kind: "empty" },
             body: [
               // e = arr[i]
-              { op: "local.get", index: 4 },
-              { op: "local.get", index: 7 },
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 8 },
               { op: "array.get", typeIdx: propMapTypeIdx },
-              { op: "local.tee", index: 8 },
+              { op: "local.tee", index: 9 },
               // empty slot → create new entry here, UNLESS the object is
               // non-extensible (#1472 Phase B Blocker A Half 2). A
               // sealed/preventExtensions/frozen object refuses NEW keys per ES
@@ -586,12 +603,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
                   { op: "i32.and" },
                   { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
-                  // arr[i] = struct.new $PropEntry { keyStr, value, flags }
-                  { op: "local.get", index: 4 },
-                  { op: "local.get", index: 7 },
-                  { op: "local.get", index: 10 },
+                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq }
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 11 },
                   { op: "local.get", index: 2 },
                   { op: "local.get", index: 3 },
+                  { op: "local.get", index: 4 }, // seq (#1837)
                   { op: "struct.new", typeIdx: propEntryTypeIdx },
                   { op: "array.set", typeIdx: propMapTypeIdx },
                   // o.count++
@@ -606,14 +624,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               },
               // occupied + LIVE + key matches → update in place
               // str_equals(flatten(e.key), fkey)
-              { op: "local.get", index: 8 },
+              { op: "local.get", index: 9 },
               { op: "ref.as_non_null" },
               { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
               { op: "call", funcIdx: strFlattenIdx },
-              { op: "local.get", index: 9 },
+              { op: "local.get", index: 10 },
               { op: "call", funcIdx: strEqualsIdx },
               // AND not a tombstone
-              { op: "local.get", index: 8 },
+              { op: "local.get", index: 9 },
               { op: "ref.as_non_null" },
               { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
               { op: "i32.const", value: FLAG_TOMBSTONE },
@@ -624,12 +642,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  // e.value = value ; e.flags = flags ; return (update in place)
-                  { op: "local.get", index: 8 },
+                  // e.value = value ; e.flags = flags ; return (update in place,
+                  // seq untouched — first-insertion order preserved per #1837)
+                  { op: "local.get", index: 9 },
                   { op: "ref.as_non_null" },
                   { op: "local.get", index: 2 },
                   { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 9 },
                   { op: "ref.as_non_null" },
                   { op: "local.get", index: 3 },
                   { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
@@ -637,12 +656,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 ],
               },
               // collision → i = (i + 1) & mask ; loop
-              { op: "local.get", index: 7 },
+              { op: "local.get", index: 8 },
               { op: "i32.const", value: 1 },
               { op: "i32.add" },
-              { op: "local.get", index: 6 },
+              { op: "local.get", index: 7 },
               { op: "i32.and" },
-              { op: "local.set", index: 7 },
+              { op: "local.set", index: 8 },
               { op: "br", depth: 0 },
             ],
           },
@@ -651,7 +670,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ];
     registerNative(
       "__obj_insert",
-      [objRef, { kind: "externref" }, { kind: "anyref" }, { kind: "i32" }],
+      [objRef, { kind: "externref" }, { kind: "anyref" }, { kind: "i32" }, { kind: "i32" }],
       [],
       [
         { name: "arr", type: propMapRef },
@@ -734,7 +753,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [
-                      // __obj_insert(o, extern.convert_any(e.key), e.value, e.flags)
+                      // __obj_insert(o, extern.convert_any(e.key), e.value,
+                      // e.flags, e.seq) — PRESERVE the original seq across the
+                      // rehash so insertion order survives a resize (#1837)
                       { op: "local.get", index: 0 },
                       { op: "local.get", index: 5 },
                       { op: "ref.as_non_null" },
@@ -746,6 +767,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       { op: "local.get", index: 5 },
                       { op: "ref.as_non_null" },
                       { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                      { op: "local.get", index: 5 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 3 }, // seq
                       { op: "call", funcIdx: objInsertIdx },
                     ],
                   },
@@ -842,13 +866,28 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 3 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
       },
-      // __obj_insert(o, key, any.convert_extern(value), FLAG_DEFAULT)
+      // seq = o.nextSeq ; o.nextSeq = seq + 1  (#1837 — claim the next insertion
+      // sequence for a potential NEW entry; an update of an existing key keeps
+      // its original seq so this number is simply skipped, which is harmless
+      // because seq values are only compared for relative order)
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      { op: "local.set", index: 7 },
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 7 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      // __obj_insert(o, key, any.convert_extern(value), FLAG_DEFAULT, seq)
       { op: "local.get", index: 3 },
       { op: "ref.as_non_null" },
       { op: "local.get", index: 1 },
       { op: "local.get", index: 2 },
       { op: "any.convert_extern" },
       { op: "i32.const", value: FLAG_DEFAULT },
+      { op: "local.get", index: 7 },
       { op: "call", funcIdx: objInsertIdx },
     ];
     registerNative(
@@ -860,6 +899,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "cap", type: { kind: "i32" } },
         { name: "load", type: { kind: "i32" } },
         { name: "any", type: { kind: "anyref" } },
+        { name: "seq", type: { kind: "i32" } },
       ],
       body,
     );
@@ -1094,18 +1134,475 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   }
   const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
 
+  // ── __obj_index_of_key(ref $AnyString key) -> i32 ────────────────────────
+  // #1837 — canonical array-index test for OrdinaryOwnPropertyKeys ordering.
+  // Returns the integer value of `key` if it is a canonical numeric array index
+  // (ES §6.1.7 / 7.1.21 CanonicalNumericIndexString restricted to array index
+  // range), else -1. Canonical means: "0", or a digit string with no leading
+  // zero whose value is a non-negative integer < 2^31-1 (we cap below i32 max so
+  // the value is usable as a signed sort key — array indices in practice are
+  // small; anything ≥ 2^31-1 is treated as a string key, which is acceptable
+  // since it would also sort after all in-range indices). Non-digit strings,
+  // leading-zero strings ("01"), "+1", "-1", "1.0", "" → -1.
+  //
+  // param: 0=key(ref $AnyString)
+  // locals: 1=str(ref $NativeString) 2=data(ref $strData) 3=len 4=off 5=i 6=c 7=val
+  {
+    const body: Instr[] = [
+      // str = flatten(key) ; len = str.len ; off = str.off ; data = str.data
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: strFlattenIdx },
+      { op: "local.tee", index: 1 },
+      { op: "struct.get", typeIdx: nativeStrTypeIdx, fieldIdx: 0 },
+      { op: "local.tee", index: 3 },
+      // if len == 0 → -1 (empty string is not an index)
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+      },
+      { op: "local.get", index: 1 },
+      { op: "struct.get", typeIdx: nativeStrTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: 4 },
+      { op: "local.get", index: 1 },
+      { op: "struct.get", typeIdx: nativeStrTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: 2 },
+      // c = data[off + 0]
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 4 },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
+      { op: "local.tee", index: 6 },
+      // special case "0": len==1 && c=='0' → 0
+      { op: "i32.const", value: 0x30 }, // '0'
+      { op: "i32.eq" },
+      { op: "local.get", index: 3 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.eq" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // first char must be '1'..'9' (no leading zero, no '0' prefix)
+      { op: "local.get", index: 6 },
+      { op: "i32.const", value: 0x31 }, // '1'
+      { op: "i32.lt_u" },
+      { op: "local.get", index: 6 },
+      { op: "i32.const", value: 0x39 }, // '9'
+      { op: "i32.gt_u" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+      },
+      // val = 0 ; i = 0 ; accumulate digits
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 7 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 5 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= len break
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 3 },
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
+              // c = data[off + i]
+              { op: "local.get", index: 2 },
+              { op: "local.get", index: 4 },
+              { op: "local.get", index: 5 },
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataTypeIdx },
+              { op: "local.tee", index: 6 },
+              // if c < '0' || c > '9' → not an index (return -1)
+              { op: "i32.const", value: 0x30 },
+              { op: "i32.lt_u" },
+              { op: "local.get", index: 6 },
+              { op: "i32.const", value: 0x39 },
+              { op: "i32.gt_u" },
+              { op: "i32.or" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+              },
+              // val = val * 10 + (c - '0')
+              { op: "local.get", index: 7 },
+              { op: "i32.const", value: 10 },
+              { op: "i32.mul" },
+              { op: "local.get", index: 6 },
+              { op: "i32.const", value: 0x30 },
+              { op: "i32.sub" },
+              { op: "i32.add" },
+              { op: "local.tee", index: 7 },
+              // overflow / out-of-range guard: if val < 0 (wrapped past i32 max)
+              // treat as a string key (return -1)
+              { op: "i32.const", value: 0 },
+              { op: "i32.lt_s" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: -1 }, { op: "return" }],
+              },
+              // i++
+              { op: "local.get", index: 5 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 5 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // return val
+      { op: "local.get", index: 7 },
+    ];
+    registerNative(
+      "__obj_index_of_key",
+      [anyStrRef],
+      [{ kind: "i32" }],
+      [
+        { name: "str", type: nativeStrRef },
+        { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
+        { name: "len", type: { kind: "i32" } },
+        { name: "off", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "c", type: { kind: "i32" } },
+        { name: "val", type: { kind: "i32" } },
+      ],
+      body,
+    );
+  }
+  const objIndexOfKeyIdx = ctx.funcMap.get("__obj_index_of_key")!;
+
+  // ── __obj_ordered(ref $Object o) -> ref $PropMap ──────────────────────────
+  // #1837 — collect this object's LIVE + ENUMERABLE own property entries into a
+  // freshly compacted $PropMap in ECMAScript OrdinaryOwnPropertyKeys order
+  // (§10.1.11.1): integer-index keys ascending by numeric value first, then the
+  // remaining string keys in insertion order ($PropEntry.seq ascending). The
+  // result array's prefix [0..m) holds the ordered entries; the suffix is null,
+  // so callers walk until the first null (or use the known live count). Symbol
+  // keys are out of scope here (the open-object runtime stores only string keys).
+  //
+  // Selection sort over the compacted set — O(m²) but m is the live-property
+  // count of one object, which is small in practice and avoids any auxiliary
+  // host array.
+  //
+  // param: 0=o(ref $Object)
+  // locals: 1=arr(ref $PropMap) 2=cap 3=i 4=e(ref null $PropEntry) 5=out(ref $PropMap)
+  //         6=m(filled count) 7=j 8=best 9=k 10=cand(ref null $PropEntry) 11=bestE(ref null $PropEntry)
+  //         12=candIdx 13=bestIdx 14=candSeq 15=bestSeq 16=tmp(ref null $PropEntry)
+  {
+    const entryRef: ValType = { kind: "ref", typeIdx: propEntryTypeIdx };
+    // Inline: leave on stack the array index (i32) for entry `e` (local idx given
+    // by `entryLocal`) — its key parsed as a canonical array index, else -1.
+    const entryIndexOf = (entryLocal: number): Instr[] => [
+      { op: "local.get", index: entryLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+      { op: "call", funcIdx: objIndexOfKeyIdx },
+    ];
+    const entrySeqOf = (entryLocal: number): Instr[] => [
+      { op: "local.get", index: entryLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 3 },
+    ];
+    // keyLess(candIdx, candSeq, bestIdx, bestSeq) -> i32 — true iff the
+    // (candIdx, candSeq) key precedes (bestIdx, bestSeq) in
+    // OrdinaryOwnPropertyKeys order. Integer-index keys (idx >= 0) precede all
+    // string keys (idx < 0); among integer keys compare by value, among string
+    // keys compare by insertion seq.
+    const keyLess = (candIdx: number, candSeq: number, bestIdx: number, bestSeq: number): Instr[] => [
+      // if candIdx >= 0
+      { op: "local.get", index: candIdx },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          // candidate is an integer index
+          // if bestIdx >= 0 → candIdx < bestIdx ; else → true (int before string)
+          { op: "local.get", index: bestIdx },
+          { op: "i32.const", value: 0 },
+          { op: "i32.ge_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "local.get", index: candIdx }, { op: "local.get", index: bestIdx }, { op: "i32.lt_s" }],
+            else: [{ op: "i32.const", value: 1 }],
+          },
+        ],
+        else: [
+          // candidate is a string key
+          // if bestIdx >= 0 → false (string never precedes int) ; else → candSeq < bestSeq
+          { op: "local.get", index: bestIdx },
+          { op: "i32.const", value: 0 },
+          { op: "i32.ge_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 0 }],
+            else: [{ op: "local.get", index: candSeq }, { op: "local.get", index: bestSeq }, { op: "i32.lt_s" }],
+          },
+        ],
+      },
+    ];
+    const body: Instr[] = [
+      // arr = o.props ; cap = arr.len
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "local.tee", index: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 2 },
+      // out = new $PropMap[o.count]  (upper bound on live entries; enumerable
+      // entries are a subset, trailing slots stay null)
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "array.new_default", typeIdx: propMapTypeIdx },
+      { op: "local.set", index: 5 },
+      // m = 0 ; i = 0 — first pass: compact live + enumerable entries into out
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 6 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 3 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
+              // e = arr[i]
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: 3 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.tee", index: 4 },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // (not tombstone) && enumerable
+                  { op: "local.get", index: 4 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_TOMBSTONE },
+                  { op: "i32.and" },
+                  { op: "i32.eqz" },
+                  { op: "local.get", index: 4 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                  { op: "i32.const", value: FLAG_ENUMERABLE },
+                  { op: "i32.and" },
+                  { op: "i32.eqz" },
+                  { op: "i32.eqz" },
+                  { op: "i32.and" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      // out[m] = e ; m++
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 6 },
+                      { op: "local.get", index: 4 },
+                      { op: "array.set", typeIdx: propMapTypeIdx },
+                      { op: "local.get", index: 6 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 6 },
+                    ],
+                  },
+                ],
+              },
+              { op: "local.get", index: 3 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 3 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // Second pass: selection sort out[0..m) by OrdinaryOwnPropertyKeys order.
+      // for j in 0..m-1: find best in [j..m) and swap into out[j]
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 7 }, // j
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if j >= m break
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
+              // best = j ; bestE = out[j] ; bestIdx = idx(bestE) ; bestSeq = bestE.seq
+              { op: "local.get", index: 7 },
+              { op: "local.set", index: 8 },
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 7 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.set", index: 11 },
+              ...entryIndexOf(11),
+              { op: "local.set", index: 13 },
+              ...entrySeqOf(11),
+              { op: "local.set", index: 15 },
+              // for k in j+1..m
+              { op: "local.get", index: 7 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 9 },
+              {
+                op: "block",
+                blockType: { kind: "empty" },
+                body: [
+                  {
+                    op: "loop",
+                    blockType: { kind: "empty" },
+                    body: [
+                      { op: "local.get", index: 9 },
+                      { op: "local.get", index: 6 },
+                      { op: "i32.ge_u" },
+                      { op: "br_if", depth: 1 },
+                      // cand = out[k] ; candIdx = idx(cand) ; candSeq = cand.seq
+                      { op: "local.get", index: 5 },
+                      { op: "local.get", index: 9 },
+                      { op: "array.get", typeIdx: propMapTypeIdx },
+                      { op: "local.set", index: 10 },
+                      ...entryIndexOf(10),
+                      { op: "local.set", index: 12 },
+                      ...entrySeqOf(10),
+                      { op: "local.set", index: 14 },
+                      // if cand precedes best → best = k, bestIdx=candIdx,
+                      // bestSeq=candSeq, bestE=cand
+                      //
+                      // ordering predicate keyLess(candIdx,candSeq,bestIdx,bestSeq):
+                      //   both indices (>=0): cand < best  ⇔  candIdx < bestIdx
+                      //   cand index, best string: cand precedes  (candIdx>=0 && bestIdx<0)
+                      //   cand string, best index: cand does NOT precede
+                      //   both strings (<0): candSeq < bestSeq
+                      ...keyLess(12, 14, 13, 15),
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: 9 },
+                          { op: "local.set", index: 8 },
+                          { op: "local.get", index: 12 },
+                          { op: "local.set", index: 13 },
+                          { op: "local.get", index: 14 },
+                          { op: "local.set", index: 15 },
+                          { op: "local.get", index: 10 },
+                          { op: "local.set", index: 11 },
+                        ],
+                      },
+                      { op: "local.get", index: 9 },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: 9 },
+                      { op: "br", depth: 0 },
+                    ],
+                  },
+                ],
+              },
+              // swap out[j] <-> out[best] (only if best != j)
+              { op: "local.get", index: 8 },
+              { op: "local.get", index: 7 },
+              { op: "i32.ne" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // tmp = out[j]
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 7 },
+                  { op: "array.get", typeIdx: propMapTypeIdx },
+                  { op: "local.set", index: 16 },
+                  // out[j] = out[best] (== bestE)
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 7 },
+                  { op: "local.get", index: 11 },
+                  { op: "array.set", typeIdx: propMapTypeIdx },
+                  // out[best] = tmp
+                  { op: "local.get", index: 5 },
+                  { op: "local.get", index: 8 },
+                  { op: "local.get", index: 16 },
+                  { op: "array.set", typeIdx: propMapTypeIdx },
+                ],
+              },
+              { op: "local.get", index: 7 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 7 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 5 },
+    ];
+    registerNative(
+      "__obj_ordered",
+      [objRef],
+      [propMapRef],
+      [
+        { name: "arr", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+        { name: "out", type: propMapRef },
+        { name: "m", type: { kind: "i32" } },
+        { name: "j", type: { kind: "i32" } },
+        { name: "best", type: { kind: "i32" } },
+        { name: "k", type: { kind: "i32" } },
+        { name: "cand", type: entryRefNull },
+        { name: "bestE", type: entryRefNull },
+        { name: "candIdx", type: { kind: "i32" } },
+        { name: "bestIdx", type: { kind: "i32" } },
+        { name: "candSeq", type: { kind: "i32" } },
+        { name: "bestSeq", type: { kind: "i32" } },
+        { name: "tmp", type: entryRefNull },
+      ],
+      body,
+    );
+    void entryRef;
+  }
+  const objOrderedIdx = ctx.funcMap.get("__obj_ordered")!;
+
   // ── __object_keys(externref obj) -> externref ────────────────────────────
   //
-  // ES §20.1.2.18 — own enumerable string keys, insertion-order-ish (we walk
-  // the open-hash table slots; order is hash order, acceptable for the
-  // standalone open-object path which has no host array to preserve order).
-  // Build a fresh $ObjVec, push each LIVE (non-tombstone) entry's key. Non
-  // $Object receivers return an empty $ObjVec (host returns [] for those that
-  // reach here; ToObject-throw on null/undefined is handled at the call site).
+  // ES §20.1.2.18 / §10.1.11.1 — own enumerable string keys in
+  // OrdinaryOwnPropertyKeys order: integer-index keys ascending first, then
+  // string keys in insertion order. We delegate the filtering + ordering to
+  // __obj_ordered (#1837), which returns a compacted $PropMap (live + enumerable
+  // entries in spec order, trailing nulls), then push each entry's key into a
+  // fresh $ObjVec. Non-$Object receivers return an empty $ObjVec (host returns []
+  // for those that reach here; ToObject-throw on null/undefined is handled at the
+  // call site).
   //
   // params: 0=obj(externref)
-  // locals: 1=any(anyref) 2=o(ref null $Object) 3=arr(ref $PropMap) 4=cap 5=i
-  //         6=e(ref null $PropEntry) 7=vec(externref)
+  // locals: 1=any(anyref) 2=o(ref null $Object) 3=arr(ordered ref $PropMap) 4=cap
+  //         5=i 6=e(ref null $PropEntry) 7=vec(externref)
   {
     const body: Instr[] = [
       // vec = __objvec_new()
@@ -1122,11 +1619,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 7 }, { op: "return" }],
       },
-      // o = cast<$Object>(any) ; arr = o.props ; cap = arr.len
+      // o = cast<$Object>(any) ; arr = __obj_ordered(o) ; cap = arr.len
       { op: "local.get", index: 1 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.tee", index: 2 },
-      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "call", funcIdx: objOrderedIdx },
       { op: "local.tee", index: 3 },
       { op: "array.len" },
       { op: "local.set", index: 4 },
@@ -1146,47 +1643,20 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 4 },
               { op: "i32.ge_s" },
               { op: "br_if", depth: 1 },
-              // e = arr[i]
+              // e = arr[i] ; ordered array is compacted — stop at first null
               { op: "local.get", index: 3 },
               { op: "local.get", index: 5 },
               { op: "array.get", typeIdx: propMapTypeIdx },
               { op: "local.tee", index: 6 },
-              // if e != null && !(e.flags & TOMBSTONE) && (e.flags & ENUMERABLE):
-              //   __objvec_push(vec, extern.convert_any(e.key))
               { op: "ref.is_null" },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_TOMBSTONE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" }, // not tombstone (0/1)
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_ENUMERABLE },
-                  { op: "i32.and" }, // enumerable bit (0 / FLAG_ENUMERABLE)
-                  { op: "i32.eqz" },
-                  { op: "i32.eqz" }, // normalise to 0/1 so the && below is correct
-                  { op: "i32.and" }, // (not tombstone) && enumerable
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [
-                      { op: "local.get", index: 7 },
-                      { op: "local.get", index: 6 },
-                      { op: "ref.as_non_null" },
-                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
-                      { op: "extern.convert_any" },
-                      { op: "call", funcIdx: objVecPushIdx },
-                    ],
-                  },
-                ],
-              },
+              { op: "br_if", depth: 1 },
+              // __objvec_push(vec, extern.convert_any(e.key))
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
               // i++ ; loop
               { op: "local.get", index: 5 },
               { op: "i32.const", value: 1 },
@@ -1342,10 +1812,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 7 }, { op: "return" }],
       },
+      // o = cast<$Object>(any) ; arr = __obj_ordered(o) ; cap = arr.len (#1837)
       { op: "local.get", index: 1 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.tee", index: 2 },
-      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "call", funcIdx: objOrderedIdx },
       { op: "local.tee", index: 3 },
       { op: "array.len" },
       { op: "local.set", index: 4 },
@@ -1363,46 +1834,20 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 4 },
               { op: "i32.ge_s" },
               { op: "br_if", depth: 1 },
+              // e = arr[i] ; compacted ordered array — stop at first null
               { op: "local.get", index: 3 },
               { op: "local.get", index: 5 },
               { op: "array.get", typeIdx: propMapTypeIdx },
               { op: "local.tee", index: 6 },
               { op: "ref.is_null" },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  // (!tombstone) && enumerable
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_TOMBSTONE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" },
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_ENUMERABLE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" },
-                  { op: "i32.eqz" }, // normalise enumerable bit to 0/1
-                  { op: "i32.and" },
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [
-                      // __objvec_push(vec, extern.convert_any(e.value))
-                      { op: "local.get", index: 7 },
-                      { op: "local.get", index: 6 },
-                      { op: "ref.as_non_null" },
-                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-                      { op: "extern.convert_any" },
-                      { op: "call", funcIdx: objVecPushIdx },
-                    ],
-                  },
-                ],
-              },
+              { op: "br_if", depth: 1 },
+              // __objvec_push(vec, extern.convert_any(e.value))
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
               { op: "local.get", index: 5 },
               { op: "i32.const", value: 1 },
               { op: "i32.add" },
@@ -1456,10 +1901,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 7 }, { op: "return" }],
       },
+      // o = cast<$Object>(any) ; arr = __obj_ordered(o) ; cap = arr.len (#1837)
       { op: "local.get", index: 1 },
       { op: "ref.cast", typeIdx: objectTypeIdx },
       { op: "local.tee", index: 2 },
-      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "call", funcIdx: objOrderedIdx },
       { op: "local.tee", index: 3 },
       { op: "array.len" },
       { op: "local.set", index: 4 },
@@ -1477,59 +1923,34 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.get", index: 4 },
               { op: "i32.ge_s" },
               { op: "br_if", depth: 1 },
+              // e = arr[i] ; compacted ordered array — stop at first null
               { op: "local.get", index: 3 },
               { op: "local.get", index: 5 },
               { op: "array.get", typeIdx: propMapTypeIdx },
               { op: "local.tee", index: 6 },
               { op: "ref.is_null" },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_TOMBSTONE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" },
-                  { op: "local.get", index: 6 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_ENUMERABLE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" },
-                  { op: "i32.eqz" }, // normalise enumerable bit to 0/1
-                  { op: "i32.and" },
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [
-                      // pair = __objvec_new()
-                      { op: "call", funcIdx: objVecNewIdx },
-                      { op: "local.set", index: 8 },
-                      // __objvec_push(pair, extern.convert_any(e.key))
-                      { op: "local.get", index: 8 },
-                      { op: "local.get", index: 6 },
-                      { op: "ref.as_non_null" },
-                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
-                      { op: "extern.convert_any" },
-                      { op: "call", funcIdx: objVecPushIdx },
-                      // __objvec_push(pair, extern.convert_any(e.value))
-                      { op: "local.get", index: 8 },
-                      { op: "local.get", index: 6 },
-                      { op: "ref.as_non_null" },
-                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-                      { op: "extern.convert_any" },
-                      { op: "call", funcIdx: objVecPushIdx },
-                      // __objvec_push(vec, pair)
-                      { op: "local.get", index: 7 },
-                      { op: "local.get", index: 8 },
-                      { op: "call", funcIdx: objVecPushIdx },
-                    ],
-                  },
-                ],
-              },
+              { op: "br_if", depth: 1 },
+              // pair = __objvec_new()
+              { op: "call", funcIdx: objVecNewIdx },
+              { op: "local.set", index: 8 },
+              // __objvec_push(pair, extern.convert_any(e.key))
+              { op: "local.get", index: 8 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
+              // __objvec_push(pair, extern.convert_any(e.value))
+              { op: "local.get", index: 8 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
+              // __objvec_push(vec, pair)
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 8 },
+              { op: "call", funcIdx: objVecPushIdx },
               { op: "local.get", index: 5 },
               { op: "i32.const", value: 1 },
               { op: "i32.add" },
@@ -1878,13 +2299,25 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 4 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
       },
-      // __obj_insert(o, key, any.convert_extern(value), nflags)
+      // seq = o.nextSeq ; o.nextSeq = seq + 1  (#1837)
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      { op: "local.set", index: 10 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 10 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      // __obj_insert(o, key, any.convert_extern(value), nflags, seq)
       { op: "local.get", index: 4 },
       { op: "ref.as_non_null" },
       { op: "local.get", index: 1 },
       { op: "local.get", index: 2 },
       { op: "any.convert_extern" },
       { op: "local.get", index: 8 },
+      { op: "local.get", index: 10 },
       { op: "call", funcIdx: objInsertIdx },
       // return obj (host import returns O)
       { op: "local.get", index: 0 },
@@ -1900,6 +2333,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "load", type: { kind: "i32" } },
         { name: "nflags", type: { kind: "i32" } },
         { name: "hf", type: { kind: "i32" } },
+        { name: "seq", type: { kind: "i32" } },
       ],
       body,
     );
@@ -2000,6 +2434,32 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED);
   emitSetFlags("__object_freeze", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN);
 
+  // ── __extern_is_undefined(externref) -> i32 (#1472 Phase C) ───────────────
+  //
+  // The JS-host import is `(v) => (v === undefined ? 1 : 0)` — it distinguishes
+  // JS `undefined` (a defined externref produced by `__get_undefined`) from
+  // `null` (a null reference). Standalone has no `__get_undefined`: `emitUndefined`
+  // falls back to `ref.null.extern`, so the runtime represents BOTH `undefined`
+  // and `null` as the null externref. The standalone `__typeof_undefined` helper
+  // (addUnionImportsAsNativeFuncs) already encodes this same conflation as a bare
+  // `ref.is_null`. We mirror it here so the two are internally consistent.
+  //
+  // This is exactly the predicate every caller wants in standalone: the
+  // default-parameter / destructuring-default paths (function-body.ts,
+  // closures.ts, class-bodies.ts, destructuring.ts) and `x === undefined`
+  // (binary-ops.ts) use `__extern_is_undefined` to decide whether to apply a
+  // default — and a missing/omitted argument arrives as the null externref, the
+  // same value `undefined` lowers to. So `ref.is_null` applies the default in
+  // precisely the "value is undefined" cases, matching §14.3.3 (keyed/iterator
+  // binding initialization defaults fire when the bound value is `undefined`).
+  registerNative(
+    "__extern_is_undefined",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }],
+    [],
+    [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+  );
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -2066,4 +2526,9 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // descriptor). Accessor descriptors stay refused (see the __defineProperty_value
   // note in ensureObjectRuntime).
   "__defineProperty_value",
+  // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
+  // undefinedness check. Native impl is `ref.is_null` (standalone conflates
+  // undefined and null, same as __typeof_undefined). This is the single largest
+  // remaining standalone-refusal helper (~6.6k tests).
+  "__extern_is_undefined",
 ]);
