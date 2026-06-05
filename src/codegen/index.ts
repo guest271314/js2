@@ -2759,6 +2759,55 @@ function emitClosureCallExport4(ctx: CodegenContext): void {
 }
 
 /**
+ * #1896 — Decide whether a host-supplied `externref` closure-call argument must
+ * be lowered out of the extern domain before it feeds the closure's `call_ref`.
+ *
+ * The `__call_fn_<arity>` / `__call_fn_method_<arity>` exports take all user
+ * args as `externref` (the host ABI). The lifted closure funcref, however,
+ * declares each user param with the closure's *internal* ValType. Under the
+ * native-strings backends a `string` param lowers to `(ref null $AnyString)`
+ * (a concrete struct ref), so the raw `externref` arg mismatches `call_ref`
+ * and the module fails validation. In `wasm:js-string` (gc) mode the string
+ * param ValType *is* `externref`, so no conversion is needed.
+ *
+ * Returns true for non-extern reference param kinds (`anyref`/`eqref`/`ref`/
+ * `ref_null`); false for `externref`/`ref_extern` (already extern-side) and for
+ * the numeric/value kinds (handled by the f64/i32 unbox branches at the call
+ * site, or simply not reference args).
+ */
+function needsExternToAnyForClosureParam(paramType: ValType): boolean {
+  switch (paramType.kind) {
+    case "anyref":
+    case "eqref":
+    case "ref":
+    case "ref_null":
+      return true;
+    default:
+      // externref / ref_extern (already extern), funcref, and value types.
+      return false;
+  }
+}
+
+/**
+ * #1896 — Lower an `externref` closure-call arg into the internal ref domain
+ * expected by the closure funcref's declared param ValType. `any.convert_extern`
+ * moves externref → anyref (engine-level identity); for a *concrete* ref param
+ * (`ref`/`ref_null` to a struct type, e.g. `(ref null $AnyString)`) a following
+ * `ref.cast` narrows anyref → the exact param type so `call_ref` typechecks.
+ * `anyref`/`eqref` params need no cast. Caller must have checked
+ * `needsExternToAnyForClosureParam(paramType)` first.
+ */
+function externToClosureParamRef(paramType: ValType): Instr[] {
+  const ops: Instr[] = [{ op: "any.convert_extern" } as Instr];
+  if (paramType.kind === "ref") {
+    ops.push({ op: "ref.cast", typeIdx: paramType.typeIdx } as Instr);
+  } else if (paramType.kind === "ref_null") {
+    ops.push({ op: "ref.cast_null", typeIdx: paramType.typeIdx } as Instr);
+  }
+  return ops;
+}
+
+/**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
  * and returns externref. Used by `__array_from`, `__proto_method_call`, and
@@ -2904,8 +2953,17 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // The host-facing param is `externref`, but the closure funcref
+          // declares this reference param as a non-extern ref type (anyref or
+          // a WasmGC struct ref — e.g. a native-strings `string` lowers to
+          // `(ref null $AnyString)`). Lower the host externref to the internal
+          // ref domain so the subsequent `call_ref` typechecks. In
+          // `wasm:js-string` (gc) mode string params ARE externref, so this
+          // branch is skipped and the arg passes raw.
+          ops.push(...externToClosureParamRef(paramType));
         }
-        // externref: no conversion
+        // externref param: no conversion
       }
       return ops;
     };
@@ -3161,6 +3219,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // See emitClosureCallExportN: a non-extern reference param (anyref /
+          // WasmGC struct ref, e.g. a native-strings `string`) needs the host
+          // externref lowered into the internal ref domain before `call_ref`.
+          // Skipped in gc mode where string params are already externref.
+          ops.push(...externToClosureParamRef(paramType));
         }
       }
       return ops;
