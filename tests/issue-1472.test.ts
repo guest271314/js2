@@ -778,4 +778,110 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     );
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   });
+
+  // ── #1888 Slice 5 — native accessor-descriptor RUNTIME LAYER (groundwork) ──
+  //
+  // Slice 5 adds the runtime groundwork for accessor descriptors under
+  // --target standalone: the `$PropEntry.$get/$set` anyref slots + FLAG_ACCESSOR
+  // (R3 layout), the native `__defineProperty_accessor` store helper, and the
+  // native `__getOwnPropertyDescriptor` read-back (builds a descriptor $Object).
+  //
+  // These tests pin the runtime layer: accessor `defineProperty` compiles
+  // host-free + validates + instantiates, and the GOPD helper routes native
+  // (no `env::__getOwnPropertyDescriptor` import). The helpers are not yet
+  // reached end-to-end — the call-site routing (compiling getter/setter as
+  // host-free closures so they reach `__defineProperty_accessor` instead of the
+  // `__make_getter_callback` JS bridge) plus live get/set invocation are
+  // #329-gated follow-ups. Landing the helpers + R3 layout now de-risks the
+  // layout change in isolation. (~0 test262 on its own; pure foundation.)
+
+  it("Phase 5: accessor defineProperty compiles + validates host-free under standalone", async () => {
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          // Accessor descriptor — getter + setter, both enumerable/configurable.
+          Object.defineProperty(o, "x", {
+            get() { return 1; },
+            set(_v: any) {},
+            enumerable: true,
+            configurable: true,
+          });
+          // The store must not disturb a sibling DATA property written before
+          // and after the accessor define (entry-slot reuse / table integrity).
+          o.before = 11;
+          Object.defineProperty(o, "y", { get() { return 2; } });
+          o.after = 31;
+          return (o.before as number) + (o.after as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    // The accessor stores don't clobber the data path: 11 + 31 = 42.
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
+  });
+
+  it("Phase 5: getter-only and setter-only accessor descriptors both store + instantiate", async () => {
+    // A descriptor with only `get` (no `set`) and one with only `set` (no `get`)
+    // both store: the absent half is a null externref → null anyref in the
+    // $PropEntry slot. Must compile + validate + instantiate host-free.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          Object.defineProperty(o, "getterOnly", { get() { return 7; }, configurable: true });
+          Object.defineProperty(o, "setterOnly", { set(_v: any) {}, configurable: true });
+          o.sentinel = 5;
+          return o.sentinel as number;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Phase 5: getOwnPropertyDescriptor on an externref receiver routes to the native helper (no host import)", async () => {
+    // The dynamic getOwnPropertyDescriptor path (non-struct/non-literal receiver)
+    // routes to the native `__getOwnPropertyDescriptor` runtime helper under
+    // standalone instead of leaking the `env::__getOwnPropertyDescriptor` host
+    // import — it reads the $PropEntry back and builds a descriptor $Object. This
+    // pins the runtime layer (helper emits as a DEFINED function, host-free); it
+    // is not yet reached for accessor *stores* (the call-site routing that
+    // compiles getter/setter as host-free closures is a #329-gated follow-up).
+    const r = await compile(
+      `
+        export function f(o: any, k: string): any {
+          return Object.getOwnPropertyDescriptor(o, k);
+        }
+      `,
+      { target: "standalone" },
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getOwnPropertyDescriptor")).toBe(false);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).toMatch(/\(func \$__getOwnPropertyDescriptor\b/);
+  });
+
+  it("default target (gc) still routes accessor defineProperty through the host import", async () => {
+    // Regression guard: standalone is opt-in. Default (gc) mode keeps the
+    // JS-host descriptor sidecar for accessor descriptors.
+    const r = await compile(
+      `
+        export function f(o: any): any {
+          Object.defineProperty(o, "x", { get() { return 1; } });
+          return o;
+        }
+      `,
+      {},
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__defineProperty_accessor")).toBe(true);
+  });
 });

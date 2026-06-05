@@ -58,16 +58,26 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { ensureNativeStringHelpers } from "./native-strings.js";
+import { ensureNativeStringHelpers, nativeStringLiteralInstrs } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
+import { addUnionImportsViaRegistry } from "./shared.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
+
+/** WasmGC `none` bottom heap type (signed-LEB 0x6e = -18). `ref.null none` is a
+ *  subtype of `anyref`, used to push a null into the `$PropEntry.$get/$set`
+ *  anyref slots on the data path (#1888 Slice 5). */
+const NONE_HEAP = -18;
 
 /** `$PropEntry.$flags` bit layout. */
 const FLAG_WRITABLE = 0x01;
 const FLAG_ENUMERABLE = 0x02;
 const FLAG_CONFIGURABLE = 0x04;
+// #1888 Slice 5 — accessor descriptor: when set, the entry's value is replaced
+// by the `$get`/`$set` funcref-bearing slots (fields 4/5). 0x08 is the first
+// free bit (0x10/0x20/0x40 remain free; 0x80 = TOMBSTONE).
+const FLAG_ACCESSOR = 0x08;
 const FLAG_TOMBSTONE = 0x80;
 /** Default for a data property created by `o.x = v` — w/e/c all true. */
 const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
@@ -137,6 +147,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // only so the field can be filled by struct.new at any callsite; it is
       // never rewritten after creation.
       { name: "seq", type: { kind: "i32" }, mutable: true },
+      // #1888 Slice 5 — accessor get/set slots. Non-null only when
+      // (flags & FLAG_ACCESSOR); the boxed getter/setter closure is held as an
+      // anyref (closures are per-signature structs dispatched dynamically, so
+      // there is no single typed closure ref to use here). On the data path
+      // both are null — zero behavioural change for non-accessor properties.
+      // Appended LAST so existing field indices 0-3 (key/value/flags/seq) are
+      // unchanged (R3 migration note); the single `struct.new $PropEntry` site
+      // (__obj_insert) pushes two `ref.null any` for these.
+      { name: "get", type: { kind: "anyref" }, mutable: true },
+      { name: "set", type: { kind: "anyref" }, mutable: true },
     ],
   });
 
@@ -603,13 +623,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
                   { op: "i32.and" },
                   { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
-                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq }
+                  // arr[i] = struct.new $PropEntry { keyStr, value, flags, seq,
+                  //                                   get=null, set=null }
                   { op: "local.get", index: 5 },
                   { op: "local.get", index: 8 },
                   { op: "local.get", index: 11 },
                   { op: "local.get", index: 2 },
                   { op: "local.get", index: 3 },
                   { op: "local.get", index: 4 }, // seq (#1837)
+                  { op: "ref.null", typeIdx: NONE_HEAP }, // get (#1888 S5) — data path: null
+                  { op: "ref.null", typeIdx: NONE_HEAP }, // set (#1888 S5) — data path: null
                   { op: "struct.new", typeIdx: propEntryTypeIdx },
                   { op: "array.set", typeIdx: propMapTypeIdx },
                   // o.count++
@@ -2659,6 +2682,326 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __defineProperty_accessor (#1888 Slice 5 — native accessor-descriptor STORE) ─
+  //
+  // `Object.defineProperty(obj, key, { get?, set?, enumerable?, configurable? })`
+  // and `Reflect.defineProperty` for an ACCESSOR descriptor under standalone /
+  // WASI. The JS-host path is the `env::__defineProperty_accessor` import backed
+  // by the JS descriptor sidecar; standalone has no host, so we store the boxed
+  // getter/setter closures + attribute flags directly into the `$PropEntry`
+  // accessor slots ($get field 4 / $set field 5).
+  //
+  // RUNTIME-LAYER GROUNDWORK (#1888 Slice 5). This + the native
+  // `__getOwnPropertyDescriptor` below + the R3 `$PropEntry.$get/$set` layout are
+  // the foundation for accessor descriptors under standalone. They are NOT yet
+  // reached end-to-end (see the call-site note below), so they bank ~0 test262 on
+  // their own — the value is de-risking the R3 layout change in isolation +
+  // providing the runtime target the wiring follow-up calls.
+  //
+  // FOLLOW-UPS (both #329-gated — the late-shift / host-free-closure funcIdx
+  // stability fix being driven now):
+  //   - Call-site wiring: `Object.defineProperty(o,k,{get,set})` (object-ops.ts)
+  //     compiles getter/setter via `compileArrowAsCallback` → `__make_getter_callback`
+  //     (a JS-host import). Routing those to HOST-FREE closures so they reach this
+  //     helper (and the GOPD readback can see real getter/setter) needs the #329
+  //     funcIdx-stability fix.
+  //   - LIVE get/set invocation on member read/write — the accessor arms in
+  //     `__extern_get` / `__extern_set` invoke `$get`/`$set` with the original
+  //     receiver bound as `this` via `__call_fn_method_0/1` (#1636-S1); also rides
+  //     sd-1472c's #1224 `__call_fn_N` externref-arg coercion fix (now landed).
+  //
+  // Flag translation matches __defineProperty_value (host value bits 0/1/2 →
+  // native FLAG_WRITABLE/_ENUMERABLE/_CONFIGURABLE) — but an accessor has no
+  // writable attribute (ES §6.2.6.1), so we additionally OR in FLAG_ACCESSOR and
+  // leave WRITABLE masked off via the same NATIVE_ATTR_MASK (the host accessor
+  // encoding never sets bit 0). The data $value slot is cleared to null.
+  //
+  // params: 0=obj 1=key 2=getter(externref) 3=setter(externref) 4=flagsF64
+  // locals: 5=o(ref null $Object) 6=any(anyref) 7=cap 8=load 9=nflags(i32) 10=hf(i32) 11=seq 12=e(ref null $PropEntry)
+  {
+    const NATIVE_ATTR_MASK = FLAG_ENUMERABLE | FLAG_CONFIGURABLE; // 0x06 — accessors carry no WRITABLE
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return obj (lenient no-op)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 6 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 6 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 5 },
+      // hf = trunc_s(flagsF64)
+      { op: "local.get", index: 4 },
+      { op: "i32.trunc_f64_s" },
+      { op: "local.set", index: 10 },
+      // nflags = (hf & (ENUMERABLE|CONFIGURABLE)) | FLAG_ACCESSOR
+      { op: "local.get", index: 10 },
+      { op: "i32.const", value: NATIVE_ATTR_MASK },
+      { op: "i32.and" },
+      { op: "i32.const", value: FLAG_ACCESSOR },
+      { op: "i32.or" },
+      { op: "local.set", index: 9 },
+      // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 2 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 3 },
+      { op: "i32.add" },
+      { op: "local.set", index: 8 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+      { op: "array.len" },
+      { op: "local.set", index: 7 },
+      // if (load + 1) * 10 >= cap * 7 → grow
+      { op: "local.get", index: 8 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "i32.const", value: 10 },
+      { op: "i32.mul" },
+      { op: "local.get", index: 7 },
+      { op: "i32.const", value: 7 },
+      { op: "i32.mul" },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 5 }, { op: "ref.as_non_null" }, { op: "call", funcIdx: objGrowIdx }],
+      },
+      // seq = o.nextSeq ; o.nextSeq = seq + 1  (#1837)
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      { op: "local.set", index: 11 },
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 11 },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 5 },
+      // __obj_insert(o, key, ref.null any, nflags, seq) — value slot stays null
+      // for an accessor; this creates the entry (or updates flags in place) and
+      // handles growth/tombstone reuse in one place.
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.null", typeIdx: NONE_HEAP },
+      { op: "local.get", index: 9 },
+      { op: "local.get", index: 11 },
+      { op: "call", funcIdx: objInsertIdx },
+      // e = __obj_find(o, key) — re-locate the just-inserted/updated entry to
+      // write the accessor slots. (__obj_insert does not take get/set params.)
+      // It is always non-null here: either we just created it, or the update-in-
+      // place branch matched an existing live entry. The only way to get null is
+      // a non-extensible object refusing a NEW key — in which case there are no
+      // accessor slots to write, so the null-guarded if is a correct no-op.
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 12 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // e.get = any.convert_extern(getter) ; e.set = any.convert_extern(setter)
+          // A null externref (absent get/set) converts to a null anyref, which
+          // GOPD reads back as `undefined` for that half of the descriptor.
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 2 },
+          { op: "any.convert_extern" },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 3 },
+          { op: "any.convert_extern" },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+          // e.value = null (clear any prior data value — accessors hold no value)
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "ref.null", typeIdx: NONE_HEAP },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+        ],
+      },
+      // return obj (host import returns O)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__defineProperty_accessor",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "load", type: { kind: "i32" } },
+        { name: "nflags", type: { kind: "i32" } },
+        { name: "hf", type: { kind: "i32" } },
+        { name: "seq", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+      ],
+      body,
+    );
+  }
+
+  // ── __getOwnPropertyDescriptor (#1888 Slice 5 — native descriptor read-back) ─
+  //
+  // `Object.getOwnPropertyDescriptor(obj, key)` / `Reflect.getOwnPropertyDescriptor`
+  // under standalone. Reads the own `$PropEntry` for `key` and materialises a
+  // descriptor `$Object`:
+  //   accessor (flags & FLAG_ACCESSOR) → { get, set, enumerable, configurable }
+  //   data                            → { value, writable, enumerable, configurable }
+  // A missing own property, or a non-`$Object` receiver, returns `undefined`
+  // (the null externref). This is the read side of the Slice-5 store/round-trip:
+  // a getter/setter installed via `__defineProperty_accessor` reads back here as
+  // `{ get, set, … }`. The boxed getter/setter come straight out of the
+  // `$PropEntry.$get/$set` anyref slots via `extern.convert_any` (a null anyref —
+  // an absent half — reads back as `undefined`).
+  //
+  // Descriptor keys ("get"/"set"/"value"/"writable"/"enumerable"/"configurable")
+  // are materialised as native `$NativeString`s (standalone forces nativeStrings)
+  // and handed to `__extern_set` as externref — `$NativeString <: $AnyString`, so
+  // the insert's `ref.cast $AnyString` succeeds. Attribute booleans are boxed via
+  // `__box_boolean` (registered through addUnionImportsViaRegistry, same defined-
+  // func, no-index-shift invariant as the rest of this runtime).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=any(anyref) 3=o(ref null $Object) 4=e(ref null $PropEntry)
+  //         5=fl(i32) 6=desc(externref)
+  {
+    // __box_boolean is needed for the attribute flags — register the union
+    // helpers (idempotent; defined funcs, no index shift) and resolve it.
+    addUnionImportsViaRegistry(ctx);
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean")!;
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+
+    // `__extern_set(desc, "<key>", <value externref>)` — desc is in local 6.
+    // `valueInstrs` must leave one externref on the stack.
+    const setKey = (key: string, valueInstrs: Instr[]): Instr[] => [
+      { op: "local.get", index: 6 }, // desc (externref)
+      // key: native string → externref
+      ...nativeStringLiteralInstrs(ctx, key),
+      { op: "extern.convert_any" } as Instr,
+      ...valueInstrs,
+      { op: "call", funcIdx: externSetIdx },
+    ];
+
+    // Box `(e.flags & MASK) != 0` as a JS boolean externref.
+    const boolAttr = (mask: number): Instr[] => [
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: mask },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+      { op: "call", funcIdx: boxBoolIdx },
+    ];
+
+    const body: Instr[] = [
+      // any = any.convert_extern(obj) ; if !$Object → return undefined (null)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; e = __obj_find(o, key)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 4 },
+      // if e == null → return undefined (own property does not exist)
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // fl = e.flags
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: 5 },
+      // desc = __new_plain_object()
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 6 },
+      // accessor vs data branch
+      { op: "local.get", index: 5 },
+      { op: "i32.const", value: FLAG_ACCESSOR },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        // accessor: { get, set, enumerable, configurable }
+        then: [
+          // desc.get = extern.convert_any(e.get)  (null anyref → undefined)
+          ...setKey("get", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+          // desc.set = extern.convert_any(e.set)
+          ...setKey("set", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+        ],
+        // data: { value, writable }
+        else: [
+          // desc.value = extern.convert_any(e.value)
+          ...setKey("value", [
+            { op: "local.get", index: 4 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+            { op: "extern.convert_any" } as Instr,
+          ]),
+          // desc.writable = box(fl & FLAG_WRITABLE)
+          ...setKey("writable", boolAttr(FLAG_WRITABLE)),
+        ],
+      },
+      // common: enumerable, configurable
+      ...setKey("enumerable", boolAttr(FLAG_ENUMERABLE)),
+      ...setKey("configurable", boolAttr(FLAG_CONFIGURABLE)),
+      // return desc
+      { op: "local.get", index: 6 },
+    ];
+    registerNative(
+      "__getOwnPropertyDescriptor",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "e", type: entryRefNull },
+        { name: "fl", type: { kind: "i32" } },
+        { name: "desc", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -2843,9 +3186,22 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_freeze",
   // #1629 S6 — native data-descriptor define (Object.defineProperty /
   // Reflect.defineProperty with a { value, writable?, enumerable?, configurable? }
-  // descriptor). Accessor descriptors stay refused (see the __defineProperty_value
-  // note in ensureObjectRuntime).
+  // descriptor).
   "__defineProperty_value",
+  // #1888 Slice 5 — native accessor-descriptor STORE ({ get?, set? }): stores
+  // the boxed getter/setter into $PropEntry.$get/$set + FLAG_ACCESSOR.
+  "__defineProperty_accessor",
+  // #1888 Slice 5 — native getOwnPropertyDescriptor: reads the $PropEntry back
+  // and builds a descriptor `$Object` (accessor → { get, set, enumerable,
+  // configurable }, data → { value, writable, enumerable, configurable };
+  // missing own prop / non-$Object receiver → undefined). RUNTIME-LAYER
+  // GROUNDWORK: both this and __defineProperty_accessor are not yet reached
+  // end-to-end under standalone — the accessor define call-site compiles
+  // getter/setter via the __make_getter_callback JS bridge, and that call-site
+  // routing (host-free closures → __defineProperty_accessor) plus live get/set
+  // invocation are #329-gated follow-ups. Landing the helpers + the R3
+  // $PropEntry $get/$set layout now de-risks the layout change in isolation.
+  "__getOwnPropertyDescriptor",
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
