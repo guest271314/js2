@@ -1134,6 +1134,443 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   }
   const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
 
+  // ── __hasOwnProperty / __object_hasOwn (externref obj, externref key) -> i32 ─
+  //
+  // ES §20.1.3.2 Object.prototype.hasOwnProperty / §20.1.2.13 Object.hasOwn:
+  // OWN-property presence only (NO prototype walk). Cast obj to $Object (return
+  // 0 on a non-$Object / null receiver — never throws into Wasm), then
+  // __obj_find on the own props table; present iff the returned entry is
+  // non-null (find already skips tombstones). Object.hasOwn shares the exact
+  // own-only predicate, so both names register the same body.
+  const emitHasOwn = (name: string): void => {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // e = __obj_find(cast<$Object>(any), key) ; return e != null
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+    ];
+    registerNative(
+      name,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  };
+  emitHasOwn("__hasOwnProperty");
+  emitHasOwn("__object_hasOwn");
+
+  // ── __extern_has(externref obj, externref key) -> i32 (#1472 Phase C) ──────
+  //
+  // ES §7.3.12 HasProperty(O, P): keyed `key in obj` — own properties AND the
+  // prototype chain. Mirrors __extern_get's proto-walk but returns a boolean
+  // instead of the value (so a present-but-undefined property still reports 1).
+  // Non-$Object / null receiver → 0 (the `in` dispatch site has already
+  // confirmed an object-shaped externref; this never throws into Wasm).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=o(ref null $Object) 3=any(anyref)
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 3 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 2 },
+      // proto-walk loop (mirror of __extern_get)
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if o == null break
+              { op: "local.get", index: 2 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if __obj_find(o, key) != null → return 1
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: objFindIdx },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
+              // o = o.proto ; loop
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // not found anywhere → 0
+      { op: "i32.const", value: 0 },
+    ];
+    registerNative(
+      "__extern_has",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
+
+  // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
+  //
+  // The $Object struct already carries the [[Prototype]] in field 0 ($proto,
+  // ref null $Object) and __extern_get/__extern_has already walk it. These four
+  // helpers expose the chain directly. All operate purely on the $proto field;
+  // non-$Object / null receivers return a lenient null/0 (never throw into
+  // Wasm — the receiver-dispatch / ToObject checks live at the call site).
+
+  // __getPrototypeOf(externref) -> externref (ES §20.1.2.12):
+  //   $Object → extern.convert_any($proto) (may be null); non-$Object → null.
+  {
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+          { op: "extern.convert_any" },
+        ],
+        else: [{ op: "ref.null.extern" }],
+      },
+    ];
+    registerNative(
+      "__getPrototypeOf",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  }
+
+  // __object_create(externref proto) -> externref (ES §20.1.2.2):
+  //   fresh empty $Object with $proto = (proto is $Object ? proto : null).
+  //   Object.create(null) passes a null externref → $proto stays null.
+  //   (The descriptors second arg is materialised separately by the call site.)
+  {
+    const body: Instr[] = [
+      // props = new $PropMap(INITIAL_CAP) (all null)
+      { op: "ref.null", typeIdx: propEntryTypeIdx },
+      { op: "i32.const", value: INITIAL_CAP },
+      { op: "array.new", typeIdx: propMapTypeIdx },
+      { op: "local.set", index: 2 },
+      // proto = (any.convert_extern(arg) is $Object ? cast : null)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: objRefNull },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+        ],
+        else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
+      },
+      // struct.new $Object {proto, props, count=0, tombstones=0, flags=0, nextSeq=0}
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.const", value: 0 }, // nextSeq (#1837)
+      { op: "struct.new", typeIdx: objectTypeIdx },
+      { op: "extern.convert_any" },
+    ];
+    registerNative(
+      "__object_create",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "props", type: propMapRef },
+      ],
+      body,
+    );
+  }
+
+  // __object_setPrototypeOf(externref obj, externref proto) -> externref
+  //   (ES §20.1.2.21 Object.setPrototypeOf → §10.1.2 [[SetPrototypeOf]] →
+  //   §10.1.2.1 OrdinarySetPrototypeOf). #1888 Slice 7. Writes $Object.$proto
+  //   (field 0) after the OrdinarySetPrototypeOf checks, then returns obj.
+  //
+  //   Per §20.1.2.21 the return value is always the first argument `obj`, even
+  //   when the [[SetPrototypeOf]] would have been observably a no-op or refused.
+  //   (Object.setPrototypeOf returns O regardless of the boolean result, except
+  //   that a *false* result throws a TypeError in the spec — see the dual-mode
+  //   note below.)
+  //
+  //   OrdinarySetPrototypeOf(O, V), with V restricted to Object|null here
+  //   (a non-$Object externref V coerces to null, matching __object_create):
+  //     1. current = O.[[Prototype]].
+  //     2. If SameValue(V, current) → true (no write; ref.eq, both nullable).
+  //     3. If O is non-extensible (OBJ_FLAG_NONEXTENSIBLE) → false (NO write).
+  //     4. Cycle check: walk p = V; while p ≠ null: if p === O → false (refuse,
+  //        never build a cyclic chain that a later proto-walk would loop on);
+  //        p = p.$proto. (We do not model the exotic [[GetPrototypeOf]] short-
+  //        circuit — all our objects are ordinary.)
+  //     5. O.[[Prototype]] = V → true.
+  //
+  //   Dual-mode posture (#1472 / #1888): a *refused* set (steps 3/4 → false)
+  //   is a SILENT no-op in standalone, NOT a thrown TypeError. This mirrors the
+  //   freeze-write refusal posture (the #1473 error machinery is a separate
+  //   layer) and keeps this slice from pulling __new_TypeError / the exn tag
+  //   late into the runtime. The proto is simply left unchanged; obj is still
+  //   returned. A non-$Object obj receiver is also a silent no-op (the ToObject
+  //   / RequireObjectCoercible receiver guard lives at the #820k call site).
+  //
+  // params: 0=obj(externref) 1=proto(externref)
+  // locals: 2=o(ref null $Object) 3=v(ref null $Object) 4=p(ref null $Object)
+  //         5=any(anyref)
+  {
+    const body: Instr[] = [
+      // o = (obj is $Object ? cast : null); if not an $Object → return obj as-is
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.set", index: 2 },
+        ],
+        else: [
+          // non-$Object receiver → no write, return obj unchanged
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      },
+      // v = (proto is $Object ? cast : null) — non-$Object/null proto ⇒ null
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: objRefNull },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+        ],
+        else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
+      },
+      { op: "local.set", index: 3 },
+      // step 2: if SameValue(v, o.$proto) → no-op (return obj)
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      { op: "ref.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 3: if o.flags & OBJ_FLAG_NONEXTENSIBLE → refuse (return obj, no write)
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 4: cycle check — p = v ; while p != null { if p === o → refuse ; p = p.$proto }
+      { op: "local.get", index: 3 },
+      { op: "local.set", index: 4 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if p == null break (end of candidate chain, no cycle)
+              { op: "local.get", index: 4 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if ref.eq(p, o) → cycle → refuse (return obj, no write)
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "ref.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "local.get", index: 0 }, { op: "return" }],
+              },
+              // p = p.$proto ; loop
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 4 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // step 5: o.$proto = v
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 3 },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      // return obj
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__object_setPrototypeOf",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "v", type: objRefNull },
+        { name: "p", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
+
+  // __isPrototypeOf(externref obj, externref candidate) -> i32 (ES §20.1.3.3):
+  //   1 iff obj appears in candidate's prototype chain. Walk candidate.$proto
+  //   and ref.eq each level against obj. Non-$Object obj/candidate → 0.
+  //
+  // params: 0=obj(externref) 1=candidate(externref)
+  // locals: 2=target(ref null $Object) 3=cur(ref null $Object) 4=any(anyref)
+  {
+    const body: Instr[] = [
+      // target = (obj is $Object ? cast : null); if null → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 4 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      { op: "local.get", index: 4 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 2 },
+      // cur = (candidate is $Object ? cast : null)
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 4 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: objRefNull },
+        then: [
+          { op: "local.get", index: 4 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+        ],
+        else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
+      },
+      { op: "local.set", index: 3 },
+      // walk: cur = cur.$proto ; if cur == null → 0 ; if cur === target → 1
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if cur == null break (candidate had no [[Prototype]])
+              { op: "local.get", index: 3 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // cur = cur.$proto
+              { op: "local.get", index: 3 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 3 },
+              // if cur == null break (reached end of chain)
+              { op: "local.get", index: 3 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if ref.eq(cur, target) → 1
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              { op: "ref.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "i32.const", value: 0 },
+    ];
+    registerNative(
+      "__isPrototypeOf",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "target", type: objRefNull },
+        { name: "cur", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
+
   // ── __obj_index_of_key(ref $AnyString key) -> i32 ────────────────────────
   // #1837 — canonical array-index test for OrdinaryOwnPropertyKeys ordering.
   // Returns the integer value of `key` if it is a canonical numeric array index
@@ -2531,4 +2968,22 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // undefined and null, same as __typeof_undefined). This is the single largest
   // remaining standalone-refusal helper (~6.6k tests).
   "__extern_is_undefined",
+  // #1472 Phase C — own-property presence (Object.prototype.hasOwnProperty /
+  // Object.hasOwn) over the $Object hash-map via __obj_find; keyed HasProperty
+  // (`key in obj`) over own + prototype chain via a proto-walk mirroring
+  // __extern_get.
+  "__hasOwnProperty",
+  "__object_hasOwn",
+  "__extern_has",
+  // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0):
+  // getPrototypeOf / Object.create / isPrototypeOf.
+  "__getPrototypeOf",
+  "__object_create",
+  "__isPrototypeOf",
+  // #1888 Slice 7 — Object.setPrototypeOf writes $Object.$proto (field 0) after
+  // the §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle checks. Routed
+  // here so the standalone call site reaches the native helper instead of the
+  // proto-dropping stub. (GC/host keeps the stub — see the calls.ts dual-mode
+  // gate.)
+  "__object_setPrototypeOf",
 ]);
