@@ -1334,11 +1334,154 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
-  // NOTE: `Object.setPrototypeOf(o, p)` is NOT wired to a native helper here —
-  // the call site (calls.ts ~L3857) currently *stubs* it in ALL modes (drops the
-  // proto arg, returns obj), so a native `__object_setPrototypeOf` would be dead
-  // code. Wiring the mutation (write `$proto`) requires changing that stubbed
-  // call site under a dual-mode gate, which is a separate follow-up slice.
+  // __object_setPrototypeOf(externref obj, externref proto) -> externref
+  //   (ES §20.1.2.21 Object.setPrototypeOf → §10.1.2 [[SetPrototypeOf]] →
+  //   §10.1.2.1 OrdinarySetPrototypeOf). #1888 Slice 7. Writes $Object.$proto
+  //   (field 0) after the OrdinarySetPrototypeOf checks, then returns obj.
+  //
+  //   Per §20.1.2.21 the return value is always the first argument `obj`, even
+  //   when the [[SetPrototypeOf]] would have been observably a no-op or refused.
+  //   (Object.setPrototypeOf returns O regardless of the boolean result, except
+  //   that a *false* result throws a TypeError in the spec — see the dual-mode
+  //   note below.)
+  //
+  //   OrdinarySetPrototypeOf(O, V), with V restricted to Object|null here
+  //   (a non-$Object externref V coerces to null, matching __object_create):
+  //     1. current = O.[[Prototype]].
+  //     2. If SameValue(V, current) → true (no write; ref.eq, both nullable).
+  //     3. If O is non-extensible (OBJ_FLAG_NONEXTENSIBLE) → false (NO write).
+  //     4. Cycle check: walk p = V; while p ≠ null: if p === O → false (refuse,
+  //        never build a cyclic chain that a later proto-walk would loop on);
+  //        p = p.$proto. (We do not model the exotic [[GetPrototypeOf]] short-
+  //        circuit — all our objects are ordinary.)
+  //     5. O.[[Prototype]] = V → true.
+  //
+  //   Dual-mode posture (#1472 / #1888): a *refused* set (steps 3/4 → false)
+  //   is a SILENT no-op in standalone, NOT a thrown TypeError. This mirrors the
+  //   freeze-write refusal posture (the #1473 error machinery is a separate
+  //   layer) and keeps this slice from pulling __new_TypeError / the exn tag
+  //   late into the runtime. The proto is simply left unchanged; obj is still
+  //   returned. A non-$Object obj receiver is also a silent no-op (the ToObject
+  //   / RequireObjectCoercible receiver guard lives at the #820k call site).
+  //
+  // params: 0=obj(externref) 1=proto(externref)
+  // locals: 2=o(ref null $Object) 3=v(ref null $Object) 4=p(ref null $Object)
+  //         5=any(anyref)
+  {
+    const body: Instr[] = [
+      // o = (obj is $Object ? cast : null); if not an $Object → return obj as-is
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.set", index: 2 },
+        ],
+        else: [
+          // non-$Object receiver → no write, return obj unchanged
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      },
+      // v = (proto is $Object ? cast : null) — non-$Object/null proto ⇒ null
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 5 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: objRefNull },
+        then: [
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+        ],
+        else: [{ op: "ref.null", typeIdx: objectTypeIdx }],
+      },
+      { op: "local.set", index: 3 },
+      // step 2: if SameValue(v, o.$proto) → no-op (return obj)
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      { op: "ref.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 3: if o.flags & OBJ_FLAG_NONEXTENSIBLE → refuse (return obj, no write)
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // step 4: cycle check — p = v ; while p != null { if p === o → refuse ; p = p.$proto }
+      { op: "local.get", index: 3 },
+      { op: "local.set", index: 4 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if p == null break (end of candidate chain, no cycle)
+              { op: "local.get", index: 4 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if ref.eq(p, o) → cycle → refuse (return obj, no write)
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "ref.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "local.get", index: 0 }, { op: "return" }],
+              },
+              // p = p.$proto ; loop
+              { op: "local.get", index: 4 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 4 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // step 5: o.$proto = v
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 3 },
+      { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 0 },
+      // return obj
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__object_setPrototypeOf",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "v", type: objRefNull },
+        { name: "p", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
 
   // __isPrototypeOf(externref obj, externref candidate) -> i32 (ES §20.1.3.3):
   //   1 iff obj appears in candidate's prototype chain. Walk candidate.$proto
@@ -2833,9 +2976,14 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__object_hasOwn",
   "__extern_has",
   // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0):
-  // getPrototypeOf / Object.create / isPrototypeOf. (setPrototypeOf is stubbed at
-  // its call site in all modes, so it is intentionally NOT routed here.)
+  // getPrototypeOf / Object.create / isPrototypeOf.
   "__getPrototypeOf",
   "__object_create",
   "__isPrototypeOf",
+  // #1888 Slice 7 — Object.setPrototypeOf writes $Object.$proto (field 0) after
+  // the §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle checks. Routed
+  // here so the standalone call site reaches the native helper instead of the
+  // proto-dropping stub. (GC/host keeps the stub — see the calls.ts dual-mode
+  // gate.)
+  "__object_setPrototypeOf",
 ]);

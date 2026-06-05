@@ -390,4 +390,8 @@ if (hasDashboardBundle) {
   );
 }
 
+// Copy plan/issues markdown files so dashboard issue.html can fetch them
+// client-side via the URL /plan/issues/<slug>.md
+copyDirectoryIfExists(join(PLAN_DIR, "issues"), join(PAGES_DIST, "plan", "issues"));
+
 console.log(`GitHub Pages artifact ready at ${PAGES_DIST}`);
