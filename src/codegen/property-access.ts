@@ -48,6 +48,8 @@ import {
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
+import { reserveAccessorGetDriver } from "./accessor-driver.js";
+import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
 const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   iterator: 1,
@@ -870,7 +872,24 @@ export function compileOptionalPropertyAccess(
         const accessorKey = `${structName}_${propName}`;
         const getterName = `${structName}_get_${propName}`;
         const getterIdx = ctx.funcMap.get(getterName);
-        if (ctx.classAccessorSet.has(accessorKey) && getterIdx !== undefined) {
+        const closureAccGet =
+          S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone
+            ? ctx.structAccessorClosure.get(accessorKey)?.getGlobal
+            : undefined;
+        if (closureAccGet !== undefined) {
+          // (#1888 S5c / C3) Migrated struct accessor → route the read through the
+          // host-free closure stored in the per-(struct,prop) global, using the
+          // SAME S5b __call_accessor_get driver as the open-`$Object` arm. The
+          // receiver struct ref is on the stack: box it to externref so the driver
+          // threads it as `this` via __current_this (#1636-S1), then call. Result
+          // is externref (the getter's boxed return); downstream coerces to the
+          // member's static type, exactly as the __extern_get path does.
+          fctx.body.push({ op: "extern.convert_any" } as Instr); // recv struct ref → externref
+          fctx.body.push({ op: "global.get", index: closureAccGet }); // getter closure (externref)
+          const driverIdx = reserveAccessorGetDriver(ctx);
+          fctx.body.push({ op: "call", funcIdx: driverIdx });
+          elseResultType = { kind: "externref" };
+        } else if (ctx.classAccessorSet.has(accessorKey) && getterIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: getterIdx });
           // Determine getter return type
           const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
@@ -2407,6 +2426,25 @@ export function compilePropertyAccess(
   const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression);
   if (typeName) {
     const accessorKey = `${typeName}_${propName}`;
+    // (#1888 S5c / C3) Migrated struct accessor → route through the host-free
+    // closure (per-(struct,prop) global + shared S5b __call_accessor_get driver)
+    // so a getter that closes over outer scope observes its captures. The
+    // receiver is boxed to externref → threaded as `this` via __current_this.
+    // Result externref (boxed getter return); the caller coerces to the static
+    // member type. Class accessors are NOT migrated (no structAccessorClosure
+    // entry) so they keep the bare-fn path below.
+    const closureAccGet =
+      S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone ? ctx.structAccessorClosure.get(accessorKey)?.getGlobal : undefined;
+    if (closureAccGet !== undefined) {
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (recvType && recvType.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      }
+      fctx.body.push({ op: "global.get", index: closureAccGet });
+      const driverIdx = reserveAccessorGetDriver(ctx);
+      fctx.body.push({ op: "call", funcIdx: driverIdx });
+      return { kind: "externref" };
+    }
     if (ctx.classAccessorSet.has(accessorKey)) {
       const getterName = `${typeName}_get_${propName}`;
       const funcIdx = ctx.funcMap.get(getterName);

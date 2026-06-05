@@ -24,6 +24,11 @@ import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
+import {
+  S5C_STRUCT_ACCESSOR_CLOSURE,
+  buildAccessorClosure,
+  ensureStructAccessorGlobal,
+} from "./struct-accessor-closure.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { compileNativeStringLiteral, compileStringLiteral } from "./string-ops.js";
 import { getVecInfo } from "./type-coercion.js";
@@ -972,6 +977,44 @@ export function compileObjectDefineProperty(
 
     const accessorKey = `${structName}_${propName}`;
     ctx.classAccessorSet.add(accessorKey);
+
+    // (#1888 S5c / C2) STORE arm — land dark behind `S5C_STRUCT_ACCESSOR_CLOSURE`.
+    // The #1629-S3 bare `${struct}_get/set_${prop}` fns below have NO capture
+    // environment, so a getter/setter that closes over outer scope reads those
+    // captures as 0 (sd-1888 root cause). Under standalone, additionally lift
+    // each accessor as a host-free CLOSURE (captures baked into `$self` by
+    // `compileArrowAsClosure`, `this` via `__current_this`) and store it in the
+    // per-(struct,prop) `(mut externref)` module global. C3 (read) / C4 (write)
+    // gate dispatch on `ctx.structAccessorClosure.has(key)` to route through the
+    // S5b `__call_accessor_get/set` drivers; until those land the bare-fn path
+    // below still serves reads, so this arm is additive + side-effect-free when
+    // the flag is off. The `as unknown as ts.FunctionExpression` cast mirrors the
+    // proven S5b `emitAccessorFn` call sites (object-ops.ts ~1945) — accessor
+    // nodes (MethodDeclaration / Get/SetAccessorDeclaration) structurally satisfy
+    // the `.body` / `.parameters` / `.modifiers` reads `compileArrowAsClosure`
+    // performs.
+    if (S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone) {
+      if (getNode) {
+        const getGlobalIdx = ensureStructAccessorGlobal(ctx, structName, propName, "get");
+        if (buildAccessorClosure(ctx, fctx, getNode as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+        } else {
+          // Lift failed — leave the global null; the bare-fn read path below
+          // still serves this accessor, so no behavior regression.
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: getGlobalIdx });
+        }
+      }
+      if (setNode) {
+        const setGlobalIdx = ensureStructAccessorGlobal(ctx, structName, propName, "set");
+        if (buildAccessorClosure(ctx, fctx, setNode as unknown as ts.FunctionExpression)) {
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "global.set", index: setGlobalIdx });
+        }
+      }
+    }
 
     // Helper to get body statements from a getter/setter node
     const getBodyStatements = (
