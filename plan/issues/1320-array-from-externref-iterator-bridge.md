@@ -606,3 +606,31 @@ generic `__iterator_next` cannot `call $gen_resume` generically. Options:
 - `npx tsc --noEmit` clean.
 - Compile+run sample cases under `{target:"wasi"}` / `{nativeStrings:true}`.
 - No new host imports (`result.imports` has no `__iterator*`).
+
+## entries() continuation (dev-iter, 2026-06-05) — SHIPPED on this branch
+
+`arr.entries()` in standalone/WASI now lowers natively (no host import). The
+deferred refusal in `compileArrayIteratorMethod` is gone; `compileNativeArrayIterator`
+builds each `[i, value]` slot as a 2-element `$ObjVec` (via `ensureObjVecBuilders`
+→ `__objvec_new` + `__objvec_push`), mirroring `__object_entries`. The outer
+canonical externref `$Vec` carries these pair externrefs; the consumer wraps it
+through `__iterator`/`__iterator_next`/`__iterator_rest` exactly as values/keys do.
+
+**Working consumers (zero `__iterator*`/`__array_*` host imports), tested in
+`tests/issue-1320-standalone.test.ts`:**
+- `[...arr.entries()]` spread (via native `__iterator_rest`) — array of pairs.
+- `for (const pair of arr.entries())` drive + `pair.length === 2`.
+- empty-receiver spread → length 0; `--target wasi` parity.
+- values()/keys() (Slice 1) unchanged; JS-host `__array_entries` path untouched.
+
+**Deferred to the open-any element-retrieval layer (#1888 S5b / #6407 Slice 1,
+senior-dev) — NOT producer bugs:**
+- `pair[0]`/`pair[1]` indexed read returns 0: `compileElementAccessBody`
+  (property-access.ts:3525) routes externref element-access through `__extern_get`
+  (key-based, $Object-only), never `__extern_get_idx` (which indexes $ObjVec).
+- `for (const [k,v] of <stored entries()>)` array-dstr: tuple-from-iterable
+  materialization (type-coercion.ts) leaks `env::__array_from_iter_n` + emits invalid
+  wasm; pre-existing for ANY stored ref-pair iterator. The direct
+  `for ([k,v] of arr.entries())` form is native via the #681 recognizer (works).
+
+`$GenStateBase` (Slice 1b / kind=1 native generators) remains untouched.
