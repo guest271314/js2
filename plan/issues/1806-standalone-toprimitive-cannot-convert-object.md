@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen, type-coercion
 language_feature: to-primitive, symbol-toprimitive, abstract-operations
 goal: standalone-mode
-sprint: 59
+sprint: 60
 related: [1472, 1525, 1525b, 1781]
 ---
 # #1806 — Standalone ToPrimitive: `Cannot convert object to primitive value`

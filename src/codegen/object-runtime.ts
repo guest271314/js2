@@ -1134,6 +1134,123 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   }
   const objVecPushIdx = ctx.funcMap.get("__objvec_push")!;
 
+  // ── __hasOwnProperty / __object_hasOwn (externref obj, externref key) -> i32 ─
+  //
+  // ES §20.1.3.2 Object.prototype.hasOwnProperty / §20.1.2.13 Object.hasOwn:
+  // OWN-property presence only (NO prototype walk). Cast obj to $Object (return
+  // 0 on a non-$Object / null receiver — never throws into Wasm), then
+  // __obj_find on the own props table; present iff the returned entry is
+  // non-null (find already skips tombstones). Object.hasOwn shares the exact
+  // own-only predicate, so both names register the same body.
+  const emitHasOwn = (name: string): void => {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // e = __obj_find(cast<$Object>(any), key) ; return e != null
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+    ];
+    registerNative(
+      name,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  };
+  emitHasOwn("__hasOwnProperty");
+  emitHasOwn("__object_hasOwn");
+
+  // ── __extern_has(externref obj, externref key) -> i32 (#1472 Phase C) ──────
+  //
+  // ES §7.3.12 HasProperty(O, P): keyed `key in obj` — own properties AND the
+  // prototype chain. Mirrors __extern_get's proto-walk but returns a boolean
+  // instead of the value (so a present-but-undefined property still reports 1).
+  // Non-$Object / null receiver → 0 (the `in` dispatch site has already
+  // confirmed an object-shaped externref; this never throws into Wasm).
+  //
+  // params: 0=obj(externref) 1=key(externref)
+  // locals: 2=o(ref null $Object) 3=any(anyref)
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any)
+      { op: "local.get", index: 3 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 2 },
+      // proto-walk loop (mirror of __extern_get)
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if o == null break
+              { op: "local.get", index: 2 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              // if __obj_find(o, key) != null → return 1
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: objFindIdx },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+              },
+              // o = o.proto ; loop
+              { op: "local.get", index: 2 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // not found anywhere → 0
+      { op: "i32.const", value: 0 },
+    ];
+    registerNative(
+      "__extern_has",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "o", type: objRefNull },
+        { name: "any", type: { kind: "anyref" } },
+      ],
+      body,
+    );
+  }
+
   // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
   //
   // The $Object struct already carries the [[Prototype]] in field 0 ($proto,
@@ -2851,6 +2968,13 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // undefined and null, same as __typeof_undefined). This is the single largest
   // remaining standalone-refusal helper (~6.6k tests).
   "__extern_is_undefined",
+  // #1472 Phase C — own-property presence (Object.prototype.hasOwnProperty /
+  // Object.hasOwn) over the $Object hash-map via __obj_find; keyed HasProperty
+  // (`key in obj`) over own + prototype chain via a proto-walk mirroring
+  // __extern_get.
+  "__hasOwnProperty",
+  "__object_hasOwn",
+  "__extern_has",
   // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0):
   // getPrototypeOf / Object.create / isPrototypeOf.
   "__getPrototypeOf",
