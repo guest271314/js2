@@ -10,6 +10,7 @@ import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { addUnionImports, ensureAnyHelpers, isAnyValue } from "./index.js";
+import { ensureAnyToStringHelper } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, registerCoerceType } from "./shared.js";
@@ -2175,6 +2176,228 @@ function tryToStringFallback(
     const funcType = ctx.mod.types[ctx.mod.functions[toStrFuncIdx - ctx.numImportFuncs]?.typeIdx ?? -1];
     const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
     emitToStringResultToF64ByKind(ctx, fctx, retKind);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * #1806 Phase 1 (string-hint slice) — OrdinaryToPrimitive over a compile-time
+ * resolvable object struct in the **string** direction, for `--target standalone`
+ * / WASI (native-strings) mode where there is no JS host `__to_primitive`.
+ *
+ * Mirrors the closure/method dispatch of {@link tryToStringFallback} (the
+ * numeric-hint walker) but produces a string instead of an f64, so that
+ * `obj + "s"`, `` `${obj}` `` and `String(obj)` invoke the object's own
+ * `@@toPrimitive("string")` / `toString` instead of falling through to the
+ * `$__any_to_string` helper, which can only emit `"[object Object]"` for a
+ * struct it cannot introspect.
+ *
+ * Per ECMA-262 §7.1.1.1 OrdinaryToPrimitive with hint "string": try `toString`
+ * first, then `valueOf`. We dispatch (in precedence order):
+ *   1. the `toString` closure field (object-literal method) via call_ref
+ *   2. a named `${name}_toString` method in funcMap
+ * Each result is normalised to a `ref $AnyString` (the native string the concat
+ * / template path expects). On success the struct ref on top of the stack is
+ * consumed and a `ref $AnyString` is left; returns true. When neither form is
+ * statically resolvable, the struct ref is left untouched and the function
+ * returns false so the caller can fall back to `$__any_to_string`.
+ *
+ * NOTE: a user `[Symbol.toPrimitive]` ("string"-hint precedence over toString)
+ * is intentionally NOT handled here yet — its hint argument must be marshalled
+ * as a native string in standalone/native-strings mode, which the existing
+ * `pushStringHint` (externref-global) path does not satisfy. Left to a follow-up
+ * so this slice stays regression-free; objects with only `toString`/`valueOf`
+ * (the dominant cluster) are covered.
+ *
+ * Expects the struct ref on top of the Wasm stack; consumes it only on success.
+ */
+export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, from: ValType): boolean {
+  if (from.kind !== "ref" && from.kind !== "ref_null") return false;
+  const typeIdx = (from as { typeIdx: number }).typeIdx;
+  const name = ctx.typeIdxToStructName.get(typeIdx);
+  if (name === undefined) return false;
+  // The native string type indices (`anyStrTypeIdx`, used by the result
+  // normaliser + `$__any_to_string`) are populated lazily; ensure they exist
+  // before any `ref.cast`/helper emission below references them.
+  ensureAnyToStringHelper(ctx);
+  if (ctx.anyStrTypeIdx < 0) return false;
+
+  // Normalise whatever the dispatched method left on the stack into a
+  // `ref $AnyString`. Strings come back as externref / ref $AnyString; numbers
+  // and booleans are routed through the standalone `$__any_to_string` dispatcher
+  // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
+  // string is cast to the concrete $AnyString so the value type is exact.
+  const normaliseToString = (retKind: string | undefined): void => {
+    if (retKind === "externref" || retKind === "ref_extern") {
+      // externref holding a native string → any.convert_extern + cast.
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+    } else if (retKind === "ref" || retKind === "ref_null") {
+      // Already an anyref subtype (the native `$AnyString` is `ref null 5`).
+      // ref.cast to the concrete $AnyString so the value type is exact.
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+    } else {
+      // f64 / i32 / boolean / void → box and route through $__any_to_string.
+      const anyToStrIdx = ensureAnyToStringHelper(ctx);
+      if (retKind === "i32") {
+        // Could be a bare number or a boolean; treat as number for ToString.
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        addUnionImports(ctx);
+        const boxIdx = ctx.funcMap.get("__box_number");
+        if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      } else if (retKind === "f64") {
+        addUnionImports(ctx);
+        const boxIdx = ctx.funcMap.get("__box_number");
+        if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    }
+  };
+
+  const funcResultKind = (funcIdx: number): string | undefined => {
+    const defIdx = funcIdx - ctx.numImportFuncs;
+    const def = defIdx >= 0 ? ctx.mod.functions[defIdx] : undefined;
+    const ft = def ? ctx.mod.types[def.typeIdx] : undefined;
+    return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
+  };
+
+  // 1. `toString` closure field (object-literal method) via call_ref.
+  // (A user `[Symbol.toPrimitive]` would take precedence per §7.1.1.1, but its
+  // native-string hint marshalling is deferred — see the function doc comment.)
+  const fields = ctx.structFields.get(name);
+  if (fields) {
+    const toStrFieldIdx = fields.findIndex((f) => f.name === "toString");
+    if (toStrFieldIdx >= 0) {
+      const toStrField = fields[toStrFieldIdx]!;
+      if (toStrField.type.kind === "ref" || toStrField.type.kind === "ref_null") {
+        const closureTypeIdx = (toStrField.type as { typeIdx: number }).typeIdx;
+        const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+        if (closureInfo) {
+          const structLocal = allocLocal(fctx, `__sts_struct_${fctx.locals.length}`, from);
+          fctx.body.push({ op: "local.set", index: structLocal });
+          fctx.body.push({ op: "local.get", index: structLocal });
+          fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: toStrFieldIdx });
+          const closureLocal = allocLocal(fctx, `__sts_closure_${fctx.locals.length}`, toStrField.type);
+          fctx.body.push({ op: "local.tee", index: closureLocal });
+          fctx.body.push({ op: "local.get", index: closureLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 });
+          {
+            const tmpFunc = allocTempLocal(fctx, { kind: "funcref" } as ValType);
+            fctx.body.push({ op: "local.tee", index: tmpFunc });
+            fctx.body.push({ op: "ref.test", typeIdx: closureInfo.funcTypeIdx });
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx } as ValType },
+              then: [
+                { op: "local.get", index: tmpFunc },
+                { op: "ref.cast_null", typeIdx: closureInfo.funcTypeIdx },
+              ],
+              else: [{ op: "ref.null", typeIdx: closureInfo.funcTypeIdx }],
+            } as Instr);
+            releaseTempLocal(fctx, tmpFunc);
+          }
+          fctx.body.push({ op: "ref.as_non_null" });
+          fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
+          normaliseToString(closureInfo.returnType?.kind);
+          return true;
+        }
+      }
+      // eqref-stored closure (object-literal method) — recover the concrete
+      // closure type from the tracked list (populated in literals.ts; the map
+      // name covers toString too) and call it. Mirrors the numeric-hint eqref
+      // dispatch (ref→f64) but normalises the result to a native string.
+      if (toStrField.type.kind === "eqref") {
+        const trackedTypes = ctx.valueOfClosureTypes.get(name) ?? [];
+        const allCallable: { closureTypeIdx: number; info: ClosureInfo }[] = [];
+        for (const closureTypeIdx of trackedTypes) {
+          const info = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+          if (info && info.paramTypes.length === 0) allCallable.push({ closureTypeIdx, info });
+        }
+        // The tracked list mixes the `valueOf` (f64-returning) and `toString`
+        // (string-returning) closure types for this struct, and structurally
+        // identical closure structs are indistinguishable by `ref.test`. For a
+        // string hint prefer the string-returning closure(s) so we never call a
+        // number-returning `valueOf` with the wrong signature (a null-deref /
+        // illegal cast). If none return a string, fall back to all candidates.
+        const isStringReturn = (rt: ValType | null | undefined): boolean =>
+          rt?.kind === "externref" || rt?.kind === "ref_extern" || rt?.kind === "ref" || rt?.kind === "ref_null";
+        const stringReturning = allCallable.filter((c) => isStringReturn(c.info.returnType));
+        const callable = stringReturning.length > 0 ? stringReturning : allCallable;
+        if (callable.length === 0) return false;
+        const structLocal = allocLocal(fctx, `__sts_estruct_${fctx.locals.length}`, from);
+        fctx.body.push({ op: "local.set", index: structLocal });
+        fctx.body.push({ op: "local.get", index: structLocal });
+        fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: toStrFieldIdx });
+        const eqLocal = allocLocal(fctx, `__sts_eq_${fctx.locals.length}`, { kind: "eqref" });
+        fctx.body.push({ op: "local.set", index: eqLocal });
+        // Build a nested if/else that tries each candidate closure type. Every
+        // arm produces a `ref $AnyString`; the final fallback is "[object Object]".
+        const buildDispatch = (idx: number): Instr[] => {
+          if (idx >= callable.length) {
+            return [
+              { op: "local.get", index: structLocal } as Instr,
+              { op: "call", funcIdx: ensureAnyToStringHelper(ctx) } as Instr,
+            ];
+          }
+          const { closureTypeIdx, info } = callable[idx]!;
+          const closureLocal = allocLocal(fctx, `__sts_cl_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: closureTypeIdx,
+          });
+          const funcTmp = allocLocal(fctx, `__sts_fn_${fctx.locals.length}`, { kind: "funcref" } as ValType);
+          const thenInstrs: Instr[] = [
+            { op: "local.get", index: eqLocal } as Instr,
+            { op: "ref.cast", typeIdx: closureTypeIdx },
+            { op: "local.tee", index: closureLocal } as Instr,
+            { op: "local.get", index: closureLocal } as Instr,
+            { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "local.tee", index: funcTmp },
+            { op: "ref.test", typeIdx: info.funcTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: info.funcTypeIdx } as ValType },
+              then: [
+                { op: "local.get", index: funcTmp },
+                { op: "ref.cast_null", typeIdx: info.funcTypeIdx },
+              ],
+              else: [{ op: "ref.null", typeIdx: info.funcTypeIdx }],
+            } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "call_ref", typeIdx: info.funcTypeIdx } as Instr,
+          ];
+          // Inline the result normalisation into this arm's instruction list.
+          const savedBody = fctx.body;
+          const scratch: Instr[] = [];
+          fctx.body = scratch;
+          normaliseToString(info.returnType?.kind);
+          fctx.body = savedBody;
+          thenInstrs.push(...scratch);
+          return [
+            { op: "local.get", index: eqLocal } as Instr,
+            { op: "ref.test", typeIdx: closureTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx } as ValType },
+              then: thenInstrs,
+              else: buildDispatch(idx + 1),
+            } as Instr,
+          ];
+        };
+        for (const instr of buildDispatch(0)) fctx.body.push(instr);
+        return true;
+      }
+    }
+  }
+
+  // 2. Named `${name}_toString` method.
+  const toStrFuncIdx = ctx.funcMap.get(`${name}_toString`);
+  if (toStrFuncIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: toStrFuncIdx });
+    normaliseToString(funcResultKind(toStrFuncIdx));
     return true;
   }
 

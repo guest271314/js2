@@ -503,21 +503,50 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect((instance.exports as Record<string, () => number>).run()).toBe(1);
   });
 
-  it("destructuring defaults refuse __extern_is_undefined instead of leaking the host import", async () => {
-    const r = await compile(
-      `
-        export function pick(a: any[]): any {
-          const [x = 1] = a;
-          return x;
+  it("Phase C: __extern_is_undefined routes native (ref.is_null) — destructuring default compiles + runs", async () => {
+    // #1472 Phase C — the undefinedness predicate is the single largest remaining
+    // standalone-refusal helper (~6.6k tests). It now lowers to the native
+    // `__extern_is_undefined` (a bare `ref.is_null`), matching standalone's
+    // undefined≡null conflation (same as `__typeof_undefined`). A destructuring
+    // default `[x = 1]` over an empty array binds the default (the slot is
+    // missing ⇒ undefined ⇒ ref.is_null true); a provided element is kept.
+    const source = `
+        export function run(): number {
+          function pick(a: number[]): number {
+            const [x = 7, y = 9] = a;
+            return x + y;
+          }
+          // a=[5]: x=5 (provided), y=9 (default) → 14
+          return pick([5]);
         }
-      `,
-      { target: "standalone" },
-    );
-    expect(r.success).toBe(false);
-    const joined = r.errors.map((e) => e.message).join("\n");
-    expect(joined).toMatch(/__extern_is_undefined/);
-    expect(joined).toMatch(/#1472 Phase B/);
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // The helper is provided natively — no env::__extern_is_undefined host import.
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_is_undefined")).toBe(false);
     assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(14);
+  });
+
+  it("Phase C: default parameter applies when arg omitted under standalone (runs native)", async () => {
+    // Default-parameter initialization (§9.2.1 / §10.2.11 IteratorBindingInitialization)
+    // checks the bound value via __extern_is_undefined for externref-typed params.
+    // A default-valued object param exercises the externref path end-to-end.
+    const source = `
+        export function run(): number {
+          function f(o: { a: number } = { a: 41 }): number { return o.a + 1; }
+          return f();   // omitted ⇒ default {a:41} ⇒ 42
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_is_undefined")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });
 
   it("new Proxy fails explicitly in standalone mode without leaking proxy host imports", async () => {
