@@ -1050,3 +1050,119 @@ describe("#1888 Slice 2 — standalone open-any method dispatch", () => {
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   });
 });
+
+/**
+ * #1888 Slice 3 — standalone borrowed-method dispatch
+ * `Type.prototype.<m>.call(recv, …args)` (ES §7.3.14 Call).
+ *
+ * The host `__proto_method_call` is refused under --target standalone (no JS
+ * runtime). Per "compile away, don't emulate", the dispatch is done STATICALLY
+ * at the call site (calls.ts) because typeName + methodName are compile-time
+ * constants: the borrowed call is synthesised as `recv.<m>(…args)` and routed
+ * through the native member-call path — no new runtime helper, no funcIdx shift.
+ *
+ * Covered now: the String brand arm (synthesised → compileNativeStringMethodCall
+ * → native __str_* over a $NativeString-branded receiver) and the
+ * Object.prototype.hasOwnProperty arm (→ native __hasOwnProperty). Everything
+ * else (Array — rides on #6407; Object isPrototypeOf/propertyIsEnumerable/valueOf
+ * — a separate follow-on) refuses-loud with a #1888 cite, never silent-wrong.
+ *
+ * String-returning methods are asserted via a numeric projection (`.length` /
+ * `charCodeAt`) since a $NativeString export return is opaque to the bare
+ * `WebAssembly.instantiate` harness (same pattern as the Blocker-B Slice-2 tests).
+ */
+describe("#1888 Slice 3 — standalone Type.prototype.<m>.call borrowed dispatch", () => {
+  const STD = { target: "standalone" as const, nativeStrings: true };
+  type NumExports = Record<string, () => number>;
+
+  it("String.prototype.indexOf.call routes native (i32 result), zero host imports", async () => {
+    const r = await compile(`export function run(): number { return String.prototype.indexOf.call("abc", "b"); }`, STD);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("String.prototype.includes.call routes native (bool result)", async () => {
+    const r = await compile(
+      `export function run(): number { return String.prototype.includes.call("hello", "ell") ? 1 : 0; }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("String.prototype.toUpperCase.call result is correct (charCodeAt projection)", async () => {
+    const r = await compile(
+      `export function run(): number { const s = String.prototype.toUpperCase.call("hi"); return s.charCodeAt(0); }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(72); // 'H'
+  });
+
+  it("String.prototype.slice.call result is correct (length + charCodeAt projection)", async () => {
+    const r = await compile(
+      `export function run(): number { const s = String.prototype.slice.call("hello", 1, 3); return s.length * 1000 + s.charCodeAt(0); }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(2101); // "el": len 2, 'e'=101
+  });
+
+  it("Object.prototype.hasOwnProperty.call routes to native __hasOwnProperty (own-only)", async () => {
+    const r = await compile(
+      `export function run(): number {
+        const o: any = {};
+        const k = "key";
+        o[k] = 1;
+        return (Object.prototype.hasOwnProperty.call(o, k) ? 1 : 0) +
+               (Object.prototype.hasOwnProperty.call(o, "absent") ? 10 : 0);
+      }`,
+      STD,
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
+  });
+
+  it("Array.prototype.push.call refuses-loud (rides on #6407, no silent-wrong)", async () => {
+    const r = await compile(
+      `export function run(): number { const a: any = []; Array.prototype.push.call(a, 5); return 1; }`,
+      STD,
+    );
+    expect(r.success).toBe(false);
+    const joined = r.errors.map((e) => e.message).join("\n");
+    expect(joined).toMatch(/#1888 Slice 3\/4/);
+    expect(joined).toMatch(/#6407/);
+  });
+
+  it("Object.prototype.isPrototypeOf.call refuses-loud (deferred follow-on, not silent-wrong)", async () => {
+    const r = await compile(
+      `export function run(): number { const p: any = {}; const o: any = {}; return Object.prototype.isPrototypeOf.call(p, o) ? 1 : 0; }`,
+      STD,
+    );
+    expect(r.success).toBe(false);
+    expect(r.errors.map((e) => e.message).join("\n")).toMatch(/#1888 Slice 3\/4/);
+  });
+
+  it("default target (gc) still uses the host __proto_method_call bridge (dual-mode unchanged)", async () => {
+    const r = await compile(`export function run(): number { return String.prototype.indexOf.call("abc", "b"); }`, {});
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__proto_method_call")).toBe(true);
+  });
+});
