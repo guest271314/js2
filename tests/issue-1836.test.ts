@@ -61,3 +61,127 @@ describe("#1836 standalone Number() octal/binary prefix", () => {
     expect(await evalStandalone(`export function test(): number { return Number("0"); }`)).toBe(0);
   });
 });
+
+// Slice: StrWhiteSpace set for ToNumber/parseInt/parseFloat (§19.2.4/.5, §7.1.4.1
+// → §11.2 WhiteSpace ∪ §11.3 LineTerminator). Previously only space/tab/LF/VT/
+// FF/CR/NBSP were trimmed; the BOM, LS/PS line terminators, and the rest of the
+// Zs category were not, so e.g. Number("﻿12") returned NaN.
+describe("#1836 standalone whitespace set (ToNumber/parseInt/parseFloat)", () => {
+  it("trims the BOM / ZWNBSP (U+FEFF), leading and trailing", async () => {
+    expect(await evalStandalone(`export function test(): number { return Number("\\uFEFF12"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("12\\uFEFF"); }`)).toBe(12);
+  });
+
+  it("trims LS (U+2028) and PS (U+2029) line terminators", async () => {
+    expect(await evalStandalone(`export function test(): number { return Number("\\u202812"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u202912"); }`)).toBe(12);
+  });
+
+  it("trims the Zs space-separator category", async () => {
+    // OGHAM SPACE, EN QUAD (range start), HAIR SPACE (range end), NARROW/MEDIUM/
+    // IDEOGRAPHIC space.
+    expect(await evalStandalone(`export function test(): number { return Number("\\u168012"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u200012"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u200a12"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u202f12"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u205f12"); }`)).toBe(12);
+    expect(await evalStandalone(`export function test(): number { return Number("\\u300012"); }`)).toBe(12);
+  });
+
+  it("applies the same set to parseInt and parseFloat", async () => {
+    expect(await evalStandalone(`export function test(): number { return parseInt("\\u2028  42"); }`)).toBe(42);
+    expect(await evalStandalone(`export function test(): number { return parseFloat("\\uFEFF3.14"); }`)).toBe(3.14);
+  });
+
+  it("does not over-trim: ordinary leading space still works, non-ws still rejected", async () => {
+    expect(await evalStandalone(`export function test(): number { return Number("  7"); }`)).toBe(7);
+    // 'a' (U+0061) is NOT whitespace — must not be skipped, so the parse fails.
+    expect(await evalStandalone(`export function test(): number { return Number("a12"); }`)).toBeNaN();
+    // A character just outside the Zs range (U+200B ZERO WIDTH SPACE is Cf, not
+    // whitespace) must NOT be trimmed.
+    expect(await evalStandalone(`export function test(): number { return Number("\\u200b12"); }`)).toBeNaN();
+  });
+});
+
+// Slice: Number.prototype.toFixed for |x| >= 1e21 (§21.1.3.3 step 5 → ToString).
+// Previously the scaled fixed-point path printed a bogus 22-digit integer with a
+// spurious fractional part; it must defer to ToString(x).
+describe("#1836 standalone toFixed |x| >= 1e21 (§21.1.3.3)", () => {
+  async function callStr(method: string): Promise<number> {
+    // Returns 1 if toFixed(2) equals toString() AND has no '.' — i.e. the
+    // step-5 ToString deferral fired (in-Wasm comparison; native strings aren't
+    // JS strings).
+    const src = `export function test(): number {
+      var x = ${method};
+      var a = x.toFixed(2);
+      return (a === x.toString() && a.indexOf(".") < 0) ? 1 : 0;
+    }`;
+    return evalStandalone(src);
+  }
+
+  it("defers to ToString for x >= 1e21", async () => {
+    expect(await callStr("1e21")).toBe(1);
+    expect(await callStr("1e30")).toBe(1);
+  });
+
+  it("does not change normal-magnitude toFixed", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (3.14159).toFixed(2) === "3.14" ? 1 : 0; }`),
+    ).toBe(1);
+    expect(await evalStandalone(`export function test(): number { return (0).toFixed(0) === "0" ? 1 : 0; }`)).toBe(1);
+    expect(
+      await evalStandalone(`export function test(): number { return (-2.5).toFixed(1) === "-2.5" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+});
+
+// Slice: Number.prototype.toString(radix) for FRACTIONAL values (§6.1.6.1.20,
+// §21.1.3.6). Previously the radix formatter only handled integers and TRAPPED
+// (`unreachable`) on any non-integer, e.g. (3.5).toString(2). Now the integer
+// part is rendered LSB-first then reversed and the fractional part is appended
+// MSB-first (multiply-by-radix), up to MAX_FRAC_DIGITS or until exhausted.
+describe("#1836 standalone toString(radix) fractional values (§6.1.6.1.20)", () => {
+  it("renders fractional binary values (no more unreachable trap)", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (3.5).toString(2) === "11.1" ? 1 : 0; }`),
+    ).toBe(1);
+    expect(await evalStandalone(`export function test(): number { return (0.5).toString(2) === "0.1" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(
+      await evalStandalone(`export function test(): number { return (0.25).toString(2) === "0.01" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("renders a leading 0 for values in (0,1)", async () => {
+    // intPart == 0 must still emit "0" before the point.
+    expect(await evalStandalone(`export function test(): number { return (0.5).toString(2) === "0.1" ? 1 : 0; }`)).toBe(
+      1,
+    );
+  });
+
+  it("handles negative fractional values", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (-3.5).toString(2) === "-11.1" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("renders fractional hex (radix 16)", async () => {
+    expect(
+      await evalStandalone(`export function test(): number { return (10.5).toString(16) === "a.8" ? 1 : 0; }`),
+    ).toBe(1);
+  });
+
+  it("does not change integer radix output (no regression)", async () => {
+    expect(await evalStandalone(`export function test(): number { return (255).toString(16) === "ff" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(await evalStandalone(`export function test(): number { return (10).toString(2) === "1010" ? 1 : 0; }`)).toBe(
+      1,
+    );
+    expect(
+      await evalStandalone(`export function test(): number { return (-255).toString(16) === "-ff" ? 1 : 0; }`),
+    ).toBe(1);
+    expect(await evalStandalone(`export function test(): number { return (0).toString(2) === "0" ? 1 : 0; }`)).toBe(1);
+  });
+});
