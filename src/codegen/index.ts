@@ -1471,6 +1471,11 @@ export function generateModule(
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
 
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (closures registered after the typeof helpers were
+    // synthesised mid-compile). Edits the helper bodies in place — no funcIdx churn.
+    fillStandaloneTypeofClosureArms(ctx);
+
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
 
@@ -2759,6 +2764,55 @@ function emitClosureCallExport4(ctx: CodegenContext): void {
 }
 
 /**
+ * #1896 — Decide whether a host-supplied `externref` closure-call argument must
+ * be lowered out of the extern domain before it feeds the closure's `call_ref`.
+ *
+ * The `__call_fn_<arity>` / `__call_fn_method_<arity>` exports take all user
+ * args as `externref` (the host ABI). The lifted closure funcref, however,
+ * declares each user param with the closure's *internal* ValType. Under the
+ * native-strings backends a `string` param lowers to `(ref null $AnyString)`
+ * (a concrete struct ref), so the raw `externref` arg mismatches `call_ref`
+ * and the module fails validation. In `wasm:js-string` (gc) mode the string
+ * param ValType *is* `externref`, so no conversion is needed.
+ *
+ * Returns true for non-extern reference param kinds (`anyref`/`eqref`/`ref`/
+ * `ref_null`); false for `externref`/`ref_extern` (already extern-side) and for
+ * the numeric/value kinds (handled by the f64/i32 unbox branches at the call
+ * site, or simply not reference args).
+ */
+function needsExternToAnyForClosureParam(paramType: ValType): boolean {
+  switch (paramType.kind) {
+    case "anyref":
+    case "eqref":
+    case "ref":
+    case "ref_null":
+      return true;
+    default:
+      // externref / ref_extern (already extern), funcref, and value types.
+      return false;
+  }
+}
+
+/**
+ * #1896 — Lower an `externref` closure-call arg into the internal ref domain
+ * expected by the closure funcref's declared param ValType. `any.convert_extern`
+ * moves externref → anyref (engine-level identity); for a *concrete* ref param
+ * (`ref`/`ref_null` to a struct type, e.g. `(ref null $AnyString)`) a following
+ * `ref.cast` narrows anyref → the exact param type so `call_ref` typechecks.
+ * `anyref`/`eqref` params need no cast. Caller must have checked
+ * `needsExternToAnyForClosureParam(paramType)` first.
+ */
+function externToClosureParamRef(paramType: ValType): Instr[] {
+  const ops: Instr[] = [{ op: "any.convert_extern" } as Instr];
+  if (paramType.kind === "ref") {
+    ops.push({ op: "ref.cast", typeIdx: paramType.typeIdx } as Instr);
+  } else if (paramType.kind === "ref_null") {
+    ops.push({ op: "ref.cast_null", typeIdx: paramType.typeIdx } as Instr);
+  }
+  return ops;
+}
+
+/**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
  * and returns externref. Used by `__array_from`, `__proto_method_call`, and
@@ -2904,8 +2958,17 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // The host-facing param is `externref`, but the closure funcref
+          // declares this reference param as a non-extern ref type (anyref or
+          // a WasmGC struct ref — e.g. a native-strings `string` lowers to
+          // `(ref null $AnyString)`). Lower the host externref to the internal
+          // ref domain so the subsequent `call_ref` typechecks. In
+          // `wasm:js-string` (gc) mode string params ARE externref, so this
+          // branch is skipped and the arg passes raw.
+          ops.push(...externToClosureParamRef(paramType));
         }
-        // externref: no conversion
+        // externref param: no conversion
       }
       return ops;
     };
@@ -3161,6 +3224,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // See emitClosureCallExportN: a non-extern reference param (anyref /
+          // WasmGC struct ref, e.g. a native-strings `string`) needs the host
+          // externref lowered into the internal ref domain before `call_ref`.
+          // Skipped in gc mode where string params are already externref.
+          ops.push(...externToClosureParamRef(paramType));
         }
       }
       return ops;
@@ -3293,12 +3362,17 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
  * (#1504). No-op when the module has no closures.
  */
-function emitIsClosureExport(ctx: CodegenContext): void {
+/**
+ * Collect the deduped set of closure base-wrapper struct type indices from
+ * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
+ * their funcref signature with the base wrapper post-V8 canonicalisation, so a
+ * `ref.test` against the base catches all of them. Walks each registered
+ * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
+ * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
+ * closure-recognition arms.)
+ */
+function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
   const mod = ctx.mod;
-
-  // Collect base wrapper struct types (deduped). Concrete closure subtypes
-  // share their funcref signature with the base wrapper post-V8 canonicalisation,
-  // so ref.test against the base catches all of them.
   const baseTypeIdxs: number[] = [];
   const seenBase = new Set<number>();
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
@@ -3320,6 +3394,16 @@ function emitIsClosureExport(ctx: CodegenContext): void {
       baseTypeIdxs.push(root);
     }
   }
+  return baseTypeIdxs;
+}
+
+function emitIsClosureExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect base wrapper struct types (deduped). Concrete closure subtypes
+  // share their funcref signature with the base wrapper post-V8 canonicalisation,
+  // so ref.test against the base catches all of them.
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
   if (baseTypeIdxs.length === 0) return;
 
   const isClosureTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_closure_type");
@@ -3354,6 +3438,93 @@ function emitIsClosureExport(ctx: CodegenContext): void {
     name: "__is_closure",
     desc: { kind: "func", index: funcIdx },
   });
+}
+
+/**
+ * #1896 — teach the standalone/WASI native `__typeof_function` and
+ * `__typeof_object` helpers to recognise closure wrapper structs.
+ *
+ * Those helpers are synthesised by `addUnionImportsAsNativeFuncs`, which runs
+ * once on the first `addUnionImports` call — frequently *mid-compile*, before
+ * every closure type has been registered in `ctx.closureInfoByTypeIdx`. Baking
+ * the base-wrapper set at registration time would therefore miss later-registered
+ * closures. Instead we rewrite the two helper bodies HERE, at finalize, after all
+ * closures are registered (same late timing as `emitIsClosureExport`). We locate
+ * the functions by name in `ctx.mod.functions` and splice in `ref.test` arms over
+ * the closure base wrappers — no funcIdx churn (we edit existing bodies in place).
+ *
+ * - `__typeof_function`: was `i32.const 0` (wrong — a stored standalone closure
+ *   is callable). Now: `any.convert_extern` then chained `ref.test` over each
+ *   closure base wrapper; return 1 on first match, else 0.
+ * - `__typeof_object`: add a closure-base-wrapper `ref.test` guard that returns 0
+ *   (a callable is `"function"`, never `"object"`) BEFORE the final non-null
+ *   `i32.const 1`, so a wrapper read back from an open-object slot is not
+ *   mis-classified as `"object"`.
+ *
+ * No-op unless native-strings (the helpers only exist then) and at least one
+ * closure base wrapper was registered.
+ */
+function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
+  if (!ctx.nativeStrings) return;
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
+  if (baseTypeIdxs.length === 0) return;
+
+  const fnByName = (name: string): WasmFunction | undefined =>
+    ctx.mod.functions.find((f) => (f as { name?: string }).name === name) as WasmFunction | undefined;
+
+  // Chained `ref.test` arms over the anyref-converted param in local 0/1. Each
+  // arm returns `matchValue` on hit. Caller supplies the param→anyref local.
+  const closureTestArms = (anyLocalIdx: number, matchValue: number): Instr[] => {
+    const arms: Instr[] = [];
+    for (const t of baseTypeIdxs) {
+      arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
+      arms.push({ op: "ref.test", typeIdx: t } as Instr);
+      arms.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: matchValue } as Instr, { op: "return" } as Instr],
+      } as Instr);
+    }
+    return arms;
+  };
+
+  // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
+  const tf = fnByName("__typeof_function");
+  if (tf) {
+    // Ensure an anyref local exists for the converted param (local index 1).
+    if (tf.locals.length === 0) {
+      tf.locals.push({ name: "$any_temp", type: { kind: "anyref" } });
+    }
+    tf.body = [
+      { op: "local.get", index: 0 } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
+      } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+      ...closureTestArms(1, 1),
+      { op: "i32.const", value: 0 } as Instr,
+    ];
+  }
+
+  // --- __typeof_object: insert closure-exclusion (return 0) before the trailing
+  // non-null `i32.const 1`. The existing body already converts the param to
+  // anyref into local 1 (`$any_temp`) for its boxed-primitive guards, so reuse it.
+  const to = fnByName("__typeof_object");
+  if (to) {
+    const b = to.body;
+    // The body ends with `{ i32.const 1 }` (the "non-null → object" fallthrough).
+    // Splice the closure-exclusion arms immediately before that terminal const.
+    const lastIdx = b.length - 1;
+    const last = b[lastIdx] as { op?: string; value?: number } | undefined;
+    if (last && last.op === "i32.const" && last.value === 1) {
+      b.splice(lastIdx, 0, ...closureTestArms(1, 0));
+    }
+  }
 }
 
 /**
@@ -4458,6 +4629,10 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (edits helper bodies in place — no funcIdx churn).
+    fillStandaloneTypeofClosureArms(ctx);
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
