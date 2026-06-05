@@ -10,7 +10,7 @@ feasibility: hard
 task_type: bugfix
 area: codegen
 goal: correctness
-sprint: 59
+sprint: 61
 ---
 # #1818 — i32/boolean parameter default fires on `0` / `false`
 
