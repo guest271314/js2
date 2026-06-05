@@ -16,6 +16,7 @@ import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasm
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
+import { ensureObjVecBuilders } from "./object-runtime.js";
 import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,
@@ -3091,18 +3092,11 @@ function compileArrayIteratorMethod(
   if (ctx.standalone || ctx.wasi) {
     // #1320 Slice 1: native iterator bridge. Build a canonical externref `$Vec`
     // (box each element here, where we have an fctx), wrap it in an `$IterRec`
-    // via the native `__iterator`. `.entries()` (whose elements are `[i, value]`
-    // pair vecs) is deferred to a later slice — keep the explicit refusal so it
-    // falls through to the iterator path rather than silently misbehaving.
-    if (methodName === "entries") {
-      reportError(
-        ctx,
-        propAccess,
-        `Codegen error: #1320 standalone/WASI Array.prototype.entries() (pair-shaped iterator) ` +
-          "is deferred to a later iterator-bridge slice; .values()/.keys() and direct for-of are native.",
-      );
-      return null;
-    }
+    // via the native `__iterator`. `.values()` boxes each element, `.keys()`
+    // boxes the index, and `.entries()` boxes a 2-element `[i, value]` pair vec
+    // per slot — all over the SAME canonical-externref-`$Vec` runtime (no
+    // `$GenStateBase` substrate). The consumer destructures each yielded pair
+    // externref via the existing array-access path.
     return compileNativeArrayIterator(ctx, fctx, propAccess, methodName);
   }
 
@@ -3121,14 +3115,20 @@ function compileArrayIteratorMethod(
 }
 
 /**
- * #1320 Slice 1 — native standalone/WASI `arr.values()` / `arr.keys()`.
+ * #1320 Slice 1 — native standalone/WASI `arr.values()` / `arr.keys()` /
+ * `arr.entries()`.
  *
  * Builds a canonical externref `$Vec` from the receiver array (boxing each
  * element here, where we have an `fctx`), then constructs an `$IterRec` over it
  * and returns it as externref — the same value shape the consumer expects from
- * the JS-host `__array_values`/`__array_keys` import. `.values()` boxes each
- * element; `.keys()` emits the index as a boxed number. `.entries()` is handled
- * by the caller (deferred refusal).
+ * the JS-host `__array_values`/`__array_keys`/`__array_entries` import.
+ * `.values()` boxes each element; `.keys()` emits the index as a boxed number;
+ * `.entries()` boxes a 2-element `[box(f64(i)), box(value)]` pair vec per slot
+ * (itself a canonical externref `$Vec`, `extern.convert_any`-wrapped). The
+ * for-of/spread/dstr consumer reads each yielded pair externref via the normal
+ * array-access path, so `for (const [k, v] of stored)` lowers `k = pair[0]`,
+ * `v = pair[1]`. All three reuse the SAME canonical-externref-`$Vec` runtime —
+ * no `$GenStateBase` (native-generator) substrate is touched.
  */
 function compileNativeArrayIterator(
   ctx: CodegenContext,
@@ -3140,6 +3140,18 @@ function compileNativeArrayIterator(
   const iterRecTypeIdx = getOrRegisterIterRecType(ctx);
   const canonVecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
   const canonArrTypeIdx = getArrTypeIdxFromVec(ctx, canonVecTypeIdx);
+
+  // `.entries()` builds each `[i, value]` slot as an `$ObjVec` so the consumer's
+  // indexed read (`pair[0]`/`pair[1]`) routes through the native
+  // `__extern_get_idx`/`__extern_length` $ObjVec arm. Register those builders
+  // BEFORE compiling the receiver so no function-index shift happens mid-body.
+  let objVecNewIdx = 0;
+  let objVecPushIdx = 0;
+  if (methodName === "entries") {
+    const builders = ensureObjVecBuilders(ctx);
+    objVecNewIdx = builders.newIdx;
+    objVecPushIdx = builders.pushIdx;
+  }
 
   // Compile the receiver to discover its vec type.
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
@@ -3190,23 +3202,53 @@ function compileNativeArrayIterator(
   loopBody.push({ op: "local.get", index: outLocal });
   loopBody.push({ op: "ref.as_non_null" } as Instr);
   loopBody.push({ op: "local.get", index: iLocal });
+  // Emit `box(f64(i))` — the numeric index, boxed to externref. Shared by
+  // `.keys()` (the slot value) and `.entries()` (the pair's [0] slot).
+  const emitBoxedIndex = (): void => {
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
+  };
+  // Emit `box(srcVec.data[i])` — the element, boxed to externref. Shared by
+  // `.values()` (the slot value) and `.entries()` (the pair's [1] slot).
+  const emitBoxedElem = (): void => {
+    fctx.body.push({ op: "local.get", index: srcVecLocal });
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "array.get", typeIdx: srcArrTypeIdx });
+    if (srcElemType.kind !== "externref") {
+      coerceType(ctx, fctx, srcElemType, { kind: "externref" });
+    }
+  };
+
   // Build the element value to box into the canonical externref slot.
   const elemInstrs = collectElemInstrs(ctx, fctx, () => {
     if (methodName === "keys") {
       // value = box(f64(i))   — keys yields the numeric index
-      fctx.body.push({ op: "local.get", index: iLocal });
-      fctx.body.push({ op: "f64.convert_i32_s" });
-      coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
+      emitBoxedIndex();
+    } else if (methodName === "entries") {
+      // value = a 2-element `[index, value]` pair built as an `$ObjVec`
+      // (key at idx 0, value at idx 1) via __objvec_new + __objvec_push.
+      // The `$ObjVec` is the runtime type the native indexed-read helpers
+      // (`__extern_get_idx`/`__extern_length`) recognize, so the consumer's
+      // `pair[0]`/`pair[1]`/`pair.length` and `[k, v]` destructuring read back
+      // correctly — exactly mirroring `__object_entries` (object-runtime.ts).
+      // (A canonical `$Vec` pair would NOT read back: `__extern_get` only
+      // understands `$Object` shapes, returning undefined for a `$Vec`.)
+      const pairLocal = allocLocal(fctx, `__iter_pair_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+      fctx.body.push({ op: "local.tee", index: pairLocal });
+      emitBoxedIndex();
+      fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+      fctx.body.push({ op: "local.get", index: pairLocal });
+      emitBoxedElem();
+      fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+      // The pair externref itself goes into the outer canonical slot.
+      fctx.body.push({ op: "local.get", index: pairLocal });
     } else {
       // value = box(srcVec.data[i])  — values yields the element
-      fctx.body.push({ op: "local.get", index: srcVecLocal });
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: srcVecTypeIdx, fieldIdx: 1 });
-      fctx.body.push({ op: "local.get", index: iLocal });
-      fctx.body.push({ op: "array.get", typeIdx: srcArrTypeIdx });
-      if (srcElemType.kind !== "externref") {
-        coerceType(ctx, fctx, srcElemType, { kind: "externref" });
-      }
+      emitBoxedElem();
     }
   });
   loopBody.push(...elemInstrs);

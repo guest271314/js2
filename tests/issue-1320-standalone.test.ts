@@ -111,19 +111,68 @@ describe("#1320 Slice 1 standalone iterator bridge", () => {
     expect((instance.exports as { f: () => number }).f()).toBe(3 + 4 + 5);
   });
 
-  it("still refuses arr.entries() in standalone (pair-shaped, deferred to a later slice)", async () => {
+  // #1320 entries() — `.entries()` reaching the generic consumer now lowers to
+  // native pair vecs (each `[i, value]` slot is an `$ObjVec`), with NO host
+  // imports. The producer is fully native; the pair *reads back* through the
+  // consumers that route via __iterator_rest (spread) and the for-of drive.
+  // (Indexed `pair[0]` read and `[k,v]` array-dstr over a *stored* entries()
+  // depend on the open-any element-retrieval layer (#1888 S5/#6407) and are
+  // covered there; the direct `for ([k,v] of arr.entries())` form is native via
+  // the #681 recognizer and is exercised in issue-681-standalone-iterators.)
+
+  it("drives a stored arr.entries() through native for-of (no host import)", async () => {
+    // Each yielded pair is a 2-element $ObjVec → pair.length === 2.
+    expect(
+      await runStandalone(`
+        export function f(): number {
+          const it = [10, 20, 30].entries();
+          let n: number = 0;
+          for (const pair of it) { n = n + pair.length; }
+          return n;
+        }
+      `),
+    ).toBe(2 + 2 + 2);
+  });
+
+  it("spreads a stored arr.entries() into an array of pairs (no host import)", async () => {
+    expect(
+      await runStandalone(`
+        export function f(): number {
+          const it = [10, 20, 30].entries();
+          const arr = [...it];
+          return arr.length;
+        }
+      `),
+    ).toBe(3);
+  });
+
+  it("spreads arr.entries() with an empty receiver to a zero-length array", async () => {
+    expect(
+      await runStandalone(`
+        export function f(): number {
+          const it = ([] as number[]).entries();
+          const arr = [...it];
+          return arr.length;
+        }
+      `),
+    ).toBe(0);
+  });
+
+  it("compiles arr.entries() under --target wasi with no host imports", async () => {
     const r = await compile(
       `
         export function f(): number {
-          const it = [1, 2].entries();
-          let s: number = 0;
-          for (const e of it) { s = s + 1; }
-          return s;
+          const it = [7, 8].entries();
+          let n: number = 0;
+          for (const pair of it) { n = n + pair.length; }
+          return n;
         }
       `,
-      { target: "standalone" },
+      { target: "wasi" },
     );
-    expect(r.success).toBe(false);
-    expect(r.errors.some((e) => /#1320.*entries/.test(e.message))).toBe(true);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    noIterHostImports(r);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(2 + 2);
   });
 });
