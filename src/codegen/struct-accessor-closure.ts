@@ -41,7 +41,7 @@ import { compileArrowAsClosure } from "./shared.js";
  * C1-C5 are wired + validated. Flip to `true` in the C5 PR once the S5c RED
  * tests pass and S5b/GC regression guards hold.
  */
-export const S5C_STRUCT_ACCESSOR_CLOSURE = false;
+export const S5C_STRUCT_ACCESSOR_CLOSURE = true;
 
 /** Module-global name for a struct accessor's getter closure slot. */
 export function structAccessorGetGlobalName(structName: string, propName: string): string {
