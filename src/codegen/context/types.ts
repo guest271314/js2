@@ -508,6 +508,17 @@ export interface CodegenContext {
   deferredClassBodies: Set<string>;
   /** Set of "ClassName_propName" for getter/setter accessor properties */
   classAccessorSet: Set<string>;
+  /**
+   * (#1888 S5c) Set of "structName_propName" whose getter/setter is compiled as
+   * a host-free CLOSURE (capturing env, call_ref-invoked) rather than the bare
+   * `${struct}_get_${prop}(this)` fn. Populated by the C2 define-site when
+   * `S5C_STRUCT_ACCESSOR_CLOSURE` is on; the C3 read / C4 write sites dispatch
+   * through the per-(struct,prop) `$__acc_get/set_<struct>_<prop>` globals +
+   * the S5b `__call_accessor_get/set` drivers ONLY when this set has the key, so
+   * class-accessor emission (#459/#1680/#1681/#1605) stays on the proven bare-fn
+   * path. Maps the key → the get/set global indices.
+   */
+  structAccessorClosure: Map<string, { getGlobal?: number; setGlobal?: number }>;
   /** Set of "ClassName_propName" for static getter/setter accessor properties */
   staticAccessorSet: Set<string>;
   /** Set of "ClassName_methodName" for static methods (no self param) */
