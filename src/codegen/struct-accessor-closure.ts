@@ -26,13 +26,13 @@
  *   (#459/#1680/#1681/#1605) stays on the proven bare-fn path — the read/write
  *   sites gate dispatch on `ctx.structAccessorClosure.has(key)`.
  *
- * ## Flag (land dark)
- * `S5C_STRUCT_ACCESSOR_CLOSURE` defaults **false**: C1-C5 land behind it with no
- * behavior change. Flip on once the 4 S5c RED tests pass, the 3 S5b tests stay
- * green, and GC-mode is byte-identical.
+ * ## Flag
+ * `S5C_STRUCT_ACCESSOR_CLOSURE` is now **true** (C1-C5 wired + validated: 4 S5c
+ * tests green, 3 S5b regression-guard tests green, GC-mode byte-identical). It
+ * landed dark (false) through C1-C5 and was flipped on in the C3/C4/C5 PR.
  */
-import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
+import { ts } from "../ts-api.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { compileArrowAsClosure } from "./shared.js";
 
