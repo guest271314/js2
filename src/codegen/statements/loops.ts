@@ -17,7 +17,7 @@ import {
   isStrictContext,
 } from "../expressions/assignment.js";
 import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
-import { shiftLateImportIndices } from "../expressions/late-imports.js";
+import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "../expressions/late-imports.js";
 import {
   addIteratorImports,
   ensureI32Condition,
@@ -2053,15 +2053,12 @@ function compileForOfAssignDestructuringExternref(
   expr: ts.ArrayLiteralExpression,
   elemLocal: number,
 ): void {
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   // Ensure __box_number is available
@@ -2343,9 +2340,23 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   // CallExpression subject and drive the existing index loop over the inner
   // receiver, so standalone/WASI iterate natively instead of hard-erroring in
   // compileArrayIteratorMethod. JS-host mode benefits too (no __array_values).
-  const valuesReceiver = arrayValuesReceiverForForOf(ctx, fctx, stmt);
-  if (valuesReceiver && compileForOfArrayTentative(ctx, fctx, stmt, valuesReceiver)) {
-    return;
+  //
+  // `arr.keys()` (§23.1.3.16 — yields each index) and `arr.entries()`
+  // (§23.1.3.4 — yields each `[index, value]` pair) share the same in-order
+  // index drive but project a different per-iteration value, so they go through
+  // compileForOfArrayKeys / compileForOfArrayEntries. All three eliminate the
+  // __array_values/__array_keys/__array_entries host imports in standalone/WASI.
+  const arrayIterRecv = arrayIteratorReceiverForForOf(ctx, fctx, stmt);
+  if (arrayIterRecv) {
+    if (arrayIterRecv.method === "values") {
+      if (compileForOfArrayTentative(ctx, fctx, stmt, arrayIterRecv.receiver)) return;
+    } else if (arrayIterRecv.method === "keys") {
+      compileForOfArrayKeys(ctx, fctx, stmt, arrayIterRecv.receiver);
+      return;
+    } else {
+      compileForOfArrayEntries(ctx, fctx, stmt, arrayIterRecv.receiver);
+      return;
+    }
   }
 
   // The TS type resolving to `Array` is necessary but NOT sufficient to use the
@@ -2360,25 +2371,35 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   }
 }
 
+/** #681: an `arr.values()/keys()/entries()` for-of subject resolved to a vec. */
+interface ArrayIteratorReceiver {
+  receiver: ts.Expression;
+  method: "values" | "keys" | "entries";
+}
+
 /**
- * #681: detect `for (… of <recv>.values())` and return `<recv>` when it is a
- * zero-argument `.values()` call whose receiver resolves to a Wasm vec struct.
- * `Array.prototype.values()` yields each element in order, so iterating the
- * iterator is identical to iterating the array directly. `.keys()`/`.entries()`
- * have a different element shape (index / `[i, v]` pair) and are NOT handled
- * here — they keep falling through to compileForOfIterator (and hard-error in
- * standalone for now, a tracked follow-up). Returns undefined when the subject
- * is not a recognizable `.values()` call.
+ * #681: detect `for (… of <recv>.<m>())` for `m` ∈ {values, keys, entries} and
+ * return the inner `<recv>` (plus which method) when it is a zero-argument call
+ * whose receiver resolves to a Wasm vec struct. The three Array iterator
+ * methods all walk the element list in order:
+ *   - `.values()`  yields each element  → identical to iterating the array.
+ *   - `.keys()`    yields each index    → compileForOfArrayKeys (§23.1.3.16).
+ *   - `.entries()` yields `[i, value]`  → compileForOfArrayEntries (§23.1.3.4).
+ * Recognizing them lets standalone/WASI drive a pure-Wasm index loop instead of
+ * hard-erroring in compileArrayIteratorMethod. Returns undefined when the
+ * subject is not a recognizable Array iterator-method call over a vec.
  */
-function arrayValuesReceiverForForOf(
+function arrayIteratorReceiverForForOf(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.ForOfStatement,
-): ts.Expression | undefined {
+): ArrayIteratorReceiver | undefined {
   const subject = stmt.expression;
   if (!ts.isCallExpression(subject) || subject.arguments.length !== 0) return undefined;
   const callee = subject.expression;
-  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "values") return undefined;
+  if (!ts.isPropertyAccessExpression(callee)) return undefined;
+  const method = callee.name.text;
+  if (method !== "values" && method !== "keys" && method !== "entries") return undefined;
 
   // Confirm the receiver lowers to a vec struct without leaving any code behind.
   const bodyLenBefore = fctx.body.length;
@@ -2388,7 +2409,7 @@ function arrayValuesReceiverForForOf(
   restoreLocals(fctx, localsSnap); // #1847 — also drops stale localMap entries
   if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return undefined;
   if (getArrTypeIdxFromVec(ctx, recvType.typeIdx) < 0) return undefined;
-  return callee.expression;
+  return { receiver: callee.expression, method };
 }
 
 /** Compile for...of over a string — iterate characters using __str_charAt */
@@ -2827,6 +2848,293 @@ function compileForOfArray(
 }
 
 /**
+ * #681: `for (k of arr.keys())` — Array.prototype.keys() (§23.1.3.16) yields the
+ * array indices 0..length-1 in order. Drive a pure-Wasm index loop and bind the
+ * loop variable to `f64(i)` each iteration. The loop variable must be a plain
+ * identifier (number-typed); a binding/assignment pattern over a numeric key is
+ * not meaningful, so those fall through to the iterator protocol via the caller
+ * having already checked `method === "keys"`. Mirrors compileForOfArray's
+ * vec-length read, null guard and break/continue depth bookkeeping.
+ */
+function compileForOfArrayKeys(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+): void {
+  // Resolve the loop variable. `.keys()` yields numbers, so only a simple
+  // identifier binding is supported; anything else falls back to the iterator
+  // path (which still hard-errors in standalone — an explicit, tracked gap).
+  let keyLocal: number;
+  let isConst = false;
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0]!;
+    if (!ts.isIdentifier(decl.name)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    isConst = !!(stmt.initializer.flags & ts.NodeFlags.Const);
+    keyLocal = allocLocal(fctx, decl.name.text, { kind: "f64" });
+    if (isConst) {
+      if (!fctx.constBindings) fctx.constBindings = new Set();
+      fctx.constBindings.add(decl.name.text);
+    }
+  } else if (ts.isIdentifier(stmt.initializer)) {
+    const varName = stmt.initializer.text;
+    keyLocal = fctx.localMap.get(varName) ?? allocLocal(fctx, varName, { kind: "f64" });
+  } else {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  emitArrayKeysEntriesLoop(ctx, fctx, stmt, receiver, (lenLocal, iLocal) => {
+    // key = f64(i)
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    fctx.body.push({ op: "local.set", index: keyLocal });
+    void lenLocal;
+  });
+}
+
+/**
+ * #681: `for ([k, v] of arr.entries())` — Array.prototype.entries() (§23.1.3.4)
+ * yields a `[index, value]` pair for each element in order. The overwhelmingly
+ * common form destructures the pair directly, so bind `k = f64(i)` and
+ * `v = data[i]` per iteration without materializing a pair object. A
+ * non-destructured `for (pair of arr.entries())` would need a 2-tuple value —
+ * out of this slice — so it falls through to the iterator path.
+ */
+function compileForOfArrayEntries(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+): void {
+  // Only support the destructured `[k, v]` binding/assignment form here.
+  let pattern: ts.ArrayBindingPattern | undefined;
+  let assignPattern: ts.ArrayLiteralExpression | undefined;
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0]!;
+    if (!ts.isArrayBindingPattern(decl.name)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    pattern = decl.name;
+    if (stmt.initializer.flags & ts.NodeFlags.Const) {
+      collectBindingNames(decl.name).forEach((n) => {
+        if (!fctx.constBindings) fctx.constBindings = new Set();
+        fctx.constBindings.add(n);
+      });
+    }
+  } else if (ts.isArrayLiteralExpression(stmt.initializer)) {
+    assignPattern = stmt.initializer;
+  } else {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  // Resolve the element (value) Wasm type from the receiver's vec/arr type.
+  const probeBody = fctx.body.length;
+  const probeLocals = snapshotLocals(fctx);
+  const recvType = compileExpression(ctx, fctx, receiver);
+  fctx.body.length = probeBody;
+  restoreLocals(fctx, probeLocals);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, recvType.typeIdx);
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+  const elemType = arrDef.element;
+
+  // Identify the two binding targets [k, v]. Holes (`[, v]`) and rest
+  // (`[k, ...rest]`) are not handled in this slice → fall back.
+  const elements = pattern ? pattern.elements : assignPattern!.elements;
+  if (elements.length !== 2) {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  // Bind key target (a number identifier) and value target. Only simple
+  // identifier targets are supported here; nested patterns fall back.
+  const keyEl = elements[0]!;
+  const valEl = elements[1]!;
+  let keyLocal: number | undefined;
+  let valLocal: number | undefined;
+  if (pattern) {
+    if (
+      !ts.isBindingElement(keyEl) ||
+      keyEl.dotDotDotToken ||
+      !ts.isIdentifier(keyEl.name) ||
+      !ts.isBindingElement(valEl) ||
+      valEl.dotDotDotToken ||
+      !ts.isIdentifier(valEl.name)
+    ) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    keyLocal = allocLocal(fctx, keyEl.name.text, { kind: "f64" });
+    valLocal = allocLocal(fctx, valEl.name.text, elemType);
+  } else {
+    if (!ts.isIdentifier(keyEl) || !ts.isIdentifier(valEl)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    keyLocal = fctx.localMap.get(keyEl.text) ?? allocLocal(fctx, keyEl.text, { kind: "f64" });
+    valLocal = fctx.localMap.get(valEl.text) ?? allocLocal(fctx, valEl.text, elemType);
+  }
+
+  emitArrayKeysEntriesLoop(ctx, fctx, stmt, receiver, (lenLocal, iLocal, dataLocal, loopArrTypeIdx) => {
+    // key = f64(i)
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    fctx.body.push({ op: "local.set", index: keyLocal! });
+    // value = data[i]
+    fctx.body.push({ op: "local.get", index: dataLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "array.get", typeIdx: loopArrTypeIdx });
+    const valLocalType = getLocalType(fctx, valLocal!);
+    if (valLocalType && !valTypesMatch(elemType, valLocalType)) {
+      coerceType(ctx, fctx, elemType, valLocalType);
+    }
+    emitCoercedLocalSet(ctx, fctx, valLocal!, elemType);
+    void lenLocal;
+  });
+}
+
+/**
+ * #681 shared driver for `.keys()`/`.entries()` for-of: build a `block { loop }`
+ * index loop over the receiver vec, invoking `bindIteration` to project the
+ * per-iteration binding(s) before the user body runs. Mirrors compileForOfArray's
+ * length read, break/continue depth bookkeeping and null guard.
+ */
+function emitArrayKeysEntriesLoop(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+  bindIteration: (lenLocal: number, iLocal: number, dataLocal: number, arrTypeIdx: number) => void,
+): void {
+  const bodyLenBefore = fctx.body.length;
+  const vecType = compileExpression(ctx, fctx, receiver);
+  if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
+    fctx.body.length = bodyLenBefore;
+    reportError(ctx, stmt, "for-of requires an array expression");
+    return;
+  }
+  const vecTypeIdx = vecType.typeIdx;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") {
+    fctx.body.length = bodyLenBefore;
+    reportError(ctx, stmt, "for-of requires an array type");
+    return;
+  }
+
+  // Save vec ref to temp local
+  const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+
+  // Mark position for null guard wrapping (struct.get on null ref traps).
+  const nullGuardStart = fctx.body.length;
+
+  // data = vec.data
+  const dataLocal = allocLocal(fctx, `__forof_data_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dataLocal });
+
+  // len = vec.length
+  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: lenLocal });
+
+  // i = 0
+  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
+
+  // Build loop body
+  const savedBody = pushBody(fctx);
+
+  // block+loop adds 2 nesting levels
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
+  adjustRethrowDepth(fctx, 2);
+
+  fctx.breakStack.push(1); // break = exit block
+  fctx.continueStack.push(0); // continue = restart loop
+
+  // i >= len → break
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "br_if", depth: 1 });
+
+  // Project the per-iteration binding(s).
+  bindIteration(lenLocal, iLocal, dataLocal, arrTypeIdx);
+
+  // Compile body — save/restore block-scoped shadows for let/const (#817).
+  if (ts.isBlock(stmt.statement)) {
+    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
+    for (const s of stmt.statement.statements) {
+      compileStatement(ctx, fctx, s);
+    }
+    restoreBlockScopedShadows(fctx, savedScope);
+  } else {
+    compileStatement(ctx, fctx, stmt.statement);
+  }
+
+  // i += 1
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: iLocal });
+
+  fctx.body.push({ op: "br", depth: 0 }); // continue loop
+
+  const loopBody = fctx.body;
+  fctx.breakStack.pop();
+  fctx.continueStack.pop();
+
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
+  adjustRethrowDepth(fctx, -2);
+
+  popBody(fctx, savedBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
+
+  // Null guard: throw TypeError for genuinely null receiver (`arr` is null).
+  if (vecType.kind === "ref_null") {
+    const guardedInstrs = fctx.body.splice(nullGuardStart);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+      else: guardedInstrs,
+    });
+  }
+}
+
+/**
  * Handle assignment destructuring for the iterator protocol path.
  * Element is externref — use __extern_get(elem, key) to extract properties/indices.
  */
@@ -2837,15 +3145,12 @@ function compileForOfIteratorAssignDestructuring(
   elemLocal: number,
   stmt: ts.ForOfStatement,
 ): void {
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   if (ts.isObjectLiteralExpression(expr)) {

@@ -390,4 +390,23 @@ if (hasDashboardBundle) {
   );
 }
 
+// Copy plan/issues markdown files so dashboard issue.html can fetch them
+// client-side via the URL /plan/issues/<slug>.md
+copyDirectoryIfExists(join(PLAN_DIR, "issues"), join(PAGES_DIST, "plan", "issues"));
+
+// Write a lightweight id → filename index next to the copied issue files so the
+// dashboard issue page can resolve a bare id (?slug=681) to its full filename.
+// (Dev serves the equivalent on the fly via website/playground/vite-plugin-dashboard.ts.)
+{
+  const issuesOut = join(PAGES_DIST, "plan", "issues");
+  if (existsSync(issuesOut)) {
+    const idIndex = {};
+    for (const name of readdirSync(issuesOut)) {
+      const m = name.match(/^(\d+[a-z]?)(?:-.*)?\.md$/i);
+      if (m) idIndex[m[1]] = name.replace(/\.md$/, "");
+    }
+    writeFileSync(join(issuesOut, "index.json"), JSON.stringify(idIndex));
+  }
+}
+
 console.log(`GitHub Pages artifact ready at ${PAGES_DIST}`);

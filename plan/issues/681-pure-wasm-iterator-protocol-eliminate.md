@@ -8,7 +8,7 @@ priority: high
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
-sprint: 59
+sprint: 60
 depends_on: [680]
 required_by: [735]
 files:
@@ -114,3 +114,38 @@ direct-array path. `.keys()`/`.entries()` (different element shape — index, or
 
 Source: loops.ts `compileForOfStatement` recognizer + a `valuesReceiverForForOf`
 helper. JS-host mode is unchanged (still routes through `__array_values`).
+
+## 2026-06-05 follow-up slice (dev-iter): native `.keys()` + `.entries()` for-of
+
+Built directly on the `.values()` slice. The `.values()` recognizer
+(`valuesReceiverForForOf`) is generalized to `arrayIteratorReceiverForForOf`,
+which now also matches `<vec>.keys()` (§23.1.3.16) and `<vec>.entries()`
+(§23.1.3.4). Two new dedicated lowerings drive a pure-Wasm index loop over the
+receiver vec and project the correct per-iteration value:
+
+- **`.keys()`** → `compileForOfArrayKeys`: binds the loop variable to `f64(i)`
+  each iteration. Only a simple-identifier binding is supported (`.keys()`
+  yields numbers); other binding forms fall through to the iterator path.
+- **`.entries()`** → `compileForOfArrayEntries`: for the common destructured
+  `for (const [k, v] of arr.entries())` form, binds `k = f64(i)` and
+  `v = data[i]` directly — no pair object is materialized. Non-destructured /
+  nested / hole / rest forms fall through.
+
+Both share `emitArrayKeysEntriesLoop`, which mirrors `compileForOfArray`'s
+length read, `block { loop }` structure, break/continue depth bookkeeping and
+genuinely-null receiver TypeError guard. JS-host mode is unchanged. The three
+Array iterator methods now lower natively in standalone/WASI with **zero**
+`__array_keys`/`__array_entries`/`__array_values` host imports.
+
+Validated (compile + run under `--target standalone` / `--target wasi` and
+JS-host default): keys/entries sums, break/continue, empty arrays, variable
+receivers — all correct, no iterator host imports. Tests in
+`tests/issue-681-standalone-iterators.test.ts` (7 passing).
+
+### Remaining #681 gap (still open — keeps this umbrella in-progress)
+
+Generic for-of over an opaque externref `any` (a runtime `GetIterator` →
+`IteratorStepValue` machine on an arbitrary externref) still hard-errors in
+standalone — the genuinely-hard residual called out in the 2026-06-03 profile.
+Non-destructured `for (pair of arr.entries())` (needs a materialized 2-tuple)
+is also a deliberate fall-through, not yet native.

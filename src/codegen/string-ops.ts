@@ -21,10 +21,17 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
-import { coerceType, emitGuardedRefCast, pushDefaultValue, pushParamSentinel } from "./type-coercion.js";
+import {
+  coerceType,
+  emitGuardedRefCast,
+  pushDefaultValue,
+  pushParamSentinel,
+  tryStructToString,
+} from "./type-coercion.js";
 
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): void {
@@ -134,6 +141,13 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
   }
 
   if (opType.kind === "ref" || opType.kind === "ref_null") {
+    // #1806 Phase 1 (string-hint): when the operand is a compile-time-resolvable
+    // object struct with its own `@@toPrimitive`/`toString`, dispatch that method
+    // (OrdinaryToPrimitive, hint "string") instead of `$__any_to_string`, which
+    // can only yield "[object Object]" for a struct it cannot introspect.
+    if (tryStructToString(ctx, fctx, opType)) {
+      return true;
+    }
     // Object / array / any-boxed ref → $__any_to_string. The helper accepts
     // anyref (the supertype), so the struct ref is already assignable.
     const anyToStrIdx = ensureAnyToStringHelper(ctx);
@@ -390,13 +404,15 @@ export function compileNativeTemplateExpression(
       }
     } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null")) {
       if (standaloneNativeStrings) {
-        // #1470 — object/any substitution in WASI/standalone: route through the
-        // pure-Wasm `$__any_to_string` dispatch helper (AnyString passthrough,
-        // AnyValue tag dispatch, "[object Object]" fallback) instead of failing
-        // compilation. Spec-correct toString()/@@toPrimitive vtable dispatch for
-        // ordinary objects lands with #1472.
-        const anyToStrIdx = ensureAnyToStringHelper(ctx);
-        fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+        // #1806 Phase 1 (string-hint): compile-time-resolvable object struct →
+        // dispatch its own `@@toPrimitive`/`toString` (OrdinaryToPrimitive, hint
+        // "string"). Falls through to `$__any_to_string` only when no static
+        // method exists (e.g. eqref-stored closure) — which yields AnyString
+        // passthrough / AnyValue tag dispatch / "[object Object]" as before.
+        if (!tryStructToString(ctx, fctx, spanType)) {
+          const anyToStrIdx = ensureAnyToStringHelper(ctx);
+          fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+        }
       } else {
         // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
         coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
@@ -2432,6 +2448,24 @@ export function compileNativeStringMethodCall(
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
+  // static RegExp routes to the pure-WasmGC matcher (returns the match index or
+  // -1) instead of the host regex engine. The string-coercion form (string
+  // argument) is not a RegExp value and falls through to the refusal below.
+  if (ctx.standalone && method === "search") {
+    const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess);
+    if (searchResult !== undefined) return searchResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.replace(/re/, "str")` / `replaceAll`
+  // against a backend-created static RegExp with a literal replacement routes
+  // to the pure-WasmGC matcher (returns the rebuilt NativeString). `$`-pattern /
+  // function replacers and the string-coercion form fall through to the refusal.
+  if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
+    const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
+    if (replaceResult !== undefined) return replaceResult;
+  }
+
   if (ctx.standalone) {
     const alwaysRegExp = method === "match" || method === "matchAll" || method === "search";
     const symbolProtocolArgForm =

@@ -1,15 +1,16 @@
 ---
 id: 1827
 title: "BigInt loose-equality loses precision / wrong semantics (== String, == Number)"
-status: ready
+status: done
 created: 2026-06-04
 updated: 2026-06-04
+completed: 2026-06-05
 priority: medium
 feasibility: medium
 task_type: bugfix
 area: codegen
 goal: correctness
-sprint: 59
+sprint: 60
 ---
 # #1827 — BigInt loose-equality precision / semantics
 

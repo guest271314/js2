@@ -927,6 +927,28 @@ export function generateModule(
       // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
       // additive (empty result ⇒ emitted module identical to today).
       ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
+      // #1886 Slice B: reserve the `__lin_u8_alloc` bump-allocator's
+      // `(i32)->(i32)` func TYPE eagerly, here — BEFORE any WasmGC struct/array
+      // type or native-string helper is registered. This keeps the shared
+      // `ctx.mod.types` prefix stable: the allocator type lands at a low, fixed
+      // index, so later string-helper struct/array type indices (which their
+      // bodies bake absolutely, e.g. `__str_flatten`'s `(ref null $type)`) are
+      // not shifted. The allocator FUNCTION itself is emitted later, in the
+      // post-import-registration helper block, so its DEFINED-function index is
+      // assigned after every late `env.*` import (e.g. `env.__extern_get` for
+      // `buf[i]` externref element access) is already counted — keeping the
+      // baked `call $__lin_u8_alloc` index correct. Splitting type (early) from
+      // function (late) is what resolves the dual constraint that defeated both
+      // the all-early and all-late single-shot emission points.
+      // Reserve the allocator's func type exactly when a Slice-B-eligible
+      // (intraprocedural, never param-threaded) buffer exists — that is the
+      // only case where `ensureLinearU8AllocHelper` actually emits the helper
+      // and bakes a `call $__lin_u8_alloc`. Gating on `localOnlyBindings`
+      // rather than `safeBindings` avoids reserving a dead func type for a
+      // source whose only safe buffers are param-threaded (Slice-C targets).
+      if (ctx.linearUint8.localOnlyBindings.size > 0) {
+        reserveLinearU8AllocType(ctx);
+      }
     }
 
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
@@ -1042,6 +1064,21 @@ export function generateModule(
     // funcMap, and addImport callers earlier in this pipeline (lib-globals
     // scan adding `eval` / `parseInt`) do not shift defined-func entries.
     emitDeferredWasiHelpers(ctx);
+
+    // #1886 Slice B — emit the `__lin_u8_alloc` bump-allocator FUNCTION here,
+    // in the same post-import-registration window as emitToUint32Helper /
+    // emitDeferredWasiHelpers and for the same reason: all the eager import
+    // collectors (collectUsedExternImports adds `env.__extern_get`;
+    // collectAllSourceImports; the __register_prototype pair) have run, so
+    // `numImportFuncs` is stable and the allocator's defined-func index — which
+    // every `call $__lin_u8_alloc` resolves against — is final. Its func TYPE
+    // was already reserved early (see reserveLinearU8AllocType) so the GC /
+    // native-string type-table prefix is unperturbed. Any import added DURING
+    // the compilation phase that follows goes through the proper late-import
+    // shift path, which moves both `funcMap` and the baked `call` indices.
+    if (ctx.wasi && ctx.linearUint8 && ctx.linearUint8.localOnlyBindings.size > 0) {
+      ensureLinearU8AllocHelper(ctx);
+    }
 
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
@@ -1434,6 +1471,11 @@ export function generateModule(
     // (necessary because __vec_len returns 0 for both empty arrays and
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
+
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (closures registered after the typeof helpers were
+    // synthesised mid-compile). Edits the helper bodies in place — no funcIdx churn.
+    fillStandaloneTypeofClosureArms(ctx);
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
@@ -2723,6 +2765,55 @@ function emitClosureCallExport4(ctx: CodegenContext): void {
 }
 
 /**
+ * #1896 — Decide whether a host-supplied `externref` closure-call argument must
+ * be lowered out of the extern domain before it feeds the closure's `call_ref`.
+ *
+ * The `__call_fn_<arity>` / `__call_fn_method_<arity>` exports take all user
+ * args as `externref` (the host ABI). The lifted closure funcref, however,
+ * declares each user param with the closure's *internal* ValType. Under the
+ * native-strings backends a `string` param lowers to `(ref null $AnyString)`
+ * (a concrete struct ref), so the raw `externref` arg mismatches `call_ref`
+ * and the module fails validation. In `wasm:js-string` (gc) mode the string
+ * param ValType *is* `externref`, so no conversion is needed.
+ *
+ * Returns true for non-extern reference param kinds (`anyref`/`eqref`/`ref`/
+ * `ref_null`); false for `externref`/`ref_extern` (already extern-side) and for
+ * the numeric/value kinds (handled by the f64/i32 unbox branches at the call
+ * site, or simply not reference args).
+ */
+function needsExternToAnyForClosureParam(paramType: ValType): boolean {
+  switch (paramType.kind) {
+    case "anyref":
+    case "eqref":
+    case "ref":
+    case "ref_null":
+      return true;
+    default:
+      // externref / ref_extern (already extern), funcref, and value types.
+      return false;
+  }
+}
+
+/**
+ * #1896 — Lower an `externref` closure-call arg into the internal ref domain
+ * expected by the closure funcref's declared param ValType. `any.convert_extern`
+ * moves externref → anyref (engine-level identity); for a *concrete* ref param
+ * (`ref`/`ref_null` to a struct type, e.g. `(ref null $AnyString)`) a following
+ * `ref.cast` narrows anyref → the exact param type so `call_ref` typechecks.
+ * `anyref`/`eqref` params need no cast. Caller must have checked
+ * `needsExternToAnyForClosureParam(paramType)` first.
+ */
+function externToClosureParamRef(paramType: ValType): Instr[] {
+  const ops: Instr[] = [{ op: "any.convert_extern" } as Instr];
+  if (paramType.kind === "ref") {
+    ops.push({ op: "ref.cast", typeIdx: paramType.typeIdx } as Instr);
+  } else if (paramType.kind === "ref_null") {
+    ops.push({ op: "ref.cast_null", typeIdx: paramType.typeIdx } as Instr);
+  }
+  return ops;
+}
+
+/**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
  * and returns externref. Used by `__array_from`, `__proto_method_call`, and
@@ -2868,8 +2959,17 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // The host-facing param is `externref`, but the closure funcref
+          // declares this reference param as a non-extern ref type (anyref or
+          // a WasmGC struct ref — e.g. a native-strings `string` lowers to
+          // `(ref null $AnyString)`). Lower the host externref to the internal
+          // ref domain so the subsequent `call_ref` typechecks. In
+          // `wasm:js-string` (gc) mode string params ARE externref, so this
+          // branch is skipped and the arg passes raw.
+          ops.push(...externToClosureParamRef(paramType));
         }
-        // externref: no conversion
+        // externref param: no conversion
       }
       return ops;
     };
@@ -3125,6 +3225,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
             ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
             ops.push({ op: "i32.trunc_f64_s" });
           }
+        } else if (needsExternToAnyForClosureParam(paramType)) {
+          // See emitClosureCallExportN: a non-extern reference param (anyref /
+          // WasmGC struct ref, e.g. a native-strings `string`) needs the host
+          // externref lowered into the internal ref domain before `call_ref`.
+          // Skipped in gc mode where string params are already externref.
+          ops.push(...externToClosureParamRef(paramType));
         }
       }
       return ops;
@@ -3257,12 +3363,17 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
  * (#1504). No-op when the module has no closures.
  */
-function emitIsClosureExport(ctx: CodegenContext): void {
+/**
+ * Collect the deduped set of closure base-wrapper struct type indices from
+ * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
+ * their funcref signature with the base wrapper post-V8 canonicalisation, so a
+ * `ref.test` against the base catches all of them. Walks each registered
+ * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
+ * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
+ * closure-recognition arms.)
+ */
+function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
   const mod = ctx.mod;
-
-  // Collect base wrapper struct types (deduped). Concrete closure subtypes
-  // share their funcref signature with the base wrapper post-V8 canonicalisation,
-  // so ref.test against the base catches all of them.
   const baseTypeIdxs: number[] = [];
   const seenBase = new Set<number>();
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
@@ -3284,6 +3395,16 @@ function emitIsClosureExport(ctx: CodegenContext): void {
       baseTypeIdxs.push(root);
     }
   }
+  return baseTypeIdxs;
+}
+
+function emitIsClosureExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  // Collect base wrapper struct types (deduped). Concrete closure subtypes
+  // share their funcref signature with the base wrapper post-V8 canonicalisation,
+  // so ref.test against the base catches all of them.
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
   if (baseTypeIdxs.length === 0) return;
 
   const isClosureTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_closure_type");
@@ -3318,6 +3439,93 @@ function emitIsClosureExport(ctx: CodegenContext): void {
     name: "__is_closure",
     desc: { kind: "func", index: funcIdx },
   });
+}
+
+/**
+ * #1896 — teach the standalone/WASI native `__typeof_function` and
+ * `__typeof_object` helpers to recognise closure wrapper structs.
+ *
+ * Those helpers are synthesised by `addUnionImportsAsNativeFuncs`, which runs
+ * once on the first `addUnionImports` call — frequently *mid-compile*, before
+ * every closure type has been registered in `ctx.closureInfoByTypeIdx`. Baking
+ * the base-wrapper set at registration time would therefore miss later-registered
+ * closures. Instead we rewrite the two helper bodies HERE, at finalize, after all
+ * closures are registered (same late timing as `emitIsClosureExport`). We locate
+ * the functions by name in `ctx.mod.functions` and splice in `ref.test` arms over
+ * the closure base wrappers — no funcIdx churn (we edit existing bodies in place).
+ *
+ * - `__typeof_function`: was `i32.const 0` (wrong — a stored standalone closure
+ *   is callable). Now: `any.convert_extern` then chained `ref.test` over each
+ *   closure base wrapper; return 1 on first match, else 0.
+ * - `__typeof_object`: add a closure-base-wrapper `ref.test` guard that returns 0
+ *   (a callable is `"function"`, never `"object"`) BEFORE the final non-null
+ *   `i32.const 1`, so a wrapper read back from an open-object slot is not
+ *   mis-classified as `"object"`.
+ *
+ * No-op unless native-strings (the helpers only exist then) and at least one
+ * closure base wrapper was registered.
+ */
+function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
+  if (!ctx.nativeStrings) return;
+  const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
+  if (baseTypeIdxs.length === 0) return;
+
+  const fnByName = (name: string): WasmFunction | undefined =>
+    ctx.mod.functions.find((f) => (f as { name?: string }).name === name) as WasmFunction | undefined;
+
+  // Chained `ref.test` arms over the anyref-converted param in local 0/1. Each
+  // arm returns `matchValue` on hit. Caller supplies the param→anyref local.
+  const closureTestArms = (anyLocalIdx: number, matchValue: number): Instr[] => {
+    const arms: Instr[] = [];
+    for (const t of baseTypeIdxs) {
+      arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
+      arms.push({ op: "ref.test", typeIdx: t } as Instr);
+      arms.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: matchValue } as Instr, { op: "return" } as Instr],
+      } as Instr);
+    }
+    return arms;
+  };
+
+  // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
+  const tf = fnByName("__typeof_function");
+  if (tf) {
+    // Ensure an anyref local exists for the converted param (local index 1).
+    if (tf.locals.length === 0) {
+      tf.locals.push({ name: "$any_temp", type: { kind: "anyref" } });
+    }
+    tf.body = [
+      { op: "local.get", index: 0 } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
+      } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+      ...closureTestArms(1, 1),
+      { op: "i32.const", value: 0 } as Instr,
+    ];
+  }
+
+  // --- __typeof_object: insert closure-exclusion (return 0) before the trailing
+  // non-null `i32.const 1`. The existing body already converts the param to
+  // anyref into local 1 (`$any_temp`) for its boxed-primitive guards, so reuse it.
+  const to = fnByName("__typeof_object");
+  if (to) {
+    const b = to.body;
+    // The body ends with `{ i32.const 1 }` (the "non-null → object" fallthrough).
+    // Splice the closure-exclusion arms immediately before that terminal const.
+    const lastIdx = b.length - 1;
+    const last = b[lastIdx] as { op?: string; value?: number } | undefined;
+    if (last && last.op === "i32.const" && last.value === 1) {
+      b.splice(lastIdx, 0, ...closureTestArms(1, 0));
+    }
+  }
 }
 
 /**
@@ -4423,6 +4631,10 @@ export function generateMultiModule(
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
 
+    // #1896: teach standalone __typeof_function/__typeof_object to recognise
+    // closure wrapper structs (edits helper bodies in place — no funcIdx churn).
+    fillStandaloneTypeofClosureArms(ctx);
+
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
 
@@ -4588,6 +4800,22 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     init: [{ op: "i32.const", value: 1024 } as Instr],
   });
   ctx.wasiBumpPtrGlobalIdx = bumpGlobalIdx;
+
+  // #1886 Slice B — dedicated bump pointer for linear-backed Uint8Array buffers.
+  // Starts at LINEAR_U8_ARENA_START (page 4) so it never aliases the page-0
+  // string-literal data segments, the page-1 stdin buffer, or the page-2 write
+  // scratch. (`$__wasi_bump_ptr` above is for string-literal data and lives in
+  // page 0, so it is unsuitable.) The allocator + memory growth are emitted
+  // lazily on first use (see ensureLinearU8AllocHelper); the region grows on
+  // demand via memory.grow, so reserving 3 pages here is still enough.
+  const u8ArenaGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__lin_u8_arena_ptr",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: LINEAR_U8_ARENA_START } as Instr],
+  });
+  ctx.linearU8ArenaGlobalIdx = u8ArenaGlobalIdx;
 
   // Check if source uses console.log/warn/error, process.exit, or node:fs functions
   let needsFdWrite = false;
@@ -5074,6 +5302,118 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
 const WASI_WRITE_SCRATCH_START = 128 * 1024;
+
+/**
+ * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
+ * 256 KiB). It sits above the page-2 write scratch with page 3 left as a guard,
+ * so a proven-I/O-only buffer never aliases the iovec scratch, string-literal
+ * data, the stdin buffer, or the write scratch. The arena grows on demand via
+ * `memory.grow` in `__lin_u8_alloc`.
+ */
+const LINEAR_U8_ARENA_START = 256 * 1024;
+
+/**
+ * #1886 Slice B — Ensure the `__lin_u8_alloc(len: i32) -> i32` bump allocator
+ * exists and return its function index (lazy, emitted on first linear-backed
+ * `new Uint8Array`). Allocates `align8(len)` bytes from the page-4 linear arena
+ * pointed at by `$__lin_u8_arena_ptr`, growing memory on demand, and returns
+ * the (8-byte-aligned) base pointer. Mirrors the #1856 align8 + page-grow idiom
+ * from `codegen-linear/runtime.ts`; emitted here because the WasmGC front-end
+ * owns its own memory/globals and cannot call the linear backend bootstrap.
+ *
+ * NOTE: the returned region is NOT explicitly zero-filled — `memory.grow`
+ * zeroes fresh pages, and the arena today only ever grows (no reset yet, see
+ * Slice D), so every byte handed out is freshly-grown zero memory, satisfying
+ * the `new Uint8Array(n)` zero-fill contract. A future arena reset (Slice D)
+ * that reuses slots must `memory.fill` callers' buffers.
+ */
+export function reserveLinearU8AllocType(ctx: CodegenContext): void {
+  // #1886 Slice B — reserve the allocator's `(i32)->(i32)` func TYPE eagerly,
+  // before any WasmGC struct/array type or native-string helper is registered,
+  // so the shared `ctx.mod.types` prefix stays stable when those later types
+  // (whose absolute indices their bodies bake) are added. Idempotent. The
+  // allocator FUNCTION is emitted later in `ensureLinearU8AllocHelper`, in the
+  // post-import-registration window, so its DEFINED-function index is final.
+  if (ctx.linearU8AllocTypeIdx !== undefined) return;
+  if (!ctx.wasi) return;
+  ctx.linearU8AllocTypeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+}
+
+export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
+  if (ctx.linearU8AllocFuncIdx !== undefined) return ctx.linearU8AllocFuncIdx;
+  if (!ctx.wasi || ctx.linearU8ArenaGlobalIdx === undefined) return -1;
+
+  const arenaGlobal = ctx.linearU8ArenaGlobalIdx;
+  // param: len(0); locals: ret(1), next(2)
+  const LEN = 0;
+  const RET = 1;
+  const NEXT = 2;
+  const PAGE = 65536;
+
+  // Reuse the eagerly-reserved func type when present (keeps the type-table
+  // prefix stable for native-string helpers); fall back to registering it now
+  // for any path that reaches the allocator without the early reservation.
+  const funcTypeIdx = ctx.linearU8AllocTypeIdx ?? addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__lin_u8_alloc", funcIdx);
+
+  const body: Instr[] = [
+    // ret = arena_ptr
+    { op: "global.get", index: arenaGlobal } as Instr,
+    { op: "local.set", index: RET } as Instr,
+    // next = align8(ret + len) = (ret + len + 7) & ~7
+    { op: "local.get", index: RET } as Instr,
+    { op: "local.get", index: LEN } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 7 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: -8 } as Instr,
+    { op: "i32.and" } as Instr,
+    { op: "local.set", index: NEXT } as Instr,
+    // if (next > memory.size * PAGE) grow by ceil((next - cur)/PAGE)
+    { op: "local.get", index: NEXT } as Instr,
+    { op: "memory.size" } as Instr,
+    { op: "i32.const", value: PAGE } as Instr,
+    { op: "i32.mul" } as Instr,
+    { op: "i32.gt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: NEXT } as Instr,
+        { op: "memory.size" } as Instr,
+        { op: "i32.const", value: PAGE } as Instr,
+        { op: "i32.mul" } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "i32.const", value: PAGE - 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "i32.const", value: PAGE } as Instr,
+        { op: "i32.div_u" } as Instr,
+        { op: "memory.grow" } as Instr,
+        { op: "drop" } as Instr,
+      ],
+    } as Instr,
+    // arena_ptr = next
+    { op: "local.get", index: NEXT } as Instr,
+    { op: "global.set", index: arenaGlobal } as Instr,
+    // return ret
+    { op: "local.get", index: RET } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: "__lin_u8_alloc",
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "ret", type: { kind: "i32" } },
+      { name: "next", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  ctx.linearU8AllocFuncIdx = funcIdx;
+  return funcIdx;
+}
 
 /**
  * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
@@ -10730,6 +11070,26 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
       // #1210: skip declarations matched by detectStringBuilders — their
       // storage is replaced by a synthetic buffer triple at compile time.
       if (fctx.pendingStringBuilders?.has(decl)) continue;
+      // #1886 Slice B: skip linear-backed `new Uint8Array(...)` bindings — their
+      // storage is a synthetic (ptr,len) i32 pair set up at the declaration site
+      // (see tryEmitLinearU8New), and the name is intentionally kept out of
+      // localMap so reads route through `fctx.linearU8Buffers`. Pre-allocating a
+      // GC `(ref null …)` local here would leave a dangling uninitialised local
+      // (which the function finalizer then treats as a live value).
+      if (
+        ctx.linearUint8 &&
+        ts.isIdentifier(decl.name) &&
+        decl.initializer &&
+        ts.isNewExpression(decl.initializer) &&
+        ts.isIdentifier(decl.initializer.expression) &&
+        decl.initializer.expression.text === "Uint8Array"
+      ) {
+        const sym = ctx.checker.getSymbolAtLocation(decl.name);
+        // Consult `localOnlyBindings` (the Slice-B intraprocedural subset), not
+        // `safeBindings` — only those bindings are actually linear-backed by
+        // tryEmitLinearU8New, so only those must have their GC hoist skipped.
+        if (sym && ctx.linearUint8.localOnlyBindings.has(sym)) continue;
+      }
       if (ts.isIdentifier(decl.name)) {
         const name = decl.name.text;
         if (fctx.localMap.has(name)) continue;

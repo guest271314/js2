@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: regular expressions
 goal: standalone-wasm
-sprint: 59
+sprint: 60
 depends_on: [1474]
 related: [1474, 682, 1535]
 ---
@@ -505,3 +505,40 @@ Still open for #1539 (issue stays `in-progress`): Phase 2b capture
 arrays/`.exec`/`.match`/named groups; Phase 2c `.replace`/`.split`/`matchAll`
 and the `d` indices flag; Phase 2d `u`/`v` code-point semantics + fancy
 features.
+
+## Implementation Notes (dev-regex, 2026-06-05) — Phase 2b `String.prototype.search`
+
+Landed `String.prototype.search(/re/)` in standalone mode on the existing
+pure-WasmGC VM — the first **String-prototype** RegExp method to leave the
+#1474 refusal gate (the prior slices were all `RegExp.prototype.*`). Returns
+the match index (f64) or `-1`, matching ECMA-262 §22.1.3.13 + §22.2.6.13
+(`RegExp.prototype[@@search]`): search runs from index 0, is unaffected by the
+`g` flag, and never advances `lastIndex`. No new opcodes, no struct changes,
+no new Wasm helper — it reuses `__regex_search` (which already fills the
+capture-slots array) and reads `caps[0]` (whole-match start).
+
+- Refactor: extracted the `.test` body's "load `$NativeRegExp` struct + flatten
+  subject + alloc caps + compute sticky + call `__regex_search`" sequence into
+  two shared helpers in `regexp-standalone.ts` — `loadStandaloneRegExpStruct`
+  (narrows an externref backend-created RegExp back to the struct) and
+  `emitRegexSearchCall` (leaves the i32 match flag on the stack, exposes the
+  populated caps array). `.test` now returns that flag directly; `.search`
+  branches on it: `matched ? f64(caps[0]) : -1`. This shared seam is the
+  spine Phase 2b `.exec`/`.match` capture-array reads will build on.
+- Routing: `tryCompileStandaloneStringSearch` hooks
+  `compileNativeStringMethodCall` (string-ops.ts) *before* the #1474 refusal,
+  fired only when the receiver is string-like and the argument is a static /
+  backend-created RegExp (`/re/`, `new RegExp("…")`, or a `const re = /…/`
+  binding). The string-coercion form (string argument the spec wraps in
+  `new RegExp`) and JS-host mode are untouched — both still take the legacy
+  host path.
+- Flag/pattern subset: identical to the `.test` slice — literal / `.` /
+  `[...]` / `^`/`$` / quantifiers / `|` / groups; flags `i`/`g`/`y`/`m`/`s`.
+  `u`/`v`/`d` and fancy features stay narrowed refusals.
+
+Files: `src/codegen/regexp-standalone.ts` (shared helpers + search hook),
+`src/codegen/string-ops.ts` (route search before refusal).
+Tests: `tests/issue-1539-standalone-regex.test.ts` (75 dual-run `.search`
+cases vs native + var-bound/`new RegExp` arg forms), narrowed the `s.search`
+refusal in `tests/issue-1474-standalone-regex-refuse.test.ts` to a
+compiles-OK assertion.

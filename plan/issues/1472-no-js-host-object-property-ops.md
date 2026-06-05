@@ -940,3 +940,136 @@ helpers (the externref result loses its static type), and `Array.prototype.
 filter.call(arrayLike, …)` emits a module with independent standalone gaps. The
 helpers build correct structures (verified via the typed for-of consumer); the
 element-readback routing belongs with the Blocker A receiver-dispatch slice.
+
+## Phase C Slice — keyed presence: `in` / hasOwn (sd-1472c, 2026-06-05)
+
+Branch `issue-1472c-has` off origin/main. Native keyed presence checks over the
+`$Object` hash-map, closing the follow-up the Phase C Reflect note explicitly
+deferred ("a real keyed native `has` — thin wrapper over `__obj_find`").
+
+### What landed (`src/codegen/object-runtime.ts`)
+- `__extern_has(externref obj, externref key) -> i32` — ES §7.3.12 HasProperty:
+  own props AND the prototype chain. A proto-walk loop mirroring `__extern_get`
+  (calls `__obj_find` at each `$Object` level, walks `$proto`), but returns a
+  boolean (so a present-but-undefined property still reports 1). Drives the `in`
+  operator (`binary-ops.ts` routes `key in obj` to `__extern_has` for an
+  object-shaped externref receiver). Non-`$Object`/null → 0.
+- `__hasOwnProperty` / `__object_hasOwn (externref, externref) -> i32` — ES
+  §20.1.3.2 / §20.1.2.13: OWN-property presence only (no proto walk), via
+  `__obj_find` over the own props table (find already skips tombstones). Both
+  names share one body.
+- All three added to `OBJECT_RUNTIME_HELPER_NAMES` so `ensureLateImport` routes
+  them through `ensureObjectRuntime` under `ctx.standalone` BEFORE the Phase A
+  `__extern_*`/`__hasOwnProperty`/`__object_hasOwn` refuse gate. No imports
+  added ⇒ no index shift.
+
+### Proven (`tests/issue-1472.test.ts`, instantiate-and-run, empty imports)
+- `key in obj` over an open `any` (computed-key writes defeat closed-struct
+  inference): present→1, absent→0; zero `env::__extern_has` / object imports.
+- `Object.hasOwn(o, k)`: own→1, absent→0; zero `env::__object_hasOwn` imports.
+
+### Scoping note (out of scope — method-dispatch gap)
+`o.hasOwnProperty(k)` (the bare *method-call* form) does NOT reach
+`__hasOwnProperty` — it routes through `__proto_method_call` (the open-`any`
+method-dispatch path), which is still refused under standalone. The native
+`__hasOwnProperty` func is in place for when that dispatch lands (the
+`__extern_method_call`/`__proto_method_call` slice). `Object.hasOwn(o, k)` is the
+host-free own-check today. `Object.prototype.hasOwnProperty.call(o, k)` likewise
+needs the method-dispatch slice. The big win in this slice is the `in` operator
+(`__extern_has`).
+
+## Phase C Slice — prototype-chain ops (sd-1472c, 2026-06-05)
+
+Branch `issue-1472c-proto` off origin/main. Native getPrototypeOf / Object.create
+/ isPrototypeOf over the existing `$Object.$proto` field (field 0). The runtime
+already *walks* the chain (`__extern_get`/`__extern_has`); these expose it.
+
+### What landed (`src/codegen/object-runtime.ts`)
+- `__getPrototypeOf(externref) -> externref` (ES §20.1.2.12): `$Object` →
+  `extern.convert_any($proto)` (may be null); non-`$Object` → null.
+- `__object_create(externref proto) -> externref` (ES §20.1.2.2): fresh empty
+  `$Object` (new `$PropMap(INITIAL_CAP)`, count/tombstones/flags = 0) with
+  `$proto` = (proto is `$Object` ? cast : null). `Object.create(null)` passes a
+  null externref ⇒ `$proto` stays null. (The descriptors 2nd arg is materialised
+  separately by the existing call site.)
+- `__isPrototypeOf(externref obj, externref candidate) -> i32` (ES §20.1.3.3):
+  walk `candidate.$proto` and `ref.eq` each level against obj; 1 if found, else 0.
+- All three added to `OBJECT_RUNTIME_HELPER_NAMES` (routed under `ctx.standalone`
+  before the Phase A `__getPrototypeOf`/`__isPrototypeOf` refuse gate). No imports
+  added ⇒ no index shift.
+
+### Proven (`tests/issue-1472.test.ts`, instantiate-and-run, empty imports)
+- `Object.create(proto)` + `Object.getPrototypeOf(o) === proto` + inherited read
+  through the chain → 8; zero `env::__getPrototypeOf`/`__object_create` imports.
+- `Object.getPrototypeOf({})` → null (bare open object has null `$proto` in
+  standalone — no built-in Object.prototype graph) → 5.
+
+### Deliberately NOT in this slice
+- **`Object.setPrototypeOf(o, p)`** is *stubbed* at its call site (`calls.ts`
+  ~L3857) in ALL modes — it drops the proto arg and returns obj, so a native
+  `__object_setPrototypeOf` would be dead code. Wiring the `$proto` write needs a
+  dual-mode change to that stubbed call site (a separate follow-up).
+- **`obj.isPrototypeOf(x)`** (the bare method-call form) routes through
+  `__proto_method_call` (open-`any` method dispatch), still refused — the native
+  `__isPrototypeOf` func is in place for when that dispatch lands.
+- Primitive receivers (`getPrototypeOf(5)` → Number.prototype) return null —
+  acceptable, since standalone ships no built-in prototype graph (the broader
+  `__get_builtin` architectural item).
+
+## Phase C Slice — `__extern_is_undefined` native (sd-1472c, 2026-06-05)
+
+Branch `issue-1472c-is-undefined` off origin/main. Routes the single largest
+remaining standalone-refusal helper (`__extern_is_undefined`, ~6.6k tests in the
+live standalone run) to a native Wasm function instead of the Phase A refusal.
+
+### Root cause / design
+`__extern_is_undefined` is the undefinedness predicate behind every
+default-parameter / destructuring-default fire (`function-body.ts`,
+`closures.ts`, `class-bodies.ts`, `statements/destructuring.ts`) and the
+`x === undefined` / `x == null` comparisons over an externref value
+(`binary-ops.ts`). The JS-host import is `(v) => (v === undefined ? 1 : 0)` —
+it distinguishes JS `undefined` (a *defined* externref minted by
+`__get_undefined`) from `null`. Standalone has **no** `__get_undefined`:
+`emitUndefined` (late-imports.ts) falls back to `ref.null.extern`, so the
+runtime represents BOTH `undefined` and `null` as the null externref. The
+standalone `__typeof_undefined` helper (`addUnionImportsAsNativeFuncs` in
+index.ts) already encodes exactly this conflation as a bare `ref.is_null`.
+
+So the correct native `__extern_is_undefined` under standalone is the **same**
+`ref.is_null` — internally consistent with `__typeof_undefined`, and exactly
+the predicate the callers want: a missing/omitted argument arrives as the null
+externref (the same value `undefined` lowers to), so `ref.is_null` applies the
+binding default in precisely the "value is undefined" cases (§14.3.3
+Keyed/Iterator BindingInitialization defaults fire when the bound value is
+`undefined`).
+
+### What landed
+- `src/codegen/object-runtime.ts`: registers `__extern_is_undefined(externref)
+  -> i32` as a DEFINED function (`local.get 0; ref.is_null`) and adds it to
+  `OBJECT_RUNTIME_HELPER_NAMES` so `ensureLateImport` auto-routes it through
+  `ensureObjectRuntime` under `ctx.standalone` (the routing check sits *before*
+  the Phase A `__extern_*` refuse gate). No imports added ⇒ no index shift.
+- `tests/issue-1472.test.ts`: replaced the now-stale "destructuring defaults
+  *refuse* `__extern_is_undefined`" Phase A test with two Phase C
+  instantiate-and-run tests — a destructuring default `[x = 7, y = 9]` over
+  `[5]` (→ 14) and a default-valued object parameter `f()` (→ 42). Both leak
+  **zero** `env::__extern_is_undefined` / object host imports and run under
+  Node's WasmGC engine with empty imports.
+
+### Scoping note (deliberately NOT in this slice)
+`x === undefined` where `x` is an **optional `number`** param does NOT route
+through this helper in EITHER mode (gc or standalone) — the param lowers to f64
+with a NaN sentinel, so the comparison resolves on the f64 side (verified: gc
+mode never binds `__extern_is_undefined` for that shape, and returns the same
+result). That f64/NaN optional-number representation is a separate pre-existing
+limitation, independent of this slice.
+
+### Pre-existing failure NOT touched by this slice
+The "Phase B Slice 3: Object.assign … (no host array imports)" test in
+`tests/issue-1472.test.ts` **already fails on clean origin/main HEAD**
+(confirmed by stashing all edits): the `Object.assign(t, ...sources)`
+computed-key path still builds the variadic sources list with the JS-host
+`__js_array_new`/`__js_array_push` under standalone instead of the native
+`$ObjVec` builders. This is a regression that predates this branch and belongs
+to a separate Object.assign call-site-retargeting follow-up — left untouched
+here to keep this slice's regression surface clean.

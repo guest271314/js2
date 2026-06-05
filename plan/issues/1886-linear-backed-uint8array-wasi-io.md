@@ -2,9 +2,10 @@
 id: 1886
 title: "Linear-backed Uint8Array for WASI I/O buffers (escape analysis) — avoid GC↔linear copies, beat AssemblyScript on memory"
 status: in-progress
-sprint: Backlog
+sprint: 61
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-06-05
+slice_b_status: done
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -344,3 +345,144 @@ Slices A+B+C are the core of this issue; D can be a follow-up if the per-message
 allocation proves to leak on infinite streams (the benchmark sends one large
 message, so A–C suffice to hit the acceptance numbers, but D is needed for
 production correctness on long-lived ports — call it out in the PR).
+
+## Slice B — implementation notes (esch, 2026-06-05, PR #2)
+
+**Landed:** the bump allocator + intraprocedural `new`/`b[i]`/`b[i]=v`/`b.length`
++ zero-copy `fd_read`/`fd_write` codegen for linear-backed `Uint8Array` locals.
+Correctness-preserving (the GC path is untouched for everything not proven
+Slice-B-eligible); the full host speedup arrives in Slice C.
+
+### What "Slice-B-eligible" means — and why it is NARROWER than Slice A
+Slice A (`safeBindings`) proves a buffer never escapes the GC heap, and it
+*admits param-threaded buffers* (a buffer passed to a user function whose
+parameter is itself linear-safe) so that Slice C can rewrite those signatures.
+But Slice B is **intraprocedural only** — it does not rewrite signatures yet.
+Backing a param-threaded buffer linearly *now* would hand a `(ptr,len)` i32 pair
+to a callee still typed for a GC array at the call boundary → invalid Wasm
+(`expected (ref null $type), found i32`). This is exactly what blew up the
+native-messaging host on the first cut: `__str_flatten` mis-validated because
+`main`'s `header`/`buf` were linear-backed but `readExact(header, …)` still
+expected a GC array.
+
+**Fix (root cause, not symptom):** the analysis now also computes
+`localOnlyBindings` — the subset of `safeBindings` that is (a) a `new
+Uint8Array(...)` *local* (never a parameter) and (b) **never** passed as an
+argument to a user function (its only call-arg uses are the
+`process.std*.{read,write}` I/O intrinsics, which Slice B lowers in place).
+Codegen consumes `localOnlyBindings`, NOT `safeBindings`, at all four wiring
+sites (`isLinearSafeBinding`, the TDZ hoist-skip, the eager type-reserve gate,
+the late allocator-emit gate). This keeps analysis ⇔ codegen *exactly aligned*:
+codegen linear-backs precisely the set it can correctly represent. Slice C will
+widen consumption to all of `safeBindings` once the signature rewrite is in.
+
+This is still a real intraprocedural win on the nm host: `emitRun`'s per-frame
+`frame` buffer (built with an element loop and written whole) IS local-only, so
+its element loop now lowers to `i32.store8` and its write is zero-copy; only the
+threaded read window (`buf`/`header`/`one`/`small`/`tmp`/`src`) stays GC until C.
+
+### The real root cause of the `expected externref found i32` fault — late-import func-index shift (sd-1886, PR #2)
+The FINDINGS handoff attributed the `function[34]::main … expected externref,
+found i32 at offset 4634` to the void-function finalizer. Disassembling the
+binary at that offset proved otherwise: the byte is **`call 2`**, and import
+func 2 is `env.__extern_get` — i.e. `$main`'s `call $__lin_u8_alloc` was
+resolving to the wrong slot. Root cause: the WIP emitted the allocator
+**eagerly** (before the import collectors), so it claimed a low defined-func
+index; then `collectUsedExternImports` registered `env.__extern_get` (added for
+the `buf[i]` externref element-access pre-pass) via the bare `addImport` path,
+which bumps `numImportFuncs` but does **not** shift already-baked defined-func
+indices. The allocator's true index moved up by one; its `funcMap` entry and
+every baked `call $__lin_u8_alloc` stayed stale → the call landed on
+`__extern_get` (an `(externref)->…` import) while passing an i32 length. (This
+is the exact `addUnionImports` hazard CLAUDE.md documents.)
+
+**Fix (split type from function):** `reserveLinearU8AllocType` registers the
+allocator's `(i32)->(i32)` func **type** eagerly (before any GC struct/array or
+native-string helper type, keeping the shared `ctx.mod.types` prefix stable so
+`__str_flatten`'s baked `(ref null $type)` indices don't shift), while the
+allocator **function** is emitted in the post-import-registration helper block
+(alongside `emitToUint32Helper` / `emitDeferredWasiHelpers`) where
+`numImportFuncs` is final — so its defined index is correct and survives
+`env.__extern_get`. This dual constraint is why neither the all-eager nor the
+all-lazy single-shot emission point works; both desync one path or the other.
+Once the fix landed, the void function ended cleanly with no leftover
+`ref.null extern` — confirming the finalizer was never the fault.
+
+### `new Uint8Array(arrayBuffer)` view form must stay GC (#1654 regression guard, sd-1886)
+The length-form lowering treats the single `new Uint8Array(arg)` argument as a
+byte count. For `new Uint8Array(someArrayBuffer)` — a zero-copy view over an
+ArrayBuffer — `arg` is an object, not a number; lowering it as a length would
+call `__lin_u8_alloc(<object>)` and read garbage (broke
+`tests/issue-1654-*`). `isLengthOrLiteralNewUint8` now gates the codegen:
+single-arg `new Uint8Array` is linear-backed **only** when the argument's static
+type is `NumberLike`/`any`; any object-typed arg (ArrayBuffer / TypedArray /
+array-like) falls through to the GC path, which models the view aliasing
+correctly. The array-literal and zero-arg forms stay linear.
+
+### The void-completion `ref.null extern` fault (kept; orthogonal)
+`tryEmitLinearU8ElementSet` returns `VOID_RESULT` and leaves nothing on the
+stack — `buf[i] = v` compiles as a pure statement store, so the
+module/function completion-value tracker is never left owing an unpaired
+trailing `ref.null extern`. `x = buf[i] = v` value-of-assignment is unsupported
+for linear-backed buffers (out of scope for byte-I/O workloads; the analysis
+never admits a buffer read as a bare identifier anyway).
+
+### Slice B validation gate (all green)
+- `probe_u8.ts` (`buf[i] = (buf[i]+1)&255` + stdin/stdout) validates AND
+  round-trips under wasmtime **v44 (pinned) and v45**; `.wat` shows
+  `i32.load8_u`/`i32.store8` + iovec `fd_read`/`fd_write`, zero `array.*` for the
+  buffer, no stray GC `$buf` local, no trailing unpaired `ref.null extern`.
+- nm host compiles to **valid** Wasm; `h2h` 64 MiB message = **65 frames /
+  13,421,760 elements / validJSON=true / match=true** on v44 AND v45; the
+  single-frame echo path also round-trips. (Peak ~84 MB — the 1 MiB read window
+  is still GC until Slice C; B's gate is correctness, not the ~24 MB number.)
+- Escaping buffer (returned) and param-threaded buffer (nm `buf`) both correctly
+  fall back to GC — verified in `.wat` (0 linear store8 for those) + execution.
+- `tests/issue-1886.test.ts` (Slice-A analysis + Slice-B `localOnlyBindings`
+  eligibility, 12) + new `tests/issue-1886-slice-b.test.ts` (codegen-validity +
+  execution round-trips, incl. the index-shift validity guard, the string-mix
+  `__str_flatten` guard, the escaping + param-threaded GC-fallback cases, and
+  `&255` wrap; 8) + `tests/wasi.test.ts` (24) + `tests/issue-1654-*` (the
+  `new Uint8Array(ab)` view-form regression guard, 5) + `tests/issue-1856.test.ts`
+  (allocator idiom, 5) all green.
+- No new failures vs `origin/main` in the targeted suites above; CI runs the
+  full conformance gate on the PR.
+
+## Slice C — interprocedural signature rewrite (PR #3, next)
+
+Rewrite every function in `linearParams` so its `Uint8Array` parameter becomes a
+`(ptr: i32, len: i32)` pair, and lower every call site that passes a linear
+buffer to push the two i32s instead of a GC ref. Once this lands, codegen can
+consume the full `safeBindings` set (drop the `localOnlyBindings` narrowing) and
+the nm host's read window (`buf`, the 1 MiB streaming buffer) becomes linear →
+`fd_read` fills it zero-copy. This is where the headline number lands: 64 MiB
+round-trip → ~0.15–0.25 s at flat ~24–31 MB, beating AssemblyScript on memory.
+
+Key risks for C (call them out in PR #3):
+- Call-arg lowering must push `(ptr,len)` in the right order and only for the
+  proven-linear parameter indices (other args unchanged).
+- Recursion / mutual recursion through `readExact`→`process.stdin.read` and
+  `readAt` — the signature change must be applied to the callee's wasm type
+  *before* any caller bakes the `call` (same late-index discipline as the
+  allocator).
+- Exported functions keep their observable GC ABI (Slice A already excludes
+  exported-fn params from `linearParams`).
+
+## Slice D — zero-copy direct-slice write (follow-on, banked)
+
+Naming: the interprocedural signature rewrite is **Slice C**; the lead's
+zero-copy-subarray idea is a SEPARATE follow-on recorded here as **Slice D** to
+avoid collision. Once a buffer is linear-backed (B/C), drop `emitRun`'s per-frame
+copy entirely — write the run's bytes DIRECTLY from the linear window:
+- linear-backed `Uint8Array.prototype.subarray(start,end)` returns a zero-copy
+  VIEW over the SAME linear buffer (`ptr+offset, len`) — not a copy. (Today the
+  host avoids `subarray` because GC `array.copy` is ~14× slower than an element
+  loop on i8 arrays; linear-backed makes the view free.)
+- `process.stdout.write(view)` → `fd_write` from `view.ptr + view.offset` for
+  `view.len`, zero copy.
+- `nm_js2wasm.ts` then drops `emitRun`'s element loop, writing
+  `buf.subarray(start, start + runLen)` directly.
+
+Acceptance: `emitRun`'s per-frame copy gone; `h2h` shows the host AT/BELOW AS
+speed AND flat memory. Land as its own PR after Slice C merges (or carve a
+sub-issue). Sequencing: Slice B (this) → Slice C → Slice D.

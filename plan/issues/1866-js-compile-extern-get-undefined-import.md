@@ -1,10 +1,11 @@
 ---
 id: 1866
 title: "JS→WASM standalone: compiled .js host emits undefined `env::__extern_get` import"
-status: ready
-sprint: Backlog
+status: done
+sprint: 60
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-06-05
+completed: 2026-06-05
 priority: medium
 feasibility: medium
 reasoning_effort: medium
