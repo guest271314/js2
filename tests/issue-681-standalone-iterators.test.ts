@@ -113,16 +113,41 @@ describe("#681 standalone iterator protocol slice", () => {
     expect((instance.exports as { f: () => number }).f()).toBe(10);
   });
 
-  it("still refuses Array.prototype.keys()/entries() in standalone (out of #681 .values() slice)", async () => {
-    const keysResult = await expectIteratorRefused(`
-      export function f(): number {
-        let sum: number = 0;
-        for (const index of [1, 2, 3].keys()) {
-          sum = sum + index;
+  it("drives Array.prototype.keys() for-of natively in standalone (#1320 Slice 1, no host import)", async () => {
+    // #1320 Slice 1 superseded the old refusal: `.keys()` now lowers to the
+    // native iterator bridge (canonical externref $Vec + native __iterator).
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const index of [1, 2, 3].keys()) {
+            sum = sum + index;
+          }
+          return sum;
         }
-        return sum;
-      }
-    `);
-    expect(keysResult.errors.some((e) => /Array\.prototype\.keys/.test(e.message))).toBe(true);
+      `,
+      { target: "standalone" },
+    );
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(result);
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(0 + 1 + 2);
+  });
+
+  it("still defers Array.prototype.entries() in standalone (pair-shaped, #1320 later slice)", async () => {
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const [i, v] of [1, 2, 3].entries()) {
+            sum = sum + i + v;
+          }
+          return sum;
+        }
+      `,
+      { target: "standalone" },
+    );
+    expect(result.success).toBe(false);
+    expect(result.errors.some((e) => /#1320.*entries|Array\.prototype\.entries/.test(e.message))).toBe(true);
   });
 });

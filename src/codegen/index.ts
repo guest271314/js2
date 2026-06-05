@@ -34,6 +34,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
+import { ensureNativeIteratorRuntime } from "./iterator-native.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import {
@@ -8063,7 +8064,13 @@ function collectIteratorImports(ctx: CodegenContext, sourceFile: ts.SourceFile):
   }
 
   if (found) {
-    addIteratorImports(ctx);
+    // #1320 Slice 1: standalone/WASI binds the four iterator ops to emitted
+    // Wasm fns (no JS host); JS-host mode keeps the env imports.
+    if (ctx.standalone || ctx.wasi) {
+      ensureNativeIteratorRuntime(ctx);
+    } else {
+      addIteratorImports(ctx);
+    }
   }
 }
 
