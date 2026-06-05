@@ -7,7 +7,7 @@ updated: 2026-04-14
 completed: 2026-04-14
 priority: low
 goal: property-model
-sprint: 0
+sprint: 60
 test262_ce: 16
 test262_refs:
   - test/language/expressions/super/prop-dot-obj-ref-this.js
