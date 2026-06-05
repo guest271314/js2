@@ -19,6 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { ensureObjVecBuilders } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
@@ -3854,13 +3855,55 @@ function compileCallExpression(
       return { kind: "i32" };
     }
 
-    // Handle Object.setPrototypeOf(obj, proto) — stub: compile both args, drop proto, return obj
+    // Handle Object.setPrototypeOf(obj, proto).
+    //   - Standalone (#1888 Slice 7): route to the native __object_setPrototypeOf
+    //     runtime helper, which writes $Object.$proto (field 0) after the
+    //     §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle checks and
+    //     returns obj. No host import leaks (the name is in
+    //     OBJECT_RUNTIME_HELPER_NAMES, so ensureLateImport lands the native fn).
+    //   - GC/host: keep the existing stub (compile both args, drop proto,
+    //     return obj) — byte-for-byte unchanged, the host runtime owns proto.
     if (
       ts.isIdentifier(propAccess.expression) &&
       propAccess.expression.text === "Object" &&
       propAccess.name.text === "setPrototypeOf" &&
       expr.arguments.length >= 2
     ) {
+      if (ctx.standalone) {
+        // obj (externref)
+        const objType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (!objType) {
+          // obj produced no value — nothing to set on; push null result.
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        if (objType.kind !== "externref") {
+          coerceType(ctx, fctx, objType, { kind: "externref" });
+        }
+        // proto (externref)
+        const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+        if (!protoType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (protoType.kind !== "externref") {
+          coerceType(ctx, fctx, protoType, { kind: "externref" });
+        }
+        const spoIdx = ensureLateImport(
+          ctx,
+          "__object_setPrototypeOf",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (spoIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: spoIdx });
+        } else {
+          // Helper unavailable (should not happen in standalone) — fall back to
+          // the stub: drop proto, leave obj on the stack.
+          fctx.body.push({ op: "drop" });
+        }
+        return { kind: "externref" };
+      }
+      // GC/host stub: compile both args, drop proto, return obj.
       const objType = compileExpression(ctx, fctx, expr.arguments[0]!);
       const protoType = compileExpression(ctx, fctx, expr.arguments[1]!);
       if (protoType) {
@@ -4655,9 +4698,23 @@ function compileCallExpression(
       const targetArg = expr.arguments[0]!;
       const targetType = compileExpression(ctx, fctx, targetArg, { kind: "externref" });
       if (targetType && targetType.kind !== "externref") coerceType(ctx, fctx, targetType, { kind: "externref" });
-      // Build sources as a JS array
-      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      // Build the variadic `...sources` list. Under --target standalone there is
+      // no JS array, so the native __object_assign iterates a $ObjVec built by
+      // the native $ObjVec builders (__objvec_new / __objvec_push) instead of the
+      // host __js_array_new / __js_array_push. JS-host / WASI keep the host
+      // imports unchanged (byte-for-byte). Per the #1472 S3 note the __js_array_*
+      // builders are NOT globally safe to alias (real JS arrays elsewhere depend
+      // on them) — so this is a per-call-site swap.
+      let arrNewIdx: number | undefined;
+      let arrPushIdx: number | undefined;
+      if (ctx.standalone) {
+        const b = ensureObjVecBuilders(ctx);
+        arrNewIdx = b.newIdx;
+        arrPushIdx = b.pushIdx;
+      } else {
+        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      }
       const assignIdx = ensureLateImport(
         ctx,
         "__object_assign",

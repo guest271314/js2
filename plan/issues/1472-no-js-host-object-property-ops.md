@@ -941,6 +941,81 @@ filter.call(arrayLike, …)` emits a module with independent standalone gaps. Th
 helpers build correct structures (verified via the typed for-of consumer); the
 element-readback routing belongs with the Blocker A receiver-dispatch slice.
 
+## Phase C Slice — keyed presence: `in` / hasOwn (sd-1472c, 2026-06-05)
+
+Branch `issue-1472c-has` off origin/main. Native keyed presence checks over the
+`$Object` hash-map, closing the follow-up the Phase C Reflect note explicitly
+deferred ("a real keyed native `has` — thin wrapper over `__obj_find`").
+
+### What landed (`src/codegen/object-runtime.ts`)
+- `__extern_has(externref obj, externref key) -> i32` — ES §7.3.12 HasProperty:
+  own props AND the prototype chain. A proto-walk loop mirroring `__extern_get`
+  (calls `__obj_find` at each `$Object` level, walks `$proto`), but returns a
+  boolean (so a present-but-undefined property still reports 1). Drives the `in`
+  operator (`binary-ops.ts` routes `key in obj` to `__extern_has` for an
+  object-shaped externref receiver). Non-`$Object`/null → 0.
+- `__hasOwnProperty` / `__object_hasOwn (externref, externref) -> i32` — ES
+  §20.1.3.2 / §20.1.2.13: OWN-property presence only (no proto walk), via
+  `__obj_find` over the own props table (find already skips tombstones). Both
+  names share one body.
+- All three added to `OBJECT_RUNTIME_HELPER_NAMES` so `ensureLateImport` routes
+  them through `ensureObjectRuntime` under `ctx.standalone` BEFORE the Phase A
+  `__extern_*`/`__hasOwnProperty`/`__object_hasOwn` refuse gate. No imports
+  added ⇒ no index shift.
+
+### Proven (`tests/issue-1472.test.ts`, instantiate-and-run, empty imports)
+- `key in obj` over an open `any` (computed-key writes defeat closed-struct
+  inference): present→1, absent→0; zero `env::__extern_has` / object imports.
+- `Object.hasOwn(o, k)`: own→1, absent→0; zero `env::__object_hasOwn` imports.
+
+### Scoping note (out of scope — method-dispatch gap)
+`o.hasOwnProperty(k)` (the bare *method-call* form) does NOT reach
+`__hasOwnProperty` — it routes through `__proto_method_call` (the open-`any`
+method-dispatch path), which is still refused under standalone. The native
+`__hasOwnProperty` func is in place for when that dispatch lands (the
+`__extern_method_call`/`__proto_method_call` slice). `Object.hasOwn(o, k)` is the
+host-free own-check today. `Object.prototype.hasOwnProperty.call(o, k)` likewise
+needs the method-dispatch slice. The big win in this slice is the `in` operator
+(`__extern_has`).
+
+## Phase C Slice — prototype-chain ops (sd-1472c, 2026-06-05)
+
+Branch `issue-1472c-proto` off origin/main. Native getPrototypeOf / Object.create
+/ isPrototypeOf over the existing `$Object.$proto` field (field 0). The runtime
+already *walks* the chain (`__extern_get`/`__extern_has`); these expose it.
+
+### What landed (`src/codegen/object-runtime.ts`)
+- `__getPrototypeOf(externref) -> externref` (ES §20.1.2.12): `$Object` →
+  `extern.convert_any($proto)` (may be null); non-`$Object` → null.
+- `__object_create(externref proto) -> externref` (ES §20.1.2.2): fresh empty
+  `$Object` (new `$PropMap(INITIAL_CAP)`, count/tombstones/flags = 0) with
+  `$proto` = (proto is `$Object` ? cast : null). `Object.create(null)` passes a
+  null externref ⇒ `$proto` stays null. (The descriptors 2nd arg is materialised
+  separately by the existing call site.)
+- `__isPrototypeOf(externref obj, externref candidate) -> i32` (ES §20.1.3.3):
+  walk `candidate.$proto` and `ref.eq` each level against obj; 1 if found, else 0.
+- All three added to `OBJECT_RUNTIME_HELPER_NAMES` (routed under `ctx.standalone`
+  before the Phase A `__getPrototypeOf`/`__isPrototypeOf` refuse gate). No imports
+  added ⇒ no index shift.
+
+### Proven (`tests/issue-1472.test.ts`, instantiate-and-run, empty imports)
+- `Object.create(proto)` + `Object.getPrototypeOf(o) === proto` + inherited read
+  through the chain → 8; zero `env::__getPrototypeOf`/`__object_create` imports.
+- `Object.getPrototypeOf({})` → null (bare open object has null `$proto` in
+  standalone — no built-in Object.prototype graph) → 5.
+
+### Deliberately NOT in this slice
+- **`Object.setPrototypeOf(o, p)`** is *stubbed* at its call site (`calls.ts`
+  ~L3857) in ALL modes — it drops the proto arg and returns obj, so a native
+  `__object_setPrototypeOf` would be dead code. Wiring the `$proto` write needs a
+  dual-mode change to that stubbed call site (a separate follow-up).
+- **`obj.isPrototypeOf(x)`** (the bare method-call form) routes through
+  `__proto_method_call` (open-`any` method dispatch), still refused — the native
+  `__isPrototypeOf` func is in place for when that dispatch lands.
+- Primitive receivers (`getPrototypeOf(5)` → Number.prototype) return null —
+  acceptable, since standalone ships no built-in prototype graph (the broader
+  `__get_builtin` architectural item).
+
 ## Phase C Slice — `__extern_is_undefined` native (sd-1472c, 2026-06-05)
 
 Branch `issue-1472c-is-undefined` off origin/main. Routes the single largest

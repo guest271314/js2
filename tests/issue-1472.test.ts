@@ -459,6 +459,187 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
     expect(wat).toMatch(/\(func \$__extern_has_idx\b/);
   });
 
+  it("Phase C: `key in obj` routes to native __extern_has (own + proto) and runs", async () => {
+    // #1472 Phase C — keyed HasProperty (`key in obj`, §7.3.12) over the $Object
+    // hash-map: own props AND the prototype chain. Native via a proto-walk
+    // mirroring __extern_get (boolean instead of value). Present-but-undefined
+    // still reports 1 — but standalone conflates undefined/null, so we use a
+    // present non-null value to keep the test crisp. The receiver is an open
+    // `any` object (computed-key writes defeat closed-struct inference).
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 5;
+          return (ka in o ? 1 : 0) + ("missing" in o ? 10 : 0); // present:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__extern_has")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
+  it("Phase C: Object.hasOwn(o, k) routes to native __object_hasOwn (own-only) and runs", async () => {
+    // #1472 Phase C — Object.hasOwn (§20.1.2.13): own-property presence only
+    // (no proto walk), native via __obj_find over the $Object props table.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          const ka = "a";
+          o[ka] = 1;
+          return (Object.hasOwn(o, ka) ? 1 : 0) + (Object.hasOwn(o, "b") ? 10 : 0); // own:1 absent:0 → 1
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_hasOwn")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
+  });
+
+  it("Phase C: Object.create + getPrototypeOf round-trip native over $Object.$proto", async () => {
+    // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0).
+    // Object.create(proto) builds a fresh $Object whose $proto is `proto`;
+    // Object.getPrototypeOf reads it back. The reified prototype still resolves
+    // inherited properties through __extern_get's existing proto-walk. Both
+    // helpers are native; zero object host imports leak.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const kt = "tag";
+          proto[kt] = 7;
+          const o: any = Object.create(proto);
+          const p: any = Object.getPrototypeOf(o);
+          // p === proto identity + inherited read via the chain → 1 + 7 = 8
+          return (p === proto ? 1 : 0) + (p[kt] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getPrototypeOf")).toBe(false);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_create")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(8);
+  });
+
+  it("Phase C: getPrototypeOf of a bare open object yields the null prototype", async () => {
+    // A bare `{}` open object has a null $proto in standalone (no built-in
+    // Object.prototype graph). Object.getPrototypeOf returns null → 5.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 1;
+          const p: any = Object.getPrototypeOf(o);
+          return p === null ? 5 : 0;
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__getPrototypeOf")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Slice 7: Object.setPrototypeOf writes $proto native; getPrototypeOf reads it + inherited read", async () => {
+    // #1888 Slice 7 — Object.setPrototypeOf(o, proto) writes $Object.$proto
+    // (field 0) under standalone (was a proto-dropping stub in all modes).
+    // After the write, Object.getPrototypeOf round-trips proto by identity and
+    // the inherited property resolves through __extern_get's existing proto
+    // walk. Both helpers native; zero object host imports leak.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const kt = "tag";
+          proto[kt] = 9;
+          const o: any = {};
+          o["own"] = 1;
+          Object.setPrototypeOf(o, proto);
+          const p: any = Object.getPrototypeOf(o);
+          // identity (1) + inherited read through the chain (9) → 10
+          return (p === proto ? 1 : 0) + (o[kt] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(r.imports.some((i) => i.module === "env" && i.name === "__object_setPrototypeOf")).toBe(false);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(10);
+  });
+
+  it("Slice 7: Object.setPrototypeOf returns its first argument (obj)", async () => {
+    // §20.1.2.21: the return value is always O (the first arg), regardless of
+    // the [[SetPrototypeOf]] result. Verify the call expression yields obj.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          proto["v"] = 4;
+          const o: any = {};
+          const ret: any = Object.setPrototypeOf(o, proto);
+          // ret === o identity (1) + inherited read via ret (4) → 5
+          return (ret === o ? 1 : 0) + (ret["v"] as number);
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(5);
+  });
+
+  it("Slice 7: Object.setPrototypeOf refuses a self-cycle (no infinite proto walk)", async () => {
+    // §10.1.2.1 step: a [[SetPrototypeOf]] that would create a cycle returns
+    // false and performs NO write. Standalone refuses silently (no throw). After
+    // `Object.setPrototypeOf(o, o)` the chain must stay acyclic: getPrototypeOf(o)
+    // is still null (the write was refused), so a subsequent walk terminates.
+    const source = `
+        export function run(): number {
+          const o: any = {};
+          o["x"] = 1;
+          Object.setPrototypeOf(o, o); // self-cycle → refused, $proto stays null
+          const p: any = Object.getPrototypeOf(o);
+          return p === null ? 7 : 0; // refused write ⇒ null proto ⇒ 7
+        }
+      `;
+    const r = await compile(source, { target: "standalone" });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(7);
+  });
+
+  it("Slice 7: default target (gc) Object.setPrototypeOf keeps the host stub (returns obj)", async () => {
+    // Dual-mode guard: in gc mode the call site keeps the existing stub
+    // (compile both args, drop proto, return obj). The result is still obj, so
+    // the program runs; the native __object_setPrototypeOf is NOT emitted.
+    const source = `
+        export function run(): number {
+          const proto: any = {};
+          const o: any = { a: 2 };
+          const ret: any = Object.setPrototypeOf(o, proto);
+          return (ret === o ? 1 : 0) + ((o as { a: number }).a); // 1 + 2 = 3
+        }
+      `;
+    const r = await compile(source); // default gc target
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    // No native __object_setPrototypeOf runtime fn in gc mode (host stub path).
+    const wat = (r as unknown as { wat?: string }).wat ?? "";
+    expect(wat).not.toMatch(/\(func \$__object_setPrototypeOf\b/);
+  });
+
   it("Phase C: __extern_is_undefined routes native (ref.is_null) — destructuring default compiles + runs", async () => {
     // #1472 Phase C — the undefinedness predicate is the single largest remaining
     // standalone-refusal helper (~6.6k tests). It now lowers to the native

@@ -20,7 +20,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
-import { ensureRegexSearch, i32ArrayLiteralInstrs, regexI32ArrayType } from "./native-regex.js";
+import { ensureRegexReplace, ensureRegexSearch, i32ArrayLiteralInstrs, regexI32ArrayType } from "./native-regex.js";
 import {
   parseFlags,
   RegexUnsupportedError,
@@ -711,4 +711,145 @@ export function tryCompileStandaloneStringSearch(
     else: [{ op: "f64.const", value: -1 }],
   } as Instr);
   return { kind: "f64" };
+}
+
+/**
+ * Recover the flags string of a static / backend-created RegExp expression
+ * (`/…/flags`, `new RegExp(p, "flags")`, or a `const re = /…/flags` binding).
+ * Returns `null` when the flags can't be statically determined.
+ */
+function staticRegExpFlags(ctx: CodegenContext, expr: ts.Expression): string | null {
+  const unwrapped = stripStaticWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) {
+    const text = (unwrapped as ts.RegularExpressionLiteral).text;
+    const lastSlash = text.lastIndexOf("/");
+    return lastSlash >= 0 ? text.slice(lastSlash + 1) : "";
+  }
+  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
+    const callee = stripStaticWrapper(unwrapped.expression);
+    if (!ts.isIdentifier(callee) || !isGlobalRegExpIdentifier(ctx, callee)) return null;
+    const flagsArg = unwrapped.arguments?.[1];
+    if (flagsArg === undefined) return "";
+    const flags = staticStringValue(ctx, flagsArg);
+    return flags === null ? null : (flags ?? "");
+  }
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+    if (decl?.initializer) return staticRegExpFlags(ctx, decl.initializer);
+  }
+  return null;
+}
+
+/**
+ * `String.prototype.replace(re, "str")` / `String.prototype.replaceAll(re,
+ * "str")` in standalone mode (#1539 Phase 2c) — **literal replacement string
+ * only**.
+ *
+ * Per ECMA-262 §22.1.3.19 / §22.2.6.11 (`RegExp.prototype[@@replace]`): walk
+ * the subject, replacing each match (all matches when the regex has the `g`
+ * flag or the method is `replaceAll`; otherwise just the first) with the
+ * replacement string, returning the rebuilt string. The result is a
+ * `$NativeString` — no array boundary, no host import.
+ *
+ * Refused (left to the narrowed gate): `$n`/`$&`/`$\``/`$'`/`$<name>`
+ * substitution patterns and function replacers (Phase 2c follow-up — they need
+ * capture-group materialization / closure dispatch), and `replaceAll` with a
+ * non-global regex (which is a runtime `TypeError` per spec; let the host path
+ * handle that diagnostic rather than mis-modelling it here).
+ */
+export function tryCompileStandaloneStringReplace(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone) return undefined;
+  const method = propAccess.name.text;
+  if (method !== "replace" && method !== "replaceAll") return undefined;
+
+  // Receiver string-like; args = (regexp, replacement).
+  if (!isStringLikeArg(ctx, propAccess.expression)) return undefined;
+  if (expr.arguments.length !== 2) return undefined;
+  const reExpr = expr.arguments[0]!;
+  const replExpr = expr.arguments[1]!;
+
+  const reType = ctx.checker.getTypeAtLocation(reExpr);
+  if (!isGlobalRegExpType(reType) && !isKnownBackendCreatedRegExpReceiver(ctx, reExpr)) {
+    return undefined; // not a RegExp arg → generic string path
+  }
+
+  // Replacement must be a static literal string with NO `$` substitution
+  // patterns (those are Phase 2c follow-up). A `$` anywhere → refuse.
+  const repl = staticStringValue(ctx, replExpr);
+  if (repl === null || repl === undefined || repl.includes("$")) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      replExpr,
+      `String.prototype.${method} with a $-substitution pattern or non-literal/function replacer (#1539 Phase 2c)`,
+    );
+    return null;
+  }
+
+  const flags = staticRegExpFlags(ctx, reExpr);
+  if (flags === null) return undefined;
+  const reHasGlobal = flags.includes("g");
+  // `replaceAll` requires a global regex (spec §22.1.3.20 step 4 throws
+  // TypeError otherwise). Leave that error to the host path; only handle the
+  // well-formed `replaceAll(/…/g, …)` here.
+  if (method === "replaceAll" && !reHasGlobal) return undefined;
+  // For `replace`, global is honored (replace-all when `g`, first-only else).
+  const globalReplace = method === "replaceAll" || reHasGlobal;
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, `String.prototype.${method} without an enabled standalone engine`);
+    return null;
+  }
+
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  if (flattenIdx === undefined) {
+    reportError(ctx, expr, "Codegen error: standalone RegExp backend missing native string helpers (#682).");
+    return null;
+  }
+  const replaceIdx = ensureRegexReplace(ctx);
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+
+  // --- the compiled $NativeRegExp struct ---
+  const loaded = loadStandaloneRegExpStruct(ctx, fctx, reExpr);
+  if (loaded === null) return null;
+  const { regexpLocal, structTypeIdx } = loaded;
+
+  // --- subject: flatten the receiver string ---
+  const subjType = compileExpression(ctx, fctx, propAccess.expression, nativeStringType(ctx));
+  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const subjLocal = allocLocal(fctx, `__re_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
+  fctx.body.push({ op: "local.set", index: subjLocal });
+
+  // --- replacement: flatten ---
+  const replType = compileExpression(ctx, fctx, replExpr, nativeStringType(ctx));
+  if (replType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const replLocal = allocLocal(fctx, `__re_repl_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
+  fctx.body.push({ op: "local.set", index: replLocal });
+
+  // __regex_replace(prog, classTable, nGroups, subjData, subjOff, subjLen, subject, replacement, global)
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "local.get", index: replLocal });
+  fctx.body.push({ op: "i32.const", value: globalReplace ? 1 : 0 });
+  fctx.body.push({ op: "call", funcIdx: replaceIdx });
+  return nativeStringType(ctx);
 }
