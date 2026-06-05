@@ -46,6 +46,10 @@ import { addFuncType } from "./registry/types.js";
 
 const BUF_CAP = 256;
 const MAX_SAFE_INTEGER = 9007199254740991;
+// Cap on fractional digits emitted by number_toString_radix (§6.1.6.1.20). f64
+// has ~52 bits of mantissa; 100 digits is well beyond what any radix 2..36 needs
+// to exhaust the representable fraction and keeps the buffer within BUF_CAP.
+const MAX_FRAC_DIGITS = 100;
 const C_ZERO = 48; // '0'
 const C_MINUS = 45; // '-'
 const C_PLUS = 43; // '+'
@@ -377,15 +381,18 @@ export function emitNativeNumberFormat(ctx: CodegenContext, which: Set<string>):
   if (needRadix && !ctx.funcMap.has("number_toString_radix")) {
     emitToStringRadix(ctx, finalizeIdx, strDataTypeIdx, i32, f64, extern, bufType);
   }
-  if (which.has("number_toString") && !ctx.funcMap.has("number_toString")) {
+  // number_toFixed needs number_toString for its |x| >= 1e21 branch (§21.1.3.3
+  // step 5 defers to ToString there), so emit it whenever toFixed/toPrecision is
+  // requested even if the program never calls .toString() directly.
+  const needPrecision = which.has("number_toPrecision");
+  const needFixed = which.has("number_toFixed") || needPrecision;
+  if ((which.has("number_toString") || needFixed) && !ctx.funcMap.has("number_toString")) {
     emitToString(ctx, strDataTypeIdx, i32, f64, extern, bufType);
   }
 
   // number_toPrecision delegates to number_toFixed + number_toExponential, so
   // those two must be emitted whenever toPrecision is requested — even if the
   // program never calls them directly.
-  const needPrecision = which.has("number_toPrecision");
-  const needFixed = which.has("number_toFixed") || needPrecision;
   const needExp = which.has("number_toExponential") || needPrecision;
 
   if (needFixed && !ctx.funcMap.has("number_toFixed")) {
@@ -652,8 +659,11 @@ function emitToString(
  *
  * The call site has already applied `ToIntegerOrInfinity(radix)`'s truncating
  * shape for ordinary positive radices and rejected values outside 2..36. This
- * standalone slice handles non-finite values, ±0, and finite safe integers.
- * Fractional and unsafe-integer shortest formatting remains #1335 Phase 2.
+ * standalone slice handles non-finite values, ±0, finite safe integers, AND
+ * finite fractional values (#1836: the integer part is rendered LSB-first then
+ * reversed; the fractional part is appended MSB-first afterwards, up to
+ * MAX_FRAC_DIGITS or until the remainder is exhausted). Shortest-representation
+ * rounding for the unsafe-integer magnitude range remains #1335 Phase 2.
  */
 function emitToStringRadix(
   ctx: CodegenContext,
@@ -681,6 +691,9 @@ function emitToStringRadix(
   const L_CODE = 11;
   const L_I = 12;
   const L_J = 13;
+  const L_INTPART = 14; // floor(abs) — integer part for the LSB-first digit loop
+  const L_FRAC = 15; // abs - intPart — fractional remainder
+  const L_K = 16; // fractional-digit counter (bounded by MAX_FRAC_DIGITS)
 
   const writeFinalizeReturn = (): Instr[] => [
     { op: "local.get", index: L_BUF },
@@ -708,18 +721,21 @@ function emitToStringRadix(
       then: [...putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO), ...writeFinalizeReturn()],
     },
 
-    // Phase 1 guard: finite integers only, and stay within exactly represented
-    // integer space so the f64 div/mod digit loop is stable.
-    { op: "local.get", index: L_ABS },
+    // Split into integer and fractional parts (§6.1.6.1.20 / §21.1.3.6): the
+    // integer part is rendered LSB-first then reversed; the fractional part is
+    // appended MSB-first afterwards. intPart = floor(abs); frac = abs - intPart.
     { op: "local.get", index: L_ABS },
     { op: "f64.floor" },
-    { op: "f64.ne" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "unreachable" }],
-    },
+    { op: "local.set", index: L_INTPART },
     { op: "local.get", index: L_ABS },
+    { op: "local.get", index: L_INTPART },
+    { op: "f64.sub" },
+    { op: "local.set", index: L_FRAC },
+
+    // Stay within exactly represented integer space so the f64 div/mod digit
+    // loop on the INTEGER part is stable. (Fractional shortest-representation
+    // edge cases beyond ~maxFractionDigits remain approximate, like V8's.)
+    { op: "local.get", index: L_INTPART },
     { op: "f64.const", value: MAX_SAFE_INTEGER },
     { op: "f64.gt" },
     {
@@ -728,8 +744,8 @@ function emitToStringRadix(
       then: [{ op: "unreachable" }],
     },
 
-    // n = abs; write least-significant digits into buf[0..pos).
-    { op: "local.get", index: L_ABS },
+    // n = intPart; write least-significant integer digits into buf[0..pos).
+    { op: "local.get", index: L_INTPART },
     { op: "local.set", index: L_N },
     {
       op: "block",
@@ -796,8 +812,19 @@ function emitToStringRadix(
       ],
     },
 
+    // If intPart == 0 the digit loop emitted nothing (e.g. 0 < abs < 1 like
+    // 0.5 -> "0.1"); emit a single '0' so the integer part is present.
+    { op: "local.get", index: L_POS },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_ZERO),
+    },
+
     // Negative finite non-zero values prepend '-' after the digit loop, then the
-    // full buffer is reversed below.
+    // full buffer is reversed below. (The '-' lands at the front after reversal;
+    // any fractional digits are appended after the reverse, so they keep order.)
     { op: "local.get", index: L_NEG },
     {
       op: "if",
@@ -805,7 +832,7 @@ function emitToStringRadix(
       then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
     },
 
-    // Reverse buf[0..pos) in place.
+    // Reverse buf[0..pos) in place (integer digits + optional leading '-').
     { op: "i32.const", value: 0 },
     { op: "local.set", index: L_I },
     { op: "local.get", index: L_POS },
@@ -856,6 +883,96 @@ function emitToStringRadix(
       ],
     },
 
+    // Fractional part (§6.1.6.1.20): if frac > 0, append '.' then up to
+    // MAX_FRAC_DIGITS digits, each = floor(frac * radix), stopping early when
+    // frac reaches 0. Emitted MSB-first directly at the tail (after the reverse),
+    // so no further reversal. The buffer is pre-sized generously (BUF_CAP) and
+    // the integer part is bounded by MAX_SAFE_INTEGER (<= 53 bits), so
+    // MAX_FRAC_DIGITS more digits stay within capacity.
+    { op: "local.get", index: L_FRAC },
+    { op: "f64.const", value: 0 },
+    { op: "f64.gt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...putConst(strDataTypeIdx, L_BUF, L_POS, C_DOT),
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_K },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // if frac == 0 || k >= MAX_FRAC_DIGITS: stop.
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.const", value: 0 },
+                { op: "f64.eq" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: MAX_FRAC_DIGITS },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+
+                // frac *= radix; digit = floor(frac); frac -= digit.
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_R },
+                { op: "f64.mul" },
+                { op: "local.set", index: L_FRAC },
+                { op: "local.get", index: L_FRAC },
+                { op: "f64.floor" },
+                { op: "local.set", index: L_DIGIT },
+                { op: "local.get", index: L_FRAC },
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.sub" },
+                { op: "local.set", index: L_FRAC },
+
+                // digitCode = digit < 10 ? '0'+digit : 'a'-10+digit.
+                { op: "local.get", index: L_DIGIT },
+                { op: "f64.const", value: 10 },
+                { op: "f64.lt" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: i32 },
+                  then: [
+                    { op: "i32.const", value: C_ZERO },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                  else: [
+                    { op: "i32.const", value: C_LC_A_MINUS_10 },
+                    { op: "local.get", index: L_DIGIT },
+                    { op: "i32.trunc_f64_s" },
+                    { op: "i32.add" },
+                  ],
+                },
+                { op: "local.set", index: L_CODE },
+
+                { op: "local.get", index: L_BUF },
+                { op: "local.get", index: L_POS },
+                { op: "local.get", index: L_CODE },
+                { op: "array.set", typeIdx: strDataTypeIdx },
+                { op: "local.get", index: L_POS },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_POS },
+
+                { op: "local.get", index: L_K },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_K },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+
     ...writeFinalizeReturn(),
   ];
 
@@ -878,6 +995,9 @@ function emitToStringRadix(
       { name: "digitCode", type: i32 },
       { name: "i", type: i32 },
       { name: "j", type: i32 },
+      { name: "intPart", type: f64 },
+      { name: "frac", type: f64 },
+      { name: "k", type: i32 },
     ],
     body,
     exported: false,
@@ -919,8 +1039,29 @@ function emitToFixed(
   const L_FDIG = 13; // fractional digit count (i32)
   const L_K = 14;
 
+  // §21.1.3.3 Number.prototype.toFixed step 5: if x >= 10^21, return ToString(x).
+  // Without this, the scaled fixed-point path below overflows the integer-digit
+  // emitter and prints a bogus 22-digit integer. number_toString is guaranteed
+  // emitted alongside toFixed (see emitNumberFormatHelpers).
+  const numToStrIdx = ctx.funcMap.get("number_toString");
+  const toStringFallback: Instr[] =
+    numToStrIdx !== undefined
+      ? [
+          { op: "local.get", index: L_ABS },
+          { op: "f64.const", value: 1e21 },
+          { op: "f64.ge" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "local.get", index: L_VALUE }, { op: "call", funcIdx: numToStrIdx }, { op: "return" }],
+          } as Instr,
+        ]
+      : [];
+
   const body: Instr[] = [
     ...emitNonFinitePrologue(ctx, finalizeIdx, strDataTypeIdx, L_VALUE, L_BUF, L_POS, L_TMP, L_NEG, L_ABS),
+    // §21.1.3.3 step 5: |x| >= 1e21 → ToString(x) (defers to number_toString).
+    ...toStringFallback,
     // fdig = (i32)digits (truncated)
     { op: "local.get", index: L_DIGITS },
     { op: "i32.trunc_f64_s" },
