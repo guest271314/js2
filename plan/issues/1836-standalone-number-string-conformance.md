@@ -57,3 +57,26 @@ Tests: `tests/issue-1836.test.ts` (8 tests). No regression in
 - whitespace set misses U+FEFF, U+2028/2029, most Zs — `parse-number-native.ts:61`. §19.2.4/.5.
 - `+"12abc"` ToNumber(String) — VERIFIED already returns NaN on current main; appears fixed.
 
+### Slice — DONE: exponential Number→String in toString() (§6.1.6.1.20)
+`emitToString` (`number_toString`, `src/codegen/number-format-native.ts`) gained
+an exponential-notation regime. A guard right after the non-finite prologue routes
+`|x| >= 1e21 || (0 < |x| < 1e-6)` — exactly where V8 switches to `d[.ddd]e±N` — to
+a new `emitExponential` helper. The mantissa is normalised into [1,10) by iterative
+×/÷10 while tracking the decimal exponent (no `log10`; Wasm has none), biased by half
+a unit in the last emitted place for round-half-up, then 15 significant digits are
+emitted (the safe double-precision floor — more exposes binary-representation noise),
+trailing zeros and a bare `.` trimmed, followed by `e`, the sign, and the exponent
+magnitude rendered MSB-first via a hundreds/tens/ones decomposition (no reverse pass,
+so the write cursor is never corrupted). Three new locals added to `number_toString`
+(`exp` i32, `m` f64, `sd` i32).
+- `(1e21).toString()` → `"1e+21"` (was a 22-digit integer); `(1e-7)` → `"1e-7"` (was `"0"`)
+- `(1.5e-7)`/`(5e-7)`/`(1.234e-10)`/`(6.022e23)`/`(1.602e-19)` bit-exact with V8
+- round-half-up: `(1.1e-7)`→`"1.1e-7"`, `(9.5e-8)`→`"9.5e-8"` (not the `…9999…` truncation)
+- negatives, multi-digit exponents (`1e100`/`1e308`/`1e-100`) correct
+- no regression: `(1e-6)`→`"0.000001"`, `9.999e20`→long integer, ordinary ints/fractions unchanged
+Tests: `tests/issue-1836-exp.test.ts` (7 tests). No regression in
+`tests/issue-1335-standalone.test.ts` (8) / `tests/issue-49-*` (7) / `tests/issue-1836.test.ts` (8).
+Residual: bit-perfect shortest-round-trip (Grisu/Ryū) for 16-17-digit extremes at the
+double-range boundaries (max-double `1.797…e308`, denormals ~`1e-308`) — these print a
+last-digit-rounded approximation, not the V8 shortest string. That is #1335 Phase 2.
+
