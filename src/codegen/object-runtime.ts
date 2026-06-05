@@ -3240,6 +3240,65 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
   );
 
+  // ── __extern_method_call(externref recv, externref name, externref args)
+  //    -> externref (#1888 Slice 2) ─────────────────────────────────────────
+  //
+  // Generic `recv.name(args)` dispatch on an open `any`/externref receiver
+  // (ES §7.3.14 Call). Open-`$Object` user-method path: resolve `name` via
+  // `__extern_get` (own + prototype walk) and invoke through the
+  // `__apply_closure` arity bridge → `__call_fn_method_0..4` (D6/D7). Non-
+  // `$Object` brands ($Vec/string/Map/Set instance methods on a genuinely-`any`
+  // receiver) are the Slice-4 brand arms — they return undefined here for now
+  // (trackable, never invalid Wasm). The closure-round-trip prerequisite landed
+  // (#1226 typeof-closure recognition + every compiled fn-expr self-registers in
+  // `closureInfoByTypeIdx` so `__call_fn_method_N` emits a matching `ref.test`
+  // arm), so a closure stored into an open `$Object` reads back callable.
+  const S2_OPENANY_DISPATCH_WIRED = true;
+  if (S2_OPENANY_DISPATCH_WIRED) {
+    const applyClosureIdx = reserveApplyClosure(ctx);
+    const externGetIdx = ctx.funcMap.get("__extern_get")!;
+
+    const body: Instr[] = [
+      // any = any.convert_extern(recv); if null → return undefined
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
+      // if ref.test $Object(any) → __apply_closure(__extern_get(recv,name), recv, args)
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          // m = __extern_get(recv, name)
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          // __apply_closure(m, recv, args)
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: applyClosureIdx },
+        ],
+        // Non-$Object receiver: brand arms ($Vec/string/Map/Set) are Slice 4;
+        // return undefined for now (never invalid Wasm).
+        else: [{ op: "ref.null.extern" }],
+      },
+    ];
+    registerNative(
+      "__extern_method_call",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      body,
+    );
+  }
+
   // Silence "declared but never used" for ValType aliases reserved for the
   // values/entries/assign slices that stack on this foundation.
   void objVecRef;
@@ -3268,6 +3327,149 @@ export function ensureObjVecBuilders(ctx: CodegenContext): { newIdx: number; pus
     newIdx: ctx.funcMap.get("__objvec_new")!,
     pushIdx: ctx.funcMap.get("__objvec_push")!,
   };
+}
+
+/**
+ * (#1888 Slice 1) Reserve the `__apply_closure(externref fn, externref recv,
+ * externref args) -> externref` arity-bridge funcIdx with a placeholder
+ * `unreachable` body, registered in `funcMap`. The real body (an arity switch
+ * on `__extern_length(args)` dispatching to `__call_fn_method_0..4`) is filled
+ * by `fillApplyClosure` at FINALIZE, because the `__call_fn_method_N` exports
+ * it calls are only emitted there (after `closureInfoByTypeIdx` is complete).
+ * Mirrors the `reserveProtoIteratorDriver`/`fillProtoIteratorDriver` pattern
+ * (#1719). Idempotent. Sets `ctx.applyClosureReserved`.
+ */
+export function reserveApplyClosure(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__apply_closure");
+  if (existing !== undefined) return existing;
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$apply_closure_type",
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.mod.functions.push({
+    name: "__apply_closure",
+    typeIdx,
+    locals: [],
+    // Placeholder; filled by fillApplyClosure. A bare `unreachable` keeps the
+    // stub valid (externref result) if the fill is ever skipped.
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  });
+  ctx.funcMap.set("__apply_closure", funcIdx);
+  ctx.applyClosureReserved = true;
+  return funcIdx;
+}
+
+/**
+ * (#1888 Slice 1) Fill the reserved `__apply_closure` bridge body at FINALIZE,
+ * AFTER `emitClosureMethodCallExportN(0..4)` have registered
+ * `__call_fn_method_0..4` in `funcMap`. The bridge reads the dynamic arg count
+ * from `__extern_length(args)` and dispatches to the matching this-threaded
+ * closure dispatcher:
+ *
+ *   n = i32(__extern_length(args))
+ *   if n==0: __call_fn_method_0(recv, fn)
+ *   if n==1: __call_fn_method_1(recv, fn, idx0)
+ *   ... up to 4 ...
+ *   else (n>4): return undefined (sentinel)
+ *
+ * S1 SCOPE — NO THROWS. This bridge returns the undefined sentinel
+ * (`ref.null.extern`) for the not-a-function and arity-overflow cases rather
+ * than raising a `TypeError`. Reason: emitting a spec-correct throw here would
+ * pull `__new_TypeError` + the exn tag + a string constant into the object
+ * runtime, and those late registrations land AFTER the string helpers have
+ * already baked `call` targets at finalize — shifting func indices and
+ * corrupting the module ("__str_flatten expected (ref null 5) found i32"). That
+ * is the #1839/#117/#1886 late-registration-index-shift class. Carving S1
+ * without throws keeps the bridge dependency-free of late error machinery, so
+ * the module verifies cleanly. The spec-correct `TypeError` throws (ES §7.3.14
+ * step 2 "is not a function", and arity-overflow) plus the index-shift fix are
+ * the S2 fast-follow. Each `__call_fn_method_N` arm is only emitted when that
+ * export was registered (no closure of arity ≤ N ⇒ no dispatcher ⇒ that arm
+ * returns the undefined sentinel). No-op when `__apply_closure` was never
+ * reserved.
+ */
+export function fillApplyClosure(ctx: CodegenContext): void {
+  if (!ctx.applyClosureReserved) return;
+  const bridgeIdx = ctx.funcMap.get("__apply_closure");
+  if (bridgeIdx === undefined) return;
+  const fnArrayIdx = bridgeIdx - ctx.numImportFuncs;
+  const bridgeFn = ctx.mod.functions[fnArrayIdx];
+  if (!bridgeFn) return;
+
+  // Dependencies, all registered by now: __extern_length + __extern_get_idx
+  // (object runtime). S1 intentionally pulls NO error machinery (see header).
+  const externLengthIdx = ctx.funcMap.get("__extern_length");
+  const externGetIdxArr = ctx.funcMap.get("__extern_get_idx");
+  if (externLengthIdx === undefined || externGetIdxArr === undefined) {
+    // Dependencies absent (object runtime not emitted after all) — keep a valid
+    // body that returns undefined so the module verifies.
+    bridgeFn.body = [{ op: "ref.null.extern" } as Instr];
+    return;
+  }
+
+  // S1 undefined sentinel: every non-dispatchable case (arity > 4, or a missing
+  // arity-N dispatcher) returns undefined rather than throwing. S2 replaces
+  // these with spec-correct TypeError throws once the late-shift is fixed.
+  const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" } as Instr];
+
+  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32)
+  const ARG_OF = (k: number): Instr[] => [
+    { op: "local.get", index: 2 } as Instr,
+    { op: "f64.const", value: k } as Instr,
+    { op: "call", funcIdx: externGetIdxArr } as Instr,
+  ];
+
+  // Build the arity dispatch from the bottom up (n>4 → undefined), each arm
+  // guarded on the matching __call_fn_method_N being registered.
+  const callMethod = (n: number): number | undefined => ctx.funcMap.get(`__call_fn_method_${n}`);
+  const armUnsupported = undefinedSentinel();
+
+  const buildArm = (n: number): Instr[] => {
+    const idx = callMethod(n);
+    if (idx === undefined) {
+      // No closure of this arity was emitted ⇒ no dispatcher. A live call of
+      // this arity is impossible (the program has no arity-n closure), but keep
+      // a valid body: return the undefined sentinel.
+      return undefinedSentinel();
+    }
+    // __call_fn_method_N(recv, fn, arg0..arg{N-1})
+    const ops: Instr[] = [{ op: "local.get", index: 1 } as Instr, { op: "local.get", index: 0 } as Instr];
+    for (let k = 0; k < n; k++) ops.push(...ARG_OF(k));
+    ops.push({ op: "call", funcIdx: idx } as Instr);
+    return ops;
+  };
+
+  // if n==0 .. n==4 else undefined. Nest as if/else chain.
+  let dispatch: Instr[] = armUnsupported;
+  for (let n = 4; n >= 0; n--) {
+    dispatch = [
+      { op: "local.get", index: 3 } as Instr,
+      { op: "i32.const", value: n } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: buildArm(n),
+        else: dispatch,
+      } as Instr,
+    ];
+  }
+
+  // n = i32(__extern_length(args)); dispatch.
+  const body: Instr[] = [
+    { op: "local.get", index: 2 } as Instr,
+    { op: "call", funcIdx: externLengthIdx } as Instr,
+    { op: "i32.trunc_f64_s" } as Instr,
+    { op: "local.set", index: 3 } as Instr,
+    ...dispatch,
+  ];
+
+  bridgeFn.body = body;
+  bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
 }
 
 /**
@@ -3342,4 +3544,10 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // proto-dropping stub. (GC/host keeps the stub — see the calls.ts dual-mode
   // gate.)
   "__object_setPrototypeOf",
+  // #1888 Slice 2 — open-`any` method dispatch `recv.m(args)`. Native arm
+  // (__extern_method_call → __extern_get + __apply_closure arity bridge). The
+  // closure round-trips through __extern_set/__extern_get as a ref.test-able
+  // wrapper (#1226 typeof recognition + closureInfoByTypeIdx self-reg), so
+  // routing native is a correct answer, not a silent undefined.
+  "__extern_method_call",
 ]);
