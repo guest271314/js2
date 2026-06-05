@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T05:55:27.886Z",
-  "baseline_generated_at": "2026-06-05T05:55:27Z",
-  "baseline_sha": "6c9f3767b8233b71dcc5fd8fb13705288f73af45",
+  "timestamp": "2026-06-05T07:26:28.516Z",
+  "baseline_generated_at": "2026-06-05T07:26:28Z",
+  "baseline_sha": "2677f978f5515a563184ba948f10fc7da799cea4",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1416,15 +1416,15 @@
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
@@ -1775,15 +1775,15 @@
         },
         "sample_files": [
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-5-b-94.js",
           "test/built-ins/Object/defineProperty/15.2.3.6-4-432.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');",
-          "other:L#:## Codegen error: '__defineProperties' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/s",
           "assertion_fail:returned # — assert ## at L#: assert(accessed, 'accessed !== true');",
+          "other:L#:## Codegen error: '__defineProperties' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/s",
           "other:L#:## Codegen error: '__hasOwnProperty' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/str",
           "assertion_fail:returned # — assert ## at L#: verifySetFunc = value;"
         ]
