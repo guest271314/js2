@@ -1546,7 +1546,21 @@ export function coerceType(
     // Skip i32_byte vec structs (ArrayBuffer/DataView backing) — neither is
     // iterable in JS and converting them to a JS array loses the wasmGC
     // struct identity that DataView method dispatch depends on (#1056).
-    if (getArrTypeIdxFromVec(ctx, typeIdx) >= 0 && ctx.vecTypeMap.get("i32_byte") !== typeIdx) {
+    //
+    // #1539/#1470/#1664: `__make_iterable` is a JS HOST import. In standalone /
+    // WASI mode there is no JS runtime, so attaching it (a) breaks standalone
+    // purity and (b) shifts already-emitted function indices (the late-import
+    // hazard — observed corrupting `__str_flatten`). Standalone keeps the vec as
+    // a WasmGC `$Vec` and the consumer uses the native array ops
+    // (`.length`/index/for-of) that already operate on it directly (this is why
+    // `String.prototype.split` works standalone). So only attach the JS-host
+    // iterable shim in JS-host mode.
+    if (
+      !ctx.standalone &&
+      !ctx.wasi &&
+      getArrTypeIdxFromVec(ctx, typeIdx) >= 0 &&
+      ctx.vecTypeMap.get("i32_byte") !== typeIdx
+    ) {
       const makeIterIdx = ensureLateImport(ctx, "__make_iterable", [{ kind: "externref" }], [{ kind: "externref" }]);
       if (makeIterIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);
