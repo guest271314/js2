@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T03:46:06.067Z",
-  "baseline_generated_at": "2026-06-05T03:46:05Z",
-  "baseline_sha": "c791d7434d53a1226f19524c6e80a494aef63f62",
+  "timestamp": "2026-06-05T03:59:52.180Z",
+  "baseline_generated_at": "2026-06-05T03:59:51Z",
+  "baseline_sha": "acd0417d3bdd786b5f85ae8c85d540c01385680d",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43125,
-    "pass": 12484,
-    "fail": 8756,
-    "compile_error": 21854,
+    "pass": 12512,
+    "fail": 8730,
+    "compile_error": 21852,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21240,
+    "compilable": 21242,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42039,
-        "pass": 12089,
-        "fail": 8332,
-        "compile_error": 21587,
+        "pass": 12117,
+        "fail": 8306,
+        "compile_error": 21585,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 20421,
+        "compilable": 20423,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43125,
-        "pass": 12484,
-        "fail": 8756,
-        "compile_error": 21854,
+        "pass": 12512,
+        "fail": 8730,
+        "compile_error": 21852,
         "compile_timeout": 13,
         "skip": 18,
-        "compilable": 21240,
+        "compilable": 21242,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48107,
-        "pass": 12704,
-        "fail": 9021,
-        "compile_error": 26255,
+        "pass": 12732,
+        "fail": 8995,
+        "compile_error": 26253,
         "compile_timeout": 13,
         "skip": 114,
-        "compilable": 21725,
+        "compilable": 21727,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43125,
-    "pass": 12484,
-    "fail": 8756,
-    "compile_error": 21854,
+    "pass": 12512,
+    "fail": 8730,
+    "compile_error": 21852,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 21240,
+    "compilable": 21242,
     "stale": 0
   },
   "full_summary": {
     "total": 48107,
-    "pass": 12704,
-    "fail": 9021,
-    "compile_error": 26255,
+    "pass": 12732,
+    "fail": 8995,
+    "compile_error": 26253,
     "compile_timeout": 13,
     "skip": 114,
-    "compilable": 21725,
+    "compilable": 21727,
     "stale": 0
   },
   "strict_summary": {
     "total": 40616,
-    "pass": 11684,
-    "fail": 8027,
-    "compile_error": 20874,
+    "pass": 11712,
+    "fail": 8001,
+    "compile_error": 20872,
     "compile_timeout": 13,
     "skip": 18,
-    "compilable": 19711,
+    "compilable": 19713,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42039,
-      "pass": 12089,
-      "fail": 8332,
-      "compile_error": 21587,
+      "pass": 12117,
+      "fail": 8306,
+      "compile_error": 21585,
       "compile_timeout": 13,
       "skip": 18,
-      "compilable": 20421,
+      "compilable": 20423,
       "stale": 0
     }
   },
@@ -890,9 +890,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 4073,
-      "fail": 2265,
-      "compile_error": 4680,
+      "pass": 4101,
+      "fail": 2238,
+      "compile_error": 4679,
       "compile_timeout": 0,
       "skip": 18,
       "total": 11036
@@ -1051,8 +1051,8 @@
       "name": "language/statements",
       "path": "language/statements",
       "pass": 3264,
-      "fail": 1963,
-      "compile_error": 4108,
+      "fail": 1964,
+      "compile_error": 4107,
       "compile_timeout": 2,
       "skip": 0,
       "total": 9337
@@ -1079,9 +1079,9 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7000,
+    "assertion_fail": 6973,
     "illegal_cast": 203,
-    "negative_test_fail": 73,
+    "negative_test_fail": 74,
     "null_deref": 220,
     "oob": 98,
     "other": 20110,
@@ -1090,7 +1090,7 @@
     "runtime_error": 2094,
     "type_error": 1,
     "unreachable": 36,
-    "wasm_compile": 5382
+    "wasm_compile": 5380
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 35289,
-    "classified": 35289,
+    "total_non_pass_non_skip": 35261,
+    "classified": 35261,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1222,15 +1222,15 @@
           "null_deref": 1
         },
         "sample_files": [
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/from/argument-string-is-infinity.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/compare/builtin.js"
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "other:L#:## Codegen error: '__proto_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/",
+          "other:L#:## Codegen error: '__extern_method_call' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get",
           "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result1, \"#-#-09T01:#:#.123987Z\", \"roundingMode is halfTrunc (with # digits from smallestUnit)\");",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result, \"#-#-#\", `default calendarName option is auto with built-in ISO calendar`);"
@@ -1409,23 +1409,23 @@
         "error_categories": {
           "assertion_fail": 113,
           "other": 1692,
-          "wasm_compile": 163,
           "null_deref": 9,
+          "wasm_compile": 163,
           "runtime_error": 17,
           "illegal_cast": 5
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
@@ -1435,17 +1435,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 4066,
+        "count": 4063,
         "statuses": {
           "pass": 0,
-          "fail": 4065,
+          "fail": 4062,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4066
+          "total": 4063
         },
         "error_categories": {
-          "assertion_fail": 4059,
+          "assertion_fail": 4056,
           "unreachable": 3,
           "runtime_error": 1,
           "promise_error": 3
@@ -1471,19 +1471,19 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 12756,
+        "count": 12706,
         "statuses": {
           "pass": 0,
-          "fail": 869,
-          "compile_error": 11887,
+          "fail": 834,
+          "compile_error": 11872,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 12756
+          "total": 12706
         },
         "error_categories": {
           "other": 11365,
-          "wasm_compile": 441,
-          "assertion_fail": 697,
+          "wasm_compile": 426,
+          "assertion_fail": 662,
           "runtime_error": 196,
           "promise_error": 13,
           "illegal_cast": 28,
@@ -1550,18 +1550,18 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 4315,
+        "count": 4336,
         "statuses": {
           "pass": 0,
-          "fail": 514,
-          "compile_error": 3801,
+          "fail": 521,
+          "compile_error": 3815,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4315
+          "total": 4336
         },
         "error_categories": {
-          "assertion_fail": 338,
-          "wasm_compile": 3146,
+          "assertion_fail": 345,
+          "wasm_compile": 3160,
           "null_deref": 28,
           "other": 660,
           "illegal_cast": 65,
@@ -1756,8 +1756,8 @@
         "count": 866,
         "statuses": {
           "pass": 0,
-          "fail": 313,
-          "compile_error": 553,
+          "fail": 314,
+          "compile_error": 552,
           "compile_timeout": 0,
           "skip": 0,
           "total": 866
@@ -1766,8 +1766,8 @@
           "assertion_fail": 297,
           "other": 521,
           "illegal_cast": 2,
-          "wasm_compile": 30,
-          "negative_test_fail": 4,
+          "wasm_compile": 29,
+          "negative_test_fail": 5,
           "promise_error": 4,
           "runtime_error": 5,
           "null_deref": 3
@@ -1939,17 +1939,17 @@
           "#1596"
         ],
         "label": "Function object name/length/prototype/call semantics",
-        "count": 168,
+        "count": 170,
         "statuses": {
           "pass": 0,
-          "fail": 121,
+          "fail": 123,
           "compile_error": 47,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 168
+          "total": 170
         },
         "error_categories": {
-          "assertion_fail": 109,
+          "assertion_fail": 111,
           "wasm_compile": 43,
           "null_deref": 4,
           "runtime_error": 1,
@@ -2728,17 +2728,17 @@
           "#779"
         ],
         "label": "Miscellaneous low-volume spec-completeness tail",
-        "count": 54,
+        "count": 56,
         "statuses": {
           "pass": 0,
-          "fail": 54,
+          "fail": 56,
           "compile_error": 0,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 54
+          "total": 56
         },
         "error_categories": {
-          "assertion_fail": 53,
+          "assertion_fail": 55,
           "range_error": 1
         },
         "sample_files": [
