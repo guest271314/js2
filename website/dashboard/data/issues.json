@@ -678,19 +678,6 @@
       "sprint": "46"
     },
     {
-      "id": "762",
-      "title": "- Generator .next(value) arguments are silently ignored",
-      "slug": "762-generator-next-value-arguments-are",
-      "priority": "medium",
-      "feasibility": "easy",
-      "depends_on": [
-        "680"
-      ],
-      "goal": "async-model",
-      "status": "blocked",
-      "sprint": "Backlog"
-    },
-    {
       "id": "746",
       "title": "Inline property tables: struct-based property access for inferred shapes",
       "slug": "746-inline-property-tables-struct-based",
@@ -731,17 +718,6 @@
   ],
   "ready": [
     {
-      "id": "6407",
-      "title": "Array.prototype.<m>.call(receiver, cb) never reads elements of a compiled $Vec / open-object receiver",
-      "slug": "6407-array-method-call-vec-receiver-element-retrieval",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "correctness",
-      "status": "ready",
-      "sprint": "59"
-    },
-    {
       "id": "1899",
       "title": "finalize funcIdx-authority contract: reconcile↔dead-elim native-string helper sibling-call mismatch (late-shift class recurrence-proofing)",
       "slug": "1899-reconcile-finalize-funcidx-authority-contract",
@@ -773,17 +749,6 @@
       "goal": "performance",
       "status": "ready",
       "sprint": "Backlog"
-    },
-    {
-      "id": "1891",
-      "title": "standalone: generator-method destructuring param emits invalid Wasm (array.set externref vs (ref null N)) — over-shifted funcIdx after generator-body late imports",
-      "slug": "1891-gen-method-dstr-stale-funcidx-array-set",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "standalone-mode",
-      "status": "ready",
-      "sprint": "60"
     },
     {
       "id": "1888",
@@ -1189,17 +1154,6 @@
       "sprint": "61"
     },
     {
-      "id": "1644",
-      "title": "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)",
-      "slug": "1644-spec-gap-bigint-typed-paths",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "60"
-    },
-    {
       "id": "1629",
       "title": "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)",
       "slug": "1629-spec-gap-object-defineproperty-descriptor-attributes",
@@ -1458,28 +1412,6 @@
       "sprint": "50"
     },
     {
-      "id": "1348",
-      "title": "spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails)",
-      "slug": "1348-spec-gap-class-static-init-and-private-fields",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "60"
-    },
-    {
-      "id": "1346",
-      "title": "spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails)",
-      "slug": "1346-spec-gap-yield-in-try-finally",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "60"
-    },
-    {
       "id": "1327",
       "title": "Landing page: per-feature test pass counts + feature report page + playground deep-link",
       "slug": "1327-landing-feature-test-stats-report-playground",
@@ -1489,17 +1421,6 @@
       "goal": "npm-library-support",
       "status": "ready",
       "sprint": "50"
-    },
-    {
-      "id": "1320",
-      "title": "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)",
-      "slug": "1320-array-from-externref-iterator-bridge",
-      "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "spec-conformance",
-      "status": "ready",
-      "sprint": "60"
     },
     {
       "id": "1254",
@@ -2396,6 +2317,19 @@
       "sprint": "45"
     },
     {
+      "id": "762",
+      "title": "- Generator .next(value) arguments are silently ignored",
+      "slug": "762-generator-next-value-arguments-are",
+      "priority": "medium",
+      "feasibility": "easy",
+      "depends_on": [
+        "680"
+      ],
+      "goal": "async-model",
+      "status": "ready",
+      "sprint": "Backlog"
+    },
+    {
       "id": "745",
       "title": "Tagged union representation to replace externref boxing",
       "slug": "745-tagged-union-representation-to-replace",
@@ -2487,6 +2421,19 @@
       "goal": "builtin-methods",
       "status": "ready",
       "sprint": "Backlog"
+    },
+    {
+      "id": "681",
+      "title": "Pure Wasm iterator protocol (eliminate 5 host imports)",
+      "slug": "681-pure-wasm-iterator-protocol-eliminate",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [
+        "680"
+      ],
+      "goal": "iterator-protocol",
+      "status": "ready",
+      "sprint": "60"
     },
     {
       "id": "674",
@@ -2722,19 +2669,6 @@
       "sprint": "52"
     },
     {
-      "id": "1539",
-      "title": "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)",
-      "slug": "1539-wasm-native-regex-engine-regress",
-      "priority": "high",
-      "feasibility": "hard",
-      "depends_on": [
-        "1474"
-      ],
-      "goal": "standalone-wasm",
-      "status": "in-progress",
-      "sprint": "60"
-    },
-    {
       "id": "1534",
       "title": "test: Web API host import unit tests (fetch, timers, localStorage, crypto.getRandomValues)",
       "slug": "1534-web-api-host-import-unit-tests",
@@ -2924,19 +2858,6 @@
       "goal": "async-model",
       "status": "in-progress",
       "sprint": "58"
-    },
-    {
-      "id": "681",
-      "title": "Pure Wasm iterator protocol (eliminate 5 host imports)",
-      "slug": "681-pure-wasm-iterator-protocol-eliminate",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [
-        "680"
-      ],
-      "goal": "iterator-protocol",
-      "status": "in-progress",
-      "sprint": "60"
     }
   ],
   "review": [
@@ -3634,6 +3555,17 @@
       "sprint": "50"
     },
     {
+      "id": "1320",
+      "title": "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)",
+      "slug": "1320-array-from-externref-iterator-bridge",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "spec-conformance",
+      "status": "in-review",
+      "sprint": "60"
+    },
+    {
       "id": "1130",
       "title": "Array methods — getter-observing property access on indices and length",
       "slug": "1130-array-methods-getter-observing-property",
@@ -3698,20 +3630,64 @@
       "goal": "core-semantics",
       "status": "in-review",
       "sprint": "58"
+    }
+  ],
+  "done": [
+    {
+      "id": "6407",
+      "title": "Array.prototype.<m>.call(receiver, cb) never reads elements of a compiled $Vec / open-object receiver",
+      "slug": "6407-array-method-call-vec-receiver-element-retrieval",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "correctness",
+      "status": "done",
+      "sprint": "61"
     },
     {
-      "id": "680",
-      "title": "Wasm-native generators (state machines) with optional JS host fallback",
-      "slug": "680-wasm-native-generators-state-machines",
+      "id": "1902",
+      "title": "Math/Number constant reads refuse under --target standalone (__get_builtin pre-empts native f64.const) [#1888 S6-c]",
+      "slug": "1902-s6c-math-number-constants-standalone",
+      "priority": "high",
+      "feasibility": "easy",
+      "depends_on": [],
+      "goal": "standalone-mode",
+      "status": "done",
+      "sprint": "61"
+    },
+    {
+      "id": "1900",
+      "title": "standalone native ToPrimitive (Phase 1): Wasm-native OrdinaryToPrimitive over $Object (~2,136 ceiling)",
+      "slug": "1900-standalone-native-toprimitive-phase1",
       "priority": "high",
       "feasibility": "hard",
       "depends_on": [],
       "goal": "standalone-mode",
-      "status": "in-review",
-      "sprint": "Backlog"
-    }
-  ],
-  "done": [
+      "status": "done",
+      "sprint": "60"
+    },
+    {
+      "id": "1897",
+      "title": "Gate merges on standalone test262 regression",
+      "slug": "1897-ci-standalone-regression-gate",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "standalone-mode",
+      "status": "done",
+      "sprint": "60"
+    },
+    {
+      "id": "1891",
+      "title": "standalone: generator-method destructuring param emits invalid Wasm (array.set externref vs (ref null N)) — over-shifted funcIdx after generator-body late imports",
+      "slug": "1891-gen-method-dstr-stale-funcidx-array-set",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "standalone-mode",
+      "status": "done",
+      "sprint": "60"
+    },
     {
       "id": "1885",
       "title": "Pages deploy regenerates test262-editions.json from stale jsonl → #goals slider shows old numbers",
@@ -5258,6 +5234,17 @@
       "sprint": "50"
     },
     {
+      "id": "1644",
+      "title": "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)",
+      "slug": "1644-spec-gap-bigint-typed-paths",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "60"
+    },
+    {
       "id": "1637",
       "title": "spec gap: Boolean wrapper + Symbol coercion TypeErrors (24 + 45 test262 fails)",
       "slug": "1637-spec-gap-boolean-symbol-coercion",
@@ -6002,6 +5989,19 @@
       "sprint": "52"
     },
     {
+      "id": "1539",
+      "title": "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)",
+      "slug": "1539-wasm-native-regex-engine-regress",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [
+        "1474"
+      ],
+      "goal": "standalone-wasm",
+      "status": "done",
+      "sprint": "60"
+    },
+    {
       "id": "1535",
       "title": "research: JS host dependency audit — identify gaps and evaluate standalone Wasm/JS replacements",
       "slug": "1535-js-host-dependency-audit-and-standalone-gap-research",
@@ -6733,6 +6733,17 @@
       "sprint": "50"
     },
     {
+      "id": "1348",
+      "title": "spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails)",
+      "slug": "1348-spec-gap-class-static-init-and-private-fields",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "60"
+    },
+    {
       "id": "1347",
       "title": "spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails)",
       "slug": "1347-spec-gap-for-of-iterator-close-on-throw",
@@ -6742,6 +6753,17 @@
       "goal": "spec-completeness",
       "status": "done",
       "sprint": "50"
+    },
+    {
+      "id": "1346",
+      "title": "spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails)",
+      "slug": "1346-spec-gap-yield-in-try-finally",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "done",
+      "sprint": "60"
     },
     {
       "id": "1343",
@@ -13314,6 +13336,17 @@
       "goal": "standalone-mode",
       "status": "done",
       "sprint": "58"
+    },
+    {
+      "id": "680",
+      "title": "Wasm-native generators (state machines) with optional JS host fallback",
+      "slug": "680-wasm-native-generators-state-machines",
+      "priority": "high",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "standalone-mode",
+      "status": "done",
+      "sprint": "Backlog"
     },
     {
       "id": "679",

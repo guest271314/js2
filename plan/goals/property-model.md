@@ -26,7 +26,7 @@ builtin-methods and iterator-protocol.
 | **129** | propertyHelper.js test262 harness include | 1 | wont-fix |  |
 | **187** | String prototype methods: heavy test skipping due to include filters | 2 | done |  |
 | **239** | Issue #239: Element access on struct types (bracket notation) | 0 | done | medium |
-| **329** | - Object.setPrototypeOf support | 0 | done | low |
+| **329** | - Object.setPrototypeOf support | 60 | done | low |
 | **341** | - Property introspection (hasOwnProperty, propertyIsEnumerable) | 7 | done | medium |
 | **359** | - Object mutability methods (Object.freeze/seal/preventExtensions) | 0 | done | low |
 | **363** | - Tagged template .raw property and identity | 0 | done | low |

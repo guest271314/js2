@@ -1,9 +1,9 @@
 ---
 id: 681
 title: "Pure Wasm iterator protocol (eliminate 5 host imports)"
-status: in-progress
+status: ready
 created: 2026-03-20
-updated: 2026-06-03
+updated: 2026-06-06
 priority: high
 feasibility: medium
 reasoning_effort: high

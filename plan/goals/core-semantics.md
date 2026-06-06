@@ -156,7 +156,7 @@ missing return values, incorrect type coercion, wrong control flow, broken scope
 | **821** | BindingElement null guard over-triggering | 56 | done | critical |
 | **822** | Wasm type mismatch compile errors (907 CE) | 31 | done | high |
 | **823** | Destructuring initializer not evaluated | 25 | done | high |
-| **846** | assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests) | Backlog | ready | critical |
+| **846** | assert.throws not thrown: built-in methods accept invalid arguments silently (2,799 tests) | 58 | in-review | critical |
 | **847** | for-await-of / for-of destructuring produces wrong values (660 tests) | 30 | done | high |
 | **852** | Destructuring parameters cause null_deref and illegal_cast (1,525 tests) | 30 | done | critical |
 | **911** | Split statements.ts into control-flow, variables, destructuring, loops, and functions modules | 39 | done | high |
