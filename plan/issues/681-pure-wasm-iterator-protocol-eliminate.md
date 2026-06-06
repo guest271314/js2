@@ -1,7 +1,7 @@
 ---
 id: 681
 title: "Pure Wasm iterator protocol (eliminate 5 host imports)"
-status: in-progress
+status: in-review
 created: 2026-03-20
 updated: 2026-06-06
 priority: high
@@ -20,6 +20,7 @@ files:
       - "for-of uses struct-based iterators instead of host imports"
 claimed_by: codex-developer
 claimed_at: 2026-06-06T18:07:10.511Z
+pr: 1256
 ---
 # #681 — Pure Wasm iterator protocol (eliminate 5 host imports)
 
