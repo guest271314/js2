@@ -256,8 +256,8 @@ Validation:
   tests/issue-1643.test.ts tests/issue-846h.test.ts tests/issue-1682.test.ts
   tests/class-static-private-this.test.ts` — pass (29 tests).
 - `pnpm exec tsc --noEmit --pretty false` — pass.
-- Rechecked before PR handoff on 2026-06-06 with the same scoped vitest set
-  and `pnpm exec tsc --noEmit --pretty false` — pass.
+- Rechecked after merging `origin/main` on 2026-06-06 with the same scoped
+  vitest set and `pnpm exec tsc --noEmit --pretty false` — pass.
 
 Notes:
 
