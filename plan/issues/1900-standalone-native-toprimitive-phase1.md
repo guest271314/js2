@@ -16,7 +16,7 @@ parent: 1806
 related: [1806, 1525b, 1472, 850, 1253, 1716]
 needs_arch_spec: true
 claimed_by: codex-developer
-claimed_at: 2026-06-06T09:10:05.166Z
+claimed_at: 2026-06-06T09:46:21.649Z
 pr: 1251
 ---
 # #1900 — Standalone native ToPrimitive (Phase 1)
