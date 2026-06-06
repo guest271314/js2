@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-06T10:54:39.561Z",
-  "baseline_generated_at": "2026-06-06T10:54:39Z",
-  "baseline_sha": "4549f6c067fd98b00e3d3c46bccb64ab31a43da2",
+  "timestamp": "2026-06-06T11:14:13.082Z",
+  "baseline_generated_at": "2026-06-06T11:14:12Z",
+  "baseline_sha": "f7bb96f9138d14a64d4a9a337cb2d5990338857e",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,8 +9,8 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16293,
-    "fail": 12377,
+    "pass": 16294,
+    "fail": 12376,
     "compile_error": 14432,
     "compile_timeout": 12,
     "skip": 18,
@@ -19,8 +19,8 @@
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 15896,
-        "fail": 11947,
+        "pass": 15897,
+        "fail": 11946,
         "compile_error": 14173,
         "compile_timeout": 12,
         "skip": 18,
@@ -52,8 +52,8 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16293,
-        "fail": 12377,
+        "pass": 16294,
+        "fail": 12376,
         "compile_error": 14432,
         "compile_timeout": 12,
         "skip": 18,
@@ -63,8 +63,8 @@
       },
       "full": {
         "total": 48114,
-        "pass": 17262,
-        "fail": 13420,
+        "pass": 17263,
+        "fail": 13419,
         "compile_error": 17306,
         "compile_timeout": 12,
         "skip": 114,
@@ -76,8 +76,8 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16293,
-    "fail": 12377,
+    "pass": 16294,
+    "fail": 12376,
     "compile_error": 14432,
     "compile_timeout": 12,
     "skip": 18,
@@ -86,8 +86,8 @@
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17262,
-    "fail": 13420,
+    "pass": 17263,
+    "fail": 13419,
     "compile_error": 17306,
     "compile_timeout": 12,
     "skip": 114,
@@ -96,8 +96,8 @@
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15460,
-    "fail": 11468,
+    "pass": 15461,
+    "fail": 11467,
     "compile_error": 13665,
     "compile_timeout": 12,
     "skip": 18,
@@ -127,8 +127,8 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 15896,
-      "fail": 11947,
+      "pass": 15897,
+      "fail": 11946,
       "compile_error": 14173,
       "compile_timeout": 12,
       "skip": 18,
@@ -891,8 +891,8 @@
       "name": "language/expressions",
       "path": "language/expressions",
       "pass": 5536,
-      "fail": 3549,
-      "compile_error": 1932,
+      "fail": 3550,
+      "compile_error": 1931,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 4612,
-      "fail": 2857,
-      "compile_error": 1868,
+      "pass": 4613,
+      "fail": 2855,
+      "compile_error": 1869,
       "compile_timeout": 0,
       "skip": 0,
       "total": 9337
@@ -1079,10 +1079,10 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9855,
+    "assertion_fail": 9853,
     "illegal_cast": 772,
     "negative_test_fail": 77,
-    "null_deref": 489,
+    "null_deref": 490,
     "oob": 154,
     "other": 11524,
     "promise_error": 56,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30738,
-    "classified": 30738,
+    "total_non_pass_non_skip": 30737,
+    "classified": 30737,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1274,7 +1274,7 @@
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
           "assertion_fail:returned # — assert ## at L#: verifyProperty(DisposableStack.prototype.adopt, 'name', { value: 'adopt', writable: false, enumerable: false, configurable: true });",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(stack2.disposed, false);"
+          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone"
         ]
       },
       {
@@ -1383,14 +1383,14 @@
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/stringify/value-bigint-tojson.js"
+          "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct"
+          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
         ]
       },
       {
@@ -1439,17 +1439,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5553,
+        "count": 5552,
         "statuses": {
           "pass": 0,
-          "fail": 5552,
+          "fail": 5551,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5553
+          "total": 5552
         },
         "error_categories": {
-          "assertion_fail": 5547,
+          "assertion_fail": 5546,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1499,8 +1499,8 @@
         "sample_files": [
           "test/language/statements/class/dstr/async-gen-meth-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-elem-ary-rest-iter.js",
-          "test/language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js",
           "test/language/statements/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-rest-iter.js",
+          "test/language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js",
           "test/language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js"
         ],
         "sample_signatures": [
@@ -1648,10 +1648,10 @@
         },
         "error_categories": {
           "wasm_compile": 779,
-          "assertion_fail": 804,
+          "assertion_fail": 803,
           "negative_test_fail": 13,
           "runtime_error": 546,
-          "null_deref": 135,
+          "null_deref": 136,
           "other": 773,
           "oob": 73,
           "illegal_cast": 81,
@@ -1670,7 +1670,7 @@
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { innerB.method(innerB); }, '[[Get]] operation of an accessor without getter');",
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $accessed i32) (loc"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $called f64) (local"
         ]
       },
       {
@@ -1697,9 +1697,9 @@
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
