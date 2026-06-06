@@ -1,7 +1,7 @@
 ---
 id: 1644
 title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)"
-status: in-progress
+status: in-review
 created: 2026-05-08
 updated: 2026-06-06
 priority: medium
@@ -14,6 +14,7 @@ goal: spec-completeness
 sprint: 60
 renumbered_from: 1350
 parent: 1328
+pr: 1249
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:10:20.967Z
 ---
