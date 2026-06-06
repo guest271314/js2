@@ -132,11 +132,15 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
       compileStringLiteral(ctx, fctx, "undefined", operand);
       return true;
     }
-    // Dynamic externref (boxed string / any) → bridge to anyref, then the
-    // in-module ToString dispatcher.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    const anyToStrIdx = ensureAnyToStringHelper(ctx);
-    fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // For standalone $Object values this routes through native
+    // OrdinaryToPrimitive("string") before the native-string concat helper.
+    const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (toStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    }
+    emitNativeStringRefFromExternref(ctx, fctx);
     return true;
   }
 
@@ -392,9 +396,12 @@ export function compileNativeTemplateExpression(
           fctx.body.push({ op: "drop" });
           compileStringLiteral(ctx, fctx, "undefined", span.expression);
         } else {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          const anyToStrIdx = ensureAnyToStringHelper(ctx);
-          fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+          const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (toStrIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: toStrIdx });
+          }
+          emitNativeStringRefFromExternref(ctx, fctx);
         }
       } else {
         coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");

@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-// #1806 Phase 0 — standalone ToPrimitive refusal.
+// #1806 Phase 0 — standalone ToPrimitive refusal, superseded by #1900 native
+// OrdinaryToPrimitive coverage.
 //
 // In `--target standalone` there is no JS host to satisfy the `env::__to_primitive`
 // import that the ToPrimitive (§7.1.1) lowering dispatches to for objects whose
@@ -12,51 +13,45 @@ import { compile } from "../src/index.js";
 // JS-host runtime which threw the bare "Cannot convert object to primitive value"
 // with no tracking issue — the 2,136-test #1806 failure cluster.
 //
-// Phase 0 converts every such case into a compile error that cites #1806, making
-// the cluster trackable. The Wasm-native ToPrimitive over the $Object struct is
-// Phase 1 (#1806).
+// Phase 0 converted every such case into a compile error that cited #1806,
+// making the cluster trackable. #1900 replaces that broad refusal with native
+// standalone ToPrimitive coverage, so this file now guards the old failure
+// shapes against regressing back to leaked host imports.
 
-const HOST_TOPRIM_REFUSED: Array<{ label: string; src: string }> = [
+const HOST_TOPRIM_REFUSED: Array<{ label: string; src: string; expected: number | "NaN" }> = [
   {
     label: "plain object coerced to number (host ToPrimitive dispatch)",
-    src: `function test(): number { const o = { a: 1, b: 2 }; return (o as any) - 0; }`,
+    src: `export function test(): number { const o = { a: 1, b: 2 }; return (o as any) - 0; }`,
+    expected: "NaN",
   },
   {
     label: "plain object in multiply (numeric hint)",
-    src: `function test(): number { const o = { x: 3 }; return (o as any) * 2; }`,
+    src: `export function test(): number { const o = { x: 3 }; return (o as any) * 2; }`,
+    expected: "NaN",
   },
   {
     label: "object in bitwise-and (ToNumeric → ToPrimitive)",
-    src: `function test(): number { const o = { p: 1 }; return (o as any) & 3; }`,
+    src: `export function test(): number { const o = { p: 1 }; return (o as any) & 3; }`,
+    expected: 0,
   },
 ];
 
-describe("#1806 Phase 0 — standalone ToPrimitive refusal", () => {
-  for (const { label, src } of HOST_TOPRIM_REFUSED) {
-    it(`refuses with a #1806 compile error: ${label}`, async () => {
+describe("#1806/#1900 — standalone ToPrimitive no longer leaks host imports", () => {
+  for (const { label, src, expected } of HOST_TOPRIM_REFUSED) {
+    it(`compiles host-free after #1900: ${label}`, async () => {
       const r = await compile(src, {
         fileName: "issue-1806.ts",
         target: "standalone",
         skipSemanticDiagnostics: true,
       });
 
-      // The compile must FAIL (no half-working module with a leaked host import).
-      expect(r.success).toBe(false);
-
-      // Every error in the cluster must cite the tracking issue #1806 so the
-      // failure is attributable, and must name the ToPrimitive operation.
-      const messages = r.errors.map((e) => e.message);
-      expect(messages.some((m) => m.includes("#1806"))).toBe(true);
-      expect(messages.some((m) => /toPrimitive/i.test(m))).toBe(true);
-
-      // The message must NOT begin with "Cannot " / "Invalid " — those prefixes
-      // make the test262 classifier bucket it as a stray runtime_error instead
-      // of a trackable compile_error.
-      const toPrimMsg = messages.find((m) => m.includes("#1806"))!;
-      expect(/^Cannot |^Invalid /.test(toPrimMsg)).toBe(false);
-
-      // No `__to_primitive` host import may leak into the standalone module.
+      expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
       expect((r.imports ?? []).some((i) => i.name === "__to_primitive")).toBe(false);
+      expect(WebAssembly.validate(r.binary)).toBe(true);
+      const { instance } = await WebAssembly.instantiate(r.binary, {});
+      const actual = (instance.exports.test as () => number)();
+      if (expected === "NaN") expect(actual).toBeNaN();
+      else expect(actual).toBe(expected);
     });
   }
 

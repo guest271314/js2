@@ -295,9 +295,7 @@ export function compileBinaryExpression(
       if (pfIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: pfIdx });
       } else {
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       }
       emitToInt32(fctx);
       return { kind: "i32" };
@@ -1069,9 +1067,7 @@ export function compileBinaryExpression(
           if (pfIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: pfIdx });
           } else {
-            addUnionImports(ctx);
-            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-            fctx.body.push({ op: "call", funcIdx: unboxIdx });
+            coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
           }
         } else if (leftType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1092,9 +1088,7 @@ export function compileBinaryExpression(
           if (pfIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: pfIdx });
           } else {
-            addUnionImports(ctx);
-            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-            fctx.body.push({ op: "call", funcIdx: unboxIdx });
+            coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
           }
         } else if (rightType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1720,15 +1714,13 @@ export function compileBinaryExpression(
 
   // Externref in numeric context: unbox externref operands to f64
   if ((leftType.kind === "externref" || rightType.kind === "externref") && isNumericOp) {
-    addUnionImports(ctx);
-    const unboxIdx = ctx.funcMap.get("__unbox_number")!;
     if (rightType.kind === "externref") {
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
     }
     if (leftType.kind === "externref") {
       const tmpR = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.set", index: tmpR });
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       fctx.body.push({ op: "local.get", index: tmpR });
       releaseTempLocal(fctx, tmpR);
     }
@@ -2195,9 +2187,7 @@ export function compileBinaryExpression(
   if (isNumericOp) {
     // Coerce right operand (top of stack) to f64
     if (rightType.kind === "externref") {
-      addUnionImports(ctx);
-      const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
     } else if (rightType.kind === "i32") {
       fctx.body.push({ op: "f64.convert_i32_s" });
     } else if (rightType.kind === "i64") {
@@ -2216,9 +2206,7 @@ export function compileBinaryExpression(
       const tmpR = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.set", index: tmpR });
       if (leftType.kind === "externref") {
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       } else if (leftType.kind === "i32") {
         fctx.body.push({ op: "f64.convert_i32_s" });
       } else if (leftType.kind === "i64") {

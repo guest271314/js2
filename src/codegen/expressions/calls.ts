@@ -7796,6 +7796,10 @@ function compileCallExpression(
         return { kind: "f64" };
       }
       if (argType?.kind === "externref") {
+        if (ctx.standalone) {
+          coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
+          return { kind: "f64" };
+        }
         // Number(x) uses ToNumber semantics — __unbox_number calls Number(v) in JS.
         // parseFloat is wrong here: Number(null)=0 but parseFloat(null)=NaN,
         // Number("")=0 but parseFloat("")=NaN, Number("0x1F")=31 but parseFloat gives 0.
