@@ -14,7 +14,7 @@ goal: spec-completeness
 sprint: 60
 parent: 1328
 claimed_by: codex-developer
-claimed_at: 2026-06-06T09:09:45.155Z
+claimed_at: 2026-06-06T09:42:52.777Z
 pr: 1250
 ---
 # #1348 — Class: static block order, private field exotics, super-class field shadow
@@ -256,6 +256,8 @@ Validation:
   tests/issue-1643.test.ts tests/issue-846h.test.ts tests/issue-1682.test.ts
   tests/class-static-private-this.test.ts` — pass (29 tests).
 - `pnpm exec tsc --noEmit --pretty false` — pass.
+- Rechecked before PR handoff on 2026-06-06 with the same scoped vitest set
+  and `pnpm exec tsc --noEmit --pretty false` — pass.
 
 Notes:
 
