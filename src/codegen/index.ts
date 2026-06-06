@@ -49,7 +49,13 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
-import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
+import {
+  addImport,
+  addStringConstantGlobal,
+  ensureExnTag,
+  localGlobalIdx,
+  nextModuleGlobalIdx,
+} from "./registry/imports.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
@@ -97,6 +103,7 @@ import {
   flatStringType,
   nativeStringType,
   nativeStringTypeNullable,
+  stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
 
@@ -7821,6 +7828,10 @@ export function addUnionImports(ctx: CodegenContext): void {
     kind: "func",
     typeIdx: typeofType,
   });
+  addImport(ctx, "env", "__typeof_bigint", {
+    kind: "func",
+    typeIdx: typeofType,
+  });
   addImport(ctx, "env", "__typeof_undefined", {
     kind: "func",
     typeIdx: typeofType,
@@ -7896,6 +7907,7 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__typeof_number",
       "__typeof_string",
       "__typeof_boolean",
+      "__typeof_bigint",
       "__typeof_undefined",
       "__typeof_object",
       "__typeof_function",
@@ -8102,12 +8114,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
   });
 
+  const bigIntStructIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$BigInt",
+    fields: [{ name: "value", type: { kind: "i64", bigint: true }, mutable: false }],
+  });
+
   // 2. Pre-compute func types — addFuncType de-dupes by signature so
   //    repeated calls return the same typeIdx.
   const externrefToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
   const externrefToF64 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
+  const externrefToI64 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i64", bigint: true }]);
   const f64ToExternref = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
   const i32ToExternref = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "externref" }]);
+  const i64ToExternref = addFuncType(ctx, [{ kind: "i64", bigint: true }], [{ kind: "externref" }]);
   const externrefToExternref = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
 
   /**
@@ -8124,6 +8145,18 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.funcMap.set(name, funcIdx);
     ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+  };
+
+  const throwNativeError = (errorName: "TypeError" | "RangeError" | "SyntaxError", message: string): Instr[] => {
+    emitWasiErrorConstructor(ctx, errorName, 1);
+    addStringConstantGlobal(ctx, message);
+    const ctorIdx = ctx.funcMap.get(`__new_${errorName}`)!;
+    const tagIdx = ensureExnTag(ctx);
+    return [
+      ...stringConstantExternrefInstrs(ctx, message),
+      { op: "call", funcIdx: ctorIdx },
+      { op: "throw", tagIdx } as Instr,
+    ];
   };
 
   // 3. __box_number(f64) -> externref
@@ -8178,6 +8211,15 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     { op: "extern.convert_any" },
   ]);
 
+  // #1644 Slice E1 — __box_bigint(i64) -> externref. In no-JS-host mode a
+  // bigint-branded i64 needs a WasmGC carrier so it cannot fall through to the
+  // number-box path and lose its BigInt identity at the externref frontier.
+  registerNative("__box_bigint", i64ToExternref, [
+    { op: "local.get", index: 0 },
+    { op: "struct.new", typeIdx: bigIntStructIdx },
+    { op: "extern.convert_any" },
+  ]);
+
   // 6. __unbox_boolean(externref) -> i32
   //    Returns the boxed value if it's a __box_boolean_struct, otherwise
   //    falls back to Boolean-coercion: null → false, any non-null ref
@@ -8215,6 +8257,141 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ],
     [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+  );
+
+  // #1644 Slice E1 — __to_bigint(externref) -> i64. This is the native
+  // ToBigInt frontier for values already represented by the standalone
+  // BigInt struct, plus boolean -> 0n/1n. Boxed numbers throw TypeError per
+  // ECMA-262 §7.1.13; native string parsing is deferred to the constructor
+  // slice, so unsupported non-BigInt refs also throw instead of becoming 0.
+  registerNative(
+    "__to_bigint",
+    externrefToI64,
+    [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: throwNativeError("TypeError", "Cannot convert null or undefined to a BigInt"),
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "i64.extend_i32_u" },
+          { op: "return" },
+        ],
+      },
+      ...throwNativeError("TypeError", "Cannot convert value to a BigInt"),
+    ],
+    [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+  );
+
+  // #1644 Slice E1/E2 bridge — minimal no-JS-host BigInt(value). Handles the
+  // standalone carriers that can be represented without a string parser:
+  // bigint identity, boolean -> 0n/1n, and integral finite boxed numbers.
+  registerNative(
+    "__bigint_ctor",
+    externrefToI64,
+    [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: throwNativeError("TypeError", "Cannot convert null or undefined to a BigInt"),
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "i64.extend_i32_u" },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxNumStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
+          { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
+          { op: "local.tee", index: 2 },
+          { op: "local.get", index: 2 },
+          { op: "f64.ne" },
+          { op: "local.get", index: 2 },
+          { op: "f64.floor" },
+          { op: "local.get", index: 2 },
+          { op: "f64.ne" },
+          { op: "i32.or" },
+          { op: "local.get", index: 2 },
+          { op: "f64.const", value: 2 ** 63 },
+          { op: "f64.ge" },
+          { op: "i32.or" },
+          { op: "local.get", index: 2 },
+          { op: "f64.const", value: -(2 ** 63) },
+          { op: "f64.lt" },
+          { op: "i32.or" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: throwNativeError(
+              "RangeError",
+              "The number cannot be converted to a BigInt because it is not an integer",
+            ),
+          },
+          { op: "local.get", index: 2 },
+          { op: "i64.trunc_sat_f64_s" },
+          { op: "return" },
+        ],
+      },
+      ...throwNativeError("SyntaxError", "Cannot convert string to a BigInt in standalone mode"),
+    ],
+    [
+      { name: "$any_temp", type: { kind: "anyref" } as ValType },
+      { name: "$num_temp", type: { kind: "f64" } },
+    ],
   );
 
   // 7. __is_truthy(externref) -> i32
@@ -8270,6 +8447,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // boxed bigint? → value !== 0n
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "i64.eqz" },
+          { op: "i32.eqz" },
+          { op: "return" },
+        ],
+      },
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
     ],
@@ -8307,7 +8499,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     { op: "ref.test", typeIdx: boxBoolStructIdx },
   ]);
 
-  // 10. __typeof_string(externref) -> i32. Under nativeStrings (auto-on
+  // 10. __typeof_bigint(externref) -> i32 — `ref.test $BigInt`.
+  registerNative("__typeof_bigint", externrefToI32, [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+    },
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: bigIntStructIdx },
+  ]);
+
+  // 11. __typeof_string(externref) -> i32. Under nativeStrings (auto-on
   //     for wasi) strings are NativeString structs at `ctx.anyStrTypeIdx`.
   //     If that type isn't registered, return 0 (no string in scope).
   if (ctx.anyStrTypeIdx >= 0) {
@@ -8328,11 +8534,11 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 11. __typeof_undefined(externref) -> i32 — `ref.is_null`.
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
   registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
 
-  // 12. __typeof_object(externref) -> i32 — non-null AND not number AND
-  //     not boolean AND not function. We approximate as "non-null and
+  // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
+  //     not boolean AND not bigint AND not function. We approximate as "non-null and
   //     not a boxed primitive" — sufficient for the common typeof
   //     dispatch use cases. Returns 0 conservatively for boxed numbers
   //     and boxed booleans.
@@ -8363,17 +8569,24 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
     ],
     [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
   );
 
-  // 13. __typeof_function(externref) -> i32 — wasi binaries don't expose
+  // 14. __typeof_function(externref) -> i32 — wasi binaries don't expose
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 14. __typeof(externref) -> externref — returns null externref under
+  // 15. __typeof(externref) -> externref — returns null externref under
   //     wasi. Producing real type-tag strings would require a NativeString
   //     per tag; defer until a wasi caller needs the typeof RESULT as a
   //     string (today's callers compare against literal tags via the

@@ -7865,6 +7865,20 @@ function compileCallExpression(
         fctx.body.push({ op: "i64.const", value: BigInt(litNum) } as Instr);
         return { kind: "i64", bigint: true };
       }
+      if (ts.isStringLiteral(litArg) || ts.isNoSubstitutionTemplateLiteral(litArg)) {
+        try {
+          const litBig = BigInt(litArg.text);
+          const minI64 = -(1n << 63n);
+          const maxI64 = (1n << 63n) - 1n;
+          if (litBig >= minI64 && litBig <= maxI64) {
+            fctx.body.push({ op: "i64.const", value: litBig } as Instr);
+            return { kind: "i64", bigint: true };
+          }
+        } catch {
+          // Keep malformed strings on the runtime path so JS-host mode throws
+          // the native SyntaxError and no-JS-host mode uses its native throw.
+        }
+      }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i32") {
