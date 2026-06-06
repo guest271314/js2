@@ -16,11 +16,11 @@
  */
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
+import { addFuncType, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 import { ReOp } from "./regex/bytecode.js";
-// NOTE: `__regex_replace` (below) reuses the native string helpers
-// `__str_substring` + `__str_concat` (registered by ensureNativeStringHelpers)
-// and returns a `$NativeString` — no array boundary, so no host import.
+// NOTE: `__regex_replace` / `__regex_split` (below) reuse the native string
+// helpers registered by ensureNativeStringHelpers and never import a JS RegExp
+// or String.prototype host shim.
 
 /** The frame struct holds one backtrack alternative, exactly like vm.ts. */
 const RE_FRAME_STRUCT = "__ReFrame";
@@ -1152,6 +1152,225 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     exported: false,
   };
   ctx.mod.functions.push(fn);
+  return funcIdx;
+}
+
+/**
+ * Emit `__regex_split(prog, classTable, nGroups, strData, strOff, strLen,
+ * subject) -> ref $vec_nstr` (#1539 Phase 2c).
+ *
+ * This is the non-capturing, non-empty-match split slice. The call site refuses
+ * capture groups and nullable separators so this helper can use the same simple
+ * boundary loop as the native string splitter: append the substring before each
+ * separator match, advance past the consumed separator, then append the tail.
+ */
+export function ensureRegexSplit(ctx: CodegenContext): number {
+  const existing = ctx.nativeRegexHelpers.get("__regex_split");
+  if (existing !== undefined) return existing;
+
+  const searchIdx = ensureRegexSearch(ctx);
+  const i32Arr = regexI32ArrayType(ctx);
+  const strDataIdx = ctx.nativeStrDataTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const strDataRef: ValType = { kind: "ref", typeIdx: strDataIdx };
+  const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
+
+  const nstrElemKey = `ref_${anyStrTypeIdx}`;
+  const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
+  const nstrArrTypeIdx = getOrRegisterArrayType(ctx, nstrElemKey, nstrElemType);
+  const nstrVecTypeIdx = getOrRegisterVecType(ctx, nstrElemKey, nstrElemType);
+  const nstrVecRef: ValType = { kind: "ref", typeIdx: nstrVecTypeIdx };
+
+  const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
+  if (substringIdx === undefined) {
+    throw new Error("__regex_split requires __str_substring (#682 native string helpers)");
+  }
+
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      i32ArrRef, // prog
+      i32ArrRef, // classTable
+      { kind: "i32" }, // nGroups
+      strDataRef, // strData
+      { kind: "i32" }, // strOff
+      { kind: "i32" }, // strLen
+      strRef, // subject (flattened)
+    ],
+    [nstrVecRef],
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeRegexHelpers.set("__regex_split", funcIdx);
+
+  // params
+  const PROG = 0,
+    CTAB = 1,
+    NGROUPS = 2,
+    SDATA = 3,
+    SOFF = 4,
+    SLEN = 5,
+    SUBJ = 6;
+  // locals
+  const NSLOTS = 7;
+  const CAPS = 8;
+  const POS = 9;
+  const LASTEND = 10;
+  const RARR = 11;
+  const RLEN = 12;
+  const RCAP = 13;
+  const NEWARR = 14;
+  const PART = 15;
+  const MSTART = 16;
+  const MEND = 17;
+
+  const appendPart = (): Instr[] => [
+    // Grow result if needed.
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: RCAP },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: RCAP },
+        { op: "i32.const", value: 2 },
+        { op: "i32.mul" },
+        { op: "local.set", index: RCAP },
+        { op: "local.get", index: RCAP },
+        { op: "array.new_default", typeIdx: nstrArrTypeIdx },
+        { op: "local.set", index: NEWARR },
+        { op: "local.get", index: NEWARR },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: RARR },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: RLEN },
+        {
+          op: "array.copy",
+          dstTypeIdx: nstrArrTypeIdx,
+          srcTypeIdx: nstrArrTypeIdx,
+        },
+        { op: "local.get", index: NEWARR },
+        { op: "local.set", index: RARR },
+      ],
+    } as Instr,
+    // resultArr[resultLen] = part
+    { op: "local.get", index: RARR },
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: PART },
+    { op: "array.set", typeIdx: nstrArrTypeIdx },
+    { op: "local.get", index: RLEN },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: RLEN },
+  ];
+
+  const body: Instr[] = [
+    // nSlots = 2 * nGroups; caps = array.new_default(nSlots)
+    { op: "local.get", index: NGROUPS },
+    { op: "i32.const", value: 2 },
+    { op: "i32.mul" },
+    { op: "local.set", index: NSLOTS },
+    { op: "local.get", index: NSLOTS },
+    { op: "array.new_default", typeIdx: i32Arr },
+    { op: "local.set", index: CAPS },
+    // result array starts at cap 8; pos = lastEnd = 0.
+    { op: "i32.const", value: 8 },
+    { op: "array.new_default", typeIdx: nstrArrTypeIdx },
+    { op: "local.set", index: RARR },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: RLEN },
+    { op: "i32.const", value: 8 },
+    { op: "local.set", index: RCAP },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: POS },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: LASTEND },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if pos > slen: break
+            { op: "local.get", index: POS },
+            { op: "local.get", index: SLEN },
+            { op: "i32.gt_s" },
+            { op: "br_if", depth: 1 },
+            // if !__regex_search(... pos, sticky=0 ...): break
+            { op: "local.get", index: PROG },
+            { op: "local.get", index: CTAB },
+            { op: "local.get", index: NSLOTS },
+            { op: "local.get", index: SDATA },
+            { op: "local.get", index: SOFF },
+            { op: "local.get", index: SLEN },
+            { op: "local.get", index: POS },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: CAPS },
+            { op: "call", funcIdx: searchIdx },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            // mstart = caps[0]; mend = caps[1]
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 0 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MSTART },
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 1 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MEND },
+            // part = substring(subject, lastEnd, mstart); append(part)
+            { op: "local.get", index: SUBJ },
+            { op: "local.get", index: LASTEND },
+            { op: "local.get", index: MSTART },
+            { op: "call", funcIdx: substringIdx },
+            { op: "local.set", index: PART },
+            ...appendPart(),
+            // lastEnd = mend; pos = mend (nullable patterns are refused at call site)
+            { op: "local.get", index: MEND },
+            { op: "local.set", index: LASTEND },
+            { op: "local.get", index: MEND },
+            { op: "local.set", index: POS },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // Append final tail: substring(subject, lastEnd, slen)
+    { op: "local.get", index: SUBJ },
+    { op: "local.get", index: LASTEND },
+    { op: "local.get", index: SLEN },
+    { op: "call", funcIdx: substringIdx },
+    { op: "local.set", index: PART },
+    ...appendPart(),
+    // return struct.new(resultLen, resultArr)
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: RARR },
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: nstrVecTypeIdx },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__regex_split",
+    typeIdx,
+    locals: [
+      { name: "nslots", type: { kind: "i32" } },
+      { name: "caps", type: i32ArrRef },
+      { name: "pos", type: { kind: "i32" } },
+      { name: "lastEnd", type: { kind: "i32" } },
+      { name: "resultArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+      { name: "resultLen", type: { kind: "i32" } },
+      { name: "resultCap", type: { kind: "i32" } },
+      { name: "newArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+      { name: "part", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+      { name: "mstart", type: { kind: "i32" } },
+      { name: "mend", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
   return funcIdx;
 }
 
