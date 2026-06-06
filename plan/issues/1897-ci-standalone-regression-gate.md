@@ -10,6 +10,9 @@ priority: high
 feasibility: hard
 created: 2026-06-05
 owner: sd-ci-gate
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:10:00.109Z
+updated: 2026-06-06
 ---
 
 # ci: gate merges on standalone test262 regression
@@ -147,3 +150,24 @@ This gate pins the *current* standalone baseline floor. It is safe to land
 while standalone is below target as long as the regression that dropped it
 to 24.76% has been restored first (sd-1888), so the floor it holds is the
 restored value. The gate never blocks an improving PR.
+
+## Codex implementation note
+
+2026-06-06: Verified the standalone guard is wired inside the required
+`merge shard reports` job and added `tests/issue-1897.test.ts` to lock the CI
+contract:
+
+- guard order: after the merged standalone report is built, before stale
+  baseline validation;
+- guard inputs: `test262-standalone-current.jsonl` vs
+  `test262-standalone-results-merged.jsonl`;
+- guard decision: `improvements - wasm-changing regressions` with
+  `compile_timeout` counted only as excluded flake; and
+- policy docs / branch-protection script: standalone rides the existing
+  `merge shard reports` required context, so no new required check is needed.
+
+Scoped validation:
+
+- `pnpm test tests/issue-1897.test.ts`
+- `pnpm exec biome lint tests/issue-1897.test.ts --diagnostic-level=error`
+- `pnpm exec prettier --check tests/issue-1897.test.ts`
