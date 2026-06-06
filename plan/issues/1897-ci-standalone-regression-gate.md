@@ -2,7 +2,7 @@
 id: 1897
 slug: ci-standalone-regression-gate
 title: "Gate merges on standalone test262 regression"
-status: in-progress
+status: in-review
 sprint: 60
 goal: standalone-mode
 area: ci
@@ -13,6 +13,7 @@ owner: sd-ci-gate
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:10:00.109Z
 updated: 2026-06-06
+pr: 1245
 ---
 
 # ci: gate merges on standalone test262 regression
