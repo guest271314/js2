@@ -24,7 +24,11 @@ import {
   compileLogicalAssignment,
   isCompoundAssignment,
 } from "./expressions/assignment.js";
-import { emitThrowTypeError, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
+import {
+  emitPrivateBrandPredicate,
+  emitThrowTypeError,
+  resolveDeclaringClassForPrivateName,
+} from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -496,16 +500,17 @@ export function compileBinaryExpression(
     if (ts.isPrivateIdentifier(expr.left)) {
       const declared = resolveDeclaringClassForPrivateName(ctx, expr.left);
       if (declared) {
-        // Compile the receiver. Coerce externref → anyref so ref.test sees
-        // a concrete heap-typed value. Class refs are already eqref-rooted.
+        // Compile the receiver. Coerce externref → anyref and save it so
+        // the brand predicate can combine structural ref.test with class-tag
+        // ancestry.
         const objResult = compileExpression(ctx, fctx, expr.right);
         if (objResult?.kind === "externref") {
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
-        // Note: ref.test against the struct typeIdx returns 0 even for
-        // null refs (per Wasm GC spec), matching the spec's "no throw,
-        // returns false" behavior.
-        fctx.body.push({ op: "ref.test", typeIdx: declared.structTypeIdx } as Instr);
+        const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
+        fctx.body.push({ op: "local.set", index: tmpAny });
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
+        releaseTempLocal(fctx, tmpAny);
         return { kind: "i32" };
       }
       // No declaring class found — fall through to the legacy compile-time
