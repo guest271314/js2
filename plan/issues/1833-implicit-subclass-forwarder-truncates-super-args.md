@@ -1,7 +1,8 @@
 ---
 id: 1833
 title: "Implicit subclass constructor forwarder truncates multi-arg super(...)"
-status: in-progress
+status: in-review
+pr: 1255
 created: 2026-06-04
 updated: 2026-06-06
 priority: medium
