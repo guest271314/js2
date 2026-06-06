@@ -14,7 +14,7 @@ goal: spec-completeness
 sprint: 60
 parent: 1328
 claimed_by: codex-developer
-claimed_at: 2026-06-06T09:42:52.777Z
+claimed_at: 2026-06-06T09:51:22.932Z
 pr: 1250
 ---
 # #1348 — Class: static block order, private field exotics, super-class field shadow
