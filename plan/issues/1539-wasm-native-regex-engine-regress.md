@@ -1,7 +1,7 @@
 ---
 id: 1539
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
-status: in-progress
+status: in-review
 created: 2026-05-20
 updated: 2026-06-06
 priority: high
@@ -16,7 +16,7 @@ depends_on: [1474]
 related: [1474, 682, 1535]
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:31:52.475Z
-pr: 1247
+pr: 1252
 ---
 # #1539 — Standalone Wasm RegExp engine via regress (Phase 2 of #1474)
 
