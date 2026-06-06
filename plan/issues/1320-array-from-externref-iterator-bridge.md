@@ -1,7 +1,8 @@
 ---
 id: 1320
 title: "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)"
-status: in-progress
+status: in-review
+pr: 1253
 created: 2026-05-07
 updated: 2026-06-06
 priority: medium
