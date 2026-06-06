@@ -222,7 +222,7 @@ pass rate goes from "good" to "excellent."
 | **1517** | spec gap: Array.fromAsync — ES2024 async-iteration constructor | 52 | in-review | medium |
 | **1518** | spec gap: Annex B.3.2 — sloppy-mode function-in-block hoisting (`var` shadow) | 52 | in-review | medium |
 | **1519** | spec gap: `new` expression — non-literal spread + non-constructor TypeError + new.target via apply/call | 52 | in-review | medium |
-| **1525b** | ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError | 60 | ready | medium |
+| **1525b** | ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError | 60 | in-progress | medium |
 | **1550** | spec gap: dstr-binding default initializer evaluated when value is non-undefined (`init-skipped` pattern) | 52 | done | high |
 | **1551** | spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue | 52 | in-progress | medium |
 | **1552** | spec gap: catch parameter destructuring (`try/dstr`) — share dstr-binding helper with function decls | 52 | done | medium |

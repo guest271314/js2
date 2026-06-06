@@ -46,7 +46,7 @@ Fixing this unblocks Symbol.toPrimitive, Symbol.species, and all user-defined it
 | **590** | Generator for-of-string missing return depth update | 0 | done | medium |
 | **612** | Symbol.asyncIterator required but not implemented (367+ CE) | 0 | done | high |
 | **616** | Cannot extend interface 'Iterator' (137 CE) | 0 | done | medium |
-| **681** | Pure Wasm iterator protocol (eliminate 5 host imports) | 60 | ready | high |
+| **681** | Pure Wasm iterator protocol (eliminate 5 host imports) | 60 | in-progress | high |
 | **734** | - Array method correctness (343 tests) | 0 | done | medium |
 | **761** | - Rest/spread elements silently dropped in destructuring (5 codegen paths) | 25 | done | high |
 | **766** | - Symbol.iterator protocol for custom iterables | 38 | done | high |

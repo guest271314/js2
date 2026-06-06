@@ -1,9 +1,9 @@
 ---
 id: 1525b
 title: "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError"
-status: ready
+status: in-progress
 created: 2026-05-27
-updated: 2026-06-02
+updated: 2026-06-06
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -14,6 +14,8 @@ goal: spec-completeness
 sprint: 60
 related: [1525, 1602, 1669, 1130, 983, 1253]
 test262_fail: 142
+claimed_by: codex-developer
+claimed_at: 2026-06-06T18:07:10.515Z
 ---
 # #1525b — ToPrimitive residuals carved from #1525
 

@@ -784,17 +784,6 @@
       "sprint": ""
     },
     {
-      "id": "1833",
-      "title": "Implicit subclass constructor forwarder truncates multi-arg super(...)",
-      "slug": "1833-implicit-subclass-forwarder-truncates-super-args",
-      "priority": "medium",
-      "feasibility": "medium",
-      "depends_on": [],
-      "goal": "correctness",
-      "status": "ready",
-      "sprint": "60"
-    },
-    {
       "id": "1832",
       "title": "compileNewFunctionExpression captures outer var shadowed by a destructured param",
       "slug": "1832-newfn-captures-outer-var-shadowed-by-destructured-param",
@@ -1377,17 +1366,6 @@
       "goal": "spec-completeness",
       "status": "ready",
       "sprint": "Backlog"
-    },
-    {
-      "id": "1525b",
-      "title": "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError",
-      "slug": "1525b-toprimitive-method-trampoline-and-step6",
-      "priority": "medium",
-      "feasibility": "hard",
-      "depends_on": [],
-      "goal": "spec-completeness",
-      "status": "ready",
-      "sprint": "60"
     },
     {
       "id": "1470",
@@ -2423,19 +2401,6 @@
       "sprint": "Backlog"
     },
     {
-      "id": "681",
-      "title": "Pure Wasm iterator protocol (eliminate 5 host imports)",
-      "slug": "681-pure-wasm-iterator-protocol-eliminate",
-      "priority": "high",
-      "feasibility": "medium",
-      "depends_on": [
-        "680"
-      ],
-      "goal": "iterator-protocol",
-      "status": "ready",
-      "sprint": "60"
-    },
-    {
       "id": "674",
       "title": "SharedArrayBuffer and Atomics",
       "slug": "674-sharedarraybuffer-and-atomics",
@@ -2614,6 +2579,17 @@
       "sprint": "61"
     },
     {
+      "id": "1833",
+      "title": "Implicit subclass constructor forwarder truncates multi-arg super(...)",
+      "slug": "1833-implicit-subclass-forwarder-truncates-super-args",
+      "priority": "medium",
+      "feasibility": "medium",
+      "depends_on": [],
+      "goal": "correctness",
+      "status": "in-progress",
+      "sprint": "60"
+    },
+    {
       "id": "1700",
       "title": "TypedArray as exported Wasm function param fails JS↔Wasm marshalling (TypeError: type incompatibility)",
       "slug": "1700-typedarray-export-param-abi-gap",
@@ -2711,6 +2687,17 @@
       "goal": "",
       "status": "in-progress",
       "sprint": "52"
+    },
+    {
+      "id": "1525b",
+      "title": "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError",
+      "slug": "1525b-toprimitive-method-trampoline-and-step6",
+      "priority": "medium",
+      "feasibility": "hard",
+      "depends_on": [],
+      "goal": "spec-completeness",
+      "status": "in-progress",
+      "sprint": "60"
     },
     {
       "id": "1520",
@@ -2858,6 +2845,19 @@
       "goal": "async-model",
       "status": "in-progress",
       "sprint": "58"
+    },
+    {
+      "id": "681",
+      "title": "Pure Wasm iterator protocol (eliminate 5 host imports)",
+      "slug": "681-pure-wasm-iterator-protocol-eliminate",
+      "priority": "high",
+      "feasibility": "medium",
+      "depends_on": [
+        "680"
+      ],
+      "goal": "iterator-protocol",
+      "status": "in-progress",
+      "sprint": "60"
     }
   ],
   "review": [
