@@ -13,7 +13,7 @@ import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { localGlobalIdx } from "../registry/imports.js";
-import { getOrRegisterVecType } from "../registry/types.js";
+import { getOrRegisterArrayType, getOrRegisterVecType } from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitGuardedRefCast } from "../type-coercion.js";
 import { compileArrayDestructuring, compileObjectDestructuring } from "./destructuring.js";
@@ -99,6 +99,68 @@ const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
 function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type): ValType {
   return isNullablePrimitiveType(type) ? { kind: "externref" } : resolveWasmType(ctx, type);
+}
+
+function stripInferenceWrapper(expr: ts.Expression): ts.Expression {
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isSatisfiesExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = (
+      expr as
+        | ts.ParenthesizedExpression
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
+  return expr;
+}
+
+function isStaticRegExpExpression(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripInferenceWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
+  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
+    const callee = stripInferenceWrapper(unwrapped.expression);
+    return ts.isIdentifier(callee) && callee.text === "RegExp";
+  }
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+    return decl?.initializer !== undefined && isStaticRegExpExpression(ctx, decl.initializer);
+  }
+  return false;
+}
+
+function nativeStringVecType(ctx: CodegenContext): ValType | null {
+  if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return null;
+  const elemKey = `ref_${ctx.anyStrTypeIdx}`;
+  const elemType: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+  getOrRegisterArrayType(ctx, elemKey, elemType);
+  const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+  return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+function inferStandaloneRegExpMatchArrayType(
+  ctx: CodegenContext,
+  initializer: ts.Expression | undefined,
+): ValType | null {
+  if (!ctx.standalone || !initializer) return null;
+  const unwrapped = stripInferenceWrapper(initializer);
+  if (!ts.isCallExpression(unwrapped)) return null;
+  if (!ts.isPropertyAccessExpression(unwrapped.expression)) return null;
+  const method = unwrapped.expression.name.text;
+  if (method === "exec") {
+    return isStaticRegExpExpression(ctx, unwrapped.expression.expression) ? nativeStringVecType(ctx) : null;
+  }
+  if (method === "match" && unwrapped.arguments.length === 1) {
+    return isStaticRegExpExpression(ctx, unwrapped.arguments[0]!) ? nativeStringVecType(ctx) : null;
+  }
+  return null;
 }
 
 function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
@@ -525,6 +587,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       ctx.externrefAccessorVars.add(name);
     }
 
+    const standaloneRegExpMatchArrayType = inferStandaloneRegExpMatchArrayType(ctx, decl.initializer);
     const wasmType: ValType = initIsAccessorLiteral
       ? { kind: "externref" as const }
       : isI32CoercedLocal
@@ -534,6 +597,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           : widenedTypeIdx !== undefined
             ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
             : (inferredVecType ??
+              standaloneRegExpMatchArrayType ??
               (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
                 ? { kind: "externref" as const }
                 : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
@@ -624,6 +688,8 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         // is the same "undefined" sentinel a hoisted externref would carry
         // before its first assignment).
         if (initIsAccessorLiteral && existingIsRef && wasmType.kind === "externref") {
+          localSlot.type = wasmType;
+        } else if (standaloneRegExpMatchArrayType !== null && existingIsExternref && newIsRef) {
           localSlot.type = wasmType;
         } else if (!(existingIsRef && newIsPrimitive) && !(existingIsExternref && newIsRef)) {
           localSlot.type = wasmType;

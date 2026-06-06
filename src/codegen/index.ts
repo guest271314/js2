@@ -60,6 +60,7 @@ import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } fro
 import {
   addFuncType,
   getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
@@ -10416,6 +10417,8 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       // Skip when element access is the callee of a call expression (e.g. obj['method']())
       // — the call handler compiles this as a direct method call, not a property read
       const isCallCallee = node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node;
+      const isNativeStandaloneRegExpMatchArray =
+        ctx.standalone && isStandaloneRegExpMatchArrayValue(ctx, node.expression);
       const objType = ctx.checker.getTypeAtLocation(node.expression);
       const sym = objType.getSymbol();
       // Skip Array and tuple types — those use Wasm GC struct/array ops, not host import
@@ -10423,6 +10426,7 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       const isWidenedVar = ts.isIdentifier(node.expression) && ctx.widenedVarStructMap.has(node.expression.text);
       if (
         !isCallCallee &&
+        !isNativeStandaloneRegExpMatchArray &&
         sym?.name !== "Array" &&
         sym?.name !== "__type" &&
         sym?.name !== "__object" &&
@@ -11290,18 +11294,113 @@ function isVecStructType(ctx: CodegenContext, type: ValType | undefined): type i
   return def?.kind === "struct" && def.fields[0]?.name === "length" && def.fields[1]?.name === "data";
 }
 
+function stripRegExpInferenceWrapper(expr: ts.Expression): ts.Expression {
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isSatisfiesExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = (
+      expr as
+        | ts.ParenthesizedExpression
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
+  return expr;
+}
+
+function isStaticRegExpExpressionForInference(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripRegExpInferenceWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
+  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
+    const callee = stripRegExpInferenceWrapper(unwrapped.expression);
+    return ts.isIdentifier(callee) && callee.text === "RegExp";
+  }
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+    return decl?.initializer !== undefined && isStaticRegExpExpressionForInference(ctx, decl.initializer);
+  }
+  return false;
+}
+
+function nativeStringVecTypeForStandaloneRegExp(ctx: CodegenContext): ValType | null {
+  if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return null;
+  const elemKey = `ref_${ctx.anyStrTypeIdx}`;
+  const elemType: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+  getOrRegisterArrayType(ctx, elemKey, elemType);
+  const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+  return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+function inferStandaloneRegExpMatchArrayType(
+  ctx: CodegenContext,
+  initializer: ts.Expression | undefined,
+): ValType | null {
+  if (!ctx.standalone || !initializer) return null;
+  const unwrapped = stripRegExpInferenceWrapper(initializer);
+  if (!ts.isCallExpression(unwrapped)) return null;
+  if (!ts.isPropertyAccessExpression(unwrapped.expression)) return null;
+  const method = unwrapped.expression.name.text;
+  if (method === "exec") {
+    return isStaticRegExpExpressionForInference(ctx, unwrapped.expression.expression)
+      ? nativeStringVecTypeForStandaloneRegExp(ctx)
+      : null;
+  }
+  if (method === "match" && unwrapped.arguments.length === 1) {
+    return isStaticRegExpExpressionForInference(ctx, unwrapped.arguments[0]!)
+      ? nativeStringVecTypeForStandaloneRegExp(ctx)
+      : null;
+  }
+  return null;
+}
+
+function isStaticRegExpMatchArrayCallForImportScan(ctx: CodegenContext, call: ts.CallExpression): boolean {
+  const callee = stripRegExpInferenceWrapper(call.expression);
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  const method = callee.name.text;
+  if (method === "exec") return isStaticRegExpExpressionForInference(ctx, callee.expression);
+  if (method === "match" && call.arguments.length === 1) {
+    return isStaticRegExpExpressionForInference(ctx, call.arguments[0]!);
+  }
+  return false;
+}
+
+function isStandaloneRegExpMatchArrayValue(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripRegExpInferenceWrapper(expr);
+  if (ts.isCallExpression(unwrapped)) return isStaticRegExpMatchArrayCallForImportScan(ctx, unwrapped);
+  if (!ts.isIdentifier(unwrapped)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+  const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+  const initializer = decl?.initializer ? stripRegExpInferenceWrapper(decl.initializer) : undefined;
+  return initializer !== undefined && ts.isCallExpression(initializer)
+    ? isStaticRegExpMatchArrayCallForImportScan(ctx, initializer)
+    : false;
+}
+
 function inferLetConstInitializerWasmType(
   ctx: CodegenContext,
   fctx: FunctionContext,
   initializer: ts.Expression | undefined,
 ): ValType | null {
-  if (!initializer || !ts.isCallExpression(initializer) || !ts.isPropertyAccessExpression(initializer.expression)) {
+  if (!initializer) return null;
+  const standaloneRegExpMatchArrayType = inferStandaloneRegExpMatchArrayType(ctx, initializer);
+  if (standaloneRegExpMatchArrayType !== null) return standaloneRegExpMatchArrayType;
+
+  const unwrapped = stripRegExpInferenceWrapper(initializer);
+  if (!ts.isCallExpression(unwrapped) || !ts.isPropertyAccessExpression(unwrapped.expression)) {
     return null;
   }
-  const methodName = initializer.expression.name.text;
+
+  const methodName = unwrapped.expression.name.text;
   if (methodName !== "subarray" && methodName !== "slice") return null;
 
-  const receiver = initializer.expression.expression;
+  const receiver = unwrapped.expression.expression;
   let receiverType: ValType | undefined;
   if (ts.isIdentifier(receiver)) {
     const localIdx = fctx.localMap.get(receiver.text);

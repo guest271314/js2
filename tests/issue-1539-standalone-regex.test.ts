@@ -133,6 +133,132 @@ describe("#1539 standalone String.prototype.search — no JS host, matches nativ
   });
 });
 
+async function readStandaloneStringSlots(src: string): Promise<Array<string | undefined> | null> {
+  const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  const mod = await WebAssembly.compile(r.binary);
+  const hostRegex = WebAssembly.Module.imports(mod).filter((i) =>
+    /RegExp|string_match|__make_iterable|__extern_get/.test(i.name),
+  );
+  expect(hostRegex, "no RegExp/string_match/iterable/extern_get host import in standalone").toEqual([]);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  const ex = instance.exports as {
+    matched(): number;
+    count(): number;
+    isUndef(i: number): number;
+    len(i: number): number;
+    at(i: number, j: number): number;
+  };
+  if (ex.matched() === 0) return null;
+  const out: Array<string | undefined> = [];
+  for (let i = 0; i < ex.count(); i++) {
+    if (ex.isUndef(i) !== 0) {
+      out.push(undefined);
+      continue;
+    }
+    let part = "";
+    for (let j = 0; j < ex.len(i); j++) part += String.fromCharCode(ex.at(i, j));
+    out.push(part);
+  }
+  return out;
+}
+
+async function standaloneExecSlots(
+  pattern: string,
+  flags: string,
+  input: string,
+): Promise<Array<string | undefined> | null> {
+  const inLit = JSON.stringify(input);
+  return readStandaloneStringSlots(`
+    export function matched(): boolean { const m = /${pattern}/${flags}.exec(${inLit}); return m !== null; }
+    export function count(): number { const m = /${pattern}/${flags}.exec(${inLit}); return m === null ? -1 : m.length; }
+    export function isUndef(i: number): boolean {
+      const m = /${pattern}/${flags}.exec(${inLit})!;
+      return m[i] === undefined;
+    }
+    export function len(i: number): number {
+      const m = /${pattern}/${flags}.exec(${inLit})!;
+      return m[i] === undefined ? -1 : m[i]!.length;
+    }
+    export function at(i: number, j: number): number {
+      const m = /${pattern}/${flags}.exec(${inLit})!;
+      return m[i]!.charCodeAt(j);
+    }
+  `);
+}
+
+async function standaloneMatchSlots(
+  pattern: string,
+  flags: string,
+  input: string,
+): Promise<Array<string | undefined> | null> {
+  const inLit = JSON.stringify(input);
+  return readStandaloneStringSlots(`
+    export function matched(): boolean { const m = ${inLit}.match(/${pattern}/${flags}); return m !== null; }
+    export function count(): number { const m = ${inLit}.match(/${pattern}/${flags}); return m === null ? -1 : m.length; }
+    export function isUndef(i: number): boolean {
+      const m = ${inLit}.match(/${pattern}/${flags})!;
+      return m[i] === undefined;
+    }
+    export function len(i: number): number {
+      const m = ${inLit}.match(/${pattern}/${flags})!;
+      return m[i] === undefined ? -1 : m[i]!.length;
+    }
+    export function at(i: number, j: number): number {
+      const m = ${inLit}.match(/${pattern}/${flags})!;
+      return m[i]!.charCodeAt(j);
+    }
+  `);
+}
+
+function nativeExecSlots(pattern: string, flags: string, input: string): Array<string | undefined> | null {
+  const m = new RegExp(pattern, flags).exec(input);
+  return m === null ? null : Array.from(m, (s) => s);
+}
+
+describe("#1539 standalone RegExp.exec/String.match — capture vec, no JS host", () => {
+  const captureCases: Array<{ p: string; f: string; input: string }> = [
+    { p: "(ab)(\\d+)", f: "", input: "xxab123yy" },
+    { p: "(a)?b", f: "", input: "b" },
+    { p: "([a-z]+)|(\\d+)", f: "", input: "42" },
+    { p: "([a-z]+)", f: "i", input: "ABC" },
+    { p: "^([a-z]+)$", f: "m", input: "x\nabc\ny" },
+    { p: "z+", f: "", input: "abc" },
+  ];
+
+  for (const { p, f, input } of captureCases) {
+    it(`/${p}/${f}.exec(${JSON.stringify(input)})`, async () => {
+      expect(await standaloneExecSlots(p, f, input)).toEqual(nativeExecSlots(p, f, input));
+    });
+    it(`${JSON.stringify(input)}.match(/${p}/${f})`, async () => {
+      expect(await standaloneMatchSlots(p, f, input)).toEqual(nativeExecSlots(p, f, input));
+    });
+  }
+
+  it("var-bound RegExp.exec argument", async () => {
+    const out = await readStandaloneStringSlots(`
+      const re = /(x+)(y)/;
+      export function matched(): boolean { const m = re.exec("axxy"); return m !== null; }
+      export function count(): number { const m = re.exec("axxy"); return m === null ? -1 : m.length; }
+      export function isUndef(i: number): boolean { const m = re.exec("axxy")!; return m[i] === undefined; }
+      export function len(i: number): number { const m = re.exec("axxy")!; return m[i]!.length; }
+      export function at(i: number, j: number): number { const m = re.exec("axxy")!; return m[i]!.charCodeAt(j); }
+    `);
+    expect(out).toEqual(["xxy", "xx", "y"]);
+  });
+
+  it("new RegExp(...).exec argument", async () => {
+    const out = await readStandaloneStringSlots(`
+      export function matched(): boolean { const m = new RegExp("(a+)(b)").exec("aaab"); return m !== null; }
+      export function count(): number { const m = new RegExp("(a+)(b)").exec("aaab"); return m === null ? -1 : m.length; }
+      export function isUndef(i: number): boolean { const m = new RegExp("(a+)(b)").exec("aaab")!; return m[i] === undefined; }
+      export function len(i: number): number { const m = new RegExp("(a+)(b)").exec("aaab")!; return m[i]!.length; }
+      export function at(i: number, j: number): number { const m = new RegExp("(a+)(b)").exec("aaab")!; return m[i]!.charCodeAt(j); }
+    `);
+    expect(out).toEqual(["aaab", "aaa", "b"]);
+  });
+});
+
 async function standaloneSplit(pattern: string, flags: string, input: string): Promise<string[]> {
   const inLit = JSON.stringify(input);
   const src = `
@@ -221,6 +347,16 @@ describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   });
   it("refuses indices flag (d, Phase 2d)", async () => {
     await expectRefused(`export function f(s: string): boolean { return /^a/d.test(s); }`);
+  });
+  it("refuses RegExp.exec with global lastIndex semantics", async () => {
+    await expectRefused(
+      `export function f(s: string): number { const m = /a/g.exec(s); return m === null ? -1 : m.length; }`,
+    );
+  });
+  it("refuses String.match with global all-match semantics", async () => {
+    await expectRefused(
+      `export function f(s: string): number { const m = s.match(/a/g); return m === null ? -1 : m.length; }`,
+    );
   });
   it("refuses regex split with capturing groups", async () => {
     await expectRefused(`export function f(s: string): number { return s.split(/(,)/).length; }`);

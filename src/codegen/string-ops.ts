@@ -22,6 +22,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import {
+  tryCompileStandaloneStringMatch,
   tryCompileStandaloneStringReplace,
   tryCompileStandaloneStringSearch,
   tryCompileStandaloneStringSplit,
@@ -2460,6 +2461,14 @@ export function compileNativeStringMethodCall(
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.match(/re/)` for non-global
+  // backend-created static RegExp materializes the same native capture vec as
+  // `.exec`. Global/all-match semantics stay refused below.
+  if (ctx.standalone && method === "match") {
+    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess);
+    if (matchResult !== undefined) return matchResult;
+  }
+
   // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
   // static RegExp routes to the pure-WasmGC matcher (returns the match index or
   // -1) instead of the host regex engine. The string-coercion form (string
