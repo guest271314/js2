@@ -1,9 +1,9 @@
 ---
 id: 1320
 title: "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't preserve own [Symbol.iterator] on plain JS objects (4 test262 fails)"
-status: ready
+status: in-progress
 created: 2026-05-07
-updated: 2026-06-04
+updated: 2026-06-06
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,6 +13,8 @@ language_feature: iterators, externref, Array.from
 goal: spec-conformance
 sprint: 60
 related: [1154, 1665, 1472, 1620, 1633, 1684]
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:10:10.473Z
 ---
 # #1320 — Array.from / Iterator.from runtime bridge drops own [Symbol.iterator]
 
@@ -203,6 +205,41 @@ structure that does materialize.
 (closure-return struct readback) — they cannot go green at the host-bridge
 layer. Status `in-review` for the partial PR; residual tracked in #1684 +
 the iterator-bridge family (#1620/#1633).
+
+## Implementation update (2026-06-06, codex-developer)
+
+The earlier #1684 gate was narrower than the actual failure. The four listed
+test262 files now pass under the scoped runner after fixing the bridge and two
+codegen paths exposed by the bridge:
+
+- closure-backed own `@@iterator` methods can arrive either as raw Wasm closure
+  structs or as JS wrapper functions; `_drainWasmClosureIterable` now drives
+  both forms, preserves the receiver, reads closure-backed iterator results,
+  and drains before `Array.from.call(C, items)` reaches native validation.
+- closure wrappers now support dynamic arity, method-call receiver forwarding,
+  and best-effort constructor identity; `instanceof` falls back to a dynamic
+  host bridge for local closure constructors such as test262's custom `C`.
+- `Symbol.iterator`-assigned closures keep their explicit return type instead
+  of being contextual-voided, and no-capture closure wrapper structs share a
+  common root so mixed `() => void` / `() => object` signatures remain callable
+  after an externref round-trip.
+- `Iterator.from` is routed through the runtime helper so string primitives keep
+  the spec `iterate-string-primitives` behavior, non-string primitives reject,
+  helper flattening rejects primitives, and string iterator accessors have a
+  fallback to the intrinsic string iterator after compiled accessor bridging.
+- The scoped test262 harness `compareArray` shim accepts `any[]`, matching
+  test262 cases that compare arrays of strings.
+
+Scoped validation:
+
+```bash
+npm test -- tests/issue-1320.test.ts
+npx tsx <four-file runTest262File loop>
+npm run typecheck
+```
+
+Results: `tests/issue-1320.test.ts` passes all 6 focused tests; the four listed
+test262 files pass; typecheck passes.
 
 ## Architect Spec — standalone (no-JS-host) GetIterator / IteratorStep / IteratorClose bridge (2026-06-04)
 
