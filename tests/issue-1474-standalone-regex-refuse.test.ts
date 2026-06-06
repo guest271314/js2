@@ -42,8 +42,17 @@ describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
     await expectRefused(`export function f(p: string): boolean { const r = RegExp(p); return r.test("x"); }`);
   });
 
-  it("rejects s.match(regexLiteral) — String method (Phase 2c)", async () => {
-    await expectRefused(`export function f(s: string): boolean { return s.match(/\\d+/) !== null; }`);
+  it("compiles non-global s.match(regexLiteral) — capture-array Phase 2b slice", async () => {
+    const r = await compile(`export function f(s: string): boolean { return s.match(/\\d+/) !== null; }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  });
+
+  it("rejects global s.match(regexLiteral) — all-match semantics (Phase 2c)", async () => {
+    await expectRefused(
+      `export function f(s: string): number { const m = s.match(/\\d+/g); return m === null ? -1 : m.length; }`,
+    );
   });
 
   it("rejects s.matchAll(regexLiteral) — Phase 2c", async () => {

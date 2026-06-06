@@ -1,7 +1,7 @@
 ---
 id: 1539
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
-status: in-review
+status: in-progress
 created: 2026-05-20
 updated: 2026-06-06
 priority: high
@@ -15,7 +15,7 @@ sprint: 60
 depends_on: [1474]
 related: [1474, 682, 1535]
 claimed_by: codex-developer
-claimed_at: 2026-06-06T09:09:50.202Z
+claimed_at: 2026-06-06T09:31:52.475Z
 pr: 1247
 ---
 # #1539 — Standalone Wasm RegExp engine via regress (Phase 2 of #1474)
@@ -571,3 +571,39 @@ imports.
 Still open for #1539: capture-array materialization for `.exec`/`.match` and
 capture-interleaved `split`, `$`/function replacement semantics, `matchAll`, and
 the `d`/`u`/`v` plus lookaround/backreference/property-escape work.
+
+## Implementation Notes (codex-developer, 2026-06-06) — Phase 2b `.exec` + non-global `.match`
+
+Landed standalone capture-array materialization for non-global/non-sticky
+`RegExp.prototype.exec(str)` and `String.prototype.match(/re/)` on the existing
+pure-WasmGC regex VM. Matches now return a nullable native string vec:
+`null` for no match, otherwise `[fullMatch, cap1, cap2, ...]`, with unmatched
+captures represented as null native strings so indexed reads observe
+`undefined` without any JS host array bridge.
+
+- Added `__regex_capture_array`, which consumes the populated `caps` slot array
+  from `__regex_search` and slices the flattened subject via native string
+  helpers. This keeps `.exec`/`.match` fully standalone and avoids
+  `env.RegExp_new`, `env.string_match`, `env.__make_iterable`, and
+  `env.__extern_get`.
+- Routed static backend-created regex values through `.exec` and non-global
+  `.match`; global/sticky paths remain narrowed refusals because observable
+  `lastIndex` and all-match semantics need the next slice.
+- Added local/global type inference for variables initialized from static
+  `.exec`/non-global `.match` calls, including non-null assertions, so indexed
+  result reads stay on the native vec path instead of coercing through
+  `externref`.
+- Tests: extended `tests/issue-1539-standalone-regex.test.ts` with dual-run
+  capture cases for full matches, optional captures, alternation captures,
+  `i`/`m` flags, no-match results, var-bound regexes, and `new RegExp(...)`;
+  updated `tests/issue-1474-standalone-regex-refuse.test.ts` so non-global
+  `.match` compiles while global `.match` remains refused.
+
+Validation: `npm test -- tests/issue-1539-standalone-regex.test.ts
+tests/issue-1474-standalone-regex-refuse.test.ts
+tests/issue-1539-standalone-regex-replace.test.ts` passed
+(3 files, 208 tests).
+
+Still open for #1539: capture-interleaved `split`, `$`/function replacement
+semantics, `matchAll`, named groups / `groups`, and the `d`/`u`/`v` plus
+lookaround/backreference/property-escape work.
