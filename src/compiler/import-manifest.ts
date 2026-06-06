@@ -96,6 +96,7 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__typeof_number") return { type: "typeof_check", targetType: "number" };
   if (name === "__typeof_string") return { type: "typeof_check", targetType: "string" };
   if (name === "__typeof_boolean") return { type: "typeof_check", targetType: "boolean" };
+  if (name === "__typeof_bigint") return { type: "typeof_check", targetType: "bigint" };
   if (name === "__typeof_undefined") return { type: "typeof_check", targetType: "undefined" };
   if (name === "__typeof_object") return { type: "typeof_check", targetType: "object" };
   if (name === "__typeof_function") return { type: "typeof_check", targetType: "function" };

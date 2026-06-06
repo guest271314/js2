@@ -21,7 +21,12 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
-import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
+import {
+  tryCompileStandaloneStringMatch,
+  tryCompileStandaloneStringReplace,
+  tryCompileStandaloneStringSearch,
+  tryCompileStandaloneStringSplit,
+} from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -132,11 +137,15 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
       compileStringLiteral(ctx, fctx, "undefined", operand);
       return true;
     }
-    // Dynamic externref (boxed string / any) → bridge to anyref, then the
-    // in-module ToString dispatcher.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    const anyToStrIdx = ensureAnyToStringHelper(ctx);
-    fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // For standalone $Object values this routes through native
+    // OrdinaryToPrimitive("string") before the native-string concat helper.
+    const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (toStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    }
+    emitNativeStringRefFromExternref(ctx, fctx);
     return true;
   }
 
@@ -392,9 +401,12 @@ export function compileNativeTemplateExpression(
           fctx.body.push({ op: "drop" });
           compileStringLiteral(ctx, fctx, "undefined", span.expression);
         } else {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          const anyToStrIdx = ensureAnyToStringHelper(ctx);
-          fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+          const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (toStrIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: toStrIdx });
+          }
+          emitNativeStringRefFromExternref(ctx, fctx);
         }
       } else {
         coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
@@ -2440,14 +2452,23 @@ export function compileNativeStringMethodCall(
     return compileExpression(ctx, fctx, propAccess.expression);
   }
 
-  // #1474 — These host-routed string methods build/consume a JS RegExp under
-  // the hood. There is no Wasm-native regex engine yet, so refuse in
-  // --target standalone (Phase 1: refuse-and-document).
+  // #1474/#1539 — These host-routed string methods build/consume a JS RegExp
+  // under the hood. In --target standalone, route the supported static RegExp
+  // slices through the pure-WasmGC matcher first, then refuse the remaining
+  // host/symbol-protocol forms with a clean diagnostic.
   //   - match / matchAll / search: the spec coerces the (string) argument to a
   //     RegExp, so they always route through the host regex engine.
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.match(/re/)` for non-global
+  // backend-created static RegExp materializes the same native capture vec as
+  // `.exec`. Global/all-match semantics stay refused below.
+  if (ctx.standalone && method === "match") {
+    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess);
+    if (matchResult !== undefined) return matchResult;
+  }
+
   // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
   // static RegExp routes to the pure-WasmGC matcher (returns the match index or
   // -1) instead of the host regex engine. The string-coercion form (string
@@ -2464,6 +2485,14 @@ export function compileNativeStringMethodCall(
   if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
     const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
     if (replaceResult !== undefined) return replaceResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.split(/re/)` against a backend-created
+  // static, non-capturing, non-nullable RegExp routes through the pure-WasmGC
+  // matcher and returns the same native string vec shape as string split.
+  if (ctx.standalone && method === "split") {
+    const splitResult = tryCompileStandaloneStringSplit(ctx, fctx, expr, propAccess);
+    if (splitResult !== undefined) return splitResult;
   }
 
   if (ctx.standalone) {

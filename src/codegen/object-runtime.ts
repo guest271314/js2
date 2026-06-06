@@ -58,7 +58,14 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { ensureNativeStringHelpers, nativeStringLiteralInstrs } from "./native-strings.js";
+import {
+  ensureAnyToStringHelper,
+  ensureNativeStringHelpers,
+  nativeStringLiteralInstrs,
+  stringConstantExternrefInstrs,
+} from "./native-strings.js";
+import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
@@ -1375,6 +1382,218 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ],
       body,
     );
+  }
+
+  // ── __to_primitive(externref input, externref hint) -> externref ─────────
+  //
+  // #1900 Phase 1 — Wasm-native OrdinaryToPrimitive over the standalone
+  // `$Object` runtime. Implements ECMA-262 §7.1.1.1 method ordering:
+  //   string hint: toString → valueOf
+  //   number/default hint: valueOf → toString
+  //
+  // The standalone runtime does not yet materialize Object.prototype as a real
+  // prototype object, so a modeled object with no `toString` property would
+  // otherwise throw. When `__extern_has(obj, "toString")` is false, the helper
+  // supplies the ordinary default Object.prototype.toString result
+  // `"[object Object]"`. A present non-callable or object-returning `toString`
+  // still shadows that default and can produce the required TypeError.
+  {
+    addUnionImportsViaRegistry(ctx);
+    const externGetIdx = ctx.funcMap.get("__extern_get")!;
+    const externHasIdx = ctx.funcMap.get("__extern_has")!;
+    const callMethod0Idx = reserveAccessorGetDriver(ctx);
+    const typeofNumberIdx = ctx.funcMap.get("__typeof_number")!;
+    const typeofStringIdx = ctx.funcMap.get("__typeof_string")!;
+    const typeofBooleanIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofFunctionIdx = ctx.funcMap.get("__typeof_function")!;
+
+    const typeErrorMessage = "Cannot convert object to primitive value";
+    addStringConstantGlobal(ctx, typeErrorMessage);
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+    const typeErrorCtorIdx = ctx.funcMap.get("__new_TypeError")!;
+    const exnTagIdx = ensureExnTag(ctx);
+
+    const stringExtern = (value: string): Instr[] => {
+      addStringConstantGlobal(ctx, value);
+      return stringConstantExternrefInstrs(ctx, value);
+    };
+
+    const L_ANY = 2;
+    const L_METHOD = 3;
+    const L_RESULT = 4;
+
+    const returnIfPrimitive = (localIdx: number): Instr[] => [
+      { op: "local.get", index: localIdx },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: localIdx }, { op: "return" }],
+      },
+      { op: "local.get", index: localIdx },
+      { op: "call", funcIdx: typeofNumberIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: localIdx }, { op: "return" }],
+      },
+      { op: "local.get", index: localIdx },
+      { op: "call", funcIdx: typeofBooleanIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: localIdx }, { op: "return" }],
+      },
+      { op: "local.get", index: localIdx },
+      { op: "call", funcIdx: typeofStringIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: localIdx }, { op: "return" }],
+      },
+    ];
+
+    const throwTypeError = (): Instr[] => [
+      ...stringExtern(typeErrorMessage),
+      { op: "call", funcIdx: typeErrorCtorIdx },
+      { op: "throw", tagIdx: exnTagIdx } as Instr,
+    ];
+
+    const isStringHint: Instr[] = [
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 0 }],
+        else: [
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: typeofStringIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "any.convert_extern" },
+              { op: "ref.cast", typeIdx: anyStrTypeIdx },
+              { op: "call", funcIdx: strFlattenIdx },
+              ...nativeStringLiteralInstrs(ctx, "string"),
+              { op: "call", funcIdx: strFlattenIdx },
+              { op: "call", funcIdx: strEqualsIdx },
+            ],
+            else: [{ op: "i32.const", value: 0 }],
+          } as Instr,
+        ],
+      } as Instr,
+    ];
+
+    const tryOrdinaryMethod = (name: "valueOf" | "toString", defaultObjectToStringOnMissing: boolean): Instr[] => [
+      { op: "local.get", index: 0 },
+      ...stringExtern(name),
+      { op: "call", funcIdx: externGetIdx },
+      { op: "local.tee", index: L_METHOD },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: defaultObjectToStringOnMissing
+          ? [
+              { op: "local.get", index: 0 },
+              ...stringExtern(name),
+              { op: "call", funcIdx: externHasIdx },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [...stringExtern("[object Object]"), { op: "return" }],
+              } as Instr,
+            ]
+          : [],
+        else: [
+          { op: "local.get", index: L_METHOD },
+          { op: "call", funcIdx: typeofFunctionIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: L_METHOD },
+              { op: "call", funcIdx: callMethod0Idx },
+              { op: "local.set", index: L_RESULT },
+              ...returnIfPrimitive(L_RESULT),
+            ],
+          } as Instr,
+        ],
+      } as Instr,
+    ];
+
+    const body: Instr[] = [
+      // Non-objects return unchanged (ToPrimitive step 1).
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: L_ANY },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      ...isStringHint,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...tryOrdinaryMethod("toString", true), ...tryOrdinaryMethod("valueOf", false)],
+        else: [...tryOrdinaryMethod("valueOf", false), ...tryOrdinaryMethod("toString", true)],
+      },
+      ...throwTypeError(),
+    ];
+
+    registerNative(
+      "__to_primitive",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "method", type: { kind: "externref" } },
+        { name: "result", type: { kind: "externref" } },
+      ],
+      body,
+    );
+
+    const toPrimitiveIdx = ctx.funcMap.get("__to_primitive")!;
+    const anyToStringIdx = ensureAnyToStringHelper(ctx);
+    const toStringBody: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [{ op: "ref.null.extern" }],
+        else: [
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "local.get", index: 0 }, ...stringExtern("string"), { op: "call", funcIdx: toPrimitiveIdx }],
+            else: [{ op: "local.get", index: 0 }],
+          } as Instr,
+        ],
+      } as Instr,
+      { op: "any.convert_extern" },
+      { op: "call", funcIdx: anyToStringIdx },
+      { op: "extern.convert_any" },
+    ];
+    registerNative("__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }], [], toStringBody);
   }
 
   // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
@@ -3588,6 +3807,8 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__new_plain_object",
   "__extern_get",
   "__extern_set",
+  "__to_primitive",
+  "__extern_toString",
   "__delete_property",
   // #1472 Phase B Blocker B — native $ObjVec-backed enumeration + indexed read.
   "__object_keys",

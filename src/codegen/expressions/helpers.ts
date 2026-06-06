@@ -88,6 +88,72 @@ export function resolveDeclaringClassForPrivateName(
   return undefined;
 }
 
+function collectClassAndDescendantTags(ctx: CodegenContext, className: string): number[] {
+  const tags: number[] = [];
+  const ownTag = ctx.classTagMap.get(className);
+  if (ownTag !== undefined) tags.push(ownTag);
+
+  const queue = [className];
+  const seen = new Set(queue);
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    for (const [child, childParent] of ctx.classParentMap) {
+      if (childParent !== parent || seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+      const tag = ctx.classTagMap.get(child);
+      if (tag !== undefined) tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+/**
+ * Emit the runtime private-brand predicate for a receiver saved as anyref.
+ *
+ * `ref.test $DeclaringClass` alone is not a full brand check in this compiler:
+ * unrelated classes with identical private-field layout may canonicalize to the
+ * same WasmGC shape. The hidden class tag distinguishes declarations, while
+ * descendant tags remain valid for private names initialized by an ancestor.
+ */
+export function emitPrivateBrandPredicate(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverLocal: number,
+  className: string,
+  structTypeIdx: number,
+): void {
+  const fields = ctx.structFields.get(className);
+  const tagFieldIdx = fields?.findIndex((f) => f.name === "__tag") ?? -1;
+  const allowedTags = collectClassAndDescendantTags(ctx, className);
+
+  fctx.body.push({ op: "local.get", index: receiverLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+
+  if (tagFieldIdx < 0 || allowedTags.length === 0) {
+    return;
+  }
+
+  const tagChecks: Instr[] = [];
+  for (let i = 0; i < allowedTags.length; i++) {
+    tagChecks.push({ op: "local.get", index: receiverLocal } as Instr);
+    tagChecks.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+    tagChecks.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: tagFieldIdx } as Instr);
+    tagChecks.push({ op: "i32.const", value: allowedTags[i]! } as Instr);
+    tagChecks.push({ op: "i32.eq" } as Instr);
+    if (i > 0) {
+      tagChecks.push({ op: "i32.or" } as Instr);
+    }
+  }
+
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: tagChecks,
+    else: [{ op: "i32.const", value: 0 } as Instr],
+  } as Instr);
+}
+
 /**
  * #1365 — Emit a Wasm throw of a real TypeError INSTANCE (not a bare string).
  *

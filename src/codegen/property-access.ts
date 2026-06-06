@@ -19,6 +19,7 @@ import { emitCachedMethodClosureAccess, emitFuncRefAsClosure } from "./closures.
 import { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
+  emitPrivateBrandPredicate,
   emitThrowTypeError,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
@@ -1239,9 +1240,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        // Brand check: ref.test against the declaring class's struct.
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: declared.structTypeIdx } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
         // result-type block: on success, return the field value; on
         // failure, throw TypeError (which doesn't return).
         const successInstrs: Instr[] = [
@@ -1301,8 +1300,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx! } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, cls.className, structTypeIdx!);
 
         // Build the failure (throw) branch FIRST. emitThrowTypeError may
         // register late imports, which shift every funcMap index (the
