@@ -1,7 +1,7 @@
 ---
 id: 1346
 title: "spec gap: yield in nested try/finally + yield expression evaluation order (46 test262 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-08
 updated: 2026-06-06
 priority: medium
@@ -16,6 +16,7 @@ parent: 1328
 related: [1665, 1042, 1620, 1320]
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:10:15.635Z
+pr: 1246
 ---
 # #1346 — yield expression: try/finally + evaluation order
 
