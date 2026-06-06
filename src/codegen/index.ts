@@ -66,6 +66,7 @@ import {
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
+import { emitNativeParseNumber } from "./parse-number-native.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
@@ -8131,6 +8132,11 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   const i64ToExternref = addFuncType(ctx, [{ kind: "i64", bigint: true }], [{ kind: "externref" }]);
   const externrefToExternref = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
 
+  if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && !ctx.funcMap.has("__str_to_number")) {
+    emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
+  }
+  const strToNumberIdx = ctx.funcMap.get("__str_to_number");
+
   /**
    * Synthesize a native helper function. The funcIdx is allocated as
    * `numImportFuncs + mod.functions.length` to match how every other
@@ -8198,6 +8204,20 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      ...(strToNumberIdx !== undefined && ctx.anyStrTypeIdx >= 0
+        ? ([
+            // StringToNumber (§7.1.4.1): object ToPrimitive can yield a native
+            // string; parse it with the existing pure-Wasm scanner before the
+            // opaque-ref NaN fallback.
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: strToNumberIdx }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // not a recognized boxed number → NaN (matches Number(opaque))
       { op: "f64.const", value: NaN },
     ],
