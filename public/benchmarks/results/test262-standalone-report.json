@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-06T18:47:05.118Z",
-  "baseline_generated_at": "2026-06-06T18:47:04Z",
-  "baseline_sha": "08a61bd459f4b522d096cf51359174d34e1bbd71",
+  "timestamp": "2026-06-06T19:01:40.647Z",
+  "baseline_generated_at": "2026-06-06T19:01:40Z",
+  "baseline_sha": "e6eedd6821a281063fc28e768431a09cfa98f340",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1225,8 +1225,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
+          "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
@@ -1372,22 +1372,22 @@
           "total": 147
         },
         "error_categories": {
-          "unreachable": 25,
           "other": 97,
+          "unreachable": 25,
           "assertion_fail": 22,
           "wasm_compile": 2,
           "oob": 1
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
+          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1698,8 +1698,8 @@
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
-          "test/language/statements/try/S12.14_A18_T3.js",
           "test/language/statements/switch/S12.11_A1_T4.js",
+          "test/language/statements/try/S12.14_A18_T3.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -1971,14 +1971,14 @@
           "test/language/function-code/10.4.3-1-48-s.js",
           "test/built-ins/Function/S15.3.5_A3_T1.js",
           "test/language/function-code/10.4.3-1-83-s.js",
-          "test/built-ins/Function/StrictFunction_reservedwords_with.js"
+          "test/built-ins/Function/15.3.5.4_2-9gs.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found struct.new of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref)",
           "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
           "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\"",
           "assertion_fail:returned # — assert ## at L#: assert((function () {return Function(\"\\\"use strict\\\";return f();\")();})());",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { new Function(\"'use strict'; with ({}) {}\"); }, '`new Function(\"\\'use strict\\'; with ({}) {}\")` throws a SyntaxError exception');"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f(); });"
         ]
       },
       {
