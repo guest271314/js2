@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-06T09:53:23.114Z",
-  "baseline_generated_at": "2026-06-06T09:53:22Z",
-  "baseline_sha": "ebb58712e7784b2d1720b199b1c1be117c9b4ec7",
+  "timestamp": "2026-06-06T10:13:57.330Z",
+  "baseline_generated_at": "2026-06-06T10:13:57Z",
+  "baseline_sha": "8fb3db4b2765e4fef760e2e1e2582e4fcb56feea",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 14961,
-    "fail": 11638,
-    "compile_error": 16503,
+    "pass": 15563,
+    "fail": 12878,
+    "compile_error": 14661,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 26599,
+    "compilable": 28441,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 14566,
-        "fail": 11209,
-        "compile_error": 16241,
+        "pass": 15168,
+        "fail": 12449,
+        "compile_error": 14399,
         "compile_timeout": 12,
         "skip": 18,
-        "compilable": 25775,
+        "compilable": 27617,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -41,34 +41,34 @@
       },
       "proposal": {
         "total": 4982,
-        "pass": 968,
-        "fail": 842,
-        "compile_error": 3076,
+        "pass": 969,
+        "fail": 1011,
+        "compile_error": 2906,
         "compile_timeout": 0,
         "skip": 96,
-        "compilable": 1810,
+        "compilable": 1980,
         "stale": 0,
         "label": "TC39 proposals"
       },
       "official": {
         "total": 43132,
-        "pass": 14961,
-        "fail": 11638,
-        "compile_error": 16503,
+        "pass": 15563,
+        "fail": 12878,
+        "compile_error": 14661,
         "compile_timeout": 12,
         "skip": 18,
-        "compilable": 26599,
+        "compilable": 28441,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 15929,
-        "fail": 12480,
-        "compile_error": 19579,
+        "pass": 16532,
+        "fail": 13889,
+        "compile_error": 17567,
         "compile_timeout": 12,
         "skip": 114,
-        "compilable": 28409,
+        "compilable": 30421,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 14961,
-    "fail": 11638,
-    "compile_error": 16503,
+    "pass": 15563,
+    "fail": 12878,
+    "compile_error": 14661,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 26599,
+    "compilable": 28441,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 15929,
-    "fail": 12480,
-    "compile_error": 19579,
+    "pass": 16532,
+    "fail": 13889,
+    "compile_error": 17567,
     "compile_timeout": 12,
     "skip": 114,
-    "compilable": 28409,
+    "compilable": 30421,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 14128,
-    "fail": 10732,
-    "compile_error": 15733,
+    "pass": 14730,
+    "fail": 11970,
+    "compile_error": 13893,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 24860,
+    "compilable": 26700,
     "stale": 0
   },
   "scope_summaries": {
@@ -117,22 +117,22 @@
     },
     "proposal": {
       "total": 4982,
-      "pass": 968,
-      "fail": 842,
-      "compile_error": 3076,
+      "pass": 969,
+      "fail": 1011,
+      "compile_error": 2906,
       "compile_timeout": 0,
       "skip": 96,
-      "compilable": 1810,
+      "compilable": 1980,
       "stale": 0
     },
     "standard": {
       "total": 42046,
-      "pass": 14566,
-      "fail": 11209,
-      "compile_error": 16241,
+      "pass": 15168,
+      "fail": 12449,
+      "compile_error": 14399,
       "compile_timeout": 12,
       "skip": 18,
-      "compilable": 25775,
+      "compilable": 27617,
       "stale": 0
     }
   },
@@ -671,8 +671,8 @@
       "name": "built-ins/String",
       "path": "built-ins/String",
       "pass": 144,
-      "fail": 435,
-      "compile_error": 644,
+      "fail": 443,
+      "compile_error": 636,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1223
@@ -710,9 +710,9 @@
     {
       "name": "built-ins/Temporal",
       "path": "built-ins/Temporal",
-      "pass": 774,
-      "fail": 838,
-      "compile_error": 2912,
+      "pass": 775,
+      "fail": 1007,
+      "compile_error": 2742,
       "compile_timeout": 0,
       "skip": 0,
       "total": 4524
@@ -850,9 +850,9 @@
     {
       "name": "language/destructuring",
       "path": "language/destructuring",
-      "pass": 14,
+      "pass": 15,
       "fail": 1,
-      "compile_error": 4,
+      "compile_error": 3,
       "compile_timeout": 0,
       "skip": 0,
       "total": 19
@@ -890,9 +890,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 4806,
-      "fail": 3119,
-      "compile_error": 3092,
+      "pass": 5157,
+      "fail": 3803,
+      "compile_error": 2057,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 4030,
-      "fail": 2599,
-      "compile_error": 2708,
+      "pass": 4280,
+      "fail": 3147,
+      "compile_error": 1910,
       "compile_timeout": 0,
       "skip": 0,
       "total": 9337
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9348,
-    "illegal_cast": 600,
-    "negative_test_fail": 76,
-    "null_deref": 303,
+    "assertion_fail": 10400,
+    "illegal_cast": 770,
+    "negative_test_fail": 77,
+    "null_deref": 483,
     "oob": 156,
-    "other": 11806,
+    "other": 11798,
     "promise_error": 56,
     "range_error": 29,
-    "runtime_error": 4974,
+    "runtime_error": 5010,
     "type_error": 9,
     "unreachable": 27,
-    "wasm_compile": 4675
+    "wasm_compile": 2641
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 32071,
-    "classified": 32071,
+    "total_non_pass_non_skip": 31468,
+    "classified": 31468,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1203,21 +1203,21 @@
           "#661"
         ],
         "label": "Temporal proposal/polyfill gap",
-        "count": 3749,
+        "count": 3748,
         "statuses": {
           "pass": 0,
-          "fail": 838,
-          "compile_error": 2911,
+          "fail": 1007,
+          "compile_error": 2741,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3749
+          "total": 3748
         },
         "error_categories": {
           "other": 230,
-          "runtime_error": 2439,
+          "runtime_error": 2440,
           "assertion_fail": 763,
-          "wasm_compile": 258,
-          "null_deref": 48,
+          "wasm_compile": 87,
+          "null_deref": 217,
           "range_error": 9,
           "oob": 1,
           "type_error": 1
@@ -1226,8 +1226,8 @@
           "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on). Recompile",
@@ -1273,7 +1273,7 @@
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
           "assertion_fail:returned # — assert ## at L#: verifyProperty(DisposableStack.prototype.adopt, 'name', { value: 'adopt', writable: false, enumerable: false, configurable: true });",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(stack2.disposed, false);"
+          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone"
         ]
       },
       {
@@ -1382,14 +1382,14 @@
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/stringify/value-bigint-tojson.js"
+          "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct"
+          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
         ]
       },
       {
@@ -1399,19 +1399,19 @@
           "#1474"
         ],
         "label": "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
-        "count": 1992,
+        "count": 1991,
         "statuses": {
           "pass": 0,
-          "fail": 163,
-          "compile_error": 1821,
+          "fail": 170,
+          "compile_error": 1813,
           "compile_timeout": 8,
           "skip": 0,
-          "total": 1992
+          "total": 1991
         },
         "error_categories": {
           "assertion_fail": 119,
-          "other": 1673,
-          "null_deref": 9,
+          "other": 1665,
+          "null_deref": 16,
           "wasm_compile": 144,
           "runtime_error": 33,
           "illegal_cast": 5,
@@ -1420,15 +1420,15 @@
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
-          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
           "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
+          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
-          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
@@ -1438,17 +1438,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5228,
+        "count": 6122,
         "statuses": {
           "pass": 0,
-          "fail": 5227,
+          "fail": 6121,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5228
+          "total": 6122
         },
         "error_categories": {
-          "assertion_fail": 5222,
+          "assertion_fail": 6116,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1498,8 +1498,8 @@
         "sample_files": [
           "test/language/statements/class/dstr/async-gen-meth-ary-ptrn-elem-id-iter-val-err.js",
           "test/language/statements/class/dstr/async-gen-meth-static-dflt-ary-ptrn-elem-ary-rest-iter.js",
-          "test/language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js",
           "test/language/statements/class/dstr/async-private-gen-meth-dflt-ary-ptrn-elem-ary-rest-iter.js",
+          "test/language/statements/class/dstr/async-private-gen-meth-ary-init-iter-close.js",
           "test/language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js"
         ],
         "sample_signatures": [
@@ -1553,27 +1553,27 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 3984,
+        "count": 2488,
         "statuses": {
           "pass": 0,
-          "fail": 1078,
-          "compile_error": 2906,
+          "fail": 1416,
+          "compile_error": 1072,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3984
+          "total": 2488
         },
         "error_categories": {
-          "assertion_fail": 402,
-          "wasm_compile": 2712,
-          "null_deref": 30,
+          "assertion_fail": 560,
+          "wasm_compile": 849,
+          "null_deref": 33,
           "other": 228,
-          "illegal_cast": 329,
+          "illegal_cast": 499,
           "oob": 63,
-          "runtime_error": 193,
+          "runtime_error": 228,
           "range_error": 3,
           "promise_error": 13,
           "type_error": 6,
-          "negative_test_fail": 5
+          "negative_test_fail": 6
         },
         "sample_files": [
           "test/language/statements/async-generator/dflt-params-ref-self.js",
@@ -1636,14 +1636,14 @@
           "#1364"
         ],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 3310,
+        "count": 3311,
         "statuses": {
           "pass": 0,
-          "fail": 1377,
+          "fail": 1378,
           "compile_error": 1930,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 3310
+          "total": 3311
         },
         "error_categories": {
           "wasm_compile": 790,
@@ -1652,7 +1652,7 @@
           "negative_test_fail": 13,
           "runtime_error": 525,
           "oob": 73,
-          "null_deref": 132,
+          "null_deref": 133,
           "illegal_cast": 81,
           "promise_error": 17,
           "range_error": 2
