@@ -21,7 +21,11 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
-import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
+import {
+  tryCompileStandaloneStringReplace,
+  tryCompileStandaloneStringSearch,
+  tryCompileStandaloneStringSplit,
+} from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -2447,9 +2451,10 @@ export function compileNativeStringMethodCall(
     return compileExpression(ctx, fctx, propAccess.expression);
   }
 
-  // #1474 — These host-routed string methods build/consume a JS RegExp under
-  // the hood. There is no Wasm-native regex engine yet, so refuse in
-  // --target standalone (Phase 1: refuse-and-document).
+  // #1474/#1539 — These host-routed string methods build/consume a JS RegExp
+  // under the hood. In --target standalone, route the supported static RegExp
+  // slices through the pure-WasmGC matcher first, then refuse the remaining
+  // host/symbol-protocol forms with a clean diagnostic.
   //   - match / matchAll / search: the spec coerces the (string) argument to a
   //     RegExp, so they always route through the host regex engine.
   //   - replace / replaceAll / split: only when the first argument needs
@@ -2471,6 +2476,14 @@ export function compileNativeStringMethodCall(
   if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
     const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
     if (replaceResult !== undefined) return replaceResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.split(/re/)` against a backend-created
+  // static, non-capturing, non-nullable RegExp routes through the pure-WasmGC
+  // matcher and returns the same native string vec shape as string split.
+  if (ctx.standalone && method === "split") {
+    const splitResult = tryCompileStandaloneStringSplit(ctx, fctx, expr, propAccess);
+    if (splitResult !== undefined) return splitResult;
   }
 
   if (ctx.standalone) {
