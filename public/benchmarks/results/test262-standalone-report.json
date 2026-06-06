@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-05T14:54:33.938Z",
-  "baseline_generated_at": "2026-06-05T14:54:33Z",
-  "baseline_sha": "1aec170c0955d532f1fa298464b284ffd3866d48",
+  "timestamp": "2026-06-06T09:53:23.114Z",
+  "baseline_generated_at": "2026-06-06T09:53:22Z",
+  "baseline_sha": "ebb58712e7784b2d1720b199b1c1be117c9b4ec7",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -10,21 +10,21 @@
   "summary": {
     "total": 43132,
     "pass": 14961,
-    "fail": 11641,
-    "compile_error": 16500,
+    "fail": 11638,
+    "compile_error": 16503,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 26602,
+    "compilable": 26599,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
         "pass": 14566,
-        "fail": 11212,
-        "compile_error": 16238,
+        "fail": 11209,
+        "compile_error": 16241,
         "compile_timeout": 12,
         "skip": 18,
-        "compilable": 25778,
+        "compilable": 25775,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,22 +53,22 @@
       "official": {
         "total": 43132,
         "pass": 14961,
-        "fail": 11641,
-        "compile_error": 16500,
+        "fail": 11638,
+        "compile_error": 16503,
         "compile_timeout": 12,
         "skip": 18,
-        "compilable": 26602,
+        "compilable": 26599,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
         "pass": 15929,
-        "fail": 12483,
-        "compile_error": 19576,
+        "fail": 12480,
+        "compile_error": 19579,
         "compile_timeout": 12,
         "skip": 114,
-        "compilable": 28412,
+        "compilable": 28409,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,31 +77,31 @@
   "official_summary": {
     "total": 43132,
     "pass": 14961,
-    "fail": 11641,
-    "compile_error": 16500,
+    "fail": 11638,
+    "compile_error": 16503,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 26602,
+    "compilable": 26599,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
     "pass": 15929,
-    "fail": 12483,
-    "compile_error": 19576,
+    "fail": 12480,
+    "compile_error": 19579,
     "compile_timeout": 12,
     "skip": 114,
-    "compilable": 28412,
+    "compilable": 28409,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
     "pass": 14128,
-    "fail": 10735,
-    "compile_error": 15730,
+    "fail": 10732,
+    "compile_error": 15733,
     "compile_timeout": 12,
     "skip": 18,
-    "compilable": 24863,
+    "compilable": 24860,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,11 +128,11 @@
     "standard": {
       "total": 42046,
       "pass": 14566,
-      "fail": 11212,
-      "compile_error": 16238,
+      "fail": 11209,
+      "compile_error": 16241,
       "compile_timeout": 12,
       "skip": 18,
-      "compilable": 25778,
+      "compilable": 25775,
       "stale": 0
     }
   },
@@ -421,8 +421,8 @@
       "name": "built-ins/GeneratorPrototype",
       "path": "built-ins/GeneratorPrototype",
       "pass": 10,
-      "fail": 40,
-      "compile_error": 11,
+      "fail": 37,
+      "compile_error": 14,
       "compile_timeout": 0,
       "skip": 0,
       "total": 61
@@ -1079,17 +1079,17 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9350,
+    "assertion_fail": 9348,
     "illegal_cast": 600,
     "negative_test_fail": 76,
     "null_deref": 303,
     "oob": 156,
-    "other": 11803,
+    "other": 11806,
     "promise_error": 56,
     "range_error": 29,
     "runtime_error": 4974,
     "type_error": 9,
-    "unreachable": 28,
+    "unreachable": 27,
     "wasm_compile": 4675
   },
   "skip_reasons": {
@@ -1109,17 +1109,17 @@
           "#1862"
         ],
         "label": "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
-        "count": 928,
+        "count": 931,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 928,
+          "compile_error": 931,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 928
+          "total": 931
         },
         "error_categories": {
-          "other": 928
+          "other": 931
         },
         "sample_files": [
           "test/language/statements/await-using/Symbol.asyncDispose-method-called-with-correct-this.js",
@@ -1213,8 +1213,8 @@
           "total": 3749
         },
         "error_categories": {
-          "runtime_error": 2439,
           "other": 230,
+          "runtime_error": 2439,
           "assertion_fail": 763,
           "wasm_compile": 258,
           "null_deref": 48,
@@ -1223,15 +1223,15 @@
           "type_error": 1
         },
         "sample_files": [
+          "test/built-ins/Temporal/Duration/compare/builtin.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
-          "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
-          "runtime_error:Cannot convert object to primitive value",
           "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on). Recompile",
+          "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, () => d.round({ smallestUnit: \"seconds\", relativeTo: \"#-#-01T00:#+#:#[-#:#:#]\" }));",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, () => duration.total(totalOf));",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result1, \"#-#-09T01:#:#.123987Z\", \"roundingMode is halfTrunc (with # digits from smallestUnit)\");"
@@ -1382,14 +1382,14 @@
           "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/parse/text-object-abrupt.js"
+          "test/built-ins/JSON/stringify/value-bigint-tojson.js"
         ],
         "sample_signatures": [
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
+          "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct"
         ]
       },
       {
@@ -1420,15 +1420,15 @@
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/S15.10.2.6_A4_T4.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
@@ -1438,18 +1438,18 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5231,
+        "count": 5228,
         "statuses": {
           "pass": 0,
-          "fail": 5230,
+          "fail": 5227,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5231
+          "total": 5228
         },
         "error_categories": {
-          "assertion_fail": 5224,
-          "unreachable": 3,
+          "assertion_fail": 5222,
+          "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
         },
@@ -1535,14 +1535,14 @@
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
           "test/built-ins/TypedArrayConstructors/internals/Delete/BigInt/key-is-symbol.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
+          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.get not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
           "other:L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
+          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
         ]
       },
       {
@@ -1698,8 +1698,8 @@
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
