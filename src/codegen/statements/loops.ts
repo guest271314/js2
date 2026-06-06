@@ -2731,14 +2731,15 @@ function compileForOfArray(
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // Structure: block { loop { guard/bind; block { body }; i++; br loop } }.
+  // `continue` exits the inner body block so the increment still runs.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
-  fctx.breakStack.push(1); // break = depth 1 (exit block)
-  fctx.continueStack.push(0); // continue = depth 0 (restart loop)
+  fctx.breakStack.push(2); // break = depth 2 (exit outer block)
+  fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
 
   // Condition: i >= length → break
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -2766,6 +2767,8 @@ function compileForOfArray(
     compileForOfAssignDestructuring(ctx, fctx, assignDestructExpr, elemLocal, elemType, vecTypeIdx, arrTypeIdx, stmt);
   }
 
+  const savedLoopBody = pushBody(fctx);
+
   // Compile body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {
     const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
@@ -2776,6 +2779,14 @@ function compileForOfArray(
   } else {
     compileStatement(ctx, fctx, stmt.statement);
   }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
 
   // Increment i
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -2790,10 +2801,10 @@ function compileForOfArray(
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -3065,14 +3076,16 @@ function emitArrayKeysEntriesLoop(
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  // block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // block+loop+body-block adds 3 nesting levels. The inner body block makes
+  // `continue` fall through to the index increment instead of re-reading the
+  // same element forever.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
-  fctx.breakStack.push(1); // break = exit block
-  fctx.continueStack.push(0); // continue = restart loop
+  fctx.breakStack.push(2); // break = exit outer block
+  fctx.continueStack.push(0); // continue = exit body block, then increment
 
   // i >= len → break
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -3082,6 +3095,8 @@ function emitArrayKeysEntriesLoop(
 
   // Project the per-iteration binding(s).
   bindIteration(lenLocal, iLocal, dataLocal, arrTypeIdx);
+
+  const savedLoopBody = pushBody(fctx);
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {
@@ -3093,6 +3108,14 @@ function emitArrayKeysEntriesLoop(
   } else {
     compileStatement(ctx, fctx, stmt.statement);
   }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
 
   // i += 1
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -3106,10 +3129,10 @@ function emitArrayKeysEntriesLoop(
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
